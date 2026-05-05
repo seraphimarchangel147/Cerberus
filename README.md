@@ -139,6 +139,35 @@ User asked: {{input}}
 
 The skill becomes the `skill_weekly_review` tool and is also runnable from the UI's Skills tab.
 
+## Auth
+
+When `OPENAGI_AUTH_TOKEN` is unset, the dashboard is open (fine for `127.0.0.1` only). When set, every route except `/health`, `/channels/twilio/webhook`, and `/channels/telegram/webhook` requires:
+
+- header `Authorization: Bearer <token>`, or
+- a `?token=<token>` query (browser convenience — sets a cookie, then redirects), or
+- the `openagi_token` cookie.
+
+Generate a strong token:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+Webhooks self-validate instead:
+
+- **Twilio:** when `TWILIO_AUTH_TOKEN` and `OPENAGI_PUBLIC_URL` are set, the daemon verifies the `X-Twilio-Signature` HMAC against the incoming form body.
+- **Telegram:** set `TELEGRAM_WEBHOOK_SECRET` and pass the same value as `secret_token` to `setWebhook` — the daemon checks the `X-Telegram-Bot-Api-Secret-Token` header.
+
+## Run as a daemon (macOS)
+
+```bash
+./scripts/install-launchd.sh             # installs ~/Library/LaunchAgents/app.openagi.daemon.plist and starts it
+./scripts/install-launchd.sh uninstall   # stop + remove
+tail -f .openagi/launchd.err.log         # watch
+```
+
+The launch agent runs at login, restarts on crash (10s throttle), and uses your project's `.openagi/.env`.
+
 ## Endpoints
 
 | Method | Path                              | Notes                                  |

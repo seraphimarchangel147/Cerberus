@@ -1,11 +1,22 @@
 import http from "node:http";
 import { EventEmitter } from "node:events";
 import { createDefaultRuntime } from "./abi-runtime.js";
+import {
+  buildSetCookie,
+  checkAuth,
+  isPublicRoute,
+  verifyTelegramSecret,
+  verifyTwilioSignature
+} from "./auth.js";
 import { ChannelManager } from "./channels.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 43210;
+  const authToken = options.authToken ?? process.env.OPENAGI_AUTH_TOKEN ?? null;
+  const publicUrl = options.publicUrl ?? process.env.OPENAGI_PUBLIC_URL ?? null;
+  const twilioAuthToken = options.twilioAuthToken ?? process.env.TWILIO_AUTH_TOKEN ?? null;
+  const telegramSecret = options.telegramSecret ?? process.env.TELEGRAM_WEBHOOK_SECRET ?? null;
   const channels =
     options.channels ??
     (runtime.agentHost
@@ -57,7 +68,31 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const pathname = url.pathname;
       const method = req.method;
 
-      if (method === "GET" && pathname === "/") return sendHtml(res, 200, renderApp());
+      // Auth gate. Webhooks bypass and self-validate below; /health stays open.
+      const extraCookies = [];
+      if (!isPublicRoute(pathname)) {
+        const auth = checkAuth(req, url, authToken);
+        if (!auth.ok) {
+          if (method === "GET" && pathname === "/" && authToken) {
+            return sendHtml(res, 401, renderLoginPage(auth.reason ?? "auth required"));
+          }
+          res.writeHead(401, {
+            "content-type": "application/json; charset=utf-8",
+            "WWW-Authenticate": "Bearer"
+          });
+          return res.end(JSON.stringify({ error: "unauthorized", reason: auth.reason ?? "auth required" }));
+        }
+        if (auth.setCookie) extraCookies.push(buildSetCookie(authToken));
+      }
+
+      if (method === "GET" && pathname === "/" && extraCookies.length) {
+        // Strip ?token from URL after we set the cookie.
+        const clean = url.pathname;
+        res.writeHead(302, { Location: clean, "Set-Cookie": extraCookies });
+        return res.end();
+      }
+
+      if (method === "GET" && pathname === "/") return sendHtml(res, 200, renderApp(), extraCookies);
       if (method === "GET" && pathname === "/health") return sendJson(res, 200, { ok: true, status: runtime.status() });
       if (method === "GET" && pathname === "/memory") return sendJson(res, 200, runtime.memory.snapshot());
       if (method === "GET" && pathname === "/agents") return sendJson(res, 200, runtime.agentHost?.store.listAgents() ?? runtime.propagation.list());
@@ -88,6 +123,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "POST" && pathname === "/channels/telegram/webhook") {
         if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
+        const tg = verifyTelegramSecret({
+          headerValue: req.headers["x-telegram-bot-api-secret-token"],
+          expected: telegramSecret
+        });
+        if (!tg.ok) return sendJson(res, 401, { error: "unauthorized", reason: tg.reason });
         const body = await readJson(req);
         const result = await channels.handleTelegramWebhook(body);
         return sendJson(res, 200, result);
@@ -96,6 +136,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/channels/twilio/webhook") {
         if (!channels) return sendXml(res, 503, twiml("OpenAGI agent host is disabled."));
         const form = await readForm(req);
+        const fullUrl = (publicUrl ?? `http://${req.headers.host ?? `${host}:${port}`}`).replace(/\/$/, "") + req.url;
+        const tw = verifyTwilioSignature({
+          authToken: twilioAuthToken,
+          fullUrl,
+          params: form,
+          signature: req.headers["x-twilio-signature"]
+        });
+        if (!tw.ok) {
+          return sendXml(res, 403, `<?xml version="1.0" encoding="UTF-8"?><Response><!-- ${tw.reason} --></Response>`);
+        }
         const result = await channels.handleSmsMessage({
           from: form.From ?? form.from ?? "sms",
           text: form.Body ?? form.body ?? "",
@@ -274,9 +324,32 @@ function handleSse(req, res, clients) {
   });
 }
 
-function sendHtml(res, status, value) {
-  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(value) });
+function sendHtml(res, status, value, cookies = []) {
+  const headers = { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(value) };
+  if (cookies.length) headers["Set-Cookie"] = cookies;
+  res.writeHead(status, headers);
   res.end(value);
+}
+
+function renderLoginPage(reason) {
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>OpenAGI · auth</title>
+<style>body{font:14px/1.5 ui-sans-serif,system-ui;background:#0e1411;color:#e8efea;display:grid;place-items:center;min-height:100vh;margin:0}
+form{background:#161d19;border:1px solid #2a352f;border-radius:10px;padding:24px;width:min(420px,90vw)}
+h1{margin:0 0 4px;font-size:18px}p{color:#8da59a;margin:6px 0 16px}
+input{width:100%;padding:9px 12px;background:#0e1411;color:#e8efea;border:1px solid #2a352f;border-radius:6px;font:inherit;margin-bottom:10px}
+button{background:#6fe1b1;color:#002219;border:0;padding:9px 14px;border-radius:6px;font-weight:700;cursor:pointer}
+.err{color:#f08080;margin-bottom:10px;font-size:12px}</style></head>
+<body><form method="GET" action="/">
+<h1>OpenAGI</h1><p>This daemon requires authentication.</p>
+${reason ? `<div class="err">${escapeHtmlForLogin(reason)}</div>` : ""}
+<input name="token" placeholder="Bearer token" autofocus required>
+<button type="submit">Sign in</button>
+</form></body></html>`;
+}
+
+function escapeHtmlForLogin(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
 }
 
 function sendJson(res, status, value) {

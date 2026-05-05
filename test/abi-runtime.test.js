@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   BudgetGuard,
+  checkAuth,
   createDefaultRuntime,
   createDurableRuntime,
   createHostedInterface,
@@ -14,7 +15,9 @@ import {
   MemorySystem,
   PropagationController,
   ToolRegistry,
-  registerCoreTools
+  generateToken,
+  registerCoreTools,
+  verifyTwilioSignature
 } from "../src/index.js";
 
 test("runtime processes ABI signal through memory and propagation", () => {
@@ -311,6 +314,46 @@ test("Rize integration registers tools when API key is set", async () => {
   for (const t of ["rize_query", "rize_today_summary", "rize_recent_sessions"]) {
     assert.ok(runtime.tools.has(t), `expected tool ${t}`);
   }
+});
+
+test("auth disabled when no token configured", () => {
+  const url = new URL("http://x/");
+  const result = checkAuth({ headers: {} }, url, null);
+  assert.equal(result.ok, true);
+  assert.match(result.reason, /auth disabled/);
+});
+
+test("auth accepts header bearer, query token, and cookie", () => {
+  const token = generateToken(16);
+  // header
+  const a = checkAuth({ headers: { authorization: `Bearer ${token}` } }, new URL("http://x/"), token);
+  assert.equal(a.ok, true);
+  // query
+  const b = checkAuth({ headers: {} }, new URL(`http://x/?token=${token}`), token);
+  assert.equal(b.ok, true);
+  assert.equal(b.setCookie, true);
+  // cookie
+  const c = checkAuth({ headers: { cookie: `openagi_token=${token}` } }, new URL("http://x/"), token);
+  assert.equal(c.ok, true);
+  // wrong
+  const d = checkAuth({ headers: { authorization: "Bearer wrong" } }, new URL("http://x/"), token);
+  assert.equal(d.ok, false);
+});
+
+test("twilio signature passes for valid HMAC and fails for tampered body", async () => {
+  const crypto = await import("node:crypto");
+  const authToken = "twilio_test_secret";
+  const fullUrl = "https://example.com/channels/twilio/webhook";
+  const params = { From: "+15555550123", Body: "hi", MessageSid: "SM1" };
+  const sortedKeys = Object.keys(params).sort();
+  const data = fullUrl + sortedKeys.map((k) => k + params[k]).join("");
+  const sig = crypto.createHmac("sha1", authToken).update(data).digest("base64");
+
+  const ok = verifyTwilioSignature({ authToken, fullUrl, params, signature: sig });
+  assert.equal(ok.ok, true);
+
+  const bad = verifyTwilioSignature({ authToken, fullUrl, params: { ...params, Body: "tampered" }, signature: sig });
+  assert.equal(bad.ok, false);
 });
 
 test("file-backed propagation persists specialist workspaces", () => {
