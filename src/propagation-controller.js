@@ -6,9 +6,11 @@ export class PropagationController {
     this.maxSpecialists = options.maxSpecialists ?? 25;
     this.repetitionThreshold = options.repetitionThreshold ?? 0.72;
     this.riskNoveltyThreshold = options.riskNoveltyThreshold ?? 0.62;
+    this.maxDepth = options.maxDepth ?? 3;
+    this.maxBreadthPerParent = options.maxBreadthPerParent ?? 5;
   }
 
-  shouldPropagate({ signal, scrutiny, memoryHits = [] }) {
+  shouldPropagate({ signal, scrutiny, memoryHits = [], parentSpecialistId = null }) {
     const repetition = clamp(signal.repetition ?? scrutiny?.dimensions?.repetition ?? 0);
     const risk = clamp(signal.risk ?? scrutiny?.dimensions?.risk ?? 0);
     const novelty = clamp(signal.novelty ?? scrutiny?.dimensions?.novelty ?? 0);
@@ -18,17 +20,31 @@ export class PropagationController {
     const explicitlyRequired = signal.requiresSpecialist === true || scrutiny?.action === "propagate";
     const underCovered = memoryCoverage < 0.35 && risk >= 0.6;
 
+    // D1: cycle / depth / breadth checks for sub-propagation.
+    let blockedBy = null;
+    if (parentSpecialistId) {
+      const parent = [...this.specialists.values()].find((s) => s.id === parentSpecialistId);
+      if (parent) {
+        if ((parent.depth ?? 0) >= this.maxDepth - 1) blockedBy = `max-depth-${this.maxDepth}`;
+        const children = [...this.specialists.values()].filter((s) => s.parentSpecialistId === parentSpecialistId && s.status !== "retired");
+        if (!blockedBy && children.length >= this.maxBreadthPerParent) blockedBy = `max-breadth-${this.maxBreadthPerParent}`;
+        // Struggling parents shouldn't spawn more.
+        if (!blockedBy && (parent.outcomeSamples ?? 0) >= 5 && (parent.meanOutcomeQuality ?? 1) < 0.4) blockedBy = "parent-low-quality";
+      }
+    }
+
     return {
-      decision: explicitlyRequired || repeated || novelAndRisky || underCovered,
+      decision: !blockedBy && (explicitlyRequired || repeated || novelAndRisky || underCovered),
       repeated,
       novelAndRisky,
       explicitlyRequired,
       underCovered,
-      memoryCoverage
+      memoryCoverage,
+      blockedBy
     };
   }
 
-  propagate({ signal, workflow, scrutiny, tools = [] }) {
+  propagate({ signal, workflow, scrutiny, tools = [], parentSpecialistId = null }) {
     if (this.specialists.size >= this.maxSpecialists) {
       return {
         created: false,
@@ -46,6 +62,9 @@ export class PropagationController {
       return { created: false, reason: "existing-specialist-activated", specialist: existing };
     }
 
+    const parent = parentSpecialistId
+      ? [...this.specialists.values()].find((s) => s.id === parentSpecialistId)
+      : null;
     const specialist = {
       id: createId("agent"),
       signature,
@@ -63,7 +82,9 @@ export class PropagationController {
       outcomeSamples: 0,
       retiredAt: null,
       retirementReason: null,
-      seasonal: signal.seasonal === true
+      seasonal: signal.seasonal === true,
+      parentSpecialistId: parentSpecialistId ?? null,
+      depth: parent ? (parent.depth ?? 0) + 1 : 0
     };
 
     this.specialists.set(signature, specialist);

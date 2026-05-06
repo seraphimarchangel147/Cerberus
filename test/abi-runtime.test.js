@@ -675,6 +675,100 @@ test("scrutiny fitter judge signal averages with correlation deltas", () => {
   assert.ok(runtime.scrutiny.judges.pragmatic.weights.evidence > before);
 });
 
+test("retiring a specialist with scoped memory creates a legacy principle in main", async () => {
+  const runtime = createDefaultRuntime();
+  const r = runtime.propagation.propagate({
+    signal: { domain: "general", taskType: "legacy", summary: "to-retire", repetition: 0.9 },
+    workflow: { id: "w", goal: "to-retire" },
+    scrutiny: { reasons: [] }
+  });
+  const sp = r.specialist;
+  // Seed scoped memory
+  for (let i = 0; i < 5; i += 1) {
+    runtime.memory.remember(
+      { content: `Spec note ${i}: pattern X needs Y`, scope: `specialist:${sp.id}`, tags: ["pattern-x", "legacy"], risk: 0.4, repetition: 0.7, novelty: 0.3 },
+      { tier: "medium" }
+    );
+  }
+  runtime.propagation.retire(sp.id, "test");
+
+  const result = await runtime.condenser.condense({
+    scope: `specialist:${sp.id}`,
+    writeScope: "main",
+    originSpecialistId: sp.id
+  });
+  assert.ok(result.principles >= 1);
+  const legacy = runtime.memory.byTier("long").find((m) => m.metadata?.originSpecialistId === sp.id);
+  assert.ok(legacy);
+  assert.ok(legacy.tags.includes(`legacy:${sp.id}`));
+  assert.equal(legacy.scope, "main");
+});
+
+test("propagation enforces max depth and breadth for sub-specialists", () => {
+  const propagation = new PropagationController({ maxDepth: 2, maxBreadthPerParent: 2 });
+  const root = propagation.propagate({
+    signal: { domain: "g", taskType: "root", summary: "root", repetition: 0.9 },
+    workflow: { id: "w", goal: "root" },
+    scrutiny: { reasons: [] }
+  });
+  // First child OK
+  const c1 = propagation.propagate({
+    signal: { domain: "g", taskType: "c1", summary: "c1", repetition: 0.9 },
+    workflow: { id: "w", goal: "c1" },
+    scrutiny: { reasons: [] },
+    parentSpecialistId: root.specialist.id
+  });
+  assert.equal(c1.created, true);
+  assert.equal(c1.specialist.depth, 1);
+  // Second child OK
+  propagation.propagate({
+    signal: { domain: "g", taskType: "c2", summary: "c2", repetition: 0.9 },
+    workflow: { id: "w", goal: "c2" },
+    scrutiny: { reasons: [] },
+    parentSpecialistId: root.specialist.id
+  });
+  // Breadth check via shouldPropagate (third child blocked)
+  const blocked = propagation.shouldPropagate({
+    signal: { repetition: 0.9, requiresSpecialist: true },
+    scrutiny: { dimensions: { repetition: 0.9, risk: 0.5, novelty: 0.5 }, action: "propagate" },
+    parentSpecialistId: root.specialist.id
+  });
+  assert.equal(blocked.decision, false);
+  assert.match(blocked.blockedBy, /max-breadth/);
+
+  // Depth check via shouldPropagate from c1's perspective
+  const depthBlocked = propagation.shouldPropagate({
+    signal: { repetition: 0.9, requiresSpecialist: true },
+    scrutiny: { dimensions: { repetition: 0.9, risk: 0.5, novelty: 0.5 }, action: "propagate" },
+    parentSpecialistId: c1.specialist.id
+  });
+  assert.equal(depthBlocked.decision, false);
+  assert.match(depthBlocked.blockedBy, /max-depth/);
+});
+
+test("vocabulary curator detects merge candidates and applies them", () => {
+  const runtime = createDefaultRuntime();
+  for (let i = 0; i < 6; i += 1) {
+    runtime.memory.remember({ content: `note ${i}`, tags: ["calendar"], risk: 0.3 }, { tier: "short" });
+  }
+  for (let i = 0; i < 6; i += 1) {
+    runtime.memory.remember({ content: `note ${i}`, tags: ["calendars"], risk: 0.3 }, { tier: "short" });
+  }
+  const merges = runtime.vocabulary.proposeMerges();
+  assert.ok(merges.length >= 1, "expected at least one near-synonym merge proposal");
+  const applied = runtime.vocabulary.applyMerges(merges);
+  assert.ok(applied[0].touched > 0);
+});
+
+test("introspector audit returns structural findings", () => {
+  const runtime = createDefaultRuntime();
+  const audit = runtime.introspector.audit();
+  assert.ok(audit.specialists);
+  assert.ok(audit.memory);
+  assert.ok(audit.cron);
+  assert.ok(Array.isArray(audit.findings));
+});
+
 test("file-backed propagation persists specialist workspaces", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-agents-"));
   const storePath = path.join(dir, "specialists.json");

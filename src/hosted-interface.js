@@ -175,6 +175,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
 
       if (method === "GET" && pathname === "/budget") return sendJson(res, 200, runtime.budget?.status?.() ?? { error: "no-budget" });
+      if (method === "GET" && pathname === "/audit") return sendJson(res, 200, runtime.introspector?.audit?.() ?? null);
+      if (method === "GET" && pathname === "/vocabulary") {
+        return sendJson(res, 200, {
+          snapshot: runtime.vocabulary.snapshot(),
+          proposedMerges: runtime.vocabulary.proposeMerges(),
+          proposedDeprecations: runtime.vocabulary.proposeDeprecations()
+        });
+      }
+      if (method === "POST" && pathname === "/vocabulary/apply-merges") {
+        const body = await readJson(req);
+        const merges = body.merges ?? runtime.vocabulary.proposeMerges();
+        return sendJson(res, 200, runtime.vocabulary.applyMerges(merges));
+      }
 
       if (method === "GET" && pathname === "/scrutiny/weights") {
         const weights = {};

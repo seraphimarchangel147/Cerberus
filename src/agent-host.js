@@ -42,7 +42,11 @@ export class AgentHost {
     });
 
     const signal = this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {} });
-    const output = this.runtime.processSignal(signal);
+    const isSpecialist = agent.role === "specialist";
+    const output = this.runtime.processSignal(signal, {
+      scope: isSpecialist ? `specialist:${agent.id}` : "main",
+      parentSpecialistId: isSpecialist ? agent.id : null
+    });
 
     if (output.propagation?.specialist) {
       this.ensureSpecialistAgent(output.propagation.specialist, agentId);

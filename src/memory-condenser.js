@@ -26,13 +26,17 @@ export class MemoryCondenser {
     this.quarantineDays = options.quarantineDays ?? QUARANTINE_DAYS;
   }
 
-  async condense({ now = new Date() } = {}) {
+  async condense({ now = new Date(), scope = null, writeScope = null, originSpecialistId = null } = {}) {
     if (!this.runtime?.memory) throw new Error("MemoryCondenser requires a runtime with memory.");
-    const candidates = this.runtime.memory
-      .byTier("medium")
+    let candidates = [...this.runtime.memory.byTier("medium"), ...this.runtime.memory.byTier("short")]
       .filter((item) => item.kind !== "principle" && !item.metadata?.condensedInto);
+    if (scope) {
+      candidates = candidates.filter((item) => item.scope === scope);
+    } else {
+      candidates = candidates.filter((item) => !item.scope || item.scope === "main");
+    }
     if (candidates.length < this.minGroupSize) {
-      return { groups: 0, principles: 0, reason: "not enough medium-tier items" };
+      return { groups: 0, principles: 0, reason: "not enough items in scope" };
     }
     const groups = clusterByTagOverlap(candidates, this.minGroupSize).slice(0, this.maxGroupsPerRun);
     const principles = [];
@@ -41,12 +45,15 @@ export class MemoryCondenser {
       const principle = await this.distill(group);
       if (!principle) continue;
       const quarantineUntil = new Date(now.getTime() + this.quarantineDays * 86400 * 1000).toISOString();
+      const tags = [...new Set(group.flatMap((m) => m.tags ?? []).concat(["principle"]))];
+      if (originSpecialistId) tags.push(`legacy:${originSpecialistId}`);
       const item = this.runtime.memory.remember(
         {
-          source: "condenser",
+          source: originSpecialistId ? "legacy" : "condenser",
           kind: "principle",
+          scope: writeScope ?? "main",
           content: principle.text,
-          tags: [...new Set(group.flatMap((m) => m.tags ?? []).concat(["principle"]))],
+          tags,
           risk: median(group.map((m) => m.risk ?? 0)),
           specificity: 0.7,
           repetition: 0.8,
@@ -54,10 +61,11 @@ export class MemoryCondenser {
             sources: group.map((m) => m.id),
             confidence: principle.confidence,
             quarantineUntil,
-            distilledAt: nowIso()
+            distilledAt: nowIso(),
+            originSpecialistId: originSpecialistId ?? null
           }
         },
-        { source: "condenser", strength: 0.8, tier: "long", critical: true }
+        { source: originSpecialistId ? "legacy" : "condenser", strength: 0.8, tier: "long", critical: true }
       );
       // Index for Lava intuition lookups.
       this.runtime.vectorStore?.upsert("principle", item.id, principle.text, {

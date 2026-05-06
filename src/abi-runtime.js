@@ -14,11 +14,13 @@ import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
 import { MemoryCondenser } from "./memory-condenser.js";
 import { OutcomeStore } from "./outcome-store.js";
+import { Introspector } from "./introspector.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
 import { ScrutinyJudge } from "./scrutiny-judge.js";
 import { ScrutinyPanel } from "./scrutiny-panel.js";
 import { SpecialistRouter } from "./specialist-router.js";
 import { VectorStore } from "./vector-store.js";
+import { VocabularyCurator } from "./vocabulary-curator.js";
 import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
@@ -103,6 +105,8 @@ export class AbiRuntime {
     this.condenser = options.condenser ?? new MemoryCondenser({ runtime: this, ...(options.condenserOptions ?? {}) });
     this.scrutinyFitter = options.scrutinyFitter ?? new ScrutinyFitter({ runtime: this, ...(options.scrutinyFitterOptions ?? {}) });
     this.scrutinyJudge = options.scrutinyJudge ?? new ScrutinyJudge({ runtime: this, ...(options.scrutinyJudgeOptions ?? {}) });
+    this.vocabulary = options.vocabulary ?? new VocabularyCurator({ runtime: this, ...(options.vocabularyOptions ?? {}) });
+    this.introspector = options.introspector ?? new Introspector({ runtime: this });
     this.outputs = [];
     this.feedback = [];
 
@@ -170,10 +174,11 @@ export class AbiRuntime {
     return signals.map((signal) => this.processSignal(signal));
   }
 
-  processSignal(signal) {
+  processSignal(signal, options = {}) {
     const workflow = this.workflows.select(signal);
     const memoryHits = this.memory.retrieve(`${signal.summary} ${signal.content} ${signal.tags?.join(" ") ?? ""}`, {
-      limit: 6
+      limit: 6,
+      scope: options.scope
     });
     const scrutiny = this.scrutiny.evaluate({
       signal,
@@ -182,16 +187,18 @@ export class AbiRuntime {
       context: this.context
     });
 
-    const propagationDecision = this.propagation.shouldPropagate({ signal, scrutiny, memoryHits });
+    const parentSpecialistId = options.parentSpecialistId ?? null;
+    const propagationDecision = this.propagation.shouldPropagate({ signal, scrutiny, memoryHits, parentSpecialistId });
     const propagated =
       propagationDecision.decision && scrutiny.action !== "ignore"
         ? this.propagation.propagate({
             signal,
             workflow,
             scrutiny,
-            tools: this.mcp.listTools()
+            tools: this.mcp.listTools(),
+            parentSpecialistId
           })
-        : { created: false, reason: "not-needed", specialist: null };
+        : { created: false, reason: propagationDecision.blockedBy ?? "not-needed", specialist: null };
 
     if (propagated.specialist && this.agentHost?.ensureSpecialistAgent) {
       this.agentHost.ensureSpecialistAgent(propagated.specialist, "main");
@@ -269,7 +276,20 @@ export class AbiRuntime {
       }
       if (job.task === "retirement-sweep") {
         const retired = this.propagation.retirementSweep?.() ?? [];
-        return { retired: retired.map((s) => ({ id: s.id, name: s.name, reason: s.retirementReason })) };
+        // C3: cross-generation inheritance — distill each retired specialist's
+        // scoped memory into a legacy principle that lives in main long-tier.
+        const legacies = [];
+        for (const sp of retired) {
+          try {
+            const result = await this.condenser.condense({
+              scope: `specialist:${sp.id}`,
+              writeScope: "main",
+              originSpecialistId: sp.id
+            });
+            legacies.push({ specialistId: sp.id, principles: result.principles ?? 0 });
+          } catch { /* skip */ }
+        }
+        return { retired: retired.map((s) => ({ id: s.id, name: s.name, reason: s.retirementReason })), legacies };
       }
       if (job.task === "scrutiny-fit") {
         return this.scrutinyFitter.fit({ now });
