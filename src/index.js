@@ -9,6 +9,8 @@ export {
   verifyTelegramSecret,
   verifyTwilioSignature
 } from "./auth.js";
+export { cosine, createEmbedder, HashBagEmbedder, OpenAIEmbedder } from "./embeddings.js";
+export { VectorStore } from "./vector-store.js";
 export { RizeClient, registerRizeIntegration } from "./integrations/rize.js";
 export { FileBackedAgentStore, InMemoryAgentStore } from "./agent-store.js";
 export { ChannelManager, TelegramChannel } from "./channels.js";

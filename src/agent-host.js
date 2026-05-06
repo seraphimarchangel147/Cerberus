@@ -23,7 +23,7 @@ export class AgentHost {
     if (input.routeTo !== false && this.runtime.specialistRouter && agentId === "main") {
       const tags = ["message", channel];
       const specialists = this.runtime.propagation?.list?.() ?? [];
-      const decision = this.runtime.specialistRouter.decide(text, tags, specialists);
+      const decision = await this.runtime.specialistRouter.decide(text, tags, specialists);
       routing = decision;
       if (decision.route && decision.candidate) {
         agentId = decision.candidate.specialist.id;
@@ -51,6 +51,15 @@ export class AgentHost {
     const toolRegistry = this.runtime.tools;
     const tools = toolRegistry?.toOpenAITools?.() ?? [];
 
+    // Lava intuition (C2): top principles from the vector store inserted into
+    // the prompt as soft hints — distinct from explicit memoryHits.
+    let intuitions = [];
+    if (this.runtime.vectorStore) {
+      try {
+        intuitions = await this.runtime.vectorStore.search("principle", text, { limit: 3, minScore: 0.1 });
+      } catch { /* best effort */ }
+    }
+
     const modelResult = await this.modelProvider.generate({
       input: text,
       agent,
@@ -64,7 +73,7 @@ export class AgentHost {
         }
       })),
       messages: sessionBefore.messages,
-      instructions: this.instructionsForAgent(agent, output),
+      instructions: this.instructionsForAgent(agent, output, intuitions),
       tools,
       toolRegistry,
       context: {
@@ -200,7 +209,10 @@ export class AgentHost {
     };
   }
 
-  instructionsForAgent(agent, output) {
+  instructionsForAgent(agent, output, intuitions = []) {
+    const intuitionBlock = intuitions.length > 0
+      ? `\nIntuitions (distilled long-term principles, may apply):\n${intuitions.map((i) => `- (${i.score.toFixed(2)}) ${i.text}`).join("\n")}\n`
+      : "";
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
 Your job is to help through the ABI loop:
@@ -211,7 +223,7 @@ Your job is to help through the ABI loop:
 Current decision: ${output.scrutiny.action}
 Reasons:
 ${output.scrutiny.reasons.map((reason) => `- ${reason}`).join("\n")}
-
+${intuitionBlock}
 Answer the user plainly. If a specialist was created, mention its name and scope.`;
   }
 

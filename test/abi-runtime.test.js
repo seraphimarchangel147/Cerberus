@@ -5,11 +5,14 @@ import path from "node:path";
 import test from "node:test";
 import {
   BudgetGuard,
+  HashBagEmbedder,
   MemoryCondenser,
   OutcomeStore,
   ScrutinyPanel,
   SpecialistRouter,
+  VectorStore,
   checkAuth,
+  cosine,
   createDefaultRuntime,
   createDurableRuntime,
   createHostedInterface,
@@ -400,7 +403,7 @@ test("agent turn writes an outcome record into runtime.outcomes", async () => {
   assert.equal(recent[0].channel, "local");
 });
 
-test("specialist router scores by text and tag overlap, respects threshold", () => {
+test("specialist router scores by text and tag overlap, respects threshold", async () => {
   const router = new SpecialistRouter({ threshold: 0.4 });
   const specialists = [
     {
@@ -422,17 +425,17 @@ test("specialist router scores by text and tag overlap, respects threshold", () 
       status: "available"
     }
   ];
-  const calendar = router.decide("Can you find time on my calendar for a meeting?", ["message", "calendar"], specialists);
+  const calendar = await router.decide("Can you find time on my calendar for a meeting?", ["message", "calendar"], specialists);
   assert.equal(calendar.route, true);
   assert.equal(calendar.candidate.specialist.id, "s1");
 
-  const irrelevant = router.decide("What's the weather like?", ["message"], specialists);
+  const irrelevant = await router.decide("What's the weather like?", ["message"], specialists);
   assert.equal(irrelevant.route, false);
 });
 
-test("specialist router off mode never routes", () => {
+test("specialist router off mode never routes", async () => {
   const router = new SpecialistRouter({ mode: "off" });
-  const decision = router.decide("anything", [], [{ id: "s", boundedScope: "anything", activationCount: 1, status: "available" }]);
+  const decision = await router.decide("anything", [], [{ id: "s", boundedScope: "anything", activationCount: 1, status: "available" }]);
   assert.equal(decision.route, false);
 });
 
@@ -572,6 +575,52 @@ test("recall is scoped per specialist when called with non-main agentId", () => 
   assert.ok(s1Contents.includes("specialist private note"));
   assert.ok(s1Contents.includes("main agent fact"), "specialists can see main scope");
   assert.ok(!s1Contents.includes("another specialist's note"));
+});
+
+test("hash-bag embedder + cosine ranks similar text higher than unrelated", async () => {
+  const embedder = new HashBagEmbedder();
+  const a = await embedder.embed("schedule a meeting on my calendar tomorrow");
+  const b = await embedder.embed("can you put a meeting on my calendar for tomorrow");
+  const c = await embedder.embed("the spider has an hourglass on its belly");
+  assert.ok(cosine(a, b) > cosine(a, c), "near-paraphrase should outscore unrelated text");
+});
+
+test("vector store upserts, persists, and reloads", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-vec-"));
+  const embedder = new HashBagEmbedder();
+  const first = new VectorStore({ embedder, dir });
+  await first.upsert("principle", "p1", "Standups are at 9am Mondays — don't schedule conflicting meetings.");
+  await first.upsert("principle", "p2", "Hourglass on a black widow spider is the lethal female.");
+
+  const second = new VectorStore({ embedder, dir });
+  const hits = await second.search("principle", "standup time mondays", { limit: 2, minScore: 0 });
+  assert.ok(hits.length >= 1);
+  assert.equal(hits[0].id, "p1");
+});
+
+test("specialist router blends keyword and semantic signals", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-route-"));
+  const embedder = new HashBagEmbedder();
+  const vs = new VectorStore({ embedder, dir });
+  const sp = {
+    id: "s1",
+    name: "calendar-helper",
+    boundedScope: "Schedule meetings, find free time on the calendar, propose times.",
+    activationCount: 3,
+    lastActivatedAt: new Date().toISOString(),
+    metadata: { tags: ["calendar", "meeting"] },
+    status: "available"
+  };
+  await vs.upsert("specialist", sp.id, `${sp.name}\n${sp.boundedScope}`);
+  const router = new SpecialistRouter({ vectorStore: vs, threshold: 0.3 });
+  const decision = await router.decide(
+    "schedule a meeting on my calendar this week",
+    ["message", "calendar"],
+    [sp]
+  );
+  assert.equal(decision.route, true, `route should fire; got score=${decision.candidate?.score}, breakdown=${JSON.stringify(decision.candidate?.breakdown)}`);
+  assert.ok(decision.candidate.breakdown.semanticScore !== null);
+  assert.ok(decision.candidate.breakdown.semanticScore > 0);
 });
 
 test("file-backed propagation persists specialist workspaces", () => {

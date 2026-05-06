@@ -10,11 +10,13 @@ import { createAbiIntegration, IntegrationRegistry } from "./integration-registr
 import { fileURLToPath } from "node:url";
 import { BudgetGuard } from "./budget-guard.js";
 import { registerRizeIntegration } from "./integrations/rize.js";
+import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
 import { MemoryCondenser } from "./memory-condenser.js";
 import { OutcomeStore } from "./outcome-store.js";
 import { ScrutinyPanel } from "./scrutiny-panel.js";
 import { SpecialistRouter } from "./specialist-router.js";
+import { VectorStore } from "./vector-store.js";
 import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
@@ -84,7 +86,10 @@ export class AbiRuntime {
         this.propagation.recordOutcomeQuality?.(specialistId, outcome.qualityScore);
       }
     };
-    this.specialistRouter = options.specialistRouter ?? new SpecialistRouter(options.routerOptions ?? {});
+    this.embedder = options.embedder ?? createEmbedder({ budgetGuard: this.budget, ...(options.embedderOptions ?? {}) });
+    this.vectorStore = options.vectorStore ?? new VectorStore({ embedder: this.embedder, ...(options.vectorStoreOptions ?? {}) });
+    if (typeof this.propagation.bindVectorStore === "function") this.propagation.bindVectorStore(this.vectorStore);
+    this.specialistRouter = options.specialistRouter ?? new SpecialistRouter({ vectorStore: this.vectorStore, ...(options.routerOptions ?? {}) });
     this.condenser = options.condenser ?? new MemoryCondenser({ runtime: this, ...(options.condenserOptions ?? {}) });
     this.outputs = [];
     this.feedback = [];
@@ -364,6 +369,7 @@ export function createDurableRuntime(options = {}) {
     mcpOptions: { logDir: mcpLogDir, ...(options.mcpOptions ?? {}) },
     budgetOptions: { storePath: path.join(dataDir, "budget", "usage.json"), ...(options.budgetOptions ?? {}) },
     outcomeOptions: { dir: path.join(dataDir, "outcomes"), ...(options.outcomeOptions ?? {}) },
+    vectorStoreOptions: { dir: path.join(dataDir, "vectors"), ...(options.vectorStoreOptions ?? {}) },
     memory: options.memory ?? new FileBackedMemorySystem({ ...(options.memoryOptions ?? {}), dir: path.join(dataDir, "memory") }),
     cron: options.cron ?? new FileBackedCronScheduler({ storePath: path.join(dataDir, "cron", "jobs.json") }),
     propagation:

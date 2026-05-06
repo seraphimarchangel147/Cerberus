@@ -59,6 +59,11 @@ export class MemoryCondenser {
         },
         { source: "condenser", strength: 0.8, tier: "long", critical: true }
       );
+      // Index for Lava intuition lookups.
+      this.runtime.vectorStore?.upsert("principle", item.id, principle.text, {
+        confidence: principle.confidence,
+        tags: item.tags
+      }).catch(() => {});
       // Mark sources so we don't re-condense them.
       for (const src of group) {
         const existing = this.runtime.memory.items.get(src.id);

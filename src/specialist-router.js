@@ -10,21 +10,48 @@ export class SpecialistRouter {
     this.threshold = options.threshold ?? Number.parseFloat(process.env.OPENAGI_ROUTING_THRESHOLD ?? String(DEFAULT_THRESHOLD));
     this.mode = options.mode ?? process.env.OPENAGI_ROUTING_MODE ?? "live"; // live | shadow | off
     this.minActivations = options.minActivations ?? 1;
+    this.vectorStore = options.vectorStore ?? null;
+    this.semanticWeight = options.semanticWeight ?? 0.4;
   }
 
   /**
    * Score every active specialist for the given signal text.
    * Returns sorted list of { specialist, score, breakdown }.
    */
-  search(signalText, signalTags, specialists) {
+  async search(signalText, signalTags, specialists) {
     const out = [];
     const text = String(signalText ?? "");
     const tags = new Set((signalTags ?? []).map((t) => String(t).toLowerCase()));
+
+    // Optional semantic pre-pass — cosine sim against indexed specialist scopes.
+    let semanticById = null;
+    if (this.vectorStore) {
+      try {
+        const hits = await this.vectorStore.search("specialist", text, { limit: 25, minScore: 0 });
+        semanticById = new Map();
+        for (const h of hits) semanticById.set(h.id, h.score);
+      } catch {
+        // best-effort; fall back to keyword only
+      }
+    }
+
     for (const sp of specialists ?? []) {
       if (sp.status === "retired") continue;
       if ((sp.activationCount ?? 0) < this.minActivations) continue;
       const breakdown = scoreMatch(text, tags, sp);
-      out.push({ specialist: sp, score: breakdown.score, breakdown });
+      let final;
+      let semanticScore = null;
+      if (semanticById) {
+        semanticScore = semanticById.get(sp.id) ?? 0;
+        final = breakdown.score * (1 - this.semanticWeight) + semanticScore * this.semanticWeight;
+      } else {
+        final = breakdown.score;
+      }
+      out.push({
+        specialist: sp,
+        score: final,
+        breakdown: { ...breakdown, semanticScore, blended: final }
+      });
     }
     return out.sort((a, b) => b.score - a.score);
   }
@@ -35,9 +62,9 @@ export class SpecialistRouter {
    * - route: true if the agent should hand off
    * - candidate: top specialist (or null)
    */
-  decide(signalText, signalTags, specialists) {
+  async decide(signalText, signalTags, specialists) {
     if (this.mode === "off") return { mode: "off", route: false, candidate: null, all: [] };
-    const all = this.search(signalText, signalTags, specialists);
+    const all = await this.search(signalText, signalTags, specialists);
     const top = all[0] ?? null;
     const matched = Boolean(top && top.score >= this.threshold);
     return {

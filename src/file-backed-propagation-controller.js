@@ -8,9 +8,18 @@ export class FileBackedPropagationController extends PropagationController {
     super(options);
     this.storePath = options.storePath ?? path.join(process.cwd(), ".openagi", "agents", "specialists.json");
     this.workspaceRoot = options.workspaceRoot ?? path.join(path.dirname(this.storePath), "workspaces");
+    this.vectorStore = options.vectorStore ?? null;
     ensureDir(path.dirname(this.storePath));
     ensureDir(this.workspaceRoot);
     if (options.autoLoad !== false) this.load();
+  }
+
+  bindVectorStore(vs) {
+    this.vectorStore = vs;
+    // Backfill index for any pre-existing specialists.
+    for (const sp of this.list({ includeRetired: false })) {
+      this.vectorStore?.upsert("specialist", sp.id, `${sp.name}\n${sp.boundedScope}\n${sp.parentGoal ?? ""}`).catch(() => {});
+    }
   }
 
   load() {
@@ -28,6 +37,12 @@ export class FileBackedPropagationController extends PropagationController {
     if (result.specialist) {
       this.ensureWorkspace(result.specialist);
       this.save();
+      // Index the specialist's bounded scope for semantic routing (D2).
+      const sp = result.specialist;
+      this.vectorStore?.upsert("specialist", sp.id, `${sp.name}\n${sp.boundedScope}\n${sp.parentGoal ?? ""}`, {
+        name: sp.name,
+        scope: sp.boundedScope
+      }).catch(() => {});
     }
     return result;
   }
