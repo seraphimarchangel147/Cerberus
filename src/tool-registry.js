@@ -92,9 +92,11 @@ export function registerCoreTools(registry, runtime) {
     handler: async (args, context) => {
       const importance = args.importance ?? "normal";
       const risk = importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45;
+      const scope = context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
       const item = runtime.memory.remember(
         {
           source: context.channel ?? "tool",
+          scope,
           content: String(args.content ?? "").trim(),
           tags: ["tool:remember", ...(args.tags ?? [])],
           risk,
@@ -120,8 +122,9 @@ export function registerCoreTools(registry, runtime) {
       required: ["query"],
       additionalProperties: false
     },
-    handler: async (args) => {
-      const hits = runtime.memory.retrieve(String(args.query ?? ""), { limit: args.limit ?? 5 });
+    handler: async (args, context) => {
+      const scope = context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
+      const hits = runtime.memory.retrieve(String(args.query ?? ""), { limit: args.limit ?? 5, scope });
       return {
         count: hits.length,
         items: hits.map(({ item, score }) => ({
@@ -129,7 +132,8 @@ export function registerCoreTools(registry, runtime) {
           tier: item.tier,
           score: Number(score.toFixed(3)),
           tags: item.tags,
-          content: item.content
+          content: item.content,
+          kind: item.kind ?? "raw"
         }))
       };
     }

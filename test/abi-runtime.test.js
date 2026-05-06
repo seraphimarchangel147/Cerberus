@@ -510,6 +510,70 @@ test("memory condenser groups items by tag overlap and writes a principle to lon
   assert.ok(principle.metadata.quarantineUntil);
 });
 
+test("propagation retirement sweep retires dormant and low-quality specialists", () => {
+  const propagation = new PropagationController();
+  const result = propagation.propagate({
+    signal: { domain: "general", taskType: "test", summary: "test scope", repetition: 0.9 },
+    workflow: { id: "w", goal: "test" },
+    scrutiny: { reasons: [] }
+  });
+  assert.equal(result.created, true);
+  const sp = result.specialist;
+
+  // Force dormancy: mark lastActivatedAt 90 days ago.
+  const longAgo = new Date(Date.now() - 90 * 86400 * 1000).toISOString();
+  sp.lastActivatedAt = longAgo;
+  const retired = propagation.retirementSweep({ dormancyDays: 30 });
+  assert.equal(retired.length, 1);
+  assert.equal(retired[0].status, "retired");
+  assert.match(retired[0].retirementReason, /dormant/);
+
+  // list() excludes retired by default
+  assert.equal(propagation.list().length, 0);
+  assert.equal(propagation.list({ includeRetired: true }).length, 1);
+});
+
+test("propagation tracks rolling outcome quality and retires bad specialists", () => {
+  const propagation = new PropagationController();
+  const r = propagation.propagate({
+    signal: { domain: "general", taskType: "bad", summary: "bad scope", repetition: 0.9 },
+    workflow: { id: "w", goal: "bad" },
+    scrutiny: { reasons: [] }
+  });
+  const sp = r.specialist;
+  for (let i = 0; i < 12; i += 1) propagation.recordOutcomeQuality(sp.id, 0.15);
+  assert.ok(sp.meanOutcomeQuality < 0.3);
+  const retired = propagation.retirementSweep({ dormancyDays: 999, minSamples: 10, qualityFloor: 0.3 });
+  assert.equal(retired.length, 1);
+  assert.match(retired[0].retirementReason, /quality/);
+});
+
+test("recall is scoped per specialist when called with non-main agentId", () => {
+  const runtime = createDefaultRuntime();
+  runtime.memory.remember(
+    { content: "main agent fact", scope: "main", tags: ["fact"], risk: 0.3 },
+    {}
+  );
+  runtime.memory.remember(
+    { content: "specialist private note", scope: "specialist:s1", tags: ["fact"], risk: 0.3 },
+    {}
+  );
+  runtime.memory.remember(
+    { content: "another specialist's note", scope: "specialist:s2", tags: ["fact"], risk: 0.3 },
+    {}
+  );
+  const mainHits = runtime.memory.retrieve("fact", { scope: "main" });
+  const mainContents = mainHits.map((h) => h.item.content);
+  assert.ok(mainContents.includes("main agent fact"));
+  assert.ok(!mainContents.includes("specialist private note"));
+
+  const s1Hits = runtime.memory.retrieve("fact", { scope: "specialist:s1" });
+  const s1Contents = s1Hits.map((h) => h.item.content);
+  assert.ok(s1Contents.includes("specialist private note"));
+  assert.ok(s1Contents.includes("main agent fact"), "specialists can see main scope");
+  assert.ok(!s1Contents.includes("another specialist's note"));
+});
+
 test("file-backed propagation persists specialist workspaces", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-agents-"));
   const storePath = path.join(dir, "specialists.json");

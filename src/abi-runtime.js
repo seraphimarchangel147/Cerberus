@@ -28,6 +28,30 @@ Decide if anything needs action right now: a follow-up to send, a memory to reco
 - If nothing needs doing, reply with exactly one short sentence describing what you observed and "standing by".
 Do not invent work. Be conservative — fewer actions, higher signal.`;
 
+const HARSH_REVIEW_PROMPT = `Weekly harsh review. Be skeptical and direct, not generous.
+
+1. Call \`recall\` for "this week" and surface the most repeated themes.
+2. Call \`list_sessions\` and judge: which conversations went somewhere, which fizzled?
+3. Look at any specialists you've spawned — are they earning their keep, or should they be retired?
+4. Are any scheduled jobs noise (firing without producing useful output)?
+5. Did the user push back on or ignore anything you sent?
+
+Output four short bullets:
+- KEEP: what worked
+- KILL: what to retire / unschedule (use the retire/cancel tools when sure)
+- CHANGE: what to recalibrate
+- ASK: what you genuinely need the user to clarify
+
+No generalities. Cite specific session ids, job names, specialist ids.`;
+
+function nextSundayEvening() {
+  const d = new Date();
+  d.setHours(20, 0, 0, 0);
+  const daysUntilSunday = (7 - d.getDay()) % 7;
+  d.setDate(d.getDate() + (daysUntilSunday === 0 ? 7 : daysUntilSunday));
+  return d;
+}
+
 export class AbiRuntime {
   constructor(options = {}) {
     this.context = {
@@ -53,6 +77,13 @@ export class AbiRuntime {
     this.skills = options.skills ?? null;
     this.budget = options.budget ?? new BudgetGuard(options.budgetOptions ?? {});
     this.outcomes = options.outcomes ?? new OutcomeStore(options.outcomeOptions ?? {});
+    // When an outcome resolves, push the quality into the matching specialist's running mean.
+    this.outcomes.onResolve = (outcome) => {
+      const specialistId = outcome.metadata?.specialistId;
+      if (specialistId && typeof outcome.qualityScore === "number") {
+        this.propagation.recordOutcomeQuality?.(specialistId, outcome.qualityScore);
+      }
+    };
     this.specialistRouter = options.specialistRouter ?? new SpecialistRouter(options.routerOptions ?? {});
     this.condenser = options.condenser ?? new MemoryCondenser({ runtime: this, ...(options.condenserOptions ?? {}) });
     this.outputs = [];
@@ -67,6 +98,25 @@ export class AbiRuntime {
         enabled: true,
         task: "condense",
         dailyAt: "03:30"
+      });
+      this.cron.addJob({
+        id: "weekly-harsh-review",
+        name: "Weekly harsh review",
+        enabled: true,
+        task: "autopilot",
+        intervalMs: 7 * 24 * 60 * 60 * 1000,
+        nextRunAt: nextSundayEvening().toISOString(),
+        input: {
+          agentId: "main",
+          prompt: HARSH_REVIEW_PROMPT
+        }
+      });
+      this.cron.addJob({
+        id: "daily-retirement-sweep",
+        name: "Daily specialist retirement sweep",
+        enabled: true,
+        task: "retirement-sweep",
+        dailyAt: "04:00"
       });
       registerCoreTools(this.tools, this);
     }
@@ -183,6 +233,10 @@ export class AbiRuntime {
       }
       if (job.task === "condense") {
         return this.condenser.condense({ now });
+      }
+      if (job.task === "retirement-sweep") {
+        const retired = this.propagation.retirementSweep?.() ?? [];
+        return { retired: retired.map((s) => ({ id: s.id, name: s.name, reason: s.retirementReason })) };
       }
       return { skipped: true, reason: `No handler for task ${job.task}` };
     }, now);

@@ -125,6 +125,7 @@ export class AgentHost {
     this.runtime.memory.remember(
       {
         source: "agent-host",
+        scope: agent.role === "specialist" ? `specialist:${agent.id}` : "main",
         content: `Session ${sessionId} user asked: ${text}\nAgent replied: ${modelResult.text}`,
         tags: ["agent-turn", channel, agentId],
         novelty: output.scrutiny.dimensions.novelty,

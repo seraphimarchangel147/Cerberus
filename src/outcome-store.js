@@ -53,6 +53,7 @@ export class OutcomeStore {
     outcome.resolvedAt = nowIso();
     if (note) outcome.metadata = { ...outcome.metadata, resolutionNote: note };
     appendJsonLine(this.eventsPath, { op: "resolve", id, qualityScore: outcome.qualityScore, source, at: outcome.resolvedAt });
+    if (this.onResolve) this.onResolve(outcome);
     this.persist();
     return outcome;
   }

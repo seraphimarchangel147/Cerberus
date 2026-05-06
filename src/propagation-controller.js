@@ -58,15 +58,70 @@ export class PropagationController {
       createdAt: nowIso(),
       lastActivatedAt: nowIso(),
       activationCount: 1,
-      reasons: scrutiny?.reasons ?? []
+      reasons: scrutiny?.reasons ?? [],
+      meanOutcomeQuality: null,
+      outcomeSamples: 0,
+      retiredAt: null,
+      retirementReason: null,
+      seasonal: signal.seasonal === true
     };
 
     this.specialists.set(signature, specialist);
     return { created: true, reason: "specialist-created", specialist };
   }
 
-  list() {
-    return [...this.specialists.values()].sort((a, b) => b.lastActivatedAt.localeCompare(a.lastActivatedAt));
+  list({ includeRetired = false } = {}) {
+    let arr = [...this.specialists.values()];
+    if (!includeRetired) arr = arr.filter((s) => s.status !== "retired");
+    return arr.sort((a, b) => b.lastActivatedAt.localeCompare(a.lastActivatedAt));
+  }
+
+  recordOutcomeQuality(specialistId, qualityScore) {
+    if (typeof qualityScore !== "number") return null;
+    const sp = [...this.specialists.values()].find((s) => s.id === specialistId);
+    if (!sp) return null;
+    const prev = sp.meanOutcomeQuality ?? 0;
+    const n = sp.outcomeSamples ?? 0;
+    sp.meanOutcomeQuality = (prev * n + qualityScore) / (n + 1);
+    sp.outcomeSamples = n + 1;
+    return sp;
+  }
+
+  retire(specialistId, reason = "manual") {
+    const sp = [...this.specialists.values()].find((s) => s.id === specialistId);
+    if (!sp || sp.status === "retired") return null;
+    sp.status = "retired";
+    sp.retiredAt = nowIso();
+    sp.retirementReason = reason;
+    return sp;
+  }
+
+  /**
+   * Sweep retirement criteria: dormant for >dormancyDays, OR rolling outcome
+   * quality < qualityFloor over >=minSamples activations. Seasonal specialists
+   * skip the dormancy check.
+   */
+  retirementSweep({ dormancyDays = 30, qualityFloor = 0.3, minSamples = 10, now = new Date() } = {}) {
+    const retired = [];
+    const cutoff = (now instanceof Date ? now.getTime() : new Date(now).getTime()) - dormancyDays * 86400 * 1000;
+    for (const sp of this.specialists.values()) {
+      if (sp.status === "retired") continue;
+      const lastMs = sp.lastActivatedAt ? new Date(sp.lastActivatedAt).getTime() : 0;
+      if (!sp.seasonal && lastMs < cutoff) {
+        sp.status = "retired";
+        sp.retiredAt = nowIso();
+        sp.retirementReason = `dormant > ${dormancyDays}d`;
+        retired.push(sp);
+        continue;
+      }
+      if ((sp.outcomeSamples ?? 0) >= minSamples && (sp.meanOutcomeQuality ?? 1) < qualityFloor) {
+        sp.status = "retired";
+        sp.retiredAt = nowIso();
+        sp.retirementReason = `mean quality ${sp.meanOutcomeQuality?.toFixed(2)} < ${qualityFloor}`;
+        retired.push(sp);
+      }
+    }
+    return retired;
   }
 
   signature(signal, workflow) {

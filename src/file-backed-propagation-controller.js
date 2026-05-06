@@ -32,11 +32,29 @@ export class FileBackedPropagationController extends PropagationController {
     return result;
   }
 
+  recordOutcomeQuality(id, score) {
+    const sp = super.recordOutcomeQuality(id, score);
+    if (sp) this.save();
+    return sp;
+  }
+
+  retire(id, reason) {
+    const sp = super.retire(id, reason);
+    if (sp) this.save();
+    return sp;
+  }
+
+  retirementSweep(opts) {
+    const retired = super.retirementSweep(opts);
+    if (retired.length > 0) this.save();
+    return retired;
+  }
+
   save() {
     writeJsonAtomic(this.storePath, {
       version: 1,
       updatedAt: nowIso(),
-      specialists: this.list()
+      specialists: this.list({ includeRetired: true })
     });
   }
 

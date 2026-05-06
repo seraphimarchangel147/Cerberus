@@ -96,7 +96,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/health") return sendJson(res, 200, { ok: true, status: runtime.status() });
       if (method === "GET" && pathname === "/memory") return sendJson(res, 200, runtime.memory.snapshot());
       if (method === "GET" && pathname === "/agents") return sendJson(res, 200, runtime.agentHost?.store.listAgents() ?? runtime.propagation.list());
-      if (method === "GET" && pathname === "/specialists") return sendJson(res, 200, runtime.propagation.list());
+      if (method === "GET" && pathname === "/specialists") {
+        const includeRetired = url.searchParams.get("retired") === "1";
+        return sendJson(res, 200, runtime.propagation.list({ includeRetired }));
+      }
+      if (method === "POST" && pathname.match(/^\/specialists\/[^/]+\/retire$/)) {
+        const id = decodeURIComponent(pathname.split("/")[2]);
+        const sp = runtime.propagation.retire(id, "manual");
+        if (!sp) return sendJson(res, 404, { error: "unknown-specialist" });
+        return sendJson(res, 200, sp);
+      }
       if (method === "GET" && pathname === "/sessions") return sendJson(res, 200, runtime.agentHost?.store.listSessions() ?? []);
       if (method === "GET" && pathname.startsWith("/sessions/")) {
         const id = decodeURIComponent(pathname.slice("/sessions/".length));
