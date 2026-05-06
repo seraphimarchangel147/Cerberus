@@ -607,6 +607,10 @@ function renderApp() {
       <button data-tab="agents">Agents</button>
       <button data-tab="channels">Channels</button>
       <button data-tab="budget">Budget</button>
+      <button data-tab="outcomes">Outcomes</button>
+      <button data-tab="scrutiny">Scrutiny</button>
+      <button data-tab="vocab">Vocab</button>
+      <button data-tab="health">Health</button>
     </nav>
   </header>
   <div class="body">
@@ -693,6 +697,18 @@ async function switchTab(tab) {
   } else if (tab === "budget") {
     sidebar.style.display = "none";
     await renderBudget();
+  } else if (tab === "outcomes") {
+    sidebar.style.display = "none";
+    await renderOutcomes();
+  } else if (tab === "scrutiny") {
+    sidebar.style.display = "none";
+    await renderScrutiny();
+  } else if (tab === "vocab") {
+    sidebar.style.display = "none";
+    await renderVocab();
+  } else if (tab === "health") {
+    sidebar.style.display = "none";
+    await renderHealth();
   }
   renderTab();
 }
@@ -1100,6 +1116,178 @@ async function renderBudget() {
     c.className = "card";
     c.innerHTML = \`<div class="row between"><span class="name">\${escapeHtml(d.date)}</span><span>$\${d.usd.toFixed(4)} · \${d.calls} call\${d.calls===1?"":"s"}</span></div>\`;
     hist.appendChild(c);
+  }
+}
+
+async function renderOutcomes() {
+  const data = await fetchJson("/outcomes?limit=40&windowDays=7");
+  const agg = data.aggregate ?? {};
+  const recent = data.recent ?? [];
+  main.innerHTML = \`
+    <div class="pane">
+      <h2>Outcomes</h2>
+      <div class="row" style="gap:16px;margin-bottom:16px;">
+        <div class="card grow"><span class="desc">7-day avg quality</span><div style="font-size:22px;font-weight:700;">\${agg.avgQuality ?? "—"}</div></div>
+        <div class="card grow"><span class="desc">Resolved</span><div style="font-size:22px;font-weight:700;">\${agg.resolved ?? 0} / \${agg.total ?? 0}</div></div>
+        <div class="card grow"><span class="desc">Pending</span><div style="font-size:22px;font-weight:700;">\${agg.pending ?? 0}</div></div>
+      </div>
+      <h3>By kind (7d)</h3>
+      <pre>\${escapeHtml(JSON.stringify(agg.byKind ?? {}, null, 2))}</pre>
+      <h3>Recent</h3>
+      <div class="grid" id="outcomeList"></div>
+    </div>
+  \`;
+  const list = $("outcomeList");
+  for (const o of recent) {
+    const el = document.createElement("div");
+    el.className = "card";
+    const qBadge = typeof o.qualityScore === "number"
+      ? \`<span class="badge \${o.qualityScore >= 0.7 ? "ok" : o.qualityScore >= 0.4 ? "warn" : "err"}">q=\${o.qualityScore.toFixed(2)}</span>\`
+      : (o.resolved ? '<span class="badge">timeout</span>' : '<span class="badge warn">pending</span>');
+    el.innerHTML = \`
+      <div class="row between">
+        <span class="name">\${escapeHtml(o.kind)} · \${escapeHtml(o.scrutinyAction ?? "—")}</span>
+        \${qBadge}
+      </div>
+      <div class="desc">\${escapeHtml(o.sessionId ?? "")} · \${escapeHtml(o.channel ?? "")} · \${escapeHtml(new Date(o.at).toLocaleString())}</div>
+      <div class="row" style="gap:6px;margin-top:8px;">
+        <button class="secondary" data-feedback="\${escapeHtml(o.refId ?? "")}" data-score="0.95">👍 great</button>
+        <button class="secondary" data-feedback="\${escapeHtml(o.refId ?? "")}" data-score="0.5">😐 ok</button>
+        <button class="secondary" data-feedback="\${escapeHtml(o.refId ?? "")}" data-score="0.1">👎 bad</button>
+      </div>
+    \`;
+    list.appendChild(el);
+  }
+  list.querySelectorAll("[data-feedback]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const refId = btn.getAttribute("data-feedback");
+      const score = Number(btn.getAttribute("data-score"));
+      if (!refId) { btn.textContent = "no refId"; return; }
+      try {
+        await postJson("/feedback", { refId, qualityScore: score });
+        btn.textContent = "✓ rated";
+        btn.disabled = true;
+      } catch (err) { btn.textContent = "[err] " + err.message; }
+    });
+  });
+}
+
+async function renderScrutiny() {
+  const data = await fetchJson("/scrutiny/weights");
+  const pending = await fetchJson("/scrutiny/pending").catch(() => null);
+  main.innerHTML = \`
+    <div class="pane">
+      <h2>Scrutiny</h2>
+      <div class="row" style="gap:8px;margin-bottom:12px;">
+        <button id="fitBtn">Run fit now</button>
+        <button class="secondary" id="judgeBtn">Run LLM judge</button>
+      </div>
+      <pre id="scrOut" class="ok"></pre>
+      <h3>Judges</h3>
+      <div class="grid two" id="judges"></div>
+      <h3>Fitter status</h3>
+      <pre>\${escapeHtml(JSON.stringify(data.fitter ?? {}, null, 2))}</pre>
+      <h3>Pending proposals</h3>
+      <div id="pendingList"></div>
+    </div>
+  \`;
+  const judges = $("judges");
+  for (const [name, j] of Object.entries(data.weights ?? {})) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = \`<div class="name">\${escapeHtml(name)}</div>
+      <div class="desc">weights</div><pre>\${escapeHtml(JSON.stringify(j.weights, null, 2))}</pre>
+      <div class="desc">thresholds</div><pre>\${escapeHtml(JSON.stringify(j.thresholds, null, 2))}</pre>\`;
+    judges.appendChild(card);
+  }
+  const pl = $("pendingList");
+  if (!pending || !pending.proposals?.length) {
+    pl.innerHTML = '<div class="empty">no pending proposals</div>';
+  } else {
+    for (const p of pending.proposals) {
+      const c = document.createElement("div");
+      c.className = "card";
+      c.innerHTML = \`<div class="row between"><span class="name">cycle \${p.cycle} · \${p.applied ? "applied" : "pending"}</span>
+        <button class="secondary" data-apply="\${p.cycle}" \${p.applied ? "disabled" : ""}>Apply</button></div>
+        <pre>\${escapeHtml(JSON.stringify(p.proposals, null, 2))}</pre>\`;
+      pl.appendChild(c);
+    }
+    pl.querySelectorAll("[data-apply]").forEach((b) => b.addEventListener("click", async () => {
+      await postJson(\`/scrutiny/pending/\${b.getAttribute("data-apply")}/apply\`, {});
+      renderScrutiny();
+    }));
+  }
+  $("fitBtn").addEventListener("click", async () => {
+    $("scrOut").textContent = "fitting…";
+    try { $("scrOut").textContent = JSON.stringify(await postJson("/scrutiny/fit", {}), null, 2); }
+    catch (e) { $("scrOut").textContent = "[err] " + e.message; }
+  });
+  $("judgeBtn").addEventListener("click", async () => {
+    $("scrOut").textContent = "running judge…";
+    try { $("scrOut").textContent = JSON.stringify(await postJson("/scrutiny/judge", {}), null, 2); }
+    catch (e) { $("scrOut").textContent = "[err] " + e.message; }
+  });
+}
+
+async function renderVocab() {
+  const data = await fetchJson("/vocabulary");
+  main.innerHTML = \`
+    <div class="pane">
+      <h2>Vocabulary</h2>
+      <div class="row" style="gap:16px;margin-bottom:12px;">
+        <div class="card grow"><span class="desc">Total tags</span><div style="font-size:22px;font-weight:700;">\${data.snapshot?.total ?? 0}</div></div>
+        <div class="card grow"><span class="desc">Proposed merges</span><div style="font-size:22px;font-weight:700;">\${data.proposedMerges?.length ?? 0}</div></div>
+        <div class="card grow"><span class="desc">Dormant tags</span><div style="font-size:22px;font-weight:700;">\${data.proposedDeprecations?.length ?? 0}</div></div>
+      </div>
+      \${data.proposedMerges?.length ? '<button id="applyMergesBtn">Apply all merges</button>' : ""}
+      <pre id="vocabOut" class="ok"></pre>
+      <h3>Merge proposals</h3>
+      <pre>\${escapeHtml(JSON.stringify(data.proposedMerges ?? [], null, 2))}</pre>
+      <h3>Top 30 tags by usage</h3>
+      <pre>\${escapeHtml((data.snapshot?.tags ?? []).slice(0, 30).map(t => \`\${t.tag} · \${t.count}\`).join("\\n"))}</pre>
+      <h3>Dormant (last seen > 60d)</h3>
+      <pre>\${escapeHtml((data.proposedDeprecations ?? []).slice(0, 30).map(t => \`\${t.tag} · \${t.lastSeen}\`).join("\\n") || "(none)")}</pre>
+    </div>
+  \`;
+  const btn = $("applyMergesBtn");
+  if (btn) btn.addEventListener("click", async () => {
+    try {
+      $("vocabOut").textContent = JSON.stringify(await postJson("/vocabulary/apply-merges", {}), null, 2);
+      setTimeout(renderVocab, 1000);
+    } catch (e) { $("vocabOut").textContent = "[err] " + e.message; }
+  });
+}
+
+async function renderHealth() {
+  const a = await fetchJson("/audit");
+  main.innerHTML = \`
+    <div class="pane">
+      <h2>Health</h2>
+      <h3>Findings</h3>
+      <div class="grid" id="findings"></div>
+      <h3>Specialists</h3>
+      <pre>\${escapeHtml(JSON.stringify(a.specialists, null, 2))}</pre>
+      <h3>Memory</h3>
+      <pre>\${escapeHtml(JSON.stringify(a.memory, null, 2))}</pre>
+      <h3>Cron upcoming</h3>
+      <pre>\${escapeHtml(JSON.stringify(a.cron?.upcoming ?? [], null, 2))}</pre>
+      <h3>Outcomes</h3>
+      <pre>\${escapeHtml(JSON.stringify(a.outcomes, null, 2))}</pre>
+      <h3>MCP</h3>
+      <pre>\${escapeHtml(JSON.stringify(a.mcp ?? [], null, 2))}</pre>
+    </div>
+  \`;
+  const f = $("findings");
+  if (!a.findings?.length) {
+    f.innerHTML = '<div class="empty">all systems nominal</div>';
+  } else {
+    for (const finding of a.findings) {
+      const c = document.createElement("div");
+      c.className = "card";
+      const cls = finding.severity === "warn" ? "warn" : finding.severity === "err" ? "err" : "ok";
+      c.innerHTML = \`<div class="row between"><span class="name">\${escapeHtml(finding.area)}</span><span class="badge \${cls}">\${escapeHtml(finding.severity)}</span></div><div class="desc">\${escapeHtml(finding.note)}</div>\`;
+      f.appendChild(c);
+    }
   }
 }
 
