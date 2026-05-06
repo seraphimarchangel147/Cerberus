@@ -167,6 +167,23 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "GET" && pathname === "/budget") return sendJson(res, 200, runtime.budget?.status?.() ?? { error: "no-budget" });
 
+      if (method === "GET" && pathname === "/outcomes") {
+        const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+        const kind = url.searchParams.get("kind");
+        const window = Number.parseInt(url.searchParams.get("windowDays") ?? "7", 10);
+        return sendJson(res, 200, {
+          aggregate: runtime.outcomes?.aggregate(window) ?? null,
+          recent: runtime.outcomes?.recent(limit, kind) ?? []
+        });
+      }
+
+      if (method === "POST" && pathname === "/feedback") {
+        const body = await readJson(req);
+        const result = runtime.outcomes?.feedback(body.refId, body.qualityScore, body.note);
+        if (!result) return sendJson(res, 404, { error: "no outcome found for refId" });
+        return sendJson(res, 200, result);
+      }
+
       if (method === "GET" && pathname === "/cron") return sendJson(res, 200, runtime.cron.listJobs());
       if (method === "POST" && pathname === "/cron") {
         const body = await readJson(req);
@@ -286,6 +303,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           if (tickerMs > 0) {
             tickerHandle = setInterval(() => {
               runtime.tick().catch(() => { /* swallow */ });
+              try {
+                runtime.outcomes?.resolveSweep({ agentStore: runtime.agentHost?.store ?? null });
+              } catch { /* swallow */ }
             }, tickerMs);
           }
           const address = server.address();

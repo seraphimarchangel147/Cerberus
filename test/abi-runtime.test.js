@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   BudgetGuard,
+  OutcomeStore,
   checkAuth,
   createDefaultRuntime,
   createDurableRuntime,
@@ -354,6 +355,46 @@ test("twilio signature passes for valid HMAC and fails for tampered body", async
 
   const bad = verifyTwilioSignature({ authToken, fullUrl, params: { ...params, Body: "tampered" }, signature: sig });
   assert.equal(bad.ok, false);
+});
+
+test("outcome store records, resolves, aggregates, and reloads", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-outcome-"));
+  const first = new OutcomeStore({ dir });
+  const a = first.record({ kind: "agent-reply", sessionId: "s1", channel: "local", scrutinyAction: "act" });
+  const b = first.record({ kind: "cron-fire", sessionId: "s2", toolCalls: [{ name: "remember", ok: true }] });
+  assert.equal(first.pending().length, 2);
+
+  first.resolve(a.id, 0.85, "user-followup");
+  const sweep = first.resolveSweep();
+  assert.ok(sweep.length >= 1, "cron-fire with tool calls should resolve via sweep");
+
+  const agg = first.aggregate(30);
+  assert.equal(agg.total, 2);
+  assert.ok(agg.avgQuality > 0.5);
+
+  // Reload from disk
+  const second = new OutcomeStore({ dir });
+  assert.equal(second.recent().length, 2);
+});
+
+test("outcome store explicit feedback resolves an outcome", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-outcome-fb-"));
+  const store = new OutcomeStore({ dir });
+  const o = store.record({ kind: "agent-reply", refId: "msg_42", sessionId: "s1" });
+  const result = store.feedback("msg_42", 0.95, "great answer");
+  assert.ok(result);
+  assert.equal(result.id, o.id);
+  assert.equal(result.qualityScore, 0.95);
+  assert.equal(result.source, "explicit-rating");
+});
+
+test("agent turn writes an outcome record into runtime.outcomes", async () => {
+  const runtime = createDefaultRuntime();
+  await runtime.agentHost.handleMessage({ channel: "local", from: "test", text: "hi" });
+  const recent = runtime.outcomes.recent(5);
+  assert.ok(recent.length >= 1);
+  assert.equal(recent[0].kind, "agent-reply");
+  assert.equal(recent[0].channel, "local");
 });
 
 test("file-backed propagation persists specialist workspaces", () => {

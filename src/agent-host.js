@@ -64,6 +64,19 @@ export class AgentHost {
       }
     });
 
+    const outcomeRecord = this.runtime.outcomes?.record({
+      kind: input.origin === "autopilot" ? "autopilot-fire" : input.origin === "cron" ? "cron-fire" : "agent-reply",
+      refId: null, // patched after we know assistant message id
+      signalId: signal.id,
+      sessionId,
+      agentId,
+      channel,
+      scrutinyAction: output.scrutiny.action,
+      scrutinyDimensions: output.scrutiny.dimensions,
+      toolCalls: (modelResult.toolCalls ?? []).map((c) => ({ name: c.name, ok: c.result?.ok ?? false })),
+      metadata: { specialistId: agent.role === "specialist" ? agent.id : null, scrutinyScore: output.scrutiny.score }
+    }) ?? null;
+
     const sessionAfter = this.store.appendMessage(sessionId, {
       role: "assistant",
       content: modelResult.text,
@@ -75,6 +88,7 @@ export class AgentHost {
         model: modelResult.model,
         responseId: modelResult.id,
         outputId: output.id,
+        outcomeId: outcomeRecord?.id ?? null,
         toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
           name: call.name,
           arguments: call.arguments,
@@ -82,6 +96,8 @@ export class AgentHost {
         }))
       }
     });
+
+    if (outcomeRecord) outcomeRecord.refId = sessionAfter.messages.at(-1)?.id ?? null;
 
     this.runtime.memory.remember(
       {

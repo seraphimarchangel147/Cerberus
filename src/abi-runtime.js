@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { BudgetGuard } from "./budget-guard.js";
 import { registerRizeIntegration } from "./integrations/rize.js";
 import { McpRegistry } from "./mcp-registry.js";
+import { OutcomeStore } from "./outcome-store.js";
 import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
@@ -46,6 +47,7 @@ export class AbiRuntime {
     this.mcp.bindToolRegistry(this.tools);
     this.skills = options.skills ?? null;
     this.budget = options.budget ?? new BudgetGuard(options.budgetOptions ?? {});
+    this.outcomes = options.outcomes ?? new OutcomeStore(options.outcomeOptions ?? {});
     this.outputs = [];
     this.feedback = [];
 
@@ -290,6 +292,7 @@ export function createDurableRuntime(options = {}) {
     skillsDir: options.skillsDir ?? path.join(dataDir, "skills"),
     mcpOptions: { logDir: mcpLogDir, ...(options.mcpOptions ?? {}) },
     budgetOptions: { storePath: path.join(dataDir, "budget", "usage.json"), ...(options.budgetOptions ?? {}) },
+    outcomeOptions: { dir: path.join(dataDir, "outcomes"), ...(options.outcomeOptions ?? {}) },
     memory: options.memory ?? new FileBackedMemorySystem({ ...(options.memoryOptions ?? {}), dir: path.join(dataDir, "memory") }),
     cron: options.cron ?? new FileBackedCronScheduler({ storePath: path.join(dataDir, "cron", "jobs.json") }),
     propagation:

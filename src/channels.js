@@ -50,15 +50,25 @@ export class ChannelManager {
     });
   }
 
-  async deliver({ channel, target, text }) {
+  async deliver({ channel, target, text, sessionId = null, refId = null }) {
     if (!channel || !text) throw new Error("deliver requires channel and text");
     appendJsonLine(this.eventsPath, { at: nowIso(), op: "deliver", channel, target, text: String(text).slice(0, 400) });
-    if (channel === "telegram") return this.telegram.sendMessage(target, text);
-    if (channel === "sms") return this.sms.sendSms(target, text);
-    if (channel === "local" || channel === "cron") {
-      return { delivered: false, reason: `channel ${channel} has no outbound transport (read from /sessions or stream /events)` };
+    let result;
+    if (channel === "telegram") result = await this.telegram.sendMessage(target, text);
+    else if (channel === "sms") result = await this.sms.sendSms(target, text);
+    else if (channel === "local" || channel === "cron") {
+      result = { delivered: false, reason: `channel ${channel} has no outbound transport (read from /sessions or stream /events)` };
+    } else {
+      throw new Error(`Unknown channel: ${channel}`);
     }
-    throw new Error(`Unknown channel: ${channel}`);
+    this.runtime?.outcomes?.record({
+      kind: "sent-message",
+      refId,
+      sessionId,
+      channel,
+      metadata: { target, length: String(text).length, result }
+    });
+    return result;
   }
 
   start() {
