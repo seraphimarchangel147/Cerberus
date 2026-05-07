@@ -1,8 +1,8 @@
 {
-  "_comment": "Copy or rename to mcp.json. The runtime auto-loads .openagi/mcp.json on startup. Three transport+auth shapes are supported:",
+  "_comment": "Copy or rename to mcp.json. The runtime auto-loads .openagi/mcp.json on startup. Four shapes are supported:",
   "servers": {
 
-    "//": "── stdio: spawn a local process and talk JSON-RPC over stdin/stdout ──",
+    "//1": "── stdio: spawn a local process and talk JSON-RPC over stdin/stdout ──",
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
@@ -17,10 +17,20 @@
       "trustLevel": "trusted"
     },
 
-    "//3": "── http + oauth: full OAuth 2.0 with discovery, dynamic registration, PKCE ──",
+    "//3": "── http + oauth (dynamic registration): for OIDC servers like Keycloak/Auth0 ──",
     "buildbetter": {
       "url": "https://mcp.example.com/mcp",
       "auth": "oauth",
+      "trustLevel": "trusted"
+    },
+
+    "//4": "── http + oauth with pre-registered client (for servers without DCR) ──",
+    "my-oauth-server": {
+      "url": "https://api.example.com/mcp",
+      "auth": "oauth",
+      "clientId": "${MY_OAUTH_CLIENT_ID}",
+      "clientSecret": "${MY_OAUTH_CLIENT_SECRET}",
+      "scope": "mcp.read mcp.write",
       "trustLevel": "trusted"
     }
   }

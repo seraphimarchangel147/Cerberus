@@ -43,6 +43,10 @@ export class McpRegistry {
       apiKey: expandValue(server.apiKey ?? null),
       headers: expandEnv(server.headers ?? {}),
       scope: server.scope,
+      // OAuth pre-registered client (for servers without dynamic registration)
+      clientId: expandValue(server.clientId ?? null),
+      clientSecret: expandValue(server.clientSecret ?? null),
+      resourceUrl: server.resourceUrl ?? null,
       // shared
       trustLevel: server.trustLevel ?? "untrusted",
       tools: server.tools ?? [],
@@ -76,6 +80,10 @@ export class McpRegistry {
           apiKey: spec.apiKey,
           headers: spec.headers ?? {},
           scope: spec.scope,
+          // OAuth pre-registered client (for non-DCR auth servers)
+          clientId: spec.clientId,
+          clientSecret: spec.clientSecret,
+          resourceUrl: spec.resourceUrl,
           // shared
           trustLevel: spec.trustLevel ?? "trusted",
           enabled: spec.enabled ?? true,
@@ -171,9 +179,11 @@ export class McpRegistry {
           };
           oauth = new McpOAuthClient({
             name: server.name,
-            resourceUrl: deriveResourceUrl(server.url),
+            resourceUrl: server.resourceUrl ?? deriveResourceUrl(server.url),
             scope: server.scope,
             dataDir: this.dataDir,
+            clientId: server.clientId,
+            clientSecret: server.clientSecret,
             printAuthUrlFn: onAuthUrl
           });
         } else if (server.auth === "bearer") {

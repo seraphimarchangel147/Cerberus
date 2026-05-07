@@ -31,6 +31,16 @@ export class McpOAuthClient {
     this.cachePath = path.join(this.dataDir, "mcp", "auth", `${this.name}.json`);
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.printAuthUrlFn = options.printAuthUrlFn ?? defaultPrintAuthUrl;
+    // Optional pre-registered client (for auth servers without dynamic
+    // client registration). When set, we skip RFC 7591 entirely.
+    this.staticClient = options.clientId
+      ? {
+          client_id: options.clientId,
+          client_secret: options.clientSecret ?? null,
+          redirect_uris: options.redirectUris ?? null,
+          token_endpoint_auth_method: options.clientSecret ? "client_secret_post" : "none"
+        }
+      : null;
     ensureDir(path.dirname(this.cachePath));
   }
 
@@ -75,7 +85,7 @@ export class McpOAuthClient {
   async authorize() {
     const discovery = await this.discover();
     const cache = this.loadCache() ?? {};
-    const client = cache.client ?? (await this.registerClient(discovery));
+    const client = this.staticClient ?? cache.client ?? (await this.registerClient(discovery));
 
     const codeVerifier = base64url(randomBytes(48));
     const codeChallenge = base64url(createHash("sha256").update(codeVerifier).digest());
