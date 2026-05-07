@@ -49,6 +49,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("cron", (data) => broadcast("cron", data));
   events.on("mcp", (data) => broadcast("mcp", data));
   events.on("tunnel", (data) => broadcast("tunnel", data));
+  events.on("replay", (data) => broadcast("replay", data));
+  if (runtime.skillReplay) runtime.skillReplay.bindEvents(events);
 
   if (runtime.tunnelWatcher) {
     runtime.tunnelWatcher.on("tunnel-url", (data) => events.emit("tunnel", { op: "url", ...data }));
@@ -437,6 +439,26 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "GET" && pathname === "/skills") return sendJson(res, 200, runtime.skills?.list() ?? []);
       if (method === "GET" && pathname === "/skills/suggested") return sendJson(res, 200, runtime.patternMiner?.list() ?? []);
+      if (method === "POST" && pathname.match(/^\/skills\/replay\/[^/]+$/)) {
+        const skill = decodeURIComponent(pathname.split("/")[3]);
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          const result = await runtime.skillReplay.run({ skill, dryRun: body.dryRun, confirm: body.confirm ?? "first-run" });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/replay-result\/[^/]+$/)) {
+        const jobId = decodeURIComponent(pathname.split("/")[3]);
+        const body = await readJson(req).catch(() => ({}));
+        const result = runtime.skillReplay.resolveJob(jobId, body);
+        if (!result) return sendJson(res, 404, { error: "unknown job" });
+        return sendJson(res, 200, { ok: true });
+      }
+      if (method === "GET" && pathname === "/skills/replay-jobs") {
+        return sendJson(res, 200, runtime.skillReplay.list({ status: url.searchParams.get("status") }));
+      }
       if (method === "POST" && pathname === "/skills/mine") {
         try { return sendJson(res, 200, await runtime.patternMiner.mine()); }
         catch (error) { return sendJson(res, 500, { error: error.message }); }

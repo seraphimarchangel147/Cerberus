@@ -261,6 +261,24 @@ export function registerCoreTools(registry, runtime) {
   });
 
   registry.register({
+    name: "replay_skill",
+    description: "Trigger a skill's structured replay steps (open_app, keyboard_shortcut, type, applescript, etc.) on the user's Mac. Use only for skills with a `replay:` block in their SKILL.md. Set dryRun:true to log actions without executing — recommended for first-time use.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Skill name." },
+        dryRun: { type: "boolean", description: "Log what would happen without doing it." }
+      },
+      required: ["name"],
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      if (!runtime.skillReplay) throw new Error("Skill replay not available.");
+      return runtime.skillReplay.run({ skill: args.name, dryRun: args.dryRun ?? false });
+    }
+  });
+
+  registry.register({
     name: "run_skill",
     description: "Run a named skill with the given input. Returns the skill's output.",
     parameters: {

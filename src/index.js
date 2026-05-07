@@ -28,6 +28,7 @@ export { MemoryCondenser } from "./memory-condenser.js";
 export { OutcomeStore } from "./outcome-store.js";
 export { ObservationStore } from "./observation-store.js";
 export { PatternMiner } from "./pattern-miner.js";
+export { SkillReplay, parseReplayBlock } from "./skill-replay.js";
 export { TunnelWatcher } from "./tunnel-watcher.js";
 export { Introspector } from "./introspector.js";
 export { ScrutinyFitter } from "./scrutiny-fitter.js";

@@ -19,11 +19,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
       AppState.shared.startSSE()
       UpdateController.shared.start()
       CaptureController.shared.start()
+      ReplayController.shared.start()
     }
   }
 
   nonisolated func applicationWillTerminate(_ notification: Notification) {
     Task { @MainActor in
+      ReplayController.shared.stop()
       CaptureController.shared.stop()
       _ = await CaptureBridge.flushNow()
       DaemonController.shared.stop()

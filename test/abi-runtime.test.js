@@ -1100,6 +1100,40 @@ test("pattern miner detects repeating sequences and writes a candidate", async (
   assert.ok(list[0].sequence.apps.length >= 3);
 });
 
+test("skill replay parses frontmatter steps and validates the action vocabulary", async () => {
+  const { parseReplayBlock } = await import("../src/index.js");
+  const md = `---
+name: morning-brief
+description: Open standup tools.
+replay:
+  - open_app: "Linear"
+  - wait: 1.5
+  - keyboard_shortcut: "cmd+k"
+  - type: "OpenAGI roadmap"
+  - press: "Return"
+---
+
+Body of the skill goes here.`;
+  const steps = parseReplayBlock(md);
+  assert.ok(steps);
+  assert.equal(steps.length, 5);
+  assert.equal(Object.keys(steps[0])[0], "open_app");
+  assert.equal(steps[1].wait, 1.5);
+  assert.equal(steps[2].keyboard_shortcut, "cmd+k");
+});
+
+test("skill replay rejects steps with unknown actions", async () => {
+  const { SkillReplay } = await import("../src/index.js");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-replay-"));
+  const replay = new SkillReplay({ dataDir });
+  // Fake an emitter so it doesn't bail on the missing one.
+  replay.bindEvents({ emit: () => {} });
+  await assert.rejects(
+    () => replay.run({ skill: "fake", steps: [{ rm_rf: "/" }] }),
+    /Invalid replay steps/
+  );
+});
+
 test("file-backed propagation persists specialist workspaces", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-agents-"));
   const storePath = path.join(dir, "specialists.json");
