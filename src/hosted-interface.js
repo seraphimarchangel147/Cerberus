@@ -651,6 +651,7 @@ function renderApp() {
     nav button:hover { color: var(--text); }
 
     .body { display: grid; grid-template-columns: 280px 1fr; min-height: 0; }
+    .body.no-sidebar { grid-template-columns: 1fr; }
     .sidebar {
       background: var(--panel);
       border-right: 1px solid var(--line);
@@ -908,49 +909,55 @@ newBtn.addEventListener("click", () => {
 async function switchTab(tab) {
   state.tab = tab;
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  const body = document.querySelector(".body");
+  const showSidebar = (yes) => {
+    sidebar.style.display = yes ? "" : "none";
+    body.classList.toggle("no-sidebar", !yes);
+  };
+
   if (tab === "chat") {
-    sidebar.style.display = "";
+    showSidebar(true);
     sidebarTitle.textContent = "Sessions";
     newBtn.textContent = "+ New";
     await refreshSessions();
   } else if (tab === "cron") {
-    sidebar.style.display = "";
+    showSidebar(true);
     sidebarTitle.textContent = "Schedules";
     newBtn.textContent = "+ Schedule";
     await refreshCron();
   } else if (tab === "skills") {
-    sidebar.style.display = "";
+    showSidebar(true);
     sidebarTitle.textContent = "Skills";
     newBtn.textContent = "↻ Reload";
     await refreshSkills();
   } else if (tab === "mcp") {
-    sidebar.style.display = "";
+    showSidebar(true);
     sidebarTitle.textContent = "MCP Servers";
     newBtn.textContent = "+ Register";
     await refreshMcp();
   } else if (tab === "agents") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderAgents();
   } else if (tab === "memory") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderMemory();
   } else if (tab === "channels") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderChannels();
   } else if (tab === "budget") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderBudget();
   } else if (tab === "outcomes") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderOutcomes();
   } else if (tab === "scrutiny") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderScrutiny();
   } else if (tab === "vocab") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderVocab();
   } else if (tab === "health") {
-    sidebar.style.display = "none";
+    showSidebar(false);
     await renderHealth();
   }
   renderTab();
