@@ -404,15 +404,11 @@ export function createDefaultRuntime(options = {}) {
         modelProviderOptions: { ...(options.modelProviderOptions ?? {}), budgetGuard: runtime.budget }
       });
   }
-  runtime.mcp.registerServer({
-    name: "openagi-mcp",
-    trustLevel: "trusted",
-    tools: [
-      { name: "memory-search", description: "Search persistent ABI memory." },
-      { name: "create-specialist", description: "Create or update a bounded specialist." },
-      { name: "publish-output", description: "Publish an ABI output or report." }
-    ]
-  });
+  // Note: we used to register a placeholder "openagi-mcp" entry here listing
+  // memory-search / create-specialist / publish-output. Those are now real
+  // tools in the internal ToolRegistry, so the placeholder is redundant and
+  // produced "transport config not supported" when users tried to connect it.
+  // Real MCP servers come from .openagi/mcp.json or POST /mcp/register.
   return runtime;
 }
 

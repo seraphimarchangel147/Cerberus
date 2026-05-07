@@ -91,7 +91,12 @@ export class McpRegistry {
     const server = this.servers.get(name);
     if (!server) throw new Error(`Unknown MCP server: ${name}`);
     if (!server.enabled) throw new Error(`MCP server ${name} is disabled.`);
-    if (server.transport !== "stdio") throw new Error(`MCP transport ${server.transport} is not supported yet.`);
+    if (!server.command) {
+      throw new Error(`MCP server '${name}' has no command — it's a metadata-only entry. Re-register it with a 'command' (and 'args') so it can be spawned.`);
+    }
+    if (server.transport !== "stdio") {
+      throw new Error(`MCP transport '${server.transport}' isn't supported yet — only 'stdio' works today. Use mcp-remote as a stdio bridge for OAuth-protected HTTP MCP servers.`);
+    }
 
     let client = this.clients.get(name);
     if (!client) {
