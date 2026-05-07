@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { McpStdioClient } from "./mcp-client.js";
+import { McpHttpClient } from "./mcp-http-client.js";
+import { McpOAuthClient } from "./mcp-oauth.js";
 import { ensureDir, readJsonFile } from "./file-utils.js";
 
 export class McpRegistry {
@@ -8,6 +10,7 @@ export class McpRegistry {
     this.servers = new Map();
     this.clients = new Map();
     this.logDir = options.logDir;
+    this.dataDir = options.dataDir ?? (options.logDir ? path.dirname(path.dirname(options.logDir)) : ".openagi");
     this.toolRegistry = options.toolRegistry ?? null;
   }
 
@@ -17,16 +20,30 @@ export class McpRegistry {
 
   registerServer(server) {
     if (!server?.name) throw new Error("MCP server requires a name.");
+    let transport = server.transport;
+    if (!transport) {
+      if (server.url) transport = "http";
+      else if (server.command) transport = "stdio";
+      else transport = "config";
+    }
     const normalized = {
       name: server.name,
+      transport,
+      // stdio-specific
       command: server.command ?? null,
       args: server.args ?? [],
-      env: server.env ?? {},
+      env: expandEnv(server.env ?? {}),
       cwd: server.cwd ?? null,
+      // http-specific
+      url: server.url ?? null,
+      auth: server.auth ?? (server.apiKey ? "bearer" : (server.url ? "oauth" : "none")),
+      apiKey: expandValue(server.apiKey ?? null),
+      headers: expandEnv(server.headers ?? {}),
+      scope: server.scope,
+      // shared
       trustLevel: server.trustLevel ?? "untrusted",
       tools: server.tools ?? [],
-      enabled: server.enabled ?? true,
-      transport: server.transport ?? (server.command ? "stdio" : "config")
+      enabled: server.enabled ?? true
     };
     this.servers.set(normalized.name, normalized);
     return normalized;
@@ -39,15 +56,27 @@ export class McpRegistry {
     const registered = [];
     const servers = config.servers ?? config.mcpServers ?? {};
     for (const [name, spec] of Object.entries(servers)) {
+      // Skip comment-only entries (keys like "_comment", "//", "//2").
+      if (name.startsWith("_") || name === "//" || /^\/\/\d*$/.test(name)) continue;
+      if (typeof spec !== "object" || spec === null) continue;
       registered.push(
         this.registerServer({
           name,
+          // stdio
           command: spec.command,
           args: spec.args ?? [],
           env: spec.env ?? {},
           cwd: spec.cwd,
+          // http
+          url: spec.url,
+          auth: spec.auth,
+          apiKey: spec.apiKey,
+          headers: spec.headers ?? {},
+          scope: spec.scope,
+          // shared
           trustLevel: spec.trustLevel ?? "trusted",
-          enabled: spec.enabled ?? true
+          enabled: spec.enabled ?? true,
+          transport: spec.transport
         })
       );
     }
@@ -55,17 +84,22 @@ export class McpRegistry {
   }
 
   listServers() {
-    return [...this.servers.values()].map((server) => ({
-      name: server.name,
-      trustLevel: server.trustLevel,
-      enabled: server.enabled,
-      transport: server.transport,
-      command: server.command,
-      args: server.args,
-      tools: this.clients.get(server.name)?.tools?.map((tool) => tool.name) ?? server.tools.map((tool) => tool.name ?? tool),
-      connected: this.clients.get(server.name)?.connected ?? false,
-      lastError: this.clients.get(server.name)?.lastError ?? null
-    }));
+    return [...this.servers.values()].map((server) => {
+      const client = this.clients.get(server.name);
+      return {
+        name: server.name,
+        trustLevel: server.trustLevel,
+        enabled: server.enabled,
+        transport: server.transport,
+        command: server.command,
+        args: server.args,
+        url: server.url,
+        auth: server.auth,
+        tools: client?.tools?.map((tool) => tool.name) ?? server.tools.map((tool) => tool.name ?? tool),
+        connected: client?.connected ?? false,
+        lastError: client?.lastError ?? null
+      };
+    });
   }
 
   listTools() {
@@ -91,24 +125,49 @@ export class McpRegistry {
     const server = this.servers.get(name);
     if (!server) throw new Error(`Unknown MCP server: ${name}`);
     if (!server.enabled) throw new Error(`MCP server ${name} is disabled.`);
-    if (!server.command) {
-      throw new Error(`MCP server '${name}' has no command — it's a metadata-only entry. Re-register it with a 'command' (and 'args') so it can be spawned.`);
-    }
-    if (server.transport !== "stdio") {
-      throw new Error(`MCP transport '${server.transport}' isn't supported yet — only 'stdio' works today. Use mcp-remote as a stdio bridge for OAuth-protected HTTP MCP servers.`);
-    }
 
     let client = this.clients.get(name);
     if (!client) {
-      client = new McpStdioClient({
-        name: server.name,
-        command: server.command,
-        args: server.args,
-        env: server.env,
-        cwd: server.cwd,
-        trustLevel: server.trustLevel,
-        logDir: this.logDir
-      });
+      if (server.transport === "stdio") {
+        if (!server.command) {
+          throw new Error(`MCP server '${name}' is stdio but has no command — set 'command' (and 'args') so it can be spawned.`);
+        }
+        client = new McpStdioClient({
+          name: server.name,
+          command: server.command,
+          args: server.args,
+          env: server.env,
+          cwd: server.cwd,
+          trustLevel: server.trustLevel,
+          logDir: this.logDir
+        });
+      } else if (server.transport === "http") {
+        if (!server.url) throw new Error(`MCP server '${name}' is http but has no url.`);
+        let oauth = null;
+        let bearerToken = null;
+        if (server.auth === "oauth") {
+          oauth = new McpOAuthClient({
+            name: server.name,
+            resourceUrl: deriveResourceUrl(server.url),
+            scope: server.scope,
+            dataDir: this.dataDir
+          });
+        } else if (server.auth === "bearer") {
+          if (!server.apiKey) throw new Error(`MCP server '${name}' has auth=bearer but no apiKey.`);
+          bearerToken = server.apiKey;
+        }
+        client = new McpHttpClient({
+          name: server.name,
+          url: server.url,
+          headers: server.headers,
+          bearerToken,
+          oauth,
+          trustLevel: server.trustLevel,
+          logDir: this.logDir
+        });
+      } else {
+        throw new Error(`MCP server '${name}' has unsupported transport '${server.transport}'. Use 'stdio' (with command) or 'http' (with url).`);
+      }
       this.clients.set(name, client);
     }
     await client.connect();
@@ -119,7 +178,10 @@ export class McpRegistry {
   async connectAll() {
     const results = [];
     for (const [name, server] of this.servers) {
-      if (!server.enabled || server.transport !== "stdio" || !server.command) continue;
+      if (!server.enabled) continue;
+      if (server.transport === "stdio" && !server.command) continue;
+      if (server.transport === "http" && !server.url) continue;
+      if (server.transport !== "stdio" && server.transport !== "http") continue;
       try {
         const status = await this.connect(name);
         results.push({ name, ok: true, status });
@@ -177,5 +239,30 @@ export class McpRegistry {
         metadata: { server: serverName, originalName: tool.name }
       });
     }
+  }
+}
+
+// Resolve "${ENV_VAR}" placeholders so config can reference secrets without
+// embedding them in the file. Bare strings pass through unchanged.
+function expandValue(value) {
+  if (typeof value !== "string") return value;
+  return value.replace(/\$\{([A-Z0-9_]+)\}/gi, (_, key) => process.env[key] ?? "");
+}
+
+function expandEnv(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj ?? {})) out[k] = expandValue(v);
+  return out;
+}
+
+// For OAuth discovery, use the MCP endpoint's origin as the resource URL
+// (where /.well-known/oauth-protected-resource lives), unless the user
+// explicitly overrides it. e.g. https://mcp.example.com/mcp → https://mcp.example.com
+function deriveResourceUrl(mcpUrl) {
+  try {
+    const u = new URL(mcpUrl);
+    return u.origin;
+  } catch {
+    return mcpUrl;
   }
 }

@@ -921,6 +921,128 @@ test("createModelProvider respects OPENAGI_PROVIDER preference", async () => {
   else delete process.env.OPENAI_API_KEY;
 });
 
+test("HTTP MCP client speaks Streamable HTTP with bearer auth (mocked fetch)", async () => {
+  const { McpHttpClient } = await import("../src/index.js");
+  const calls = [];
+  const responseQueue = [
+    // initialize
+    { status: 200, headers: { "content-type": "application/json", "mcp-session-id": "sess-123" },
+      body: { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-03-26", serverInfo: { name: "test" } } } },
+    // notifications/initialized → 202
+    { status: 202, headers: {}, body: "" },
+    // tools/list
+    { status: 200, headers: { "content-type": "application/json" },
+      body: { jsonrpc: "2.0", id: 2, result: { tools: [{ name: "ping", description: "ping" }] } } }
+  ];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, headers: opts.headers, body: JSON.parse(opts.body) });
+    const next = responseQueue.shift();
+    return {
+      ok: next.status < 400,
+      status: next.status,
+      statusText: "OK",
+      headers: { get: (k) => next.headers[k.toLowerCase()] ?? null },
+      json: async () => typeof next.body === "string" ? {} : next.body,
+      text: async () => typeof next.body === "string" ? next.body : JSON.stringify(next.body),
+      body: { getReader: () => ({ read: async () => ({ done: true, value: null }) }) }
+    };
+  };
+  try {
+    const client = new McpHttpClient({
+      name: "test",
+      url: "https://example.com/mcp",
+      bearerToken: "secret-key"
+    });
+    await client.connect();
+    assert.equal(client.connected, true);
+    assert.equal(client.tools.length, 1);
+    assert.equal(client.tools[0].name, "ping");
+    assert.equal(client.sessionId, "sess-123");
+    // Verify Authorization header was sent
+    assert.equal(calls[0].headers.authorization, "Bearer secret-key");
+    // Second + third requests echo the session id captured from initialize
+    assert.equal(calls[1].headers["mcp-session-id"], "sess-123");
+    assert.equal(calls[2].headers["mcp-session-id"], "sess-123");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("HTTP MCP client parses SSE response body for matching id", async () => {
+  const { McpHttpClient } = await import("../src/index.js");
+  const sseBody = [
+    'data: {"jsonrpc":"2.0","id":99,"result":{"unrelated":true}}',
+    "",
+    'data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}',
+    "",
+    ""
+  ].join("\n");
+  const encoded = new TextEncoder().encode(sseBody);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    headers: { get: (k) => k === "content-type" ? "text/event-stream" : null },
+    json: async () => ({}),
+    text: async () => sseBody,
+    body: {
+      getReader() {
+        let sent = false;
+        return {
+          async read() {
+            if (sent) return { done: true, value: null };
+            sent = true;
+            return { done: false, value: encoded };
+          }
+        };
+      }
+    }
+  });
+  try {
+    const client = new McpHttpClient({ name: "sse", url: "https://x.example/mcp" });
+    // Bypass the rest of initialize by directly invoking request after stubbing the protocol step
+    const result = await client.request("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+    assert.equal(result.protocolVersion, "2025-03-26");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OAuth client discovery falls back to openid-configuration when oauth-authorization-server is missing", async () => {
+  const { McpOAuthClient } = await import("../src/index.js");
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    const u = String(url);
+    if (u.endsWith("/.well-known/oauth-protected-resource")) {
+      return { ok: true, json: async () => ({ authorization_servers: ["https://auth.example/realms/x"] }) };
+    }
+    if (u.endsWith("/.well-known/oauth-authorization-server")) {
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (u.endsWith("/.well-known/openid-configuration")) {
+      return { ok: true, json: async () => ({
+        authorization_endpoint: "https://auth.example/auth",
+        token_endpoint: "https://auth.example/token",
+        registration_endpoint: "https://auth.example/register"
+      }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-oauth-"));
+    const client = new McpOAuthClient({ name: "test-mcp", resourceUrl: "https://mcp.example", dataDir: dir });
+    const discovery = await client.discover();
+    assert.equal(discovery.serverMeta.token_endpoint, "https://auth.example/token");
+    assert.ok(calls.some((c) => c.endsWith("openid-configuration")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("file-backed propagation persists specialist workspaces", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-agents-"));
   const storePath = path.join(dir, "specialists.json");

@@ -1,14 +1,26 @@
 {
-  "_comment": "Copy or rename to mcp.json. The runtime auto-loads .openagi/mcp.json on startup.",
+  "_comment": "Copy or rename to mcp.json. The runtime auto-loads .openagi/mcp.json on startup. Three transport+auth shapes are supported:",
   "servers": {
+
+    "//": "── stdio: spawn a local process and talk JSON-RPC over stdin/stdout ──",
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
       "trustLevel": "trusted"
     },
-    "fetch": {
-      "command": "uvx",
-      "args": ["mcp-server-fetch"],
+
+    "//2": "── http + bearer: hit a remote URL with a static API key ──",
+    "my-bearer-server": {
+      "url": "https://my.mcp.server/mcp",
+      "auth": "bearer",
+      "apiKey": "${MY_MCP_KEY}",
+      "trustLevel": "trusted"
+    },
+
+    "//3": "── http + oauth: full OAuth 2.0 with discovery, dynamic registration, PKCE ──",
+    "buildbetter": {
+      "url": "https://mcp.example.com/mcp",
+      "auth": "oauth",
       "trustLevel": "trusted"
     }
   }

@@ -22,6 +22,8 @@ export { FileBackedPropagationController } from "./file-backed-propagation-contr
 export { createAbiIntegration, IntegrationRegistry, normalizeSignal } from "./integration-registry.js";
 export { McpRegistry } from "./mcp-registry.js";
 export { McpStdioClient } from "./mcp-client.js";
+export { McpHttpClient } from "./mcp-http-client.js";
+export { McpOAuthClient } from "./mcp-oauth.js";
 export { MemoryCondenser } from "./memory-condenser.js";
 export { OutcomeStore } from "./outcome-store.js";
 export { TunnelWatcher } from "./tunnel-watcher.js";
