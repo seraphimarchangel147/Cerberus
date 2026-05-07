@@ -703,14 +703,42 @@ function renderApp() {
     }
     .composer button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    .pane { flex: 1; overflow: auto; padding: 16px 20px; }
-    .pane h2 { margin: 0 0 12px; font-size: 18px; }
-    .pane h3 { margin: 18px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-    .grid { display: grid; gap: 10px; }
-    .grid.two { grid-template-columns: 1fr 1fr; }
-    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+    .pane { flex: 1; overflow: auto; padding: 24px 32px 60px; }
+    .pane > * { max-width: 1180px; margin-left: auto; margin-right: auto; }
+    .pane h2 { margin: 0 0 14px; font-size: 20px; letter-spacing: -0.01em; }
+    .pane h3 { margin: 22px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+    .pane > .row, .pane > .grid { max-width: 1180px; margin-left: auto; margin-right: auto; }
+    .pane pre { max-height: 320px; overflow: auto; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+    .grid.two { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+    .grid.stats { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
     .card .name { font-weight: 700; }
-    .card .desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .card .desc { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.5; }
+    .card .stat-value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+    .muted { color: var(--muted); }
+
+    /* Memory tab */
+    .tier-pills { display: flex; gap: 4px; }
+    .tier-pills button { background: var(--panel); color: var(--muted); border: 1px solid var(--line); padding: 6px 14px; border-radius: 18px; font: inherit; font-size: 12px; cursor: pointer; }
+    .tier-pills button .count { color: var(--muted); margin-left: 6px; font-size: 11px; }
+    .tier-pills button:hover { color: var(--text); border-color: #3a4a42; }
+    .tier-pills button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+    .tier-pills button.active .count { color: var(--accent); }
+    .mem-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; max-width: 1180px; margin: 0 auto; }
+    .mem-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 140px; }
+    .mem-card.tier-short { border-left: 3px solid #6fe1b1; }
+    .mem-card.tier-medium { border-left: 3px solid #f0b454; }
+    .mem-card.tier-long { border-left: 3px solid #a98ef5; }
+    .mem-head { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+    .mem-head .badge.tier-short { background: rgba(111,225,177,0.12); color: #6fe1b1; border-color: rgba(111,225,177,0.3); }
+    .mem-head .badge.tier-medium { background: rgba(240,180,84,0.12); color: #f0b454; border-color: rgba(240,180,84,0.3); }
+    .mem-head .badge.tier-long { background: rgba(169,142,245,0.12); color: #a98ef5; border-color: rgba(169,142,245,0.3); }
+    .mem-age { color: var(--muted); font-size: 11px; margin-left: auto; }
+    .mem-content { font-size: 13px; line-height: 1.5; max-height: 8.4em; overflow: hidden; position: relative; word-break: break-word; }
+    .mem-content::after { content: ""; position: absolute; bottom: 0; left: 0; right: 0; height: 1.6em; background: linear-gradient(transparent, var(--panel)); pointer-events: none; }
+    .mem-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+    .chip { background: var(--bg); color: var(--muted); padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); white-space: nowrap; }
     .row { display: flex; gap: 8px; align-items: center; }
     .row.between { justify-content: space-between; }
     .row > .grow { flex: 1; }
@@ -1248,24 +1276,101 @@ async function renderAgents() {
 
 async function renderMemory() {
   const snap = await fetchJson("/memory");
-  main.innerHTML = '<div class="pane"><h2>Memory</h2><h3>Short</h3><div id="ms"></div><h3>Medium</h3><div id="mm"></div><h3>Long</h3><div id="ml"></div></div>';
-  fillMemory($("ms"), snap.short);
-  fillMemory($("mm"), snap.medium);
-  fillMemory($("ml"), snap.long);
+  state.memorySnap = snap;
+  if (!state.memoryFilter) state.memoryFilter = { tier: "all", query: "" };
+  renderMemoryView();
 }
 
-function fillMemory(container, items) {
-  container.innerHTML = "";
-  if (!items || items.length === 0) {
-    container.innerHTML = '<div class="empty">(none)</div>';
+function renderMemoryView() {
+  const snap = state.memorySnap || { short: [], medium: [], long: [] };
+  const f = state.memoryFilter;
+  const counts = { short: snap.short.length, medium: snap.medium.length, long: snap.long.length };
+  const total = counts.short + counts.medium + counts.long;
+  const principles = snap.long.filter((m) => m.kind === "principle").length;
+
+  main.innerHTML = \`
+    <div class="pane">
+      <div class="row between" style="margin-bottom:14px;align-items:center;flex-wrap:wrap;gap:10px;">
+        <h2 style="margin:0;">Memory <span class="muted" style="font-weight:400;font-size:14px;">· \${total} total · \${principles} principle\${principles===1?"":"s"}</span></h2>
+      </div>
+      <div class="row" style="gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
+        <div class="tier-pills">
+          <button data-tier="all" class="\${f.tier==='all'?'active':''}">All <span class="count">\${total}</span></button>
+          <button data-tier="short" class="\${f.tier==='short'?'active':''}">Short <span class="count">\${counts.short}</span></button>
+          <button data-tier="medium" class="\${f.tier==='medium'?'active':''}">Medium <span class="count">\${counts.medium}</span></button>
+          <button data-tier="long" class="\${f.tier==='long'?'active':''}">Long <span class="count">\${counts.long}</span></button>
+        </div>
+        <input type="search" id="memSearch" placeholder="search content or tags…" value="\${escapeHtml(f.query)}" style="flex:1;min-width:240px;">
+      </div>
+      <div class="mem-grid" id="memList"></div>
+    </div>
+  \`;
+  document.querySelectorAll("[data-tier]").forEach((b) =>
+    b.addEventListener("click", () => { state.memoryFilter.tier = b.dataset.tier; renderMemoryView(); })
+  );
+  const search = $("memSearch");
+  if (search) {
+    search.addEventListener("input", (e) => {
+      state.memoryFilter.query = e.target.value;
+      fillMemoryGrid();
+    });
+  }
+  fillMemoryGrid();
+}
+
+function fillMemoryGrid() {
+  const snap = state.memorySnap || {};
+  const f = state.memoryFilter;
+  const list = $("memList");
+  if (!list) return;
+
+  let items = [];
+  if (f.tier === "all" || f.tier === "short") items = items.concat((snap.short ?? []).map((m) => ({ ...m, _tier: "short" })));
+  if (f.tier === "all" || f.tier === "medium") items = items.concat((snap.medium ?? []).map((m) => ({ ...m, _tier: "medium" })));
+  if (f.tier === "all" || f.tier === "long") items = items.concat((snap.long ?? []).map((m) => ({ ...m, _tier: "long" })));
+
+  if (f.query) {
+    const q = f.query.toLowerCase();
+    items = items.filter((m) =>
+      (m.content || "").toLowerCase().includes(q) ||
+      (m.tags || []).some((t) => String(t).toLowerCase().includes(q))
+    );
+  }
+
+  items.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+  if (items.length === 0) {
+    list.innerHTML = '<div class="empty">No memory items match this filter.</div>';
     return;
   }
-  for (const m of items) {
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML = \`<div class="row between"><span class="name">\${escapeHtml(m.id)}</span><span class="badge">strength \${(m.strength ?? 0).toFixed(2)}</span></div><div class="desc">\${escapeHtml(m.content)}</div>\`;
-    container.appendChild(card);
-  }
+
+  list.innerHTML = items.map((m) => {
+    const tags = (m.tags || []).slice(0, 6).map((t) => \`<span class="chip">\${escapeHtml(t)}</span>\`).join("");
+    const kindBadge = m.kind === "principle" ? '<span class="badge ok">principle</span>' : "";
+    const dangerBadge = (m.dangerLevel || 0) > 0.7 ? '<span class="badge err">⚠ danger</span>' : "";
+    const scopeBadge = m.scope && m.scope !== "main" ? \`<span class="badge">\${escapeHtml(m.scope)}</span>\` : "";
+    const age = m.createdAt ? timeAgo(m.createdAt) : "";
+    return \`
+      <div class="mem-card tier-\${m._tier}">
+        <div class="mem-head">
+          <span class="badge tier-\${m._tier}">\${m._tier}</span>
+          \${kindBadge}\${dangerBadge}\${scopeBadge}
+          <span class="badge">str \${(m.strength ?? 0).toFixed(2)}</span>
+          <span class="mem-age">\${escapeHtml(age)}</span>
+        </div>
+        <div class="mem-content">\${escapeHtml(m.content || "")}</div>
+        \${tags ? \`<div class="mem-tags">\${tags}</div>\` : ""}
+      </div>
+    \`;
+  }).join("");
+}
+
+function timeAgo(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60000) return "just now";
+  if (ms < 3600000) return Math.floor(ms / 60000) + "m ago";
+  if (ms < 86400000) return Math.floor(ms / 3600000) + "h ago";
+  return Math.floor(ms / 86400000) + "d ago";
 }
 
 async function renderChannels() {
@@ -1309,33 +1414,42 @@ async function renderChannels() {
 async function renderBudget() {
   const b = await fetchJson("/budget");
   const pct = Math.min(100, (b.spentUsd / Math.max(b.dailyUsdLimit, 0.0001)) * 100);
+  const stateClass = pct > 90 ? "err" : pct > 70 ? "warn" : "ok";
   main.innerHTML = \`
     <div class="pane">
       <h2>Budget</h2>
       <div class="card">
-        <div class="row between"><span class="name">Today (\${escapeHtml(b.today)})</span><span class="badge \${pct > 90 ? 'err' : pct > 70 ? 'warn' : 'ok'}">\${pct.toFixed(0)}% of limit</span></div>
-        <div style="margin-top:10px; height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden;">
-          <div style="width: \${pct}%; height: 100%; background: var(--accent);"></div>
+        <div class="row between" style="align-items:center;">
+          <span class="name">Today · \${escapeHtml(b.today)}</span>
+          <span class="badge \${stateClass}">\${pct.toFixed(0)}% of limit</span>
         </div>
-        <div class="row" style="gap: 16px; margin-top: 12px;">
-          <div><span class="desc">Spent</span><div style="font-size: 22px; font-weight: 700;">$\${b.spentUsd.toFixed(4)}</div></div>
-          <div><span class="desc">Remaining</span><div style="font-size: 22px; font-weight: 700;">$\${b.remainingUsd.toFixed(4)}</div></div>
-          <div><span class="desc">Daily limit</span><div style="font-size: 22px; font-weight: 700;">$\${b.dailyUsdLimit.toFixed(2)}</div></div>
-          <div><span class="desc">Calls</span><div style="font-size: 22px; font-weight: 700;">\${b.calls}</div></div>
+        <div style="margin-top:10px;height:8px;background:var(--panel-2);border-radius:4px;overflow:hidden;">
+          <div style="width:\${pct}%;height:100%;background:var(--accent);transition:width .3s;"></div>
         </div>
-        <h3>Tokens today</h3>
-        <pre>input: \${b.tokens.input}\\noutput: \${b.tokens.output}\\ncache_read: \${b.tokens.cacheRead}\\ncache_write: \${b.tokens.cacheWrite}</pre>
       </div>
+
+      <h3>Today</h3>
+      <div class="grid stats">
+        <div class="card"><span class="desc">Spent</span><div class="stat-value">$\${b.spentUsd.toFixed(4)}</div></div>
+        <div class="card"><span class="desc">Remaining</span><div class="stat-value">$\${b.remainingUsd.toFixed(4)}</div></div>
+        <div class="card"><span class="desc">Daily limit</span><div class="stat-value">$\${b.dailyUsdLimit.toFixed(2)}</div></div>
+        <div class="card"><span class="desc">Calls</span><div class="stat-value">\${b.calls}</div></div>
+        <div class="card"><span class="desc">Input tokens</span><div class="stat-value">\${b.tokens.input.toLocaleString()}</div></div>
+        <div class="card"><span class="desc">Output tokens</span><div class="stat-value">\${b.tokens.output.toLocaleString()}</div></div>
+        <div class="card"><span class="desc">Cache read</span><div class="stat-value">\${b.tokens.cacheRead.toLocaleString()}</div></div>
+        <div class="card"><span class="desc">Cache write</span><div class="stat-value">\${b.tokens.cacheWrite.toLocaleString()}</div></div>
+      </div>
+
       <h3>Last 14 days</h3>
       <div id="budgetHistory" class="grid"></div>
-      <p class="desc" style="margin-top: 12px;">Limit is set via <code>OPENAGI_DAILY_USD_LIMIT</code> in <code>.openagi/.env</code>.</p>
+      <p class="desc" style="margin-top:12px;">Limit is set via <code>OPENAGI_DAILY_USD_LIMIT</code> in <code>.openagi/.env</code>.</p>
     </div>
   \`;
   const hist = $("budgetHistory");
-  for (const d of b.history ?? []) {
+  for (const d of (b.history ?? [])) {
     const c = document.createElement("div");
     c.className = "card";
-    c.innerHTML = \`<div class="row between"><span class="name">\${escapeHtml(d.date)}</span><span>$\${d.usd.toFixed(4)} · \${d.calls} call\${d.calls===1?"":"s"}</span></div>\`;
+    c.innerHTML = \`<div class="row between"><span class="name">\${escapeHtml(d.date)}</span><span class="muted">\${d.calls} call\${d.calls===1?"":"s"}</span></div><div class="stat-value">$\${d.usd.toFixed(4)}</div>\`;
     hist.appendChild(c);
   }
 }
@@ -1344,16 +1458,18 @@ async function renderOutcomes() {
   const data = await fetchJson("/outcomes?limit=40&windowDays=7");
   const agg = data.aggregate ?? {};
   const recent = data.recent ?? [];
+  const byKindCards = Object.entries(agg.byKind ?? {})
+    .map(([k, v]) => \`<div class="card"><span class="desc">\${escapeHtml(k)}</span><div class="stat-value">\${v}</div></div>\`)
+    .join("");
   main.innerHTML = \`
     <div class="pane">
-      <h2>Outcomes</h2>
-      <div class="row" style="gap:16px;margin-bottom:16px;">
-        <div class="card grow"><span class="desc">7-day avg quality</span><div style="font-size:22px;font-weight:700;">\${agg.avgQuality ?? "—"}</div></div>
-        <div class="card grow"><span class="desc">Resolved</span><div style="font-size:22px;font-weight:700;">\${agg.resolved ?? 0} / \${agg.total ?? 0}</div></div>
-        <div class="card grow"><span class="desc">Pending</span><div style="font-size:22px;font-weight:700;">\${agg.pending ?? 0}</div></div>
+      <h2>Outcomes <span class="muted" style="font-size:14px;font-weight:400;">· last 7 days</span></h2>
+      <div class="grid stats">
+        <div class="card"><span class="desc">Avg quality</span><div class="stat-value">\${agg.avgQuality ?? "—"}</div></div>
+        <div class="card"><span class="desc">Resolved</span><div class="stat-value">\${agg.resolved ?? 0} <span class="muted" style="font-size:14px;">/ \${agg.total ?? 0}</span></div></div>
+        <div class="card"><span class="desc">Pending</span><div class="stat-value">\${agg.pending ?? 0}</div></div>
       </div>
-      <h3>By kind (7d)</h3>
-      <pre>\${escapeHtml(JSON.stringify(agg.byKind ?? {}, null, 2))}</pre>
+      \${byKindCards ? \`<h3>By kind</h3><div class="grid stats">\${byKindCards}</div>\` : ""}
       <h3>Recent</h3>
       <div class="grid" id="outcomeList"></div>
     </div>
@@ -1396,41 +1512,54 @@ async function renderOutcomes() {
 async function renderScrutiny() {
   const data = await fetchJson("/scrutiny/weights");
   const pending = await fetchJson("/scrutiny/pending").catch(() => null);
+  const fitter = data.fitter ?? {};
+  const weightsBlock = (w) => Object.entries(w ?? {})
+    .map(([k, v]) => \`<div class="row between" style="font-size:12px;padding:3px 0;"><span class="muted">\${escapeHtml(k)}</span><strong>\${typeof v === "number" ? v.toFixed(3) : escapeHtml(String(v))}</strong></div>\`)
+    .join("");
   main.innerHTML = \`
     <div class="pane">
-      <h2>Scrutiny</h2>
-      <div class="row" style="gap:8px;margin-bottom:12px;">
+      <h2>Scrutiny <span class="muted" style="font-size:14px;font-weight:400;">· cycle \${fitter.cycles ?? 0} · \${fitter.autoApply ? "auto-apply" : "warmup"}</span></h2>
+      <div class="row" style="gap:8px;margin-bottom:14px;">
         <button id="fitBtn">Run fit now</button>
         <button class="secondary" id="judgeBtn">Run LLM judge</button>
       </div>
-      <pre id="scrOut" class="ok"></pre>
+      <pre id="scrOut" class="ok" style="display:none;"></pre>
+
       <h3>Judges</h3>
       <div class="grid two" id="judges"></div>
+
       <h3>Fitter status</h3>
-      <pre>\${escapeHtml(JSON.stringify(data.fitter ?? {}, null, 2))}</pre>
+      <div class="grid stats">
+        <div class="card"><span class="desc">Cycles run</span><div class="stat-value">\${fitter.cycles ?? 0}</div></div>
+        <div class="card"><span class="desc">Warmup cycles</span><div class="stat-value">\${fitter.warmupCycles ?? 0}</div></div>
+        <div class="card"><span class="desc">Pending proposals</span><div class="stat-value">\${fitter.pendingProposals ?? 0}</div></div>
+        <div class="card"><span class="desc">Last run</span><div class="stat-value" style="font-size:14px;">\${fitter.lastRunAt ? escapeHtml(new Date(fitter.lastRunAt).toLocaleString()) : "—"}</div></div>
+      </div>
+
       <h3>Pending proposals</h3>
-      <div id="pendingList"></div>
+      <div id="pendingList" class="grid"></div>
     </div>
   \`;
   const judges = $("judges");
   for (const [name, j] of Object.entries(data.weights ?? {})) {
     const card = document.createElement("div");
     card.className = "card";
-    card.innerHTML = \`<div class="name">\${escapeHtml(name)}</div>
-      <div class="desc">weights</div><pre>\${escapeHtml(JSON.stringify(j.weights, null, 2))}</pre>
-      <div class="desc">thresholds</div><pre>\${escapeHtml(JSON.stringify(j.thresholds, null, 2))}</pre>\`;
+    card.innerHTML = \`<div class="row between"><span class="name">\${escapeHtml(name)}</span></div>
+      <div class="desc" style="margin:8px 0 4px;">weights</div>\${weightsBlock(j.weights)}
+      <div class="desc" style="margin:10px 0 4px;">thresholds</div>\${weightsBlock(j.thresholds)}\`;
     judges.appendChild(card);
   }
   const pl = $("pendingList");
   if (!pending || !pending.proposals?.length) {
-    pl.innerHTML = '<div class="empty">no pending proposals</div>';
+    pl.innerHTML = '<div class="empty">No pending proposals.</div>';
   } else {
     for (const p of pending.proposals) {
       const c = document.createElement("div");
       c.className = "card";
-      c.innerHTML = \`<div class="row between"><span class="name">cycle \${p.cycle} · \${p.applied ? "applied" : "pending"}</span>
-        <button class="secondary" data-apply="\${p.cycle}" \${p.applied ? "disabled" : ""}>Apply</button></div>
-        <pre>\${escapeHtml(JSON.stringify(p.proposals, null, 2))}</pre>\`;
+      c.innerHTML = \`<div class="row between"><span class="name">cycle \${p.cycle}</span>
+        <span class="badge \${p.applied ? "ok" : "warn"}">\${p.applied ? "applied" : "pending"}</span></div>
+        <details style="margin-top:8px;"><summary class="desc">view weight deltas</summary><pre>\${escapeHtml(JSON.stringify(p.proposals, null, 2))}</pre></details>
+        <div class="row" style="margin-top:8px;"><button class="secondary" data-apply="\${p.cycle}" \${p.applied ? "disabled" : ""}>\${p.applied ? "Applied" : "Apply"}</button></div>\`;
       pl.appendChild(c);
     }
     pl.querySelectorAll("[data-apply]").forEach((b) => b.addEventListener("click", async () => {
@@ -1438,36 +1567,51 @@ async function renderScrutiny() {
       renderScrutiny();
     }));
   }
+  const showOut = (text) => { const el = $("scrOut"); el.style.display = "block"; el.textContent = text; };
   $("fitBtn").addEventListener("click", async () => {
-    $("scrOut").textContent = "fitting…";
-    try { $("scrOut").textContent = JSON.stringify(await postJson("/scrutiny/fit", {}), null, 2); }
-    catch (e) { $("scrOut").textContent = "[err] " + e.message; }
+    showOut("fitting…");
+    try { showOut(JSON.stringify(await postJson("/scrutiny/fit", {}), null, 2)); }
+    catch (e) { showOut("[err] " + e.message); }
   });
   $("judgeBtn").addEventListener("click", async () => {
-    $("scrOut").textContent = "running judge…";
-    try { $("scrOut").textContent = JSON.stringify(await postJson("/scrutiny/judge", {}), null, 2); }
-    catch (e) { $("scrOut").textContent = "[err] " + e.message; }
+    showOut("running judge…");
+    try { showOut(JSON.stringify(await postJson("/scrutiny/judge", {}), null, 2)); }
+    catch (e) { showOut("[err] " + e.message); }
   });
 }
 
 async function renderVocab() {
   const data = await fetchJson("/vocabulary");
+  const merges = data.proposedMerges ?? [];
+  const top = (data.snapshot?.tags ?? []).slice(0, 60);
+  const dormant = (data.proposedDeprecations ?? []).slice(0, 30);
+  const mergeCards = merges.length === 0
+    ? '<div class="empty">No near-synonym candidates right now.</div>'
+    : merges.map((m) =>
+      \`<div class="card"><div class="row between"><span class="name">\${escapeHtml(m.winner)}</span><span class="badge">sim \${m.similarity}</span></div><div class="desc">absorbs <code>\${escapeHtml(m.loser)}</code> · \${m.winnerCount} use\${m.winnerCount===1?"":"s"}</div></div>\`
+    ).join("");
+  const tagChips = top.length === 0
+    ? '<div class="empty">No tags yet.</div>'
+    : \`<div class="mem-tags">\${top.map((t) => \`<span class="chip">\${escapeHtml(t.tag)} · \${t.count}</span>\`).join("")}</div>\`;
+  const dormantList = dormant.length === 0
+    ? '<div class="empty">Nothing dormant.</div>'
+    : \`<div class="mem-tags">\${dormant.map((t) => \`<span class="chip">\${escapeHtml(t.tag)}</span>\`).join("")}</div>\`;
   main.innerHTML = \`
     <div class="pane">
       <h2>Vocabulary</h2>
-      <div class="row" style="gap:16px;margin-bottom:12px;">
-        <div class="card grow"><span class="desc">Total tags</span><div style="font-size:22px;font-weight:700;">\${data.snapshot?.total ?? 0}</div></div>
-        <div class="card grow"><span class="desc">Proposed merges</span><div style="font-size:22px;font-weight:700;">\${data.proposedMerges?.length ?? 0}</div></div>
-        <div class="card grow"><span class="desc">Dormant tags</span><div style="font-size:22px;font-weight:700;">\${data.proposedDeprecations?.length ?? 0}</div></div>
+      <div class="grid stats">
+        <div class="card"><span class="desc">Total tags</span><div class="stat-value">\${data.snapshot?.total ?? 0}</div></div>
+        <div class="card"><span class="desc">Proposed merges</span><div class="stat-value">\${merges.length}</div></div>
+        <div class="card"><span class="desc">Dormant tags</span><div class="stat-value">\${dormant.length}</div></div>
       </div>
-      \${data.proposedMerges?.length ? '<button id="applyMergesBtn">Apply all merges</button>' : ""}
-      <pre id="vocabOut" class="ok"></pre>
+      \${merges.length ? '<div class="row" style="margin:12px 0;"><button id="applyMergesBtn">Apply all merges</button></div>' : ""}
+      <div id="vocabOut" class="muted" style="font-size:12px;"></div>
       <h3>Merge proposals</h3>
-      <pre>\${escapeHtml(JSON.stringify(data.proposedMerges ?? [], null, 2))}</pre>
-      <h3>Top 30 tags by usage</h3>
-      <pre>\${escapeHtml((data.snapshot?.tags ?? []).slice(0, 30).map(t => \`\${t.tag} · \${t.count}\`).join("\\n"))}</pre>
+      <div class="grid">\${mergeCards}</div>
+      <h3>Most-used tags</h3>
+      \${tagChips}
       <h3>Dormant (last seen > 60d)</h3>
-      <pre>\${escapeHtml((data.proposedDeprecations ?? []).slice(0, 30).map(t => \`\${t.tag} · \${t.lastSeen}\`).join("\\n") || "(none)")}</pre>
+      \${dormantList}
     </div>
   \`;
   const btn = $("applyMergesBtn");
@@ -1481,35 +1625,65 @@ async function renderVocab() {
 
 async function renderHealth() {
   const a = await fetchJson("/audit");
+  const sp = a.specialists ?? {};
+  const mem = a.memory ?? { counts: {}, saturation: {}, principles: 0 };
+  const upcoming = a.cron?.upcoming ?? [];
+  const out7 = a.outcomes?.last7Days ?? null;
+  const out30 = a.outcomes?.last30Days ?? null;
+  const mcp = a.mcp ?? [];
+
+  const findingCards = !a.findings?.length
+    ? '<div class="empty">All systems nominal.</div>'
+    : a.findings.map((f) => {
+        const cls = f.severity === "warn" ? "warn" : f.severity === "err" ? "err" : "ok";
+        return \`<div class="card"><div class="row between"><span class="name">\${escapeHtml(f.area)}</span><span class="badge \${cls}">\${escapeHtml(f.severity)}</span></div><div class="desc">\${escapeHtml(f.note)}</div></div>\`;
+      }).join("");
+
+  const upcomingCards = upcoming.length === 0
+    ? '<div class="empty">Nothing scheduled.</div>'
+    : upcoming.map((j) => \`<div class="card"><div class="row between"><span class="name">\${escapeHtml(j.name)}</span><span class="badge">\${escapeHtml(j.task)}</span></div><div class="desc">next: \${escapeHtml(new Date(j.nextRunAt).toLocaleString())}</div></div>\`).join("");
+
+  const mcpCards = mcp.length === 0
+    ? '<div class="empty">No MCP servers registered.</div>'
+    : mcp.map((s) => \`<div class="card"><div class="row between"><span class="name">\${escapeHtml(s.name)}</span><span class="badge \${s.connected ? "ok" : ""}">\${s.connected ? "live" : "idle"}</span></div><div class="desc">\${s.tools} tool\${s.tools===1?"":"s"}</div></div>\`).join("");
+
   main.innerHTML = \`
     <div class="pane">
       <h2>Health</h2>
+
       <h3>Findings</h3>
-      <div class="grid" id="findings"></div>
+      <div class="grid">\${findingCards}</div>
+
       <h3>Specialists</h3>
-      <pre>\${escapeHtml(JSON.stringify(a.specialists, null, 2))}</pre>
+      <div class="grid stats">
+        <div class="card"><span class="desc">Active</span><div class="stat-value">\${sp.active ?? 0}</div></div>
+        <div class="card"><span class="desc">Retired</span><div class="stat-value muted">\${sp.retired ?? 0}</div></div>
+        <div class="card"><span class="desc">Dormant >14d</span><div class="stat-value">\${sp.dormant ?? 0}</div></div>
+        <div class="card"><span class="desc">Low quality</span><div class="stat-value">\${sp.lowQuality ?? 0}</div></div>
+      </div>
+
       <h3>Memory</h3>
-      <pre>\${escapeHtml(JSON.stringify(a.memory, null, 2))}</pre>
-      <h3>Cron upcoming</h3>
-      <pre>\${escapeHtml(JSON.stringify(a.cron?.upcoming ?? [], null, 2))}</pre>
+      <div class="grid stats">
+        <div class="card"><span class="desc">Short tier</span><div class="stat-value">\${mem.counts.short ?? 0}</div><div class="desc">\${((mem.saturation.short ?? 0) * 100).toFixed(0)}% saturated</div></div>
+        <div class="card"><span class="desc">Medium tier</span><div class="stat-value">\${mem.counts.medium ?? 0}</div><div class="desc">\${((mem.saturation.medium ?? 0) * 100).toFixed(0)}% saturated</div></div>
+        <div class="card"><span class="desc">Long tier</span><div class="stat-value">\${mem.counts.long ?? 0}</div><div class="desc">\${((mem.saturation.long ?? 0) * 100).toFixed(0)}% saturated</div></div>
+        <div class="card"><span class="desc">Principles</span><div class="stat-value">\${mem.principles ?? 0}</div></div>
+      </div>
+
       <h3>Outcomes</h3>
-      <pre>\${escapeHtml(JSON.stringify(a.outcomes, null, 2))}</pre>
+      <div class="grid stats">
+        <div class="card"><span class="desc">7-day avg quality</span><div class="stat-value">\${out7?.avgQuality ?? "—"}</div><div class="desc">\${out7?.resolved ?? 0} / \${out7?.total ?? 0} resolved</div></div>
+        <div class="card"><span class="desc">30-day avg quality</span><div class="stat-value">\${out30?.avgQuality ?? "—"}</div><div class="desc">\${out30?.resolved ?? 0} / \${out30?.total ?? 0} resolved</div></div>
+        <div class="card"><span class="desc">Pending (7d)</span><div class="stat-value">\${out7?.pending ?? 0}</div></div>
+      </div>
+
+      <h3>Upcoming cron</h3>
+      <div class="grid">\${upcomingCards}</div>
+
       <h3>MCP</h3>
-      <pre>\${escapeHtml(JSON.stringify(a.mcp ?? [], null, 2))}</pre>
+      <div class="grid">\${mcpCards}</div>
     </div>
   \`;
-  const f = $("findings");
-  if (!a.findings?.length) {
-    f.innerHTML = '<div class="empty">all systems nominal</div>';
-  } else {
-    for (const finding of a.findings) {
-      const c = document.createElement("div");
-      c.className = "card";
-      const cls = finding.severity === "warn" ? "warn" : finding.severity === "err" ? "err" : "ok";
-      c.innerHTML = \`<div class="row between"><span class="name">\${escapeHtml(finding.area)}</span><span class="badge \${cls}">\${escapeHtml(finding.severity)}</span></div><div class="desc">\${escapeHtml(finding.note)}</div>\`;
-      f.appendChild(c);
-    }
-  }
 }
 
 async function fetchJson(path) {
