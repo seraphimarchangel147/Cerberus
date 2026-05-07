@@ -94,8 +94,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (!isPublicRoute(pathname) && !setupBypass) {
         const auth = checkAuth(req, url, getAuthToken());
         if (!auth.ok) {
-          if (method === "GET" && pathname === "/" && getAuthToken()) {
-            return sendHtml(res, 401, renderLoginPage(auth.reason ?? "auth required"));
+          // Browsers (Accept: text/html) get the login form on ANY failed GET,
+          // not just GET /. After sign-in, redirect back to the original path.
+          const accept = req.headers.accept ?? "";
+          const wantsHtml = method === "GET" && accept.includes("text/html");
+          if (wantsHtml && getAuthToken()) {
+            const next = pathname + url.search;
+            return sendHtml(res, 401, renderLoginPage(auth.reason ?? "auth required", next));
           }
           res.writeHead(401, {
             "content-type": "application/json; charset=utf-8",
@@ -497,21 +502,41 @@ function sendHtml(res, status, value, cookies = []) {
   res.end(value);
 }
 
-function renderLoginPage(reason) {
+function renderLoginPage(reason, next = "/") {
+  // Sanitise the redirect target so an attacker can't bounce the user
+  // off-site after sign-in.
+  const safeNext = typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : "/";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>OpenAGI · auth</title>
 <style>body{font:14px/1.5 ui-sans-serif,system-ui;background:#0e1411;color:#e8efea;display:grid;place-items:center;min-height:100vh;margin:0}
 form{background:#161d19;border:1px solid #2a352f;border-radius:10px;padding:24px;width:min(420px,90vw)}
-h1{margin:0 0 4px;font-size:18px}p{color:#8da59a;margin:6px 0 16px}
+h1{margin:0 0 4px;font-size:18px}p{color:#8da59a;margin:6px 0 16px;font-size:13px}
 input{width:100%;padding:9px 12px;background:#0e1411;color:#e8efea;border:1px solid #2a352f;border-radius:6px;font:inherit;margin-bottom:10px}
-button{background:#6fe1b1;color:#002219;border:0;padding:9px 14px;border-radius:6px;font-weight:700;cursor:pointer}
-.err{color:#f08080;margin-bottom:10px;font-size:12px}</style></head>
-<body><form method="GET" action="/">
+button{background:#6fe1b1;color:#002219;border:0;padding:9px 14px;border-radius:6px;font-weight:700;cursor:pointer;width:100%}
+.err{color:#f08080;margin-bottom:10px;font-size:12px}
+.hint{color:#8da59a;font-size:12px;margin-top:14px}
+.hint code{background:#0e1411;padding:2px 5px;border-radius:3px;border:1px solid #2a352f}</style></head>
+<body><form method="GET" action="/setup-redirect" id="loginForm">
 <h1>OpenAGI</h1><p>This daemon requires authentication.</p>
 ${reason ? `<div class="err">${escapeHtmlForLogin(reason)}</div>` : ""}
 <input name="token" placeholder="Bearer token" autofocus required>
+<input type="hidden" name="next" value="${escapeHtmlForLogin(safeNext)}">
 <button type="submit">Sign in</button>
-</form></body></html>`;
+<div class="hint">Find your token in <code>.openagi/.env</code> as <code>OPENAGI_AUTH_TOKEN</code>.<br>Or run: <code>grep OPENAGI_AUTH_TOKEN .openagi/.env</code></div>
+</form>
+<script>
+document.getElementById("loginForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const token = fd.get("token");
+  const next = fd.get("next") || "/";
+  // Set the cookie ourselves so we can land directly on the requested path
+  // without a query-string redirect that leaks the token in history.
+  document.cookie = "openagi_token=" + encodeURIComponent(token) + "; path=/; max-age=2592000; SameSite=Strict";
+  window.location.replace(next);
+});
+</script>
+</body></html>`;
 }
 
 function escapeHtmlForLogin(s) {

@@ -85,7 +85,15 @@ struct TrayMenu: View {
       Button("Open dashboard…") { state.openDashboard() }
       Button("Open health audit…") { state.openDashboard(path: "/?tab=health") }
       Button("Settings…") { state.openDashboard(path: "/setup") }
+      Button("Copy auth token") { copyAuthToken() }
     }
+  }
+
+  private func copyAuthToken() {
+    guard let token = state.authToken(), !token.isEmpty else { return }
+    let pb = NSPasteboard.general
+    pb.clearContents()
+    pb.setString(token, forType: .string)
   }
 
   // Updates / quit
