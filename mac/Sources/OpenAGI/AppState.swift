@@ -32,6 +32,9 @@ final class AppState: ObservableObject {
 
   enum HealthStatus { case unknown, healthy, degraded, down }
 
+  @Published var lastError: String? = nil
+  @Published var consecutiveFailures: Int = 0
+
   struct Finding: Identifiable, Codable {
     var id: String { "\(severity):\(area):\(note)" }
     let severity: String
@@ -96,6 +99,8 @@ final class AppState: ObservableObject {
   }
 
   private func pollOnce() async {
+    // Always probe /health on its own so we can distinguish "daemon is dead"
+    // from "daemon is up but /audit is throwing".
     do {
       let h: HealthResponse = try await get("/health")
       status = computeStatus(h)
@@ -104,21 +109,43 @@ final class AppState: ObservableObject {
       memoryShort = h.status?.memory?.short ?? 0
       memoryMedium = h.status?.memory?.medium ?? 0
       memoryLong = h.status?.memory?.long ?? 0
+      lastError = nil
+      consecutiveFailures = 0
+    } catch {
+      status = .down
+      lastError = "/health: \(error.localizedDescription)"
+      consecutiveFailures += 1
+      if consecutiveFailures == 3 {
+        notify(title: "OpenAGI offline", body: lastError ?? "Daemon stopped responding.", path: "/")
+      }
+      return
+    }
 
+    // Sub-fetches: any of these can fail (e.g. dashboard render bug, FTS db
+    // contention) without meaning the daemon is offline. Capture the error
+    // so the tray can still show what's wrong.
+    do {
       let b: BudgetResponse = try await get("/budget")
       spentToday = b.spentUsd ?? 0
       spentLimit = b.dailyUsdLimit ?? 10
-
+    } catch {
+      lastError = "/budget: \(error.localizedDescription)"
+      status = (status == .healthy) ? .degraded : status
+    }
+    do {
       let a: AuditResponse = try await get("/audit")
       findings = a.findings ?? []
-
+    } catch {
+      lastError = "/audit: \(error.localizedDescription)"
+      status = (status == .healthy) ? .degraded : status
+    }
+    do {
       let sessions: [SessionSummary] = try await get("/sessions")
       recentSessions = Array(sessions.prefix(5))
-
-      if status != .healthy { Task { await self.fetchAuditAndNotify() } }
     } catch {
-      status = .down
+      // Quietly skip; not critical.
     }
+    if status != .healthy { Task { await self.fetchAuditAndNotify() } }
   }
 
   private func computeStatus(_ h: HealthResponse) -> HealthStatus {

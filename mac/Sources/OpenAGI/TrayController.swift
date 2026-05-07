@@ -35,6 +35,10 @@ struct TrayMenu: View {
   private var headerSection: some View {
     Group {
       Text(statusLine).disabled(true)
+      if let err = state.lastError {
+        Text("⚠ \(err)").disabled(true).foregroundStyle(.red).lineLimit(3)
+        Button("Show daemon log…") { revealDaemonLog() }
+      }
       if state.providerConfigured {
         Text("Model: \(state.providerName)").disabled(true)
       } else {
@@ -44,6 +48,16 @@ struct TrayMenu: View {
         .disabled(true)
       Text("Memory · short \(state.memoryShort) · medium \(state.memoryMedium) · long \(state.memoryLong)")
         .disabled(true)
+    }
+  }
+
+  private func revealDaemonLog() {
+    let path = AppState.dataDir().appendingPathComponent("daemon.log")
+    NSWorkspace.shared.open([path], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Console.app"), configuration: NSWorkspace.OpenConfiguration()) { _, error in
+      if error != nil {
+        // Fallback: reveal in Finder
+        NSWorkspace.shared.activateFileViewerSelecting([path])
+      }
     }
   }
 
