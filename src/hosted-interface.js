@@ -50,7 +50,15 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("mcp", (data) => broadcast("mcp", data));
   events.on("tunnel", (data) => broadcast("tunnel", data));
   events.on("replay", (data) => broadcast("replay", data));
+  events.on("skill-candidate", (data) => broadcast("skill-candidate", data));
   if (runtime.skillReplay) runtime.skillReplay.bindEvents(events);
+
+  // Expose the bus to runtime subsystems (pattern miner, session miner) so
+  // they can emit "skill-candidate" without holding a reference to this
+  // module. Set non-enumerably so JSON serialization of runtime stays clean.
+  if (!runtime.events) {
+    Object.defineProperty(runtime, "events", { value: events, enumerable: false });
+  }
 
   if (runtime.tunnelWatcher) {
     runtime.tunnelWatcher.on("tunnel-url", (data) => events.emit("tunnel", { op: "url", ...data }));
@@ -1465,7 +1473,9 @@ function renderMcpDetail(server) {
   });
 }
 
+let composerOpen = false;
 function openMcpComposer() {
+  composerOpen = true;
   main.innerHTML = \`
     <div class="pane">
       <h2>Register MCP server</h2>
@@ -1526,11 +1536,20 @@ function openMcpComposer() {
   document.querySelectorAll('#mcpForm input[name="kind"]').forEach((r) =>
     r.addEventListener("change", updateKindVisibility));
   updateKindVisibility();
-  $("cancelBtn").addEventListener("click", () => refreshMcp());
+  $("cancelBtn").addEventListener("click", () => { composerOpen = false; refreshMcp(); });
 
-  $("mcpForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
+  // Defense in depth: bind both the form submit AND a direct click on the
+  // Register button. Some environments (older Safari, browser extensions
+  // intercepting forms) suppress the submit event; the click fallback uses
+  // requestSubmit() which still triggers our handler if it's wired, and
+  // falls back to invoking the same logic directly otherwise.
+  const submitForm = async (e) => {
+    if (e) e.preventDefault();
+    const formEl = $("mcpForm");
+    if (!formEl) return;
+    if (formEl.dataset.submitting === "1") return;
+    formEl.dataset.submitting = "1";
+    const fd = new FormData(formEl);
     const kind = fd.get("kind") || "stdio";
     const body = {
       name: (fd.get("name") || "").trim(),
@@ -1551,10 +1570,11 @@ function openMcpComposer() {
       body.auth = "bearer";
       body.apiKey = (fd.get("apiKey") || "").trim();
     }
-    if (!body.name) { showOut("name is required", "err"); return; }
-    if (kind === "stdio" && !body.command) { showOut("command is required for stdio", "err"); return; }
-    if ((kind === "http-oauth" || kind === "http-bearer") && !body.url) { showOut("url is required for http", "err"); return; }
-    if (kind === "http-bearer" && !body.apiKey) { showOut("apiKey is required for http+bearer", "err"); return; }
+    const reset = () => { formEl.dataset.submitting = ""; };
+    if (!body.name) { showOut("name is required", "err"); reset(); return; }
+    if (kind === "stdio" && !body.command) { showOut("command is required for stdio", "err"); reset(); return; }
+    if ((kind === "http-oauth" || kind === "http-bearer") && !body.url) { showOut("url is required for http", "err"); reset(); return; }
+    if (kind === "http-bearer" && !body.apiKey) { showOut("apiKey is required for http+bearer", "err"); reset(); return; }
 
     const btn = $("registerSubmit");
     btn.disabled = true;
@@ -1562,11 +1582,28 @@ function openMcpComposer() {
     try {
       const result = await postJson("/mcp/register", body);
       showOut("Registered ✓ — " + JSON.stringify(result, null, 2));
+      composerOpen = false;
       setTimeout(() => refreshMcp(), 600);
     } catch (err) {
       showOut("Registration failed: " + (err.message || String(err)), "err");
       btn.disabled = false;
       btn.textContent = "Register";
+      reset();
+    }
+  };
+  $("mcpForm").addEventListener("submit", submitForm);
+  $("registerSubmit").addEventListener("click", (e) => {
+    // If the button is type=submit inside a form, the browser will fire
+    // submit on its own — but if anything intercepts that path, this
+    // explicit click handler still drives the registration.
+    if (e.defaultPrevented) return;
+    const f = $("mcpForm");
+    if (!f) return;
+    if (typeof f.requestSubmit === "function") {
+      e.preventDefault();
+      f.requestSubmit();
+    } else {
+      submitForm(e);
     }
   });
 }
@@ -2179,7 +2216,7 @@ evt.addEventListener("message", (e) => {
 });
 evt.addEventListener("cron", () => { if (state.tab === "cron") refreshCron(); });
 evt.addEventListener("mcp", (e) => {
-  if (state.tab === "mcp") refreshMcp();
+  if (state.tab === "mcp" && !composerOpen) refreshMcp();
   // Surface OAuth-required as a system notification if the page is unfocused
   try {
     const data = JSON.parse(e.data);
@@ -2188,6 +2225,22 @@ evt.addEventListener("mcp", (e) => {
       if ("Notification" in window && Notification.permission === "granted") {
         new Notification("OpenAGI · OAuth required", { body: data.name + " — open the MCP tab to authorize." });
       }
+    }
+  } catch {}
+});
+
+// New skill candidate proposed by the pattern miner or session miner.
+// Refresh the Skills tab if the user is on it; otherwise show a browser
+// notification (the Mac app also fires its own native notification — see
+// AppState SSE handler).
+evt.addEventListener("skill-candidate", (e) => {
+  if (state.tab === "skills") refreshSkills(true);
+  try {
+    const data = JSON.parse(e.data);
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("OpenAGI learned a new skill candidate", {
+        body: (data.name || "untitled") + (data.description ? " — " + data.description : "")
+      });
     }
   } catch {}
 });

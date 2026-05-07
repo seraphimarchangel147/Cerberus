@@ -17,6 +17,7 @@ import { ObservationStore } from "./observation-store.js";
 import { OutcomeStore } from "./outcome-store.js";
 import { Introspector } from "./introspector.js";
 import { PatternMiner } from "./pattern-miner.js";
+import { SessionMiner } from "./session-miner.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
 import { SkillReplay } from "./skill-replay.js";
 import { ScrutinyJudge } from "./scrutiny-judge.js";
@@ -114,6 +115,7 @@ export class AbiRuntime {
     this.introspector = options.introspector ?? new Introspector({ runtime: this });
     this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher(options.tunnelWatcherOptions ?? {});
     this.patternMiner = options.patternMiner ?? new PatternMiner({ runtime: this, dataDir: options.dataDir, ...(options.patternMinerOptions ?? {}) });
+    this.sessionMiner = options.sessionMiner ?? new SessionMiner({ runtime: this, dataDir: options.dataDir, ...(options.sessionMinerOptions ?? {}) });
     this.skillReplay = options.skillReplay ?? new SkillReplay({ runtime: this, dataDir: options.dataDir, ...(options.skillReplayOptions ?? {}) });
     this.outputs = [];
     this.feedback = [];
@@ -169,6 +171,13 @@ export class AbiRuntime {
         enabled: true,
         task: "pattern-mine",
         dailyAt: "02:30"
+      });
+      this.cron.addJob({
+        id: "nightly-session-mine",
+        name: "Nightly chat-session skill miner",
+        enabled: true,
+        task: "session-mine",
+        dailyAt: "03:30"
       });
       registerCoreTools(this.tools, this);
     }
@@ -314,6 +323,9 @@ export class AbiRuntime {
       }
       if (job.task === "pattern-mine") {
         return this.patternMiner.mine({ now });
+      }
+      if (job.task === "session-mine") {
+        return this.sessionMiner.mine({ now });
       }
       return { skipped: true, reason: `No handler for task ${job.task}` };
     }, now);

@@ -72,6 +72,13 @@ export class PatternMiner {
       if (!proposal || proposal.pass === true) continue;
       const candidate = this.persistCandidate(seq, proposal);
       candidates.push(candidate);
+      this.runtime?.events?.emit?.("skill-candidate", {
+        source: "pattern-miner",
+        id: candidate.id,
+        name: proposal.name,
+        description: proposal.description,
+        occurrences: seq.count
+      });
     }
     return { mined: sequences.length, scored: scored.length, candidates: candidates.length, items: candidates };
   }

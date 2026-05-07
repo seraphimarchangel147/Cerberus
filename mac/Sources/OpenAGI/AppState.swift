@@ -187,6 +187,24 @@ final class AppState: ObservableObject {
     }
     if event == "mcp" { Task { await pollOnce() } }
     if event == "message" { Task { await pollOnce() } }
+    if event == "skill-candidate" {
+      // Pattern miner / session miner proposed a new skill — surface it.
+      let parsed = parseSkillCandidate(data)
+      let title = "OpenAGI learned a new skill"
+      let body: String = {
+        let name = parsed.name ?? "untitled"
+        if let desc = parsed.description, !desc.isEmpty { return "\(name) — \(desc)" }
+        return name
+      }()
+      notify(title: title, body: body, path: "/?tab=skills")
+    }
+  }
+
+  private func parseSkillCandidate(_ data: String) -> (name: String?, description: String?) {
+    guard let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any] else {
+      return (nil, nil)
+    }
+    return (json["name"] as? String, json["description"] as? String)
   }
 
   private func fetchAuditAndNotify() async {
