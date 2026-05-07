@@ -24,6 +24,7 @@ export { McpRegistry } from "./mcp-registry.js";
 export { McpStdioClient } from "./mcp-client.js";
 export { MemoryCondenser } from "./memory-condenser.js";
 export { OutcomeStore } from "./outcome-store.js";
+export { TunnelWatcher } from "./tunnel-watcher.js";
 export { Introspector } from "./introspector.js";
 export { ScrutinyFitter } from "./scrutiny-fitter.js";
 export { ScrutinyJudge } from "./scrutiny-judge.js";

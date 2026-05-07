@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>OpenAGI</string>
+  <key>CFBundleExecutable</key>
+  <string>OpenAGI</string>
+  <key>CFBundleIdentifier</key>
+  <string>app.openagi.daemon</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>OpenAGI</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__BUILD__</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>Released under MIT license.</string>
+
+  <!-- Sparkle. Replace SUPublicEDKey with the EdDSA public key generated locally:
+       generate_keys-bin (from Sparkle release) → prints public key.
+       SUFeedURL points at the appcast.xml served from your release artifact host. -->
+  <key>SUFeedURL</key>
+  <string>https://github.com/buildbetter/openagi/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>__SPARKLE_PUBLIC_KEY__</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <key>SUScheduledCheckInterval</key>
+  <integer>86400</integer>
+</dict>
+</plist>

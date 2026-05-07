@@ -19,6 +19,7 @@ import { ScrutinyFitter } from "./scrutiny-fitter.js";
 import { ScrutinyJudge } from "./scrutiny-judge.js";
 import { ScrutinyPanel } from "./scrutiny-panel.js";
 import { SpecialistRouter } from "./specialist-router.js";
+import { TunnelWatcher } from "./tunnel-watcher.js";
 import { VectorStore } from "./vector-store.js";
 import { VocabularyCurator } from "./vocabulary-curator.js";
 import { MemorySystem } from "./memory-system.js";
@@ -107,6 +108,7 @@ export class AbiRuntime {
     this.scrutinyJudge = options.scrutinyJudge ?? new ScrutinyJudge({ runtime: this, ...(options.scrutinyJudgeOptions ?? {}) });
     this.vocabulary = options.vocabulary ?? new VocabularyCurator({ runtime: this, ...(options.vocabularyOptions ?? {}) });
     this.introspector = options.introspector ?? new Introspector({ runtime: this });
+    this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher(options.tunnelWatcherOptions ?? {});
     this.outputs = [];
     this.feedback = [];
 
@@ -424,6 +426,7 @@ export function createDurableRuntime(options = {}) {
     budgetOptions: { storePath: path.join(dataDir, "budget", "usage.json"), ...(options.budgetOptions ?? {}) },
     outcomeOptions: { dir: path.join(dataDir, "outcomes"), ...(options.outcomeOptions ?? {}) },
     vectorStoreOptions: { dir: path.join(dataDir, "vectors"), ...(options.vectorStoreOptions ?? {}) },
+    tunnelWatcherOptions: { dataDir, ...(options.tunnelWatcherOptions ?? {}) },
     memory: options.memory ?? new FileBackedMemorySystem({ ...(options.memoryOptions ?? {}), dir: path.join(dataDir, "memory") }),
     cron: options.cron ?? new FileBackedCronScheduler({ storePath: path.join(dataDir, "cron", "jobs.json") }),
     propagation:

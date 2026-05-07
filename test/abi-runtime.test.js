@@ -818,6 +818,36 @@ test("setup wizard rejects unknown keys (allowlist only)", async () => {
   assert.equal(result.keys.includes("ANTHROPIC_API_KEY"), true);
 });
 
+test("tunnel watcher detects new cloudflared URL and persists to .env", async () => {
+  const { TunnelWatcher } = await import("../src/index.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-tunnel-"));
+  const logPath = path.join(dir, "tunnel.log");
+  const envPath = path.join(dir, ".env");
+  fs.writeFileSync(logPath, "starting...\n");
+  fs.writeFileSync(envPath, "ANTHROPIC_API_KEY=existing\n");
+
+  delete process.env.OPENAGI_PUBLIC_URL;
+  const watcher = new TunnelWatcher({ logPath, envPath });
+  let captured = null;
+  watcher.on("tunnel-url", (e) => { captured = e; });
+
+  // Initial scan with no URL — should emit nothing
+  watcher.tickSafe();
+  assert.equal(captured, null);
+
+  // Append a quick-tunnel URL
+  fs.appendFileSync(logPath, "Your quick Tunnel: https://abc-def-ghi.trycloudflare.com\n");
+  watcher.tickSafe();
+  assert.ok(captured, "expected tunnel-url event");
+  assert.match(captured.url, /trycloudflare\.com/);
+
+  // Verify env file got updated
+  const envText = fs.readFileSync(envPath, "utf8");
+  assert.match(envText, /OPENAGI_PUBLIC_URL=https:\/\/abc-def-ghi\.trycloudflare\.com/);
+  assert.match(envText, /ANTHROPIC_API_KEY=existing/, "should preserve existing keys");
+  assert.equal(process.env.OPENAGI_PUBLIC_URL, "https://abc-def-ghi.trycloudflare.com");
+});
+
 test("file-backed propagation persists specialist workspaces", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-agents-"));
   const storePath = path.join(dir, "specialists.json");

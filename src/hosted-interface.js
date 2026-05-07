@@ -46,6 +46,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("message", (data) => broadcast("message", data));
   events.on("cron", (data) => broadcast("cron", data));
   events.on("mcp", (data) => broadcast("mcp", data));
+  events.on("tunnel", (data) => broadcast("tunnel", data));
+
+  if (runtime.tunnelWatcher) {
+    runtime.tunnelWatcher.on("tunnel-url", (data) => events.emit("tunnel", { op: "url", ...data }));
+    runtime.tunnelWatcher.on("tunnel-changed", (data) => events.emit("tunnel", { op: "changed", ...data }));
+    runtime.tunnelWatcher.start();
+  }
 
   if (runtime.agentHost) {
     const original = runtime.agentHost.handleMessage.bind(runtime.agentHost);
@@ -416,6 +423,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         for (const client of sseClients) try { client.end(); } catch { /* ignore */ }
         sseClients.clear();
         channels?.stop();
+        runtime.tunnelWatcher?.stop?.();
         runtime.mcp?.disconnectAll?.().catch(() => {});
         server.close((error) => (error ? reject(error) : resolve()));
       });

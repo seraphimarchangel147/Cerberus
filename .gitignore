@@ -6,3 +6,15 @@ npm-debug.log*
 .DS_Store
 logs/
 .claude/
+
+# Mac SwiftPM build artifacts
+mac/.build/
+mac/.swiftpm/
+mac/Package.resolved
+
+# Mac app bundle output
+build/
+
+# Temporary files
+*.tmp
+*.swp

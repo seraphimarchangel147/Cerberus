@@ -54,6 +54,20 @@ curl -fsSL https://raw.githubusercontent.com/buildbetter/openagi/main/scripts/in
 
 Auto-detects Docker vs. native systemd, installs Node if missing, sets up the service, prints the wizard URL.
 
+### Mac native `.app` build
+
+Build a SwiftUI menubar app that bundles Node + the runtime + Sparkle auto-update:
+
+```bash
+./scripts/build-mac-app.sh                            # unsigned local build
+SIGN_IDENTITY="Developer ID Application: ..." \
+  NOTARIZE=1 DMG=1 \
+  AC_USERNAME=... AC_PASSWORD=... AC_TEAM_ID=... \
+  ./scripts/build-mac-app.sh                          # signed, notarized .dmg
+```
+
+Output: `build/OpenAGI.app` (+ optional `.dmg`). See [`mac/README.md`](mac/README.md) for Sparkle key setup, hardened-runtime exceptions, and release signing.
+
 ### Updates
 
 ```bash
