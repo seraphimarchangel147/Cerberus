@@ -64,6 +64,20 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" \
 sed -e "s/__VERSION__/${VERSION}/g" -e "s/__BUILD__/${BUILD_NUM}/g" \
   "${MAC_DIR}/Resources/Info.plist" > "${APP}/Contents/Info.plist"
 
+# Icons. Auto-build them if the inputs are present but the outputs are stale,
+# so a fresh clone or an icon-source change picks them up automatically.
+if [[ -f "${MAC_DIR}/Resources/icon-sources/AppIcon-source.png" ]]; then
+  if [[ ! -f "${MAC_DIR}/Resources/AppIcon.icns" \
+        || "${MAC_DIR}/Resources/icon-sources/AppIcon-source.png" -nt "${MAC_DIR}/Resources/AppIcon.icns" \
+        || "${MAC_DIR}/Resources/icon-sources/MenuIcon-source.png" -nt "${MAC_DIR}/Resources/MenuIcon.png" ]]; then
+    echo "▶ Rebuilding icons from sources"
+    "${ROOT}/scripts/build-icons.sh"
+  fi
+fi
+[[ -f "${MAC_DIR}/Resources/AppIcon.icns" ]]    && cp "${MAC_DIR}/Resources/AppIcon.icns"    "${APP}/Contents/Resources/AppIcon.icns"
+[[ -f "${MAC_DIR}/Resources/MenuIcon.png" ]]    && cp "${MAC_DIR}/Resources/MenuIcon.png"    "${APP}/Contents/Resources/MenuIcon.png"
+[[ -f "${MAC_DIR}/Resources/MenuIcon@2x.png" ]] && cp "${MAC_DIR}/Resources/MenuIcon@2x.png" "${APP}/Contents/Resources/MenuIcon@2x.png"
+
 # Bundle Node
 NODE_DEST="${APP}/Contents/Resources/node"
 mkdir -p "${NODE_DEST}"
