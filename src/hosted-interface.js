@@ -454,7 +454,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       return sendJson(res, 404, { error: "not-found" });
     } catch (error) {
-      return sendJson(res, 500, { error: error.message });
+      // Log so we can diagnose 500s instead of swallowing them.
+      const logLine = `[${new Date().toISOString()}] 500 ${req.method} ${req.url} — ${error.message}\n${error.stack ?? ""}\n`;
+      try { process.stderr.write(logLine); } catch { /* ignore */ }
+      return sendJson(res, 500, { error: error.message, route: req.url });
     }
   });
 
@@ -668,10 +671,25 @@ function renderApp() {
 
     .main { display: flex; flex-direction: column; min-height: 0; }
     .thread { flex: 1; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
-    .msg { max-width: 700px; padding: 10px 12px; border-radius: 10px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
-    .msg.user { background: var(--user); align-self: flex-end; }
+    .msg { max-width: 720px; padding: 10px 12px; border-radius: 10px; line-height: 1.5; word-wrap: break-word; }
+    .msg.user { background: var(--user); align-self: flex-end; white-space: pre-wrap; }
     .msg.assistant { background: var(--assistant); border: 1px solid var(--line); align-self: flex-start; }
     .msg .meta { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+    .msg .body { display: block; }
+    .msg .body p { margin: 0 0 8px; }
+    .msg .body p:last-child { margin-bottom: 0; }
+    .msg .body h2, .msg .body h3, .msg .body h4 { margin: 12px 0 6px; line-height: 1.25; }
+    .msg .body h2 { font-size: 18px; }
+    .msg .body h3 { font-size: 16px; }
+    .msg .body h4 { font-size: 14px; color: var(--accent); }
+    .msg .body ul, .msg .body ol { margin: 6px 0 8px; padding-left: 22px; }
+    .msg .body li { margin: 2px 0; }
+    .msg .body blockquote { margin: 6px 0; padding: 4px 12px; border-left: 3px solid var(--accent); color: var(--muted); }
+    .msg .body a { color: var(--accent); }
+    .msg .body code.md-inline { background: var(--bg); padding: 1px 5px; border-radius: 3px; font: 12px ui-monospace, Menlo, monospace; border: 1px solid var(--line); }
+    .msg .body pre.md-code { margin: 8px 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; }
+    .msg .body pre.md-code code { font: 12px/1.5 ui-monospace, Menlo, monospace; }
+    .msg .body strong { font-weight: 700; }
     .composer { border-top: 1px solid var(--line); padding: 12px 16px; background: var(--panel); display: flex; gap: 8px; align-items: flex-end; }
     .composer textarea {
       flex: 1; min-height: 38px; max-height: 200px; resize: none;
@@ -733,6 +751,7 @@ function renderApp() {
       <button data-tab="scrutiny">Scrutiny</button>
       <button data-tab="vocab">Vocab</button>
       <button data-tab="health">Health</button>
+      <button id="setupBtn" title="Open setup wizard">⚙ Setup</button>
     </nav>
   </header>
   <div class="body">
@@ -765,9 +784,83 @@ const sidebarList = $("sidebarList");
 const sidebarTitle = $("sidebarTitle");
 const newBtn = $("newSession");
 
-document.querySelectorAll("nav button").forEach((btn) => {
+document.querySelectorAll("nav button[data-tab]").forEach((btn) => {
   btn.addEventListener("click", () => switchTab(btn.dataset.tab));
 });
+document.getElementById("setupBtn")?.addEventListener("click", () => {
+  window.location.href = "/setup";
+});
+
+// Tiny markdown renderer for chat replies. No backtick characters in this
+// function's source so it can live inside the dashboard's outer template
+// literal without escaping wars. BT = backtick built from char code.
+const BT = String.fromCharCode(96);
+const FENCE = BT + BT + BT;
+const FENCE_RE = new RegExp(FENCE + "(\\\\w+)?\\\\n([\\\\s\\\\S]*?)" + FENCE, "g");
+const INLINE_RE = new RegExp(BT + "([^" + BT + "\\\\n]+)" + BT, "g");
+
+function renderMarkdown(input) {
+  if (!input) return "";
+  let s = String(input);
+
+  // Escape HTML first — guarantees XSS safety even if the renderer is buggy.
+  s = s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+  // Fenced code blocks
+  s = s.replace(FENCE_RE, (_, lang, code) => {
+    const langClass = lang ? ' class="md-code-block lang-' + lang + '"' : ' class="md-code-block"';
+    return '<pre class="md-code"><code' + langClass + '>' + code.replace(/\\n$/, "") + '</code></pre>';
+  });
+
+  // Inline code
+  s = s.replace(INLINE_RE, '<code class="md-inline">$1</code>');
+
+  // Headings
+  s = s.replace(/^### (.*)$/gm, "<h4>$1</h4>");
+  s = s.replace(/^## (.*)$/gm, "<h3>$1</h3>");
+  s = s.replace(/^# (.*)$/gm, "<h2>$1</h2>");
+
+  // Blockquotes
+  s = s.replace(/^&gt; (.*)$/gm, "<blockquote>$1</blockquote>");
+
+  // Bold then italic
+  s = s.replace(/\\*\\*([^*\\n]+)\\*\\*/g, "<strong>$1</strong>");
+  s = s.replace(/(?<!\\w)\\*([^*\\n]+?)\\*(?!\\w)/g, "<em>$1</em>");
+  s = s.replace(/(?<!\\w)_([^_\\n]+?)_(?!\\w)/g, "<em>$1</em>");
+
+  // Links [text](url)
+  s = s.replace(/\\[([^\\]]+)\\]\\((https?:[^\\s)]+)\\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  // Lists
+  const lines = s.split(/\\n/);
+  const out = [];
+  let ulOpen = false, olOpen = false;
+  for (const line of lines) {
+    const ulMatch = /^[-*] (.*)$/.exec(line);
+    const olMatch = /^\\d+\\. (.*)$/.exec(line);
+    if (ulMatch) {
+      if (olOpen) { out.push("</ol>"); olOpen = false; }
+      if (!ulOpen) { out.push("<ul>"); ulOpen = true; }
+      out.push("<li>" + ulMatch[1] + "</li>");
+    } else if (olMatch) {
+      if (ulOpen) { out.push("</ul>"); ulOpen = false; }
+      if (!olOpen) { out.push("<ol>"); olOpen = true; }
+      out.push("<li>" + olMatch[1] + "</li>");
+    } else {
+      if (ulOpen) { out.push("</ul>"); ulOpen = false; }
+      if (olOpen) { out.push("</ol>"); olOpen = false; }
+      out.push(line);
+    }
+  }
+  if (ulOpen) out.push("</ul>");
+  if (olOpen) out.push("</ol>");
+  s = out.join("\\n");
+
+  // Paragraphs
+  s = s.replace(/\\n{2,}/g, "</p><p>").replace(/\\n/g, "<br>");
+  return "<p>" + s + "</p>";
+}
 
 newBtn.addEventListener("click", () => {
   if (state.tab === "chat") {
@@ -926,7 +1019,9 @@ function appendMessage(msg, autoscroll = true) {
   const div = document.createElement("div");
   div.className = "msg " + (msg.role === "user" ? "user" : "assistant");
   const meta = msg.role === "assistant" && msg.metadata?.model ? \`\${msg.metadata.model} · \${msg.metadata.provider ?? ""}\` : msg.from ?? "";
-  div.innerHTML = \`<div class="meta">\${escapeHtml(meta)}</div>\${escapeHtml(msg.content ?? "")}\`;
+  // Assistant replies render markdown; user messages stay literal.
+  const body = msg.role === "assistant" ? renderMarkdown(msg.content ?? "") : escapeHtml(msg.content ?? "");
+  div.innerHTML = \`<div class="meta">\${escapeHtml(meta)}</div><div class="body">\${body}</div>\`;
   thread.appendChild(div);
   if (autoscroll) thread.scrollTop = thread.scrollHeight;
 }

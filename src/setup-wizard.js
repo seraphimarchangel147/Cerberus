@@ -115,12 +115,20 @@ export function renderWizard({ proposedToken } = {}) {
       width:100%; padding:9px 12px; background:#0e1411; color:#e8efea;
       border:1px solid #2a352f; border-radius:6px; font:inherit; outline:none;
     }
+    input[type="radio"], input[type="checkbox"] {
+      width: auto; padding: 0; margin: 0; flex: 0 0 auto;
+    }
     input:focus, textarea:focus, select:focus { border-color:#6fe1b1; }
     .row { display:flex; gap:10px; }
     .row > * { flex: 1; }
-    .grid { display: grid; gap: 10px; margin-bottom: 12px; }
-    .opt { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
-    .opt input[type="checkbox"] { width:auto; }
+    .grid { display: grid; gap: 6px; margin-bottom: 12px; }
+    .opt {
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+      border: 1px solid #2a352f; border-radius: 6px; cursor: pointer;
+      background: #0e1411;
+    }
+    .opt:hover { border-color: #3a4a42; }
+    .opt:has(input:checked) { border-color: #6fe1b1; background: #14322a; }
     button {
       background:#6fe1b1; color:#002219; border:0; padding:10px 16px;
       border-radius:8px; font-weight:700; cursor:pointer; font-size: 14px;
