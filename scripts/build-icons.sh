@@ -60,9 +60,11 @@ rm -rf "${ICONSET}"
 # only need the source to have transparent background. The build is a simple
 # downscale to 22pt (1x) and 44pt (2x).
 echo "▶ Building MenuIcon"
-sips --setProperty format png --resampleHeightWidth 22 22 \
+# 26pt @1x / 52px @2x. The source PNG has built-in transparent padding so
+# the visible glyph ends up around 18pt — matches the rest of the menu bar.
+sips --setProperty format png --resampleHeightWidth 26 26 \
      "${MENU_SRC}" --out "${OUT_DIR}/MenuIcon.png" >/dev/null
-sips --setProperty format png --resampleHeightWidth 44 44 \
+sips --setProperty format png --resampleHeightWidth 52 52 \
      "${MENU_SRC}" --out "${OUT_DIR}/MenuIcon@2x.png" >/dev/null
 
 echo "▶ Done."
