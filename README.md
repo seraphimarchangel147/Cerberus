@@ -1,52 +1,72 @@
 # OpenAGI
 
-An always-on local agent host with a real chat UI, scheduled prompts, MCP tool execution, skills, and SMS/Telegram channels — built on a directional-adaptive-scrutiny + tiered-memory + propagation core.
+**An always-on, local-first agent that remembers, watches, and learns your patterns.**
 
-OpenAGI takes the daemon-first, channel-first, persistent shape of OpenClaw / PicoClaw / TinyAGI and pairs it with an opinionated decision layer:
+> Local. Private. Always learning. Bring your own LLM. Your data never leaves your machine.
+
+**Website:** [openagi.sh](https://openagi.sh) · **Source:** [github.com/Spshulem/openAGI](https://github.com/Spshulem/openAGI)
+
+OpenAGI is a daemon that runs on your laptop, server, or Raspberry Pi. It hosts a chat UI, executes tools, schedules prompts, watches your screen activity (opt-in), and detects repeating patterns over days — then proposes auto-generated skills you can accept with one click. Everything lives under `~/.openagi/` on your machine. No accounts. No telemetry. No cloud component.
 
 ```text
-Channels -> Signals -> Workflows -> Directional Adaptive Scrutiny
--> Agent Layer + Tools -> Multi-Tiered Memory -> Propagation
--> Outputs -> Feedback
+Channels → Signals → Workflows → Directional Adaptive Scrutiny
+       → Agent Layer + Tools → Tiered Memory → Propagation
+       → Outputs → Feedback
 ```
+
+---
+
+## Three pillars
+
+### 1. Remembers you
+Every conversation, every correction, every decision lives in tiered memory — short-term for working context, medium for repeated patterns, long-term **Lava** for durable truths. The agent doesn't reset between sessions. Corrections you make once never have to be made twice. The seven-axis **Scrutiny layer** scores every signal before acting (`act / ask / watch / ignore / propagate`). Risky or repeated tasks spawn bounded specialists — specialization without sprawl.
+
+### 2. Watches you work _(killer feature)_
+Turn on local screen capture and OpenAGI starts noticing the things you do over and over: the file you keep moving, the report you build every Friday, the script you run after every deploy. Once it sees a pattern enough times, it drafts a skill for it and surfaces it in the dashboard with one-click accept/reject. Powered by **ScreenCaptureKit + Vision OCR + SQLite FTS5** on macOS — entirely on-device. Off by default, opt-in per workspace, default-deny exclusion list (1Password, banking, private windows).
+
+### 3. Yours
+Everything OpenAGI sees, learns, and remembers lives in `~/.openagi/` on your machine. No accounts. No telemetry. No remote dependencies beyond the model API key you choose to provide. Use any LLM — OpenAI, Anthropic, or any provider speaking the OpenAI Responses API. Swap models any time. The agent you raise belongs to you.
+
+---
+
+## How OpenAGI compares
+
+|                                            | OpenAGI | OpenClaw | AutoGPT | Operator | Claude.ai | Devin |
+|--------------------------------------------|:-------:|:--------:|:-------:|:--------:|:---------:|:-----:|
+|                                            | _local_ | _local_  | _local_ | _cloud_  |  _cloud_  | _cloud_ |
+| Runs on your machine                        |   ✅    |    ✅    |    ✅   |    —     |     —     |   —   |
+| Your data never leaves                      |   ✅    |    ✅    | partial |    —     |     —     |   —   |
+| Bring your own LLM                          | ✅ any  |    ✅    |    ✅   |    —     |     —     |   —   |
+| **Watches you, learns patterns**            | **✅**  |    —     |    —    |    —     |     —     |   —   |
+| **Adaptive Scrutiny decision layer**        | **✅**  |    —     |    —    |    —     |     —     |   —   |
+| **Bounded specialists (propagation)**       | **✅**  |    —     |    —    |    —     |     —     |   —   |
+| Persistent memory across sessions           | ✅ tiered | ✅ md   |    —    | limited  | limited   | limited |
+| Multi-channel (SMS / Telegram / HTTP)       |   ✅    |    ✅    |    —    |    —     |     —     |   —   |
+| MCP server support                          |   ✅    |    ✅    |    —    |  some    |    —      |   —   |
+| Source-available                            |   ✅    |    ✅    |    ✅   |    —     |     —     |   —   |
+| No telemetry, no accounts                   |   ✅    |    ✅    |    ✅   |    —     |     —     |   —   |
+
+OpenAGI builds on the local-first foundation that [OpenClaw](https://github.com/openclaw/openclaw) and PicoClaw shipped first — durable memory, MCP registry, daemon shape. The differentiation is the three highlighted rows: **watching you work**, **scoring every signal before acting**, and **bounded specialization**.
+
+---
+
+## Quickstart (60 seconds)
+
+```bash
+git clone https://github.com/Spshulem/openAGI && cd openAGI
+npm install
+npm run serve
+```
+
+Open `http://127.0.0.1:43210/`. The first-run wizard asks for an OpenAI or Anthropic key (or skip — runs in deterministic mode without one), runs a smoke test, and you're chatting.
+
+---
 
 ## Install
 
-### Mac / Linux desktop / Linux server (from source)
+All install paths end with a daemon listening on `127.0.0.1:43210` and a setup wizard at `/setup`.
 
-```bash
-git clone https://github.com/Spshulem/openAGI
-cd openagi
-npm run serve     # http://127.0.0.1:43210/setup
-```
-
-Open `http://127.0.0.1:43210/`. The first-run wizard collects keys and runs a smoke test.
-
-For always-on:
-
-```bash
-npm run install-launchd     # macOS — auto-start at login + auto-restart
-npm run install-systemd     # Linux — same, via systemd (sudo for system-wide; pass 'user' for rootless)
-```
-
-### Docker / Linux SBC (Raspberry Pi, pamir.ai, Jetson)
-
-```bash
-docker run -d --name openagi \
-  -p 43210:43210 -v openagi-data:/data \
-  ghcr.io/spshulem/openagi:latest
-```
-
-Visit `http://<host>:43210/` for the wizard. Multi-arch image (`linux/amd64` + `linux/arm64`).
-
-Or with compose:
-
-```bash
-cp .env.example .env
-docker compose -f docker-compose.example.yml up -d
-```
-
-### Linux one-line installer
+### Linux (one-line installer)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Spshulem/openAGI/main/scripts/install.sh | sh
@@ -54,9 +74,24 @@ curl -fsSL https://raw.githubusercontent.com/Spshulem/openAGI/main/scripts/insta
 
 Auto-detects Docker vs. native systemd, installs Node if missing, sets up the service, prints the wizard URL.
 
-### Mac native `.app` build
+### macOS / Linux (from source)
 
-Build a SwiftUI menubar app that bundles Node + the runtime + Sparkle auto-update:
+```bash
+git clone https://github.com/Spshulem/openAGI && cd openAGI
+npm install
+npm run serve                # http://127.0.0.1:43210/setup
+```
+
+For always-on:
+
+```bash
+npm run install-launchd      # macOS — auto-start at login + auto-restart on crash
+npm run install-systemd      # Linux — same, via systemd (sudo for system-wide; pass 'user' for rootless)
+```
+
+### macOS native menu bar app
+
+A SwiftUI menubar app that bundles Node + the runtime + Sparkle auto-update + screen capture + replay confirmation:
 
 ```bash
 ./scripts/build-mac-app.sh                            # unsigned local build
@@ -66,51 +101,65 @@ SIGN_IDENTITY="Developer ID Application: ..." \
   ./scripts/build-mac-app.sh                          # signed, notarized .dmg
 ```
 
-Output: `build/OpenAGI.app` (+ optional `.dmg`). See [`mac/README.md`](mac/README.md) for Sparkle key setup, hardened-runtime exceptions, and release signing.
+Output: `build/OpenAGI.app` (+ optional `.dmg`). See [`mac/README.md`](mac/README.md) for Sparkle key setup, hardened-runtime entitlements, and release signing.
+
+### Docker / Linux SBC (Raspberry Pi, Jetson, x86)
+
+```bash
+docker run -d --name openagi \
+  -p 43210:43210 -v openagi-data:/data \
+  ghcr.io/spshulem/openagi:latest
+```
+
+Multi-arch image (`linux/amd64` + `linux/arm64`). Or with compose:
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.example.yml up -d
+```
 
 ### Updates
 
 ```bash
-npm run update                  # auto-detects mode (docker/systemd/launchd/source) and updates in place
-npm run install-update-timer    # Linux: install a weekly auto-update timer (Sundays 04:00)
+npm run update                 # auto-detects mode (docker/systemd/launchd/source) and updates in place
+npm run install-update-timer   # Linux: install a weekly auto-update timer (Sundays 04:00)
 ```
 
-For Docker users who want fully unattended auto-update, run [Watchtower](https://containrrr.dev/watchtower/) alongside the OpenAGI container.
+For Docker, run [Watchtower](https://containrrr.dev/watchtower/) alongside the OpenAGI container. The Mac native `.app` updates via Sparkle automatically.
 
-Mac native `.app` builds (when shipped) update via Sparkle automatically.
-
-### Test it
-
-```bash
-curl -s http://127.0.0.1:43210/message \
-  -H "authorization: Bearer $OPENAGI_AUTH_TOKEN" \
-  -H 'content-type: application/json' \
-  -d '{"text":"remind me in 60 seconds to drink water","from":"me"}'
-```
-
-The daemon ticks every 10s by default (`OPENAGI_TICKER_MS`) so scheduled prompts fire on time without external pokes.
+---
 
 ## What's wired
 
-- **Chat UI on `/`** — sessions sidebar, message thread, tabs for Memory / Cron / Skills / MCP / Agents / Channels. SSE event stream so the UI updates live.
-- **Tool-use loop** — when `OPENAI_API_KEY` is set, the agent uses the Responses API with `tools` and structured args. Default model: `gpt-5`.
-- **Internal tools** — `remember`, `recall`, `schedule_message`, `list_sessions`, `list_skills`, `run_skill`, `list_mcp_tools`, `run_mcp_tool`.
-- **Skills** — drop a `SKILL.md` (frontmatter + body) under `.openagi/skills/<name>/` and it shows up as a first-class tool the agent can invoke.
-- **MCP execution** — register stdio MCP servers in `.openagi/mcp.json` (or via the UI). On connect, every tool the server advertises becomes a callable agent tool (`mcp_<server>_<tool>`).
-- **Cron prompts that ping you back** — the agent can call `schedule_message({prompt, delaySeconds | intervalSeconds | dailyAt, channel, target})`. When the job fires, the daemon runs the prompt through the agent and routes the reply to the originating channel (SMS via Twilio, Telegram, or local).
-- **SMS bidirectional** — Twilio inbound webhook → agent reply via TwiML. Twilio outbound REST for proactive sends and scheduled-prompt fires.
-- **Telegram** — webhook (`/channels/telegram/webhook`) or long polling (`TELEGRAM_POLLING=1`).
-- **Persistent state** under `.openagi/`: memory (JSONL audit + atomic snapshot), cron jobs, agent/session store, specialist workspaces, MCP logs.
+| Capability | Detail |
+|------------|--------|
+| **Chat UI** | `/` — sessions sidebar, message thread, tabs for Memory / Cron / Skills / MCP / Agents / Channels / Activity. SSE event stream so the UI updates live. |
+| **Tool-use loop** | When `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is set, the agent uses tool calling with structured args. Default model: `gpt-5`. |
+| **Internal tools** | `remember`, `recall`, `schedule_message`, `list_sessions`, `list_skills`, `run_skill`, `list_mcp_tools`, `run_mcp_tool`, `register_mcp_server`, `connect_mcp_server`, `disconnect_mcp_server`, `list_cron_jobs`, `cancel_cron_job`, `get_audit`, `get_budget`, `set_provider`, `retire_specialist`, `replay_skill`. |
+| **Skills** | Drop a `SKILL.md` (frontmatter + body) under `.openagi/skills/<name>/` — it shows up as a first-class tool the agent can invoke. |
+| **Auto-skill mining** | Pattern-miner runs nightly, detects repeating activity sequences, LLM proposes a skill, lands in `.openagi/skills-suggested/` for one-click accept. Session-miner does the same on chat history. |
+| **Skill replay** | Action vocabulary (`open_app`, `keyboard_shortcut`, `applescript`, `shortcut`, `type`, `wait`, `say`, `browser`, ...) — Mac executor confirms first run with a modal, persists trust. |
+| **MCP execution** | Register stdio or HTTP+OAuth MCP servers in `.openagi/mcp.json` (or via the UI). On connect, every tool the server advertises becomes a callable agent tool (`mcp_<server>_<tool>`). |
+| **Cron prompts** | The agent can call `schedule_message({prompt, delaySeconds | intervalSeconds | dailyAt, channel, target})`. When the job fires, the daemon runs the prompt and routes the reply to the originating channel (SMS, Telegram, local). |
+| **SMS bidirectional** | Twilio inbound webhook → agent reply via TwiML. Twilio outbound REST for proactive sends and scheduled fires. |
+| **Telegram** | Webhook (`/channels/telegram/webhook`) or long polling (`TELEGRAM_POLLING=1`). |
+| **Persistent state** | All under `.openagi/`: memory (JSONL audit + atomic snapshot), cron jobs, agent/session store, specialist workspaces, MCP logs. |
 
-## Twilio bidirectional SMS
+---
+
+## Remote access (SMS, Telegram, tunneling)
+
+Once the daemon is running locally, you can reach it from anywhere via SMS or Telegram by pairing it with a public tunnel.
 
 > Full step-by-step including tunnel + auth + Telegram + launchd: [`docs/setup/remote-channels.md`](docs/setup/remote-channels.md). Quick version below.
 
-You'll need a Twilio account, a phone number, and a public URL for the webhook. Spin one up with:
+### Tunnel
 
 ```bash
 npm run tunnel    # cloudflared (preferred) or ngrok, auto-detected
 ```
+
+### Twilio bidirectional SMS
 
 1. Drop credentials into `.openagi/.env`:
     ```bash
@@ -124,18 +173,48 @@ npm run tunnel    # cloudflared (preferred) or ngrok, auto-detected
     https://abcd1234.ngrok-free.app/channels/twilio/webhook
     ```
 4. Text your number. The reply comes back as TwiML.
-5. To test outbound: from the dashboard's **Channels** tab, send a test SMS, or:
-    ```bash
-    curl -s http://127.0.0.1:43210/channels/sms/send \
-      -H 'content-type: application/json' \
-      -d '{"to":"+15555550123","text":"Hi from OpenAGI"}'
-    ```
-6. Schedule an SMS ping:
+5. Schedule an SMS ping:
     ```bash
     curl -s http://127.0.0.1:43210/cron \
+      -H "authorization: Bearer $OPENAGI_AUTH_TOKEN" \
       -H 'content-type: application/json' \
-      -d '{"name":"morning-nudge","prompt":"Write me a one-line motivational sentence.","dailyAt":"08:00","channel":"sms","target":"+15555550123"}'
+      -d '{"name":"morning-nudge","prompt":"One-line motivational sentence.","dailyAt":"08:00","channel":"sms","target":"+15555550123"}'
     ```
+
+### Telegram
+
+Create a bot via [@BotFather](https://t.me/BotFather), drop the token in `.openagi/.env`:
+
+```bash
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_POLLING=1               # or set up a webhook to /channels/telegram/webhook
+TELEGRAM_WEBHOOK_SECRET=...      # only if using webhooks
+```
+
+---
+
+## Screen capture & pattern mining (macOS)
+
+Off by default. To enable on the macOS native app:
+
+1. Launch `OpenAGI.app`.
+2. Click the menu-bar icon → **Capture** → **Enable capture**.
+3. macOS prompts for **Screen Recording** + **Accessibility** permissions — grant once.
+4. Click **Capture → Privacy settings…** to tune frequency, retention, app/regex exclusions, and disk budget.
+
+Once running:
+- Every ~30 seconds the Mac batches activity (window titles + frame OCR) and pushes to the daemon's `/observations` endpoint.
+- Nightly at 02:30 UTC, the **pattern miner** clusters repeating sequences and asks the LLM to propose a skill name + description + body.
+- Suggested skills land in `.openagi/skills-suggested/` and surface in the dashboard's **Skills → Suggested** section.
+- Accept → writes a real `SKILL.md`. If the skill includes a `replay:` block, `replay_skill` invokes it (Mac shows a confirmation modal first run).
+
+Privacy posture (non-negotiable):
+- No keystroke logging
+- No cloud sync — capture stays local
+- Default-deny exclusion list: 1Password, Wallet, banking sites, private/incognito windows, 2FA / OTP screens
+- One-click wipe in the privacy panel
+
+---
 
 ## MCP servers
 
@@ -148,22 +227,59 @@ Drop a config at `.openagi/mcp.json`:
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
       "trustLevel": "trusted"
+    },
+    "my-hosted": {
+      "url": "https://mcp.example.com/mcp",
+      "auth": "oauth",
+      "trustLevel": "trusted"
     }
   }
 }
 ```
 
-Restart the daemon and click **Connect** in the MCP tab — or:
+Three transport+auth shapes are supported: **stdio** (spawn local process), **http+bearer** (URL with static API key), **http+oauth** (URL with browser-based OAuth — supports both dynamic registration and pre-registered clients).
+
+For the bearer shape, reference your secrets via `.openagi/.env` only — `${VAR}` substitution is allowlisted to keys defined in that file (closes the env-var exfiltration class). Restart the daemon and click **Connect** in the MCP tab — or:
 
 ```bash
-curl -s -X POST http://127.0.0.1:43210/mcp/connect/filesystem
+curl -s -X POST http://127.0.0.1:43210/mcp/connect/filesystem \
+  -H "authorization: Bearer $OPENAGI_AUTH_TOKEN"
 ```
 
 On connect, each MCP tool becomes a first-class agent tool (`mcp_filesystem_read_file`, etc.) and the model can call it directly.
 
+---
+
+## Skills
+
+Skills are markdown templates the agent can run as sub-prompts. Three are bundled (`recap`, `morning-brief`, `remind`). Add your own at `.openagi/skills/<name>/SKILL.md`:
+
+```markdown
+---
+name: weekly-review
+description: Summarize the past 7 days of memory and propose 3 follow-ups.
+replay:
+  - say: "Running your weekly review."
+  - applescript: |
+      tell application "Calendar" to activate
+---
+
+You are running a weekly review.
+
+1. Call `recall` with query "this week" to pull recent items.
+2. Group by tag, summarize each cluster in one bullet.
+3. Propose three follow-ups the user should schedule.
+
+User asked: {{input}}
+```
+
+The skill becomes the `skill_weekly_review` tool and is also runnable from the UI's **Skills** tab. The `replay:` block (optional) makes it executable on the Mac via `replay_skill` with a confirmation modal.
+
+---
+
 ## Integrations
 
-Integrations are plug-in modules in `src/integrations/<name>.js`. Each one self-registers tools on the runtime when its credentials are present in env, and silently no-ops otherwise. **No keys live in source.**
+Integrations are plug-in modules in `src/integrations/<name>.js`. Each one self-registers tools when its credentials are present in env, and silently no-ops otherwise. **No keys live in source.**
 
 Bundled:
 
@@ -182,34 +298,15 @@ export function registerYourIntegration(runtime, options = {}) {
 }
 ```
 
-Then add one line to `src/abi-runtime.js` constructor: `registerYourIntegration(this);`
+Then add one line to `src/abi-runtime.js`: `registerYourIntegration(this);`
 
-For SaaS that ships an MCP server, you don't need an integration module — just point at it from `.openagi/mcp.json` and the agent gets every tool automatically.
+For SaaS that ships an MCP server, you don't need an integration module — just point `.openagi/mcp.json` at it and the agent gets every tool automatically.
 
-## Skills
-
-Skills are markdown templates the agent can run as sub-prompts. Three are bundled (`recap`, `morning-brief`, `remind`). Add your own at `.openagi/skills/<name>/SKILL.md`:
-
-```markdown
----
-name: weekly-review
-description: Summarize the past 7 days of memory and propose 3 follow-ups.
 ---
 
-You are running a weekly review.
+## Auth & security
 
-1. Call `recall` with query "this week" to pull recent items.
-2. Group by tag, summarize each cluster in one bullet.
-3. Propose three follow-ups the user should schedule.
-
-User asked: {{input}}
-```
-
-The skill becomes the `skill_weekly_review` tool and is also runnable from the UI's Skills tab.
-
-## Auth
-
-When `OPENAGI_AUTH_TOKEN` is unset, the dashboard is open (fine for `127.0.0.1` only). When set, every route except `/health`, `/channels/twilio/webhook`, and `/channels/telegram/webhook` requires:
+When `OPENAGI_AUTH_TOKEN` is unset, the dashboard runs unauthenticated (fine for `127.0.0.1` only). When set, every route except `/health` and the webhook endpoints requires:
 
 - header `Authorization: Bearer <token>`, or
 - a `?token=<token>` query (browser convenience — sets a cookie, then redirects), or
@@ -226,15 +323,12 @@ Webhooks self-validate instead:
 - **Twilio:** when `TWILIO_AUTH_TOKEN` and `OPENAGI_PUBLIC_URL` are set, the daemon verifies the `X-Twilio-Signature` HMAC against the incoming form body.
 - **Telegram:** set `TELEGRAM_WEBHOOK_SECRET` and pass the same value as `secret_token` to `setWebhook` — the daemon checks the `X-Telegram-Bot-Api-Secret-Token` header.
 
-## Run as a daemon (macOS)
+Additional defenses:
 
-```bash
-./scripts/install-launchd.sh             # installs ~/Library/LaunchAgents/app.openagi.daemon.plist and starts it
-./scripts/install-launchd.sh uninstall   # stop + remove
-tail -f .openagi/launchd.err.log         # watch
-```
+- **Cross-origin POST blocked** — any browser request whose `Origin` doesn't match `Host` is rejected with 403, regardless of auth state.
+- **MCP register hardening** — `command` is allowlisted to known runners (`npx`, `node`, `bun`, `deno`, `python3`, `uvx`, `docker`); URL hosts may not be loopback / RFC1918 / link-local / cloud-metadata; `${VAR}` substitution is allowlisted to keys explicitly declared in `.openagi/.env`.
 
-The launch agent runs at login, restarts on crash (10s throttle), and uses your project's `.openagi/.env`.
+---
 
 ## Endpoints
 
@@ -252,15 +346,20 @@ The launch agent runs at login, restarts on crash (10s throttle), and uses your 
 | GET    | `/skills`                         | List skills                            |
 | POST   | `/skills/reload`                  | Re-scan skill directories              |
 | POST   | `/skills/:name/run`               | Run a skill                            |
+| POST   | `/skills/replay/:name`            | Replay a skill on the Mac              |
 | GET    | `/mcp`, `/mcp/tools`              | MCP server + tool inventory            |
 | POST   | `/mcp/register`                   | Register a server at runtime           |
 | POST   | `/mcp/connect/:name`              | Spawn the server, fetch tools          |
 | POST   | `/mcp/disconnect/:name`           | Kill it                                |
 | POST   | `/mcp/call`                       | `{server, tool, args}`                 |
+| POST   | `/observations`                   | Activity batch from Mac capture        |
+| GET    | `/observations/search`            | Full-text search of observed activity  |
 | POST   | `/channels/twilio/webhook`        | Twilio inbound SMS                     |
 | POST   | `/channels/telegram/webhook`      | Telegram inbound                       |
 | POST   | `/channels/sms/send`              | Twilio outbound (`{to, text}`)         |
 | POST   | `/tick`                           | Manually run due cron jobs             |
+
+---
 
 ## Environment
 
@@ -279,18 +378,31 @@ src/
   abi-runtime.js              orchestrates signals → scrutiny → memory → propagation
   agent-host.js               turn loop, threads tool registry into model provider
   agent-store.js              persistent agents and sessions
+  auth.js                     bearer/cookie auth + CSRF (cross-origin POST guard)
   channels.js                 local + Telegram + Twilio (SMS) channels
   cron-scheduler.js           interval/dailyAt jobs (incl. the "prompt" job type)
   directional-adaptive-scrutiny.js  decision layer
-  file-backed-*.js            durable JSONL+snapshot stores
   hosted-interface.js         HTTP server, SSE, chat UI
   mcp-client.js               stdio JSON-RPC MCP transport
+  mcp-http-client.js          HTTP+bearer MCP transport
+  mcp-oauth.js                HTTP+OAuth MCP transport (DCR + pre-registered)
   mcp-registry.js             config + live clients, tool exposure
   memory-system.js            short/medium/long tiers with decay
-  model-provider.js           DeterministicModelProvider + OpenAI Responses tool loop
+  model-provider.js           DeterministicModelProvider + OpenAI / Anthropic tool loops
+  observation-store.js        SQLite FTS5 store for capture observations
+  pattern-miner.js            cluster repeating activity → propose skills
+  session-miner.js            cluster repeating chat intents → propose skills
   propagation-controller.js   bounded specialist creation
   skills.js                   SKILL.md loader, exposes each skill as a tool
+  skill-replay.js             replay parser + executor + trust persistence
   tool-registry.js            internal tools the agent can call
+mac/Sources/OpenAGI/
+  AppDelegate.swift           menubar lifecycle
+  TrayController.swift        menu bar icon + status
+  DaemonController.swift      Node bundle launcher + crash recovery
+  AppState.swift              SSE client + dashboard window
+  Capture/                    ScreenCaptureKit + Vision OCR pipeline
+  Replay/                     SSE-driven action executor + confirmation modal
 examples/
   hosted-server.js            entrypoint for `npm run serve`
   abi-demo.js                 deterministic ABI signal demo
@@ -299,19 +411,24 @@ test/
   abi-runtime.test.js
 ```
 
+---
+
 ## Roadmap
 
-- Auth/pairing for remote access (currently `127.0.0.1` only).
-- HTTP / SSE MCP transport (stdio is in).
+- HTTP / SSE MCP transport for a richer client capability than current stdio.
 - Specialist routing — when a message matches a specialist's bounded scope, route to it instead of always `main`.
 - Embeddings-backed memory search alongside the current keyword overlap.
 - Per-channel delivery policies and retry queues.
+- Sparkle release pipeline so the Mac `.app` updates automatically.
+
+---
 
 ## License
 
-PolyForm Noncommercial License 1.0.0 — see [LICENSE](LICENSE).
+**PolyForm Noncommercial License 1.0.0** — see [LICENSE](LICENSE).
 
-You can use, fork, run, and modify OpenAGI freely for personal, research, hobby,
-educational, government, and other noncommercial purposes. Commercial use
-(including using OpenAGI as part of a paid product or revenue-generating service)
-requires a separate license — open an issue or reach out if you want one.
+You can use, fork, run, and modify OpenAGI freely for personal, research, hobby, educational, government, and other noncommercial purposes. Commercial use (including using OpenAGI as part of a paid product or revenue-generating service) requires a separate license — open an issue or reach out if you want one.
+
+---
+
+[openagi.sh](https://openagi.sh) · [Issues](https://github.com/Spshulem/openAGI/issues) · [Docs](https://github.com/Spshulem/openAGI/tree/main/docs)
