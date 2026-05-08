@@ -480,6 +480,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/skills/replay-jobs") {
         return sendJson(res, 200, runtime.skillReplay.list({ status: url.searchParams.get("status") }));
       }
+      if (method === "GET" && pathname === "/observations/recent-context") {
+        if (!runtime.observations?.getRecentContext) return sendJson(res, 503, { error: "no observation store" });
+        const minutes = Math.max(1, Math.min(60, Number(url.searchParams.get("minutes") ?? 10)));
+        const ctx = await runtime.observations.getRecentContext({ minutes, maxChars: 1500, maxSnippets: 6 });
+        return sendJson(res, 200, ctx);
+      }
       if (method === "POST" && pathname === "/skills/mine") {
         // "Mine now" runs both miners so the user gets both activity-pattern
         // and chat-session candidates without having to know which is which.
@@ -2234,6 +2240,38 @@ async function refreshHealth() {
   }
 }
 
+async function refreshAmbientBadge() {
+  let host = document.getElementById("ambientBadge");
+  if (!host) {
+    host = document.createElement("span");
+    host.id = "ambientBadge";
+    host.style.cssText = "margin-left:12px;font-size:12px;padding:3px 9px;border-radius:10px;border:1px solid var(--line);color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap;";
+    host.title = "Ambient context — what the agent sees from your screen. Click to view Activity tab.";
+    host.addEventListener("click", () => switchTab("activity"));
+    const slot = document.querySelector("header .status")?.parentElement;
+    if (slot) slot.appendChild(host);
+  }
+  try {
+    const ctx = await fetchJson("/observations/recent-context?minutes=10");
+    const apps = ctx.apps?.length ?? 0;
+    const snippets = ctx.snippets?.length ?? 0;
+    if (apps === 0 && snippets === 0) {
+      host.textContent = "👀 capture idle";
+      host.style.color = "var(--muted)";
+      host.style.borderColor = "var(--line)";
+    } else {
+      const topApp = ctx.apps?.[0]?.app?.split(".").pop() ?? "";
+      host.textContent = \`👀 \${apps} app\${apps === 1 ? "" : "s"} · \${snippets} snippet\${snippets === 1 ? "" : "s"}\${topApp ? " · " + topApp : ""}\`;
+      host.style.color = "var(--accent)";
+      host.style.borderColor = "var(--accent)";
+    }
+  } catch {
+    host.textContent = "👀 capture off";
+    host.style.color = "var(--muted)";
+    host.style.borderColor = "var(--line)";
+  }
+}
+
 function renderProviderSwitch(p) {
   let host = document.getElementById("providerSwitch");
   if (!host) {
@@ -2301,6 +2339,8 @@ evt.addEventListener("skill-candidate", (e) => {
 
 setInterval(refreshHealth, 5000);
 refreshHealth();
+setInterval(refreshAmbientBadge, 15000);
+refreshAmbientBadge();
 switchTab("chat");
 </script>
 </body>
