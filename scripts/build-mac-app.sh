@@ -181,12 +181,36 @@ if [[ "${NOTARIZE:-0}" == "1" ]]; then
   fi
   TARGET="${DMG_PATH:-${APP}}"
   echo "▶ Submitting ${TARGET} for notarization"
+
+  # Capture submit output so we can parse status + submission id.
+  NOTARY_LOG="${BUILD_DIR}/notarize-submit.log"
   xcrun notarytool submit "${TARGET}" \
     --apple-id "${AC_USERNAME}" \
     --password "${AC_PASSWORD}" \
     --team-id "${AC_TEAM_ID}" \
-    --wait
-  if [[ -d "${TARGET}" ]]; then xcrun stapler staple "${TARGET}"; fi
+    --wait 2>&1 | tee "${NOTARY_LOG}"
+
+  STATUS="$(grep -E '^[[:space:]]*status:' "${NOTARY_LOG}" | tail -1 | awk -F': ' '{print $2}' | tr -d '[:space:]')"
+  SUBMISSION_ID="$(grep -E '^[[:space:]]*id:' "${NOTARY_LOG}" | tail -1 | awk -F': ' '{print $2}' | tr -d '[:space:]')"
+
+  if [[ "${STATUS}" != "Accepted" ]]; then
+    echo "" >&2
+    echo "✗ Notarization status: ${STATUS:-unknown}" >&2
+    echo "✗ Submission id: ${SUBMISSION_ID:-unknown}" >&2
+    if [[ -n "${SUBMISSION_ID}" ]]; then
+      echo "" >&2
+      echo "▶ Fetching Apple's notarization log:" >&2
+      xcrun notarytool log "${SUBMISSION_ID}" \
+        --apple-id "${AC_USERNAME}" \
+        --password "${AC_PASSWORD}" \
+        --team-id "${AC_TEAM_ID}" >&2 || true
+    fi
+    exit 1
+  fi
+
+  echo "▶ Stapling notarization ticket"
+  # stapler accepts both .app directories and .dmg files.
+  xcrun stapler staple "${TARGET}"
 fi
 
 echo "▶ Done. ${APP}"
