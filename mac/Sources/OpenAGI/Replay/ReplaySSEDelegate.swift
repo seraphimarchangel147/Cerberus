@@ -38,7 +38,8 @@ final class ReplaySSEDelegate: NSObject, URLSessionDataDelegate {
       }
     }
     if event == "replay" && !data.isEmpty {
-      Task { @MainActor in ReplayController.shared.handleReplay(eventData: data) }
+      let payload = data
+      Task { @MainActor in ReplayController.shared.handleReplay(eventData: payload) }
     }
   }
 }

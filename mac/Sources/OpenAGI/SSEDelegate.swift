@@ -38,7 +38,9 @@ final class SSEDelegate: NSObject, URLSessionDataDelegate {
       }
     }
     if !data.isEmpty {
-      Task { @MainActor in AppState.shared.handleSSEEvent(event, data) }
+      let evt = event
+      let payload = data
+      Task { @MainActor in AppState.shared.handleSSEEvent(evt, payload) }
     }
   }
 }

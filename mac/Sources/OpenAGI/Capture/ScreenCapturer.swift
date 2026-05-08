@@ -30,7 +30,8 @@ final class ScreenCapturer {
     stop()
     let interval = max(2.0, CaptureSettings.shared.captureIntervalSeconds)
     timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-      Task { @MainActor in await self?.captureOnce() }
+      guard let self else { return }
+      Task { @MainActor in await self.captureOnce() }
     }
   }
 
