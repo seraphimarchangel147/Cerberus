@@ -5,6 +5,15 @@ import { McpHttpClient } from "./mcp-http-client.js";
 import { McpOAuthClient } from "./mcp-oauth.js";
 import { ensureDir, readJsonFile } from "./file-utils.js";
 
+// Whitelist of executables permitted as the `command` for stdio MCP servers.
+// Anything not in this set is rejected at registerServer() — closes the
+// "register /bin/sh -c <payload>" RCE path.
+const ALLOWED_STDIO_COMMANDS = new Set([
+  "npx", "node", "bun", "bunx", "deno",
+  "python", "python3", "uv", "uvx",
+  "docker"
+]);
+
 export class McpRegistry {
   constructor(options = {}) {
     this.servers = new Map();
@@ -15,6 +24,12 @@ export class McpRegistry {
     // Set by hosted-interface so OAuth-required surfaces in the dashboard SSE.
     this.onOauthRequired = options.onOauthRequired ?? null;
     this.connecting = new Map(); // name → Promise (in-flight connect)
+    // Allowlist of env-var names the user has opted into via .openagi/.env.
+    // Only these can flow into ${VAR} substitutions; references to anything
+    // else (AWS_*, GITHUB_TOKEN, etc.) throw at registerServer().
+    this.permittedEnvKeys = options.permittedEnvKeys instanceof Set
+      ? options.permittedEnvKeys
+      : new Set(loadDotenvKeys(this.dataDir));
   }
 
   bindToolRegistry(toolRegistry) {
@@ -29,23 +44,44 @@ export class McpRegistry {
       else if (server.command) transport = "stdio";
       else transport = "config";
     }
+
+    // stdio command allowlist — must be a known runner.
+    if (transport === "stdio") {
+      const cmd = server.command;
+      if (!cmd) throw new Error("stdio MCP server requires a `command`.");
+      const cmdLeaf = String(cmd).trim().split("/").pop();
+      if (!ALLOWED_STDIO_COMMANDS.has(cmdLeaf)) {
+        throw new Error(
+          `stdio command "${cmd}" is not in the allowlist. ` +
+          `Permitted: ${[...ALLOWED_STDIO_COMMANDS].join(", ")}.`
+        );
+      }
+    }
+
+    // http URL must be http(s) and not a loopback / link-local / RFC1918 host.
+    if (transport === "http") {
+      if (!server.url) throw new Error("http MCP server requires a `url`.");
+      assertSafeMcpUrl(server.url);
+    }
+
+    const allowed = this.permittedEnvKeys;
     const normalized = {
       name: server.name,
       transport,
       // stdio-specific
       command: server.command ?? null,
       args: server.args ?? [],
-      env: expandEnv(server.env ?? {}),
+      env: expandEnv(server.env ?? {}, allowed),
       cwd: server.cwd ?? null,
       // http-specific
       url: server.url ?? null,
       auth: server.auth ?? (server.apiKey ? "bearer" : (server.url ? "oauth" : "none")),
-      apiKey: expandValue(server.apiKey ?? null),
-      headers: expandEnv(server.headers ?? {}),
+      apiKey: expandValue(server.apiKey ?? null, allowed),
+      headers: expandEnv(server.headers ?? {}, allowed),
       scope: server.scope,
       // OAuth pre-registered client (for servers without dynamic registration)
-      clientId: expandValue(server.clientId ?? null),
-      clientSecret: expandValue(server.clientSecret ?? null),
+      clientId: expandValue(server.clientId ?? null, allowed),
+      clientSecret: expandValue(server.clientSecret ?? null, allowed),
       resourceUrl: server.resourceUrl ?? null,
       // shared
       trustLevel: server.trustLevel ?? "untrusted",
@@ -277,16 +313,71 @@ export class McpRegistry {
 }
 
 // Resolve "${ENV_VAR}" placeholders so config can reference secrets without
-// embedding them in the file. Bare strings pass through unchanged.
-function expandValue(value) {
+// embedding them in the file. Only env-vars that the user has opted into via
+// .openagi/.env are eligible — references to host env vars outside that set
+// (e.g. AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN) throw, preventing exfiltration
+// through an MCP server's auth header.
+function expandValue(value, allowedKeys) {
   if (typeof value !== "string") return value;
-  return value.replace(/\$\{([A-Z0-9_]+)\}/gi, (_, key) => process.env[key] ?? "");
+  return value.replace(/\$\{([A-Z0-9_]+)\}/gi, (_, key) => {
+    if (allowedKeys && !allowedKeys.has(key)) {
+      throw new Error(
+        `${key} is not in the env allowlist. Add it to .openagi/.env to reference it from MCP config.`
+      );
+    }
+    return process.env[key] ?? "";
+  });
 }
 
-function expandEnv(obj) {
+function expandEnv(obj, allowedKeys) {
   const out = {};
-  for (const [k, v] of Object.entries(obj ?? {})) out[k] = expandValue(v);
+  for (const [k, v] of Object.entries(obj ?? {})) out[k] = expandValue(v, allowedKeys);
   return out;
+}
+
+// Read keys out of .openagi/.env so registerServer knows what may be expanded.
+// We deliberately don't read process.env directly — only what the user has
+// explicitly placed in this file is eligible for ${VAR} substitution.
+function loadDotenvKeys(dataDir) {
+  const file = path.join(dataDir ?? ".openagi", ".env");
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch { return []; }
+  const keys = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=/);
+    if (m) keys.push(m[1]);
+  }
+  return keys;
+}
+
+// Reject MCP URLs that point at loopback / link-local / RFC1918 / cloud
+// metadata endpoints. Combined with the env-var allowlist this closes the
+// SSRF + secret-exfil chain through `/mcp/register`.
+function assertSafeMcpUrl(value) {
+  let u;
+  try { u = new URL(value); } catch { throw new Error(`Invalid MCP url: ${value}`); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`MCP url protocol must be http or https, got "${u.protocol}".`);
+  }
+  const host = u.hostname.toLowerCase();
+  if (
+    host === "localhost" || host === "0.0.0.0" || host === "::" ||
+    host.endsWith(".localhost") ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    host === "169.254.169.254" || // AWS / GCP IMDS
+    /^fd[0-9a-f]{2}:/.test(host) || // ULA
+    /^fe80:/.test(host) || // link-local
+    host === "::1"
+  ) {
+    throw new Error(
+      `MCP url host "${host}" is not allowed (loopback, private, or link-local). ` +
+      `Use a public hostname.`
+    );
+  }
 }
 
 // For OAuth discovery, use the MCP endpoint's origin as the resource URL

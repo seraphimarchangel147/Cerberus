@@ -46,6 +46,30 @@ export function isPublicRoute(pathname) {
   );
 }
 
+// Block cross-origin browser POSTs against state-changing routes. When
+// OPENAGI_AUTH_TOKEN is unset (default for single-user local installs), the
+// daemon would otherwise accept any same-machine browser request — including
+// one a malicious webpage triggers via fetch(). If the browser sets Origin
+// and it doesn't match our own Host, we reject. Non-browser callers (curl,
+// native clients, MCP clients) don't set Origin, so this is browser-only
+// CSRF defense and doesn't break programmatic use.
+export function checkOrigin(req) {
+  const method = req.method ?? "GET";
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    return { ok: true };
+  }
+  const origin = req.headers.origin;
+  if (!origin) return { ok: true }; // non-browser caller
+  let originHost;
+  try { originHost = new URL(origin).host; } catch { return { ok: false, reason: "malformed Origin header" }; }
+  const host = req.headers.host;
+  if (!host) return { ok: false, reason: "missing Host header" };
+  if (originHost !== host) {
+    return { ok: false, reason: `cross-origin POST blocked (Origin ${originHost} ≠ Host ${host})` };
+  }
+  return { ok: true };
+}
+
 export function verifyTwilioSignature({ authToken, fullUrl, params, signature }) {
   if (!authToken) return { ok: true, reason: "no twilio auth token configured" };
   if (!signature) return { ok: false, reason: "missing X-Twilio-Signature" };

@@ -6,6 +6,7 @@ import { createDefaultRuntime } from "./abi-runtime.js";
 import {
   buildSetCookie,
   checkAuth,
+  checkOrigin,
   isPublicRoute,
   verifyTelegramSecret,
   verifyTwilioSignature
@@ -106,6 +107,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (setupActive && method === "GET" && pathname === "/") {
         res.writeHead(302, { Location: "/setup" });
         return res.end();
+      }
+
+      // CSRF gate — block cross-origin browser POSTs against any state-changing
+      // route (always on, even before auth is configured). Webhook routes
+      // self-authenticate so we exempt them.
+      if (!isPublicRoute(pathname)) {
+        const origin = checkOrigin(req);
+        if (!origin.ok) {
+          res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+          return res.end(JSON.stringify({ error: "forbidden", reason: origin.reason }));
+        }
       }
 
       // Auth gate. Webhooks self-validate, /health stays open, setup routes

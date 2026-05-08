@@ -18,7 +18,7 @@
     },
 
     "//3": "── http + oauth (dynamic registration): for OIDC servers like Keycloak/Auth0 ──",
-    "buildbetter": {
+    "my-dcr-server": {
       "url": "https://mcp.example.com/mcp",
       "auth": "oauth",
       "trustLevel": "trusted"

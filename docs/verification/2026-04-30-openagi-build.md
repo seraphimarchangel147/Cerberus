@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-30
 **Plan:** none on disk — implicit plan from conversation: ship chat UI, conversational fallback, tool-use loop, Twilio outbound, cron-prompt jobs, skills, MCP stdio execution.
-**Branch:** uncommitted changes in `/path/to/openAGI/` (parent repo `/path/to`, branch `main`)
+**Branch:** uncommitted changes on `main`
 **PR:** none
 
 ## Method
