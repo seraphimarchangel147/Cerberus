@@ -30,6 +30,11 @@ final class CaptureBridge {
     let batch = CaptureStorage.shared.unpushedBatch(limit: 100)
     if batch.isEmpty { return }
 
+    // TODO(roadmap/remote-capture): make this configurable so the Mac
+    // can run as a capture-only client streaming to a remote daemon
+    // (e.g. a home Mac mini). Plumbing to a remote URL + bearer token
+    // is the same as localhost; just a settings field + UserDefaults.
+    // See docs/ROADMAP.md for the full design.
     var url = URL(string: "http://127.0.0.1:43210/observations")!
     var req = URLRequest(url: url)
     req.httpMethod = "POST"

@@ -483,6 +483,7 @@ test/
 
 ## Roadmap
 
+- **Remote capture streaming _(coming soon)_** — run the agent daemon on one machine (e.g. a home Mac mini) and stream screen captures + activity from any number of laptops/desktops to it. Foundation is already wired: `CaptureBridge` POSTs observations to `/observations` over HTTP with bearer auth. What's left is a thin "capture-only" client mode that points at a remote daemon URL + a tunnel, plus per-source attribution so the agent can answer "what was I doing on the work laptop yesterday vs. the home Mac". Track in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - HTTP / SSE MCP transport for a richer client capability than current stdio.
 - Specialist routing — when a message matches a specialist's bounded scope, route to it instead of always `main`.
 - Embeddings-backed memory search alongside the current keyword overlap.
