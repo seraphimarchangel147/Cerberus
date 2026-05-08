@@ -83,6 +83,34 @@ export class PatternMiner {
     return { mined: sequences.length, scored: scored.length, candidates: candidates.length, items: candidates };
   }
 
+  // For each occurrence of this sequence, pull a short OCR snippet from
+  // the frame closest to the sequence's middle timestamp. Returns a small
+  // array {app, when, text} so the proposal prompt can reference real
+  // on-screen content (commit messages, ticket numbers, channel names…)
+  // rather than just app identifiers.
+  async collectOcrForSequence(seq) {
+    if (!this.runtime?.observations?.search) return [];
+    const out = [];
+    const occurrences = (seq.occurrences ?? []).slice(0, 3);
+    for (const occ of occurrences) {
+      // Sequence's middle moment (occ is an ISO time string for the start)
+      const mid = new Date(occ).getTime();
+      const since = new Date(mid - 60_000).toISOString();
+      const until = new Date(mid + 120_000).toISOString();
+      try {
+        const rows = await this.runtime.observations.search({ since, until, limit: 8 });
+        for (const r of rows) {
+          const text = (r.text || "").trim();
+          if (!text || text.length < 40) continue;
+          out.push({ app: r.app || "?", when: r.at, text: text.replace(/\s+/g, " ").slice(0, 200) });
+          if (out.length >= 6) break;
+        }
+      } catch { /* best effort */ }
+      if (out.length >= 6) break;
+    }
+    return out;
+  }
+
   alreadyProposed(seq) {
     try {
       const files = fs.readdirSync(this.suggestedDir);
@@ -108,7 +136,11 @@ export class PatternMiner {
         scheduleHint: seq.startHour != null ? `daily at ${pad2(seq.startHour)}:00` : null
       };
     }
-    const prompt = buildProposalPrompt(seq);
+    // Pull OCR snippets from the time windows where this sequence occurred,
+    // so the LLM proposing the skill name + body can ground in what was
+    // actually on screen — not just app names.
+    const ocrSnippets = await this.collectOcrForSequence(seq);
+    const prompt = buildProposalPrompt(seq, ocrSnippets);
     try {
       const result = await provider.generate({
         input: prompt,
@@ -277,12 +309,15 @@ Output STRICTLY as JSON, no preamble. Schema:
 
 If pass=true, you can omit the other fields.`;
 
-function buildProposalPrompt(seq) {
+function buildProposalPrompt(seq, ocrSnippets = []) {
+  const ocrBlock = ocrSnippets.length > 0
+    ? `\n\nWhat was on screen during these occurrences (OCR text from screenshots, may be noisy):\n${ocrSnippets.map((s) => `- [${s.app}] ${s.text}`).join("\n")}`
+    : "";
   return `Sequence: ${seq.apps.join(" → ")}
 Occurrences: ${seq.count} times in the last 14 days
-Typical start hour: ~${seq.startHour}:00 (variance ${seq.hourVariance.toFixed(1)})
+Typical start hour: ~${seq.startHour}:00 (variance ${seq.hourVariance.toFixed(1)})${ocrBlock}
 
-Is this a real routine?`;
+Is this a real routine? If yes, propose a skill name + body that names the actual work (use OCR clues like ticket numbers, channel names, file paths). If no, return {"pass": true, "reason": "..."}.`;
 }
 
 function parseProposal(text) {

@@ -173,6 +173,49 @@ export class ObservationStore {
     return this.db.prepare(`SELECT 'activity' AS kind, app, window, at, event FROM activity WHERE ${where} ORDER BY at DESC LIMIT ?`).all(...params);
   }
 
+  // Build a compact "what was the user just doing" digest the agent host
+  // prepends to every chat turn. Returns top apps by focus-count in the
+  // window plus a budget-trimmed list of OCR snippets, so the LLM can ground
+  // its replies in actual on-screen activity instead of just app names.
+  async getRecentContext({ minutes = 10, maxChars = 1500, maxSnippets = 6 } = {}) {
+    await this.ready;
+    if (this.fallback) return { apps: [], snippets: [], sinceIso: null };
+    const sinceIso = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+
+    const apps = this.db.prepare(
+      `SELECT app, COUNT(*) AS n FROM activity
+       WHERE at >= ? GROUP BY app ORDER BY n DESC LIMIT 5`
+    ).all(sinceIso);
+
+    const frames = this.db.prepare(
+      `SELECT frame_uid, app, window, captured_at,
+         (SELECT text FROM texts WHERE ref = frames.frame_uid AND kind = 'frame') AS text
+       FROM frames WHERE captured_at >= ?
+       ORDER BY captured_at DESC LIMIT ?`
+    ).all(sinceIso, maxSnippets * 3);
+
+    const snippets = [];
+    const seenTexts = new Set();
+    let charsUsed = 0;
+    for (const f of frames) {
+      const raw = (f.text || "").trim();
+      if (!raw) continue;
+      // Per-frame budget so one screenshot can't eat the whole window.
+      const perFrame = Math.min(280, maxChars - charsUsed);
+      if (perFrame < 80) break;
+      const trimmed = raw.replace(/\s+/g, " ").slice(0, perFrame).trim();
+      // Dedupe near-identical frames captured back-to-back.
+      const dedupeKey = trimmed.slice(0, 120);
+      if (seenTexts.has(dedupeKey)) continue;
+      seenTexts.add(dedupeKey);
+      snippets.push({ app: f.app, window: f.window, at: f.captured_at, text: trimmed });
+      charsUsed += trimmed.length;
+      if (snippets.length >= maxSnippets) break;
+      if (charsUsed >= maxChars) break;
+    }
+    return { apps, snippets, sinceIso };
+  }
+
   async timelineByHour({ since } = {}) {
     await this.ready;
     if (this.fallback) return [];

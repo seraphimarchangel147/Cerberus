@@ -64,6 +64,17 @@ export class AgentHost {
       } catch { /* best effort */ }
     }
 
+    // Ambient on-screen context: top apps + most recent OCR snippets from
+    // the last 10 minutes. Lets the agent ground its replies in what the
+    // user is actually doing, not just what they typed. Best-effort —
+    // failures fall through silently so chat keeps working without capture.
+    let ambientContext = null;
+    if (channel !== "autopilot" && channel !== "cron" && this.runtime.observations?.getRecentContext) {
+      try {
+        ambientContext = await this.runtime.observations.getRecentContext({ minutes: 10, maxChars: 1500, maxSnippets: 6 });
+      } catch { /* swallow */ }
+    }
+
     const modelResult = await this.modelProvider.generate({
       input: text,
       agent,
@@ -77,7 +88,7 @@ export class AgentHost {
         }
       })),
       messages: sessionBefore.messages,
-      instructions: this.instructionsForAgent(agent, output, intuitions),
+      instructions: this.instructionsForAgent(agent, output, intuitions, ambientContext),
       tools,
       toolRegistry,
       context: {
@@ -213,10 +224,29 @@ export class AgentHost {
     };
   }
 
-  instructionsForAgent(agent, output, intuitions = []) {
+  instructionsForAgent(agent, output, intuitions = [], ambientContext = null) {
     const intuitionBlock = intuitions.length > 0
       ? `\nIntuitions (distilled long-term principles, may apply):\n${intuitions.map((i) => `- (${i.score.toFixed(2)}) ${i.text}`).join("\n")}\n`
       : "";
+
+    let ambientBlock = "";
+    if (ambientContext && (ambientContext.apps?.length || ambientContext.snippets?.length)) {
+      const lines = ["", "Recent on-screen activity (last ~10 minutes — opt-in screen capture, on-device OCR):"];
+      if (ambientContext.apps?.length) {
+        lines.push(`Active apps: ${ambientContext.apps.map((a) => `${a.app} (${a.n})`).join(", ")}`);
+      }
+      if (ambientContext.snippets?.length) {
+        lines.push("Recent screen snippets:");
+        for (const s of ambientContext.snippets) {
+          const stamp = (s.at || "").slice(11, 16); // HH:MM
+          const where = s.window ? `${s.app} · ${s.window}` : s.app;
+          lines.push(`- [${stamp} ${where}] ${s.text}`);
+        }
+      }
+      lines.push("Use this to ground your reply in what the user is actually doing. Don't quote the snippets back verbatim — refer to them naturally if relevant.");
+      ambientBlock = lines.join("\n") + "\n";
+    }
+
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
 Your job is to help through the ABI loop:
@@ -227,7 +257,7 @@ Your job is to help through the ABI loop:
 Current decision: ${output.scrutiny.action}
 Reasons:
 ${output.scrutiny.reasons.map((reason) => `- ${reason}`).join("\n")}
-${intuitionBlock}
+${intuitionBlock}${ambientBlock}
 Answer the user plainly. If a specialist was created, mention its name and scope.`;
   }
 
