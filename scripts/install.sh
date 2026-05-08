@@ -54,6 +54,74 @@ ip_for_user() {
   fi
 }
 
+install_via_mac_dmg() {
+  color_green "▶ Installing OpenAGI for macOS"
+  if [ "$(uname -s)" != "Darwin" ]; then
+    color_red "install_via_mac_dmg only runs on macOS."
+    return 1
+  fi
+
+  # Pull the latest signed .dmg from the GitHub Release.
+  color_yellow "▶ Resolving latest release"
+  RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/Spshulem/openAGI/releases/latest" || true)"
+  if [ -z "$RELEASE_JSON" ]; then
+    color_red "Couldn't reach GitHub API. Check your network and try again."
+    return 1
+  fi
+
+  DMG_URL="$(printf '%s' "$RELEASE_JSON" | grep -oE '"browser_download_url":[[:space:]]*"[^"]*\.dmg"' | head -1 | sed -E 's/.*"(https[^"]+\.dmg)".*/\1/')"
+  if [ -z "$DMG_URL" ]; then
+    color_yellow "No .dmg in the latest release yet. Falling back to source build."
+    color_yellow "Run:  git clone $REPO && cd openAGI && npm install && ./scripts/build-mac-app.sh"
+    return 1
+  fi
+
+  TMP="$(mktemp -d)"
+  DMG="$TMP/OpenAGI.dmg"
+  color_yellow "▶ Downloading $(basename "$DMG_URL")"
+  curl -fL --progress-bar -o "$DMG" "$DMG_URL"
+
+  color_yellow "▶ Verifying signature + notarization"
+  if ! spctl --assess --type install "$DMG" >/dev/null 2>&1; then
+    color_yellow "  spctl couldn't verify the DMG itself; will check the .app after install."
+  fi
+
+  color_yellow "▶ Mounting"
+  MOUNT_OUT="$(hdiutil attach -nobrowse -readonly "$DMG")"
+  MOUNT_PATH="$(printf '%s' "$MOUNT_OUT" | tail -1 | awk -F'\t' '{print $NF}')"
+  if [ ! -d "$MOUNT_PATH" ]; then
+    color_red "Mount failed. DMG saved at $DMG."
+    return 1
+  fi
+
+  APP_SOURCE="$MOUNT_PATH/OpenAGI.app"
+  if [ ! -d "$APP_SOURCE" ]; then
+    color_red "OpenAGI.app not found inside the DMG."
+    hdiutil detach "$MOUNT_PATH" -quiet || true
+    return 1
+  fi
+
+  color_yellow "▶ Copying to /Applications"
+  if [ -d "/Applications/OpenAGI.app" ]; then
+    rm -rf "/Applications/OpenAGI.app.bak"
+    mv "/Applications/OpenAGI.app" "/Applications/OpenAGI.app.bak" || true
+  fi
+  cp -R "$APP_SOURCE" "/Applications/OpenAGI.app"
+  hdiutil detach "$MOUNT_PATH" -quiet || true
+  rm -rf "$TMP"
+
+  if spctl --assess --verbose=4 "/Applications/OpenAGI.app" >/dev/null 2>&1; then
+    color_green "  ✓ Gatekeeper says: signed + notarized."
+  else
+    color_yellow "  ⚠ App is installed but not yet Gatekeeper-validated. Right-click → Open the first time."
+  fi
+
+  color_green "▶ Launching OpenAGI"
+  open "/Applications/OpenAGI.app"
+  color_green "✓ Installed. Look in your menu bar — the OpenAGI icon should appear."
+  color_yellow "  Setup wizard: http://127.0.0.1:43210/setup"
+}
+
 install_via_docker() {
   color_green "▶ Installing OpenAGI via Docker"
   if ! command -v docker >/dev/null 2>&1; then
@@ -114,13 +182,17 @@ color_green "Architecture: ${arch}"
 case "${MODE}" in
   docker) install_via_docker ;;
   systemd|source) install_via_systemd ;;
+  mac) install_via_mac_dmg ;;
   auto)
-    if command -v docker >/dev/null 2>&1; then
+    UNAME_S="$(uname -s)"
+    if [ "$UNAME_S" = "Darwin" ]; then
+      install_via_mac_dmg
+    elif command -v docker >/dev/null 2>&1; then
       install_via_docker || install_via_systemd
     elif [ -f /etc/debian_version ]; then
       install_via_systemd
     else
-      color_red "Auto-install only supports Debian-family hosts or systems with Docker installed."
+      color_red "Auto-install only supports macOS, Debian-family hosts, or systems with Docker installed."
       color_red "Install Docker first, then re-run this script."
       exit 1
     fi
@@ -137,8 +209,9 @@ $(color_green "OpenAGI is up.")
     http://${ip:-<your IP>}:43210/setup
 
   Tail logs:
-    journalctl -u openagi -f         # systemd
-    docker logs -f openagi           # docker
+    journalctl -u openagi -f                                    # systemd
+    docker logs -f openagi                                      # docker
+    tail -f ~/Library/Application\ Support/OpenAGI/launchd.err.log  # macOS
 
 ──────────────────────────────────────────────
 EOF

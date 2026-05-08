@@ -41,13 +41,13 @@
   <key>NSScreenCaptureUsageDescription</key>
   <string>OpenAGI captures periodic screenshots locally for OCR + recall. Frames stay on this Mac. Excluded apps (e.g. password managers) are never captured.</string>
 
-  <!-- Sparkle. Replace SUPublicEDKey with the EdDSA public key generated locally:
-       generate_keys-bin (from Sparkle release) → prints public key.
-       SUFeedURL points at the appcast.xml served from your release artifact host. -->
+  <!-- Sparkle EdDSA public key. The matching private key lives in the
+       OpenAGI keychain on the release-signing machine (and as the
+       SPARKLE_ED_PRIVATE_KEY GitHub secret for CI release signing). -->
   <key>SUFeedURL</key>
   <string>https://github.com/Spshulem/openAGI/releases/latest/download/appcast.xml</string>
   <key>SUPublicEDKey</key>
-  <string>__SPARKLE_PUBLIC_KEY__</string>
+  <string>unOtVkyA3akAScIoYYZ8UkqoBx56Ze1mDcEni8K1964=</string>
   <key>SUEnableAutomaticChecks</key>
   <true/>
   <key>SUScheduledCheckInterval</key>
