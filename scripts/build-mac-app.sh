@@ -18,7 +18,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAC_DIR="${ROOT}/mac"
 BUILD_DIR="${ROOT}/build"
 APP="${BUILD_DIR}/OpenAGI.app"
-VERSION="${VERSION:-$(node -p "require('${ROOT}/package.json').version")}"
+# Version resolution, in priority order:
+#   1. $VERSION env var (CI passes this from the git tag — never override)
+#   2. Latest git tag matching v* (so local builds match the latest release
+#      without anyone having to remember to bump package.json after every tag)
+#   3. package.json (last-resort fallback)
+if [[ -z "${VERSION:-}" ]]; then
+  GIT_TAG="$(cd "${ROOT}" && git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+  if [[ -n "${GIT_TAG}" ]]; then
+    VERSION="${GIT_TAG#v}"
+  else
+    VERSION="$(node -p "require('${ROOT}/package.json').version")"
+  fi
+fi
 BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 NODE_VERSION="${NODE_VERSION:-22.21.1}"
 
