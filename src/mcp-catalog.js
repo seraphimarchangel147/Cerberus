@@ -72,6 +72,21 @@ export const MCP_CATALOG = [
     }
   },
   {
+    id: "buildbetter",
+    name: "BuildBetter",
+    description: "Search calls, read transcripts, list action items / commitments / signals from your BuildBetter workspace. Useful when you want on-demand call recall — pair with the BuildBetter direct API source for automatic action-item ingestion into tasks.",
+    matches: {
+      bundleIds: [],
+      hostnames: ["buildbetter.app", "app.buildbetter.app"],
+      keywords: ["buildbetter", "action item", "call summary", "interview"]
+    },
+    register: {
+      url: "https://mcp.buildbetter.app/sse",
+      transport: "http",
+      auth: "oauth"
+    }
+  },
+  {
     id: "filesystem-tmp",
     name: "Filesystem (read-only on /tmp)",
     description: "Lets the agent read scratch files in /tmp for grounding.",
