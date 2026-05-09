@@ -111,6 +111,22 @@ final class DaemonController {
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
   }
 
+  /// Async probe: is the daemon actually responding on /health right now?
+  /// Returns false on connection refused, timeout, or any non-200.
+  @MainActor
+  func probeHealth() async -> Bool {
+    guard let url = URL(string: "http://127.0.0.1:43210/health") else { return false }
+    var req = URLRequest(url: url)
+    req.timeoutInterval = 2.0
+    do {
+      let (_, resp) = try await URLSession.shared.data(for: req)
+      if let http = resp as? HTTPURLResponse { return http.statusCode == 200 }
+      return false
+    } catch {
+      return false
+    }
+  }
+
   /// POST /tick to the daemon. Used after wake-from-sleep so any cron jobs
   /// that were due during the sleep window run within ~1s instead of
   /// waiting up to OPENAGI_TICKER_MS for the resumed setInterval to fire.

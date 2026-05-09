@@ -21,18 +21,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
       CaptureController.shared.start()
       ReplayController.shared.start()
 
-      // Wake observer: the moment macOS resumes from sleep we POST /tick
-      // so any cron jobs that were due during the sleep window run within
-      // ~1s of wake instead of waiting up to OPENAGI_TICKER_MS for the
-      // resumed setInterval to fire.
+      // Wake observer: the moment macOS resumes from sleep we (1) probe
+      // /health to see if the daemon survived the sleep cycle, restart
+      // it if not, and (2) POST /tick so any cron jobs that were due
+      // during the sleep window run within ~1s of wake instead of waiting
+      // up to OPENAGI_TICKER_MS for the resumed setInterval.
       NSWorkspace.shared.notificationCenter.addObserver(
         forName: NSWorkspace.didWakeNotification,
         object: nil,
         queue: .main
       ) { _ in
         Task { @MainActor in
-          NSLog("OpenAGI: system woke — kicking daemon to run any missed cron jobs")
-          await DaemonController.shared.kickTick()
+          NSLog("OpenAGI: system woke — checking daemon health")
+          let alive = await DaemonController.shared.probeHealth()
+          if !alive {
+            NSLog("OpenAGI: daemon didn't survive sleep — restarting")
+            DaemonController.shared.restart()
+          } else {
+            await DaemonController.shared.kickTick()
+          }
         }
       }
     }

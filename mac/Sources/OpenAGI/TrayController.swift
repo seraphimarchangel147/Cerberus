@@ -88,6 +88,13 @@ struct TrayMenu: View {
         Text("⚠ \(err)").disabled(true).foregroundStyle(.red).lineLimit(3)
         Button("Show daemon log…") { revealDaemonLog() }
       }
+      // When daemon is down or degraded, the restart action moves up
+      // here next to the error so it's discoverable without scrolling.
+      if state.status == .down || state.status == .degraded {
+        Button(state.status == .down ? "↻ Restart daemon" : "↻ Restart daemon (recover)") {
+          DaemonController.shared.restart()
+        }
+      }
       if state.providerConfigured {
         Text("Model: \(state.providerName)").disabled(true)
       } else {

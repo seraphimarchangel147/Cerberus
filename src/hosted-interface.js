@@ -2522,8 +2522,26 @@ async function renderIntegrations() {
       ? \`<div class="muted" style="font-size:11px; margin-top:4px;">env: <code>\${p.envKeys.map(escapeHtml).join("</code> · <code>")}</code></div>\`
       : "";
     let actions = "";
-    if (p.kind === "api" && p.envKeys?.length > 0 && !p.configured) {
-      actions = \`<a class="btn-secondary" href="/setup" style="font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid var(--line); text-decoration:none;">Add credentials in /setup</a>\`;
+    let editForm = "";
+    if (p.kind === "api" && p.envKeys?.length > 0) {
+      const formId = \`form-\${it.id}-\${p.kind}\`;
+      const editLabel = p.configured ? "Edit credentials" : "+ Add credentials";
+      actions = \`<button class="edit-creds-btn" data-form-id="\${formId}" style="font-size:11px; padding:3px 8px;">\${editLabel}</button>\`;
+      editForm = \`
+        <form id="\${formId}" data-int-form class="edit-creds-form" style="display:none; margin-top:10px; padding:10px; background:rgba(255,255,255,.03); border-radius:6px;">
+          \${p.envKeys.map((k) => \`
+            <div style="margin-bottom:8px;">
+              <label style="display:block; font-size:11px; margin-bottom:3px; color:var(--muted);">\${escapeHtml(k)}</label>
+              <input type="\${k.includes("EMAIL") || k.includes("URL") || k.includes("FROM_NUMBER") || k.includes("USER_NAME") ? "text" : "password"}" name="\${escapeHtml(k)}" placeholder="\${p.configured ? "(leave blank to keep current)" : ""}" autocomplete="off" style="width:100%; padding:5px 7px; font-size:12px;">
+            </div>
+          \`).join("")}
+          <div class="row" style="gap:6px; align-items:center;">
+            <button type="submit" style="font-size:11px; padding:3px 10px;">Save</button>
+            <button type="button" data-cancel="\${formId}" class="secondary" style="font-size:11px; padding:3px 10px;">Cancel</button>
+            <span class="muted" style="font-size:11px;">Restart daemon afterwards from the menu bar to apply.</span>
+          </div>
+        </form>
+      \`;
     } else if (p.kind === "mcp" && !p.configured) {
       actions = \`<button class="add-mcp-btn" data-catalog-id="\${escapeHtml(p.catalogId)}" data-int-id="\${escapeHtml(it.id)}" style="font-size:11px; padding:3px 8px;">+ Connect this MCP</button>\`;
     } else if (p.kind === "mcp" && p.configured) {
@@ -2545,6 +2563,7 @@ async function renderIntegrations() {
             \${actions}
           </div>
         </div>
+        \${editForm}
       </div>
     \`;
   };
@@ -2584,6 +2603,43 @@ async function renderIntegrations() {
         showToast(\`Connect failed: \${err.message}\`, false);
         btn.disabled = false;
         btn.textContent = "+ Connect this MCP";
+      }
+    });
+  });
+
+  // Inline credential edit forms — show/hide and submit to /setup/save.
+  document.querySelectorAll(".edit-creds-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const form = document.getElementById(btn.dataset.formId);
+      if (!form) return;
+      form.style.display = form.style.display === "none" ? "" : "none";
+    });
+  });
+  document.querySelectorAll("[data-cancel]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const form = document.getElementById(btn.dataset.cancel);
+      if (form) form.style.display = "none";
+    });
+  });
+  document.querySelectorAll(".edit-creds-form").forEach((form) => {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const values = {};
+      for (const [k, v] of fd.entries()) {
+        const trimmed = String(v ?? "").trim();
+        if (trimmed.length > 0) values[k] = trimmed;
+      }
+      if (Object.keys(values).length === 0) {
+        showToast("Nothing to save (all fields empty)", false);
+        return;
+      }
+      try {
+        await postJson("/setup/save", values);
+        showToast("✓ Credentials saved. Restart the daemon from the menu bar to apply.", true);
+        await renderIntegrations();
+      } catch (err) {
+        showToast("Save failed: " + err.message, false);
       }
     });
   });

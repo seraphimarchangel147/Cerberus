@@ -35,6 +35,10 @@ final class AppState: ObservableObject {
 
   @Published var lastError: String? = nil
   @Published var consecutiveFailures: Int = 0
+  // Throttle for the auto-restart-on-3-consecutive-fails recovery path.
+  // Without this we'd respawn in a tight loop if the daemon is broken
+  // for a real reason (port conflict, missing entitlement, etc).
+  private var lastAutoRestartAt: Date = .distantPast
 
   struct Finding: Identifiable, Codable {
     var id: String { "\(severity):\(area):\(note)" }
@@ -132,6 +136,16 @@ final class AppState: ObservableObject {
       consecutiveFailures += 1
       if consecutiveFailures == 3 {
         notify(title: "OpenAGI offline", body: lastError ?? "Daemon stopped responding.", path: "/")
+      }
+      // Auto-recover: if /health has been failing for 3+ consecutive
+      // polls (~15s with default 5s polling), the daemon is genuinely
+      // dead. Restart it. Capped at one auto-restart per minute so we
+      // don't spin if the daemon is fundamentally broken — the user
+      // sees the offline state and can take action.
+      if consecutiveFailures == 3, Date().timeIntervalSince(lastAutoRestartAt) > 60 {
+        lastAutoRestartAt = Date()
+        NSLog("OpenAGI: daemon /health failing — auto-restarting")
+        DaemonController.shared.restart()
       }
       return
     }
