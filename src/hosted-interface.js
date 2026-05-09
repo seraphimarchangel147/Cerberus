@@ -485,6 +485,67 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/skills/replay-jobs") {
         return sendJson(res, 200, runtime.skillReplay.list({ status: url.searchParams.get("status") }));
       }
+      if (method === "GET" && pathname === "/integrations/status") {
+        // Live status of every source/integration the runtime knows about.
+        // Used by the Integrations dashboard tab to show cards + last-sync.
+        const status = {
+          sources: [
+            {
+              id: "linear",
+              name: "Linear",
+              kind: "task-source",
+              configured: Boolean(runtime.linearTaskSource?.isConfigured?.()),
+              envKeys: ["LINEAR_API_KEY"],
+              lastSyncedAt: runtime.linearTaskSource?.lastSyncedAt ?? null,
+              description: "Assigned issues poll into your task list every 5 min."
+            },
+            {
+              id: "buildbetter",
+              name: "BuildBetter",
+              kind: "task-source",
+              configured: Boolean(runtime.buildBetterTaskSource?.isConfigured?.()),
+              envKeys: ["BUILDBETTER_API_KEY", "BUILDBETTER_USER_EMAIL", "BUILDBETTER_USER_NAME"],
+              lastSyncedAt: runtime.buildBetterTaskSource?.lastSyncedAt ?? null,
+              description: "Action items + commitments from recent calls become tasks."
+            },
+            {
+              id: "rize",
+              name: "Rize.io",
+              kind: "activity-source",
+              configured: Boolean(process.env.RIZE_API_KEY),
+              envKeys: ["RIZE_API_KEY"],
+              description: "Time-tracking source. Adds rize_today_summary / rize_query / rize_recent_sessions agent tools."
+            },
+            {
+              id: "inbox",
+              name: "Inbox folder",
+              kind: "task-source",
+              configured: true,
+              envKeys: [],
+              description: "Always on. Drop .md/.txt files into ~/Library/Application Support/OpenAGI/inbox/ for tasks."
+            }
+          ],
+          channels: [
+            {
+              id: "twilio",
+              name: "Twilio SMS",
+              kind: "channel",
+              configured: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+              envKeys: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"],
+              description: "Two-way SMS — text the agent, get texts back."
+            },
+            {
+              id: "telegram",
+              name: "Telegram",
+              kind: "channel",
+              configured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+              envKeys: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_POLLING"],
+              description: "Bot from BotFather. Webhook or long-polling."
+            }
+          ]
+        };
+        return sendJson(res, 200, status);
+      }
       if (method === "GET" && pathname === "/tasks") {
         if (!runtime.tasks?.list) return sendJson(res, 503, { error: "no task store" });
         const queue = url.searchParams.get("queue") || undefined;
@@ -1015,6 +1076,7 @@ function renderApp() {
       <button data-tab="cron">Cron</button>
       <button data-tab="skills">Skills</button>
       <button data-tab="mcp">MCP</button>
+      <button data-tab="integrations">Integrations</button>
       <button data-tab="agents">Agents</button>
       <button data-tab="channels">Channels</button>
       <button data-tab="budget">Budget</button>
@@ -1241,6 +1303,9 @@ async function switchTab(tab) {
   } else if (tab === "tasks") {
     showSidebar(false);
     await renderTasks();
+  } else if (tab === "integrations") {
+    showSidebar(false);
+    await renderIntegrations();
   }
   renderTab();
 }
@@ -2187,6 +2252,68 @@ async function renderHealth() {
       <div class="grid">\${mcpCards}</div>
     </div>
   \`;
+}
+
+async function renderIntegrations() {
+  const data = await fetchJson("/integrations/status").catch(() => ({ sources: [], channels: [] }));
+  const card = (it) => {
+    const status = it.configured
+      ? \`<span class="badge ok">configured</span>\`
+      : \`<span class="badge">not configured</span>\`;
+    const lastSync = it.lastSyncedAt
+      ? \`<div class="muted" style="font-size:11px;">Last sync: \${escapeHtml(new Date(it.lastSyncedAt).toLocaleString())}</div>\`
+      : "";
+    const envBlock = it.envKeys?.length > 0
+      ? \`<div class="muted" style="font-size:11px; margin-top:6px;">env: <code>\${it.envKeys.map(escapeHtml).join("</code> · <code>")}</code></div>\`
+      : "";
+    return \`
+      <div class="card" style="padding:14px;">
+        <div class="row between" style="align-items:flex-start;">
+          <div>
+            <div class="name" style="font-weight:600;">\${escapeHtml(it.name)}</div>
+            <div class="muted" style="font-size:11px; text-transform:uppercase; margin-top:1px;">\${escapeHtml(it.kind)}</div>
+          </div>
+          \${status}
+        </div>
+        <div class="desc" style="margin-top:8px;">\${escapeHtml(it.description ?? "")}</div>
+        \${lastSync}
+        \${envBlock}
+      </div>
+    \`;
+  };
+
+  main.innerHTML = \`
+    <div class="pane">
+      <h2>Integrations</h2>
+      <p class="muted">Sources feed your task list and activity log. Channels are how messages reach you. Edit env vars at <a href="/setup">/setup</a> or in <code>.openagi/.env</code> directly, then restart the daemon.</p>
+
+      <h3 style="margin-top:18px;">Sources</h3>
+      <div class="grid two" style="gap:10px;">
+        \${(data.sources ?? []).map(card).join("")}
+      </div>
+
+      <h3 style="margin-top:24px;">Channels</h3>
+      <div class="grid two" style="gap:10px;">
+        \${(data.channels ?? []).map(card).join("")}
+      </div>
+
+      <h3 style="margin-top:24px;">MCP catalog</h3>
+      <p class="muted">When the proactive observer sees you using one of these in screen activity, it'll suggest connecting the MCP. You can also register manually in the MCP tab.</p>
+      <div id="mcpCatalogPreview"></div>
+    </div>
+  \`;
+
+  // Show a preview of the MCP catalog matched against current activity.
+  fetchJson("/observations/recent-context?minutes=15")
+    .then(async (ctx) => {
+      // Server-side has the catalog match logic; we'd need a dedicated
+      // endpoint for the catalog dump. For now, just show that the
+      // observer will surface them — link out to the docs / proactive tab.
+      const host = $("mcpCatalogPreview");
+      const apps = (ctx.apps ?? []).slice(0, 4).map((a) => a.app).join(", ");
+      host.innerHTML = \`<div class="card"><div class="desc">Recent activity: \${escapeHtml(apps || "(no recent activity — capture is off or quiet)")}.</div><div class="desc" style="margin-top:6px;">Connected MCPs are visible in the <a href="/?tab=mcp">MCP tab</a>.</div></div>\`;
+    })
+    .catch(() => {});
 }
 
 async function renderTasks() {

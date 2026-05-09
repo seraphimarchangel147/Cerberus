@@ -153,15 +153,15 @@ export function renderWizard({ proposedToken } = {}) {
 
   <form id="form">
     <div class="step">
-      <h2>1 / 6</h2>
+      <h2>1 / 7</h2>
       <h3>Welcome</h3>
-      <p>OpenAGI is an always-on local agent: chat, scheduled prompts, MCP tools, SMS/Telegram channels.<br>
+      <p>OpenAGI is an always-on local agent: chat, scheduled prompts, MCP tools, SMS/Telegram channels, automatic task tracking from your calls/issues/notes.<br>
       Everything runs on this machine. State stays in <code>${escapeHtml(envFilePath().replace(/\\/g, "/"))}</code>.</p>
-      <p>This wizard takes ~2 minutes. You can change anything later by re-running <code>/setup</code>.</p>
+      <p>This wizard takes ~3 minutes. You can change anything later by re-running <code>/setup</code> or via the <code>Integrations</code> tab.</p>
     </div>
 
     <div class="step">
-      <h2>2 / 6 · model</h2>
+      <h2>2 / 7 · model</h2>
       <h3>Pick a primary provider</h3>
       <p>You can supply both — but pick which one drives chat and tool calls. Switch later from the dashboard.</p>
       <div class="grid">
@@ -186,7 +186,7 @@ export function renderWizard({ proposedToken } = {}) {
     </div>
 
     <div class="step">
-      <h2>3 / 6 · auth</h2>
+      <h2>3 / 7 · auth</h2>
       <h3>Bearer token</h3>
       <p>This is the password for your dashboard. Save it now — you'll need it to log in. We auto-generated a strong one for you, or paste your own.</p>
       <div class="token" id="tokenView">${escapeHtml(token)}</div>
@@ -198,8 +198,9 @@ export function renderWizard({ proposedToken } = {}) {
     </div>
 
     <div class="step">
-      <h2>4 / 6 · channels</h2>
+      <h2>4 / 7 · channels</h2>
       <h3>Where can the agent reach you? <span class="sub">all optional</span></h3>
+      <p class="sub">Channels are how messages get to/from you. (Data sources — where tasks come from — live in step 5.)</p>
 
       <details>
         <summary>Twilio SMS — text the agent and get texts back</summary>
@@ -218,18 +219,51 @@ export function renderWizard({ proposedToken } = {}) {
           <div class="opt"><input type="checkbox" id="tgPoll" name="TELEGRAM_POLLING" value="1"><label for="tgPoll" style="margin:0;">Long-poll instead of webhook (works without a tunnel)</label></div>
         </div>
       </details>
+    </div>
+
+    <div class="step">
+      <h2>5 / 7 · sources</h2>
+      <h3>Where do tasks + activity come from? <span class="sub">all optional</span></h3>
+      <p class="sub">Sources feed the task system + activity log. The agent uses these to know what's on your plate. You can edit any of these later from <code>Integrations</code> in the dashboard.</p>
+
+      <details>
+        <summary>Linear — assigned issues become tasks</summary>
+        <div style="padding-top:10px;">
+          <p class="sub">Get a personal API key at <a href="https://linear.app/settings/api" target="_blank" rel="noopener">linear.app/settings/api</a>. Polls every 5 min.</p>
+          <label>LINEAR_API_KEY</label>
+          <input type="password" name="LINEAR_API_KEY" placeholder="lin_api_…" autocomplete="off">
+        </div>
+      </details>
 
       <details style="margin-top:8px;">
-        <summary>Rize.io — pull what you worked on today</summary>
+        <summary>BuildBetter — call action items become tasks</summary>
+        <div style="padding-top:10px;" class="grid">
+          <p class="sub">Pulls action_item / commitment / follow_up extractions from your recent calls. Polls every 15 min.</p>
+          <div><label>BUILDBETTER_API_KEY</label><input type="password" name="BUILDBETTER_API_KEY" autocomplete="off"></div>
+          <div><label>BUILDBETTER_USER_EMAIL <span class="sub">(or use BUILDBETTER_USER_NAME below)</span></label><input type="email" name="BUILDBETTER_USER_EMAIL" placeholder="you@example.com"></div>
+          <div><label>BUILDBETTER_USER_NAME <span class="sub">(alternative to email)</span></label><input type="text" name="BUILDBETTER_USER_NAME" placeholder="Your Name"></div>
+        </div>
+      </details>
+
+      <details style="margin-top:8px;">
+        <summary>Rize.io — what you worked on today</summary>
         <div style="padding-top:10px;">
+          <p class="sub">Activity tracking surfaces "what did I work on today?" via the <code>rize_*</code> agent tools. Get a key at <a href="https://my.rize.io/settings/api" target="_blank" rel="noopener">my.rize.io/settings/api</a>.</p>
           <label>RIZE_API_KEY</label>
           <input type="password" name="RIZE_API_KEY" autocomplete="off">
+        </div>
+      </details>
+
+      <details style="margin-top:8px;">
+        <summary>Inbox folder — drop files for tasks <span class="sub">no setup needed</span></summary>
+        <div style="padding-top:10px;">
+          <p class="sub">Always-on. Drop any <code>.md</code> or <code>.txt</code> file into <code>~/Library/Application Support/OpenAGI/inbox/</code> and OpenAGI parses GitHub-style checkboxes (<code>- [ ] foo</code>) and <code>TODO:</code> / <code>TASK:</code> / <code>REMINDER:</code> prefixes into tasks. Sweeps every 30 seconds. Works for reMarkable (point your Dropbox sync at the inbox folder), Obsidian, Bear, scanned paper notes.</p>
         </div>
       </details>
     </div>
 
     <div class="step">
-      <h2>5 / 6 · public access</h2>
+      <h2>6 / 7 · public access</h2>
       <h3>Tunnel <span class="sub">required for SMS/Telegram webhooks</span></h3>
       <p>If you want Twilio or Telegram webhooks to reach this machine, expose it via a tunnel. <code>cloudflared</code> on macOS: <code>brew install cloudflared</code>; on Linux: <a href="https://pkg.cloudflare.com/index.html" target="_blank" rel="noopener">pkg.cloudflare.com</a>.</p>
       <p>Then run <code>npm run tunnel</code> in another terminal and paste the URL it prints below.</p>
@@ -238,7 +272,7 @@ export function renderWizard({ proposedToken } = {}) {
     </div>
 
     <div class="step">
-      <h2>6 / 6 · spending</h2>
+      <h2>7 / 7 · spending</h2>
       <h3>Daily budget</h3>
       <p>Hard ceiling on LLM spend per day. Provider calls throw <code>BUDGET_EXCEEDED</code> past this. Default $10/day.</p>
       <label>OPENAGI_DAILY_USD_LIMIT</label>
