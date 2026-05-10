@@ -369,7 +369,13 @@ export function registerCoreTools(registry, runtime) {
     name: "register_mcp_server",
     description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with static API key), http+oauth (URL with browser-based OAuth). After registering, the user typically needs to call connect_mcp_server. THIS REQUIRES USER APPROVAL — registering an MCP can mean spawning an arbitrary process or contacting an arbitrary host. Prefer connect_catalog_mcp when the server is already in the curated catalog.",
     needsConfirmation: true,
-    summarize: (args) => `Register MCP '${args.name}' (${args.transport ?? (args.url ? "http" : "stdio")})`,
+    // Summary is what shows in the menu-bar notification and dashboard
+    // approval card header. Critically include the fields that determine
+    // whether the action is dangerous: the stdio command + first few args,
+    // or the http URL. Hiding these in the args details would let a prompt-
+    // injected agent slip a malicious `docker run -v $HOME:/host …` past a
+    // user who only glances at the notification.
+    summarize: (args) => summarizeRegisterMcpServer(args),
     parameters: {
       type: "object",
       properties: {
@@ -656,7 +662,18 @@ export function registerCoreTools(registry, runtime) {
       additionalProperties: false
     },
     needsConfirmation: true,
-    summarize: (args) => `Connect MCP: ${args.catalogId}${args.apiKey ? " (with API key you provided)" : ""}`,
+    // When apiKey is supplied, include a short prefix in the summary so
+    // the user can sanity-check that the agent is forwarding *their* key
+    // and not a substituted attacker key from prompt injection. Full key
+    // still appears in the args details for users who want to verify.
+    summarize: (args) => {
+      let label = `Connect MCP: ${args.catalogId}`;
+      if (args.apiKey) {
+        const prefix = String(args.apiKey).slice(0, 8);
+        label += ` (with key starting "${prefix}…")`;
+      }
+      return label;
+    },
     handler: async (args) => {
       const { MCP_CATALOG } = await import("./mcp-catalog.js");
       const entry = MCP_CATALOG.find((e) => e.id === args.catalogId);
@@ -730,4 +747,25 @@ export function registerCoreTools(registry, runtime) {
   });
 
   return registry;
+}
+
+// Builds the human-readable summary shown on register_mcp_server approval
+// cards. Always includes the fields that determine whether the call is
+// dangerous (stdio command + first 3 args, or http URL + auth mode) so the
+// user can't approve a hidden `docker run -v /:/host` based on the name
+// alone. Exported for testing.
+export function summarizeRegisterMcpServer(args = {}) {
+  const transport = args.transport ?? (args.url ? "http" : args.command ? "stdio" : "config");
+  const name = args.name ?? "(unnamed)";
+  if (transport === "stdio") {
+    const cmd = args.command ?? "?";
+    const firstArgs = (args.args ?? []).slice(0, 3).join(" ");
+    const more = (args.args?.length ?? 0) > 3 ? " …" : "";
+    return `Register stdio MCP '${name}' → ${cmd} ${firstArgs}${more}`.trim();
+  }
+  if (transport === "http") {
+    const auth = args.auth ?? (args.apiKey ? "bearer" : "oauth");
+    return `Register http MCP '${name}' → ${args.url ?? "(no url)"} (auth=${auth})`;
+  }
+  return `Register MCP '${name}' (${transport})`;
 }

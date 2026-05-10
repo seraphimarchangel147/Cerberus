@@ -1943,7 +1943,7 @@ async function renderChatDeepLink() {
             <span class="badge">\${escapeHtml(action.toolName)}</span>
           </div>
           \${action.reason ? \`<div class="muted" style="margin-top:6px; font-size:12px;">\${escapeHtml(action.reason)}</div>\` : ""}
-          <details style="margin-top:6px;"><summary class="muted" style="font-size:11px;">view args</summary><pre style="font-size:11px; margin-top:4px;">\${escapeHtml(JSON.stringify(action.args, null, 2))}</pre></details>
+          <details open style="margin-top:6px;"><summary class="muted" style="font-size:11px;">args</summary><pre style="font-size:11px; margin-top:4px;">\${escapeHtml(JSON.stringify(action.args, null, 2))}</pre></details>
           <div class="row" style="gap:8px; margin-top:10px;">
             <button id="dl-approve">Approve & run</button>
             <button id="dl-deny" class="secondary">Deny</button>
@@ -2904,7 +2904,7 @@ async function renderSuggestions() {
           <span class="badge">\${escapeHtml(a.toolName)}</span>
         </div>
         \${a.reason ? \`<div class="muted" style="margin-top:6px; font-size:12px;">\${escapeHtml(a.reason)}</div>\` : ""}
-        <details style="margin-top:6px;"><summary class="muted" style="font-size:11px;">view args</summary><pre style="font-size:11px; margin-top:4px;">\${escapeHtml(JSON.stringify(a.args, null, 2))}</pre></details>
+        <details open style="margin-top:6px;"><summary class="muted" style="font-size:11px;">args</summary><pre style="font-size:11px; margin-top:4px;">\${escapeHtml(JSON.stringify(a.args, null, 2))}</pre></details>
         <div class="muted" style="margin-top:4px; font-size:11px;">queued \${escapeHtml(new Date(a.createdAt).toLocaleString())}</div>
         <div class="row" style="gap:8px; margin-top:10px;">
           <button data-pending-action="approve">Approve & run</button>

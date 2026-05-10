@@ -1371,6 +1371,133 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("register_mcp_server.summarize: stdio call exposes command + args", async () => {
+  const { summarizeRegisterMcpServer } = await import("../src/tool-registry.js");
+  const summary = summarizeRegisterMcpServer({
+    name: "linear-helper",
+    transport: "stdio",
+    command: "docker",
+    args: ["run", "--rm", "-v", "$HOME:/host", "alpine"]
+  });
+  // The dangerous fields (command, first args) MUST appear in the summary
+  // string so a user approving the menu-bar notification can see what
+  // they're approving. This is the C1 review finding.
+  assert.match(summary, /docker/, "command appears in summary");
+  assert.match(summary, /run/, "first arg appears in summary");
+  assert.match(summary, /-v/, "second arg appears in summary");
+  assert.match(summary, /linear-helper/, "server name appears in summary");
+  assert.match(summary, /…|\.\.\./u, "truncation marker when args >3");
+});
+
+test("register_mcp_server.summarize: http call exposes URL + auth", async () => {
+  const { summarizeRegisterMcpServer } = await import("../src/tool-registry.js");
+  const summary = summarizeRegisterMcpServer({
+    name: "evil-mcp",
+    transport: "http",
+    url: "https://attacker.example.com/mcp",
+    auth: "bearer"
+  });
+  assert.match(summary, /attacker\.example\.com/, "URL host appears in summary");
+  assert.match(summary, /bearer/, "auth mode appears in summary");
+  assert.match(summary, /evil-mcp/, "server name appears in summary");
+});
+
+test("register_mcp_server.summarize: short stdio doesn't add ellipsis", async () => {
+  const { summarizeRegisterMcpServer } = await import("../src/tool-registry.js");
+  const summary = summarizeRegisterMcpServer({
+    name: "fs",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem"]
+  });
+  // With ≤3 args the truncation marker should be absent.
+  assert.doesNotMatch(summary, /…|\.\.\./u, "no ellipsis when args fit");
+  assert.match(summary, /npx/);
+  assert.match(summary, /server-filesystem/);
+});
+
+test("connect_catalog_mcp.summarize: with apiKey shows prefix to detect substitution", async () => {
+  const { ToolRegistry, registerCoreTools } = await import("../src/tool-registry.js");
+  const fakeRuntime = {
+    memory: { remember: () => ({}), retrieve: () => [] },
+    cron: { addJob: () => ({}), listJobs: () => [], removeJob: () => false },
+    mcp: { listServers: () => [], listTools: () => [], registerServer: () => ({}), connect: () => Promise.resolve(), disconnect: () => Promise.resolve() },
+    channels: { deliver: () => ({}) },
+    introspector: { audit: () => ({}) },
+    budget: { status: () => ({}) },
+    skills: { list: () => [], run: () => ({}) },
+    skillReplay: { run: () => ({}) },
+    propagation: { retire: () => null },
+    observations: { search: async () => [] },
+    tasks: { add: () => ({}), list: () => [], complete: () => null, update: () => null, agentPickNext: () => null },
+    agentHost: { store: { listSessions: () => [], listAgents: () => [] } }
+  };
+  const registry = new ToolRegistry();
+  registerCoreTools(registry, fakeRuntime);
+
+  const tool = registry.get("connect_catalog_mcp");
+  assert.ok(tool.summarize, "connect_catalog_mcp has summarize");
+
+  // Without apiKey — plain summary.
+  const noKey = tool.summarize({ catalogId: "stripe" });
+  assert.equal(noKey, "Connect MCP: stripe");
+
+  // With apiKey — first 8 chars shown so user can detect a substituted key.
+  const withKey = tool.summarize({ catalogId: "stripe", apiKey: "sk_live_realkey123" });
+  assert.match(withKey, /sk_live_/, "first 8 chars of key appear in summary");
+  assert.doesNotMatch(withKey, /realkey123/, "rest of key is not shown");
+});
+
+test("ToolRegistry.invoke: gated tool's summary persists through to pending action", async () => {
+  // End-to-end: when the agent invokes register_mcp_server with a hidden
+  // docker-run-as-host payload, the queued pending action's summary must
+  // contain the dangerous fields — not just the friendly name.
+  const { ToolRegistry, registerCoreTools } = await import("../src/tool-registry.js");
+  const { PendingActionStore } = await import("../src/pending-actions.js");
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-summary-"));
+  const pending = new PendingActionStore({ dir: tmp });
+  const registry = new ToolRegistry();
+  registry.bindPendingActions(pending);
+
+  const fakeRuntime = {
+    mcp: { registerServer: () => ({ name: "x", transport: "stdio" }) }
+  };
+  registerCoreTools(registry, fakeRuntime);
+
+  const result = await registry.invoke("register_mcp_server", {
+    name: "innocuous-looking",
+    transport: "stdio",
+    command: "docker",
+    args: ["run", "--rm", "-v", "/:/host", "alpine"]
+  }, { sessionId: "test" });
+
+  assert.equal(result.result.status, "awaiting_confirmation");
+  const queued = pending.get(result.result.actionId);
+  assert.match(queued.summary, /docker/, "queued summary exposes command");
+  assert.match(queued.summary, /-v/, "queued summary exposes mount arg");
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test("approval cards: args render with <details open> by default (C4 regression)", async () => {
+  // The dashboard's approval cards used to render <details> closed, so users
+  // glancing at the card might approve without seeing the args. This test
+  // pins the open-by-default behavior in both the chat-deep-link card and
+  // the suggestions-tab card, so they don't quietly drift back to closed.
+  const fsLocal = await import("node:fs");
+  const src = fsLocal.readFileSync(new URL("../src/hosted-interface.js", import.meta.url), "utf8");
+
+  // Count <details open ...> tags. There should be at least 2 — one for
+  // each approval-card surface (renderChatDeepLink + renderSuggestions).
+  const openDetails = src.match(/<details\s+open\b/g) ?? [];
+  assert.ok(openDetails.length >= 2, `expected ≥2 <details open> in approval cards, got ${openDetails.length}`);
+
+  // No `<details>` for approval args should be missing the open attr.
+  // Find approval-context details (the ones immediately followed by an
+  // args dump in JSON.stringify(action.args... or a.args).
+  const closedNearArgs = src.match(/<details\s+style="[^"]*"><summary[^>]*>(view args|args)<\/summary>[^<]*<pre[^>]*>\$\{escapeHtml\(JSON\.stringify\((action|a)\.args/g) ?? [];
+  assert.equal(closedNearArgs.length, 0, "no closed <details> blocks around action.args / a.args");
+});
+
 test("IMessagePollerSource: skips when not enabled or self-handle missing", async () => {
   const { IMessagePollerSource } = await import("../src/integrations/imessage-poller.js");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-im-"));
