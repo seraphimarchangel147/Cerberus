@@ -109,30 +109,38 @@ export class McpRegistry {
   /// Save the un-expanded server specs to configPath (if set). We keep the
   /// `${VAR}` indirection so secrets stay in .env, not duplicated into the
   /// JSON. Called automatically from registerServer; no-op if the registry
-  /// wasn't constructed with a configPath.
+  /// wasn't constructed with a configPath. Throws on either of:
+  ///   - apiKey passed as a literal value (must be `${VAR}` to persist)
+  ///   - filesystem write failure
+  /// so callers that registered through an HTTP endpoint see a real error
+  /// instead of "200 OK but quietly lost on next boot".
   _persist(originalSpec) {
     if (!this.configPath) return;
-    try {
-      const existing = readJsonFile(this.configPath, null) ?? {};
-      const servers = existing.servers ?? existing.mcpServers ?? {};
-      // Round-trip what the caller passed (with `${VAR}` placeholders intact)
-      // so we never write the expanded secret back to disk.
-      const spec = {
-        ...(originalSpec ?? {}),
-        // Drop fields that aren't valid in the file schema.
-        name: undefined
-      };
-      for (const k of Object.keys(spec)) {
-        if (spec[k] === undefined) delete spec[k];
-      }
-      servers[originalSpec.name] = spec;
-      const out = existing.mcpServers ? { ...existing, mcpServers: servers } : { ...existing, servers };
-      writeJsonAtomic(this.configPath, out);
-    } catch (error) {
-      // Persistence is best-effort — if .openagi/ isn't writable we still
-      // keep the in-memory registration so the user gets value this session.
-      try { process.stderr.write(`MCP persist failed: ${error.message}\n`); } catch { /* ignore */ }
+    // Refuse to write raw bearer tokens to disk. Callers that need a
+    // bearer should add the env var via .env + allowEnvKey() and pass
+    // the apiKey as `${VAR}`. This catches /mcp/register callers that
+    // would otherwise leak an sk_live_… into mcp.json.
+    if (originalSpec?.apiKey != null && !looksLikeEnvPlaceholder(originalSpec.apiKey)) {
+      throw new Error(
+        `MCP server '${originalSpec.name}': refusing to persist a literal apiKey. ` +
+        `Pass apiKey: '\${VAR_NAME}' and put the value in .env so it isn't duplicated to mcp.json.`
+      );
     }
+    const existing = readJsonFile(this.configPath, null) ?? {};
+    const servers = existing.servers ?? existing.mcpServers ?? {};
+    // Round-trip what the caller passed (with `${VAR}` placeholders intact)
+    // so we never write the expanded secret back to disk.
+    const spec = {
+      ...(originalSpec ?? {}),
+      // Drop fields that aren't valid in the file schema.
+      name: undefined
+    };
+    for (const k of Object.keys(spec)) {
+      if (spec[k] === undefined) delete spec[k];
+    }
+    servers[originalSpec.name] = spec;
+    const out = existing.mcpServers ? { ...existing, mcpServers: servers } : { ...existing, servers };
+    writeJsonAtomic(this.configPath, out);
   }
 
   loadConfigFile(filePath) {
@@ -375,6 +383,15 @@ function expandValue(value, allowedKeys) {
     }
     return process.env[key] ?? "";
   });
+}
+
+// Strict-shape predicate: the apiKey field is either entirely a `${VAR}`
+// placeholder (which expandValue will substitute at register time) or empty.
+// Anything else is a literal bearer that we refuse to persist.
+function looksLikeEnvPlaceholder(value) {
+  if (value == null || value === "") return true;
+  if (typeof value !== "string") return false;
+  return /^\$\{[A-Z0-9_]+\}$/i.test(value.trim());
 }
 
 function expandEnv(obj, allowedKeys) {

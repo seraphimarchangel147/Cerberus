@@ -361,10 +361,11 @@ export function renderWizard({ proposedToken } = {}) {
 
       // Register every MCP the user checked. OAuth-shaped ones will surface
       // their auth URLs on /?tab=mcp and /?tab=integrations once we land.
+      // Parallel by Promise.all — order doesn't matter and serial would
+      // add a noticeable delay when 6+ entries are checked.
       const checkedMcps = Array.from(document.querySelectorAll('input[name^="mcp_"]:checked'))
         .map((el) => el.name.replace(/^mcp_/, ""));
-      const mcpResults = [];
-      for (const catalogId of checkedMcps) {
+      const mcpResults = await Promise.all(checkedMcps.map(async (catalogId) => {
         try {
           const r = await fetch("/integrations/connect-mcp", {
             method: "POST",
@@ -372,11 +373,11 @@ export function renderWizard({ proposedToken } = {}) {
             body: JSON.stringify({ catalogId })
           });
           const rb = await r.json();
-          mcpResults.push({ catalogId, ok: r.ok, name: rb.name, error: rb.error });
+          return { catalogId, ok: r.ok, name: rb.name, error: rb.error };
         } catch (err) {
-          mcpResults.push({ catalogId, ok: false, error: err.message });
+          return { catalogId, ok: false, error: err.message };
         }
-      }
+      }));
       const mcpSummary = mcpResults.length === 0 ? "" :
         '\\n\\n<span class="ok">MCPs registered:</span> ' +
         mcpResults.filter((r) => r.ok).map((r) => r.name ?? r.catalogId).join(", ") +

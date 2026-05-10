@@ -1215,3 +1215,115 @@ test("inbox parseTaskLine: GitHub checkboxes + explicit prefixes", async () => {
   assert.equal(parseTaskLine("just text"), null);
   assert.equal(parseTaskLine(""), null);
 });
+
+function makeMcpRegistryTmpDir(prefix = "openagi-mcp-test-") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return { dir, configPath: path.join(dir, "mcp.json") };
+}
+
+test("McpRegistry persist: ${VAR} placeholder round-trips, raw key is rejected", async () => {
+  const { McpRegistry } = await import("../src/mcp-registry.js");
+  const { dir, configPath } = makeMcpRegistryTmpDir();
+
+  const r = new McpRegistry({
+    dataDir: dir,
+    configPath,
+    permittedEnvKeys: new Set(["STRIPE_MCP_API_KEY"])
+  });
+  process.env.STRIPE_MCP_API_KEY = "sk_test_round_trip";
+
+  // Placeholder form persists with the placeholder text intact.
+  r.registerServer({
+    name: "stripe",
+    url: "https://mcp.stripe.com/",
+    transport: "http",
+    auth: "bearer",
+    apiKey: "${STRIPE_MCP_API_KEY}"
+  });
+  assert.ok(fs.existsSync(configPath), "mcp.json was written");
+  const onDisk = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(onDisk.servers.stripe.apiKey, "${STRIPE_MCP_API_KEY}",
+    "placeholder is preserved on disk, never the raw secret");
+
+  // A second registry constructed from the same configPath expands the
+  // placeholder against the current env when loadConfigFile runs.
+  const r2 = new McpRegistry({
+    dataDir: dir,
+    configPath,
+    permittedEnvKeys: new Set(["STRIPE_MCP_API_KEY"])
+  });
+  r2.loadConfigFile(configPath);
+  assert.equal(r2.servers.get("stripe").apiKey, "sk_test_round_trip",
+    "loaded registration expands ${VAR} from process.env");
+
+  // Raw bearer is refused — would otherwise leak into mcp.json.
+  assert.throws(
+    () => r.registerServer({
+      name: "stripe-raw",
+      url: "https://mcp.stripe.com/",
+      transport: "http",
+      auth: "bearer",
+      apiKey: "sk_live_real_secret_here"
+    }),
+    /refusing to persist a literal apiKey/
+  );
+
+  fs.rmSync(dir, { recursive: true });
+  delete process.env.STRIPE_MCP_API_KEY;
+});
+
+test("McpRegistry allowEnvKey extends the in-memory permitted set", async () => {
+  const { McpRegistry } = await import("../src/mcp-registry.js");
+  const { dir, configPath } = makeMcpRegistryTmpDir();
+  const r = new McpRegistry({ dataDir: dir, configPath, permittedEnvKeys: new Set() });
+
+  // Without the env key allowlisted, ${...} expansion throws.
+  assert.throws(
+    () => r.registerServer({
+      name: "ph",
+      url: "https://mcp.posthog.com/sse",
+      transport: "http",
+      auth: "bearer",
+      apiKey: "${POSTHOG_MCP_API_KEY}"
+    }),
+    /not in the env allowlist/
+  );
+
+  // After allowEnvKey, the same registration succeeds.
+  process.env.POSTHOG_MCP_API_KEY = "phx_test";
+  r.allowEnvKey("POSTHOG_MCP_API_KEY");
+  const ok = r.registerServer({
+    name: "ph",
+    url: "https://mcp.posthog.com/sse",
+    transport: "http",
+    auth: "bearer",
+    apiKey: "${POSTHOG_MCP_API_KEY}"
+  });
+  assert.equal(ok.apiKey, "phx_test");
+
+  fs.rmSync(dir, { recursive: true });
+  delete process.env.POSTHOG_MCP_API_KEY;
+});
+
+test("McpRegistry persist surfaces filesystem errors instead of swallowing", async () => {
+  const { McpRegistry } = await import("../src/mcp-registry.js");
+  // Point configPath at a file under a path that can't exist (component
+  // already exists as a regular file). writeJsonAtomic's mkdirSync will
+  // throw, which we expect to propagate.
+  const { dir } = makeMcpRegistryTmpDir();
+  const blocker = path.join(dir, "blocker");
+  fs.writeFileSync(blocker, "i am a file, not a directory");
+  const configPath = path.join(blocker, "subdir", "mcp.json");
+
+  const r = new McpRegistry({ dataDir: dir, configPath, permittedEnvKeys: new Set() });
+  assert.throws(
+    () => r.registerServer({
+      name: "stdio-fs",
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    })
+  );
+
+  fs.rmSync(dir, { recursive: true });
+});

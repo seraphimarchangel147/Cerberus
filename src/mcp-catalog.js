@@ -311,8 +311,11 @@ export const MCP_CATALOG = [
     category: "communication",
     authType: "oauth",
     status: "coming-soon",
-    matches: { bundleIds: ["com.tinyspeck.slackmacgap"], hostnames: ["slack.com", "app.slack.com"], keywords: ["slack"] },
-    register: { transport: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-slack"] }
+    matches: { bundleIds: ["com.tinyspeck.slackmacgap"], hostnames: ["slack.com", "app.slack.com"], keywords: ["slack"] }
+    // No register block until Slack ships an OAuth-shaped MCP. The stdio
+    // @modelcontextprotocol/server-slack path needs SLACK_BOT_TOKEN, which
+    // we'd need to add to WIZARD_FIELDS + collect during setup before
+    // marking this entry available.
   },
 
   // ─── Calls & Meetings ───────────────────────────────────────────────

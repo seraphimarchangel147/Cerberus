@@ -489,6 +489,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // One-click register + connect for catalog entries. Used by the
         // unified Integrations tab so the user doesn't have to fill in
         // the MCP register form for known servers.
+        //
+        // Body: { catalogId, apiKey? } — apiKey is required when the
+        // catalog entry has apiKeyEnvVar AND that env var isn't already
+        // populated. We persist the key to .env (under the entry's
+        // declared apiKeyEnvVar) so it survives restart, then register
+        // the MCP with `${VAR}` indirection — never with a literal.
         const body = await readJson(req).catch(() => ({}));
         const catalogId = body.catalogId;
         if (!catalogId) return sendJson(res, 400, { error: "catalogId required" });
@@ -497,13 +503,25 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         if (!entry) return sendJson(res, 404, { error: "not in catalog" });
         if (!entry.register) return sendJson(res, 400, { error: "catalog entry has no register info" });
         try {
-          const spec = { name: entry.id, ...entry.register };
-          // For bearer-auth catalog entries, point the apiKey at an env var
-          // so the actual secret stays in .env and gets re-read on restart.
-          // Whitelist that var on the registry first so registerServer's
-          // ${VAR} expansion accepts it.
+          // Bearer-auth path: capture the API key into .env if the request
+          // supplied one, or fail fast if neither request nor env has it.
           if (entry.register.auth === "bearer" && entry.apiKeyEnvVar) {
+            const incoming = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+            const existing = process.env[entry.apiKeyEnvVar] ?? "";
+            if (incoming) {
+              const { saveEnv } = await import("./setup-wizard.js");
+              const dataDir = process.env.OPENAGI_DATA_DIR ?? path.join(process.cwd(), ".openagi");
+              saveEnv({ dataDir, values: { [entry.apiKeyEnvVar]: incoming } });
+            } else if (!existing) {
+              return sendJson(res, 400, {
+                error: `apiKey required (catalog entry '${entry.id}' uses ${entry.apiKeyEnvVar} which isn't set yet)`,
+                apiKeyEnvVar: entry.apiKeyEnvVar
+              });
+            }
             runtime.mcp.allowEnvKey?.(entry.apiKeyEnvVar);
+          }
+          const spec = { name: entry.id, ...entry.register };
+          if (entry.register.auth === "bearer" && entry.apiKeyEnvVar) {
             spec.apiKey = `\${${entry.apiKeyEnvVar}}`;
           }
           const server = runtime.mcp.registerServer(spec);
@@ -2521,15 +2539,28 @@ async function renderIntegrations() {
     } else {
       badge = '<span class="badge">off</span>';
     }
+    // Bearer-auth entries need an API key. Reveal an inline input here
+    // when the env var isn't set yet — the click handler reads the value
+    // from this field and POSTs it alongside the catalogId.
+    const needsKey = e.connectable && !e.configured && e.apiKeyEnvVar && !e.apiKeyConfigured;
+    const keyFieldId = \`cat-key-\${e.id}\`;
     let action;
     if (e.configured) {
       action = \`<a href="/?tab=mcp" style="font-size:11px;">Manage →</a>\`;
     } else if (e.connectable) {
-      action = \`<button class="add-mcp-btn" data-catalog-id="\${escapeHtml(e.id)}" data-int-id="\${escapeHtml(e.id)}" style="font-size:11px; padding:3px 8px;">+ Connect</button>\`;
+      action = \`<button class="add-mcp-btn" data-catalog-id="\${escapeHtml(e.id)}" data-int-id="\${escapeHtml(e.id)}" \${needsKey ? \`data-key-field-id="\${keyFieldId}"\` : ""} style="font-size:11px; padding:3px 8px;">+ Connect</button>\`;
     } else {
       const auth = e.authType === "oauth" ? "OAuth coming soon" : "Coming soon";
       action = \`<span class="muted" style="font-size:11px;">\${auth}</span>\`;
     }
+    const keyField = needsKey
+      ? \`
+        <div style="margin-top:8px;">
+          <label style="display:block; font-size:10px; color:var(--muted); margin-bottom:3px;">\${escapeHtml(e.apiKeyEnvVar)}\${e.apiKeyHelp ? \` — \${escapeHtml(e.apiKeyHelp)}\` : ""}</label>
+          <input type="password" id="\${keyFieldId}" autocomplete="off" placeholder="paste your key" style="width:100%; padding:5px 7px; font-size:12px;">
+        </div>
+      \`
+      : "";
     return \`
       <div class="card" style="padding:10px 12px;">
         <div class="row between" style="align-items:flex-start; gap:8px;">
@@ -2539,6 +2570,7 @@ async function renderIntegrations() {
           </div>
           \${badge}
         </div>
+        \${keyField}
         <div style="margin-top:6px;">\${action}</div>
       </div>
     \`;
@@ -2641,18 +2673,30 @@ async function renderIntegrations() {
   document.querySelectorAll(".add-mcp-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const catalogId = btn.dataset.catalogId;
-      const intId = btn.dataset.intId;
+      const keyFieldId = btn.dataset.keyFieldId;
+      const originalLabel = btn.textContent;
+      let apiKey;
+      if (keyFieldId) {
+        const field = document.getElementById(keyFieldId);
+        const v = field?.value?.trim();
+        if (!v) {
+          showToast("Paste the API key into the field above this button before connecting.", false);
+          field?.focus();
+          return;
+        }
+        apiKey = v;
+      }
       btn.disabled = true;
       btn.textContent = "Connecting...";
       try {
-        const result = await postJson("/integrations/connect-mcp", { catalogId });
+        const result = await postJson("/integrations/connect-mcp", apiKey ? { catalogId, apiKey } : { catalogId });
         showToast(\`✓ Registered \${result.name ?? catalogId} MCP — opening MCP tab.\`, true);
         // If OAuth, the MCP page will show the auth URL via SSE.
         setTimeout(() => switchTab("mcp"), 800);
       } catch (err) {
         showToast(\`Connect failed: \${err.message}\`, false);
         btn.disabled = false;
-        btn.textContent = "+ Connect this MCP";
+        btn.textContent = originalLabel;
       }
     });
   });
