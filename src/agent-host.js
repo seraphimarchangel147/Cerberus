@@ -300,10 +300,23 @@ Stay inside the bounded scope. If the user's request falls outside it, say so an
 
   status() {
     return {
-      provider: this.modelProvider.constructor.name,
+      provider: friendlyProviderLabel(this.modelProvider),
       providerConfigured: this.modelProvider.isConfigured(),
+      providerModel: this.modelProvider.model ?? null,
       agents: this.store.listAgents(),
       sessions: this.store.listSessions()
     };
   }
+}
+
+// Maps a provider class to a short user-facing label. Avoids leaking
+// "AnthropicProvider" / "OpenAIResponsesProvider" class names into the
+// dashboard header.
+function friendlyProviderLabel(provider) {
+  if (!provider) return "—";
+  const cls = provider.constructor?.name ?? "";
+  if (cls === "AnthropicProvider") return "Anthropic";
+  if (cls === "OpenAIResponsesProvider") return "OpenAI";
+  if (cls === "DeterministicModelProvider") return provider.name ?? "deterministic";
+  return cls.replace(/Provider$/, "") || "—";
 }

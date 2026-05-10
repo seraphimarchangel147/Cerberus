@@ -1119,7 +1119,8 @@ function renderApp() {
       border-bottom: 1px solid var(--line);
     }
     header h1 { font-size: 14px; font-weight: 700; margin: 0; letter-spacing: 0.02em; }
-    header .status { color: var(--muted); font-size: 12px; }
+    header .status { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+    header .status .status-pill { white-space: nowrap; padding: 2px 8px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
     nav { display: flex; gap: 4px; margin-left: auto; }
     nav button {
       background: transparent; border: 1px solid transparent; color: var(--muted);
@@ -3234,13 +3235,23 @@ async function refreshHealth() {
       fetchJson("/admin/provider").catch(() => null)
     ]);
     state.health = h;
-    const m = h.status.memory ?? {};
     const provider = h.status.agentHost?.provider ?? "—";
-    const budget = b ? \` · $\${b.spentUsd.toFixed(2)} / $\${b.dailyUsdLimit.toFixed(2)}\` : "";
-    $("status").textContent = \`runtime online · \${provider} \${h.status.agentHost?.providerConfigured ? "✓" : "(no key)"} · short \${m.short || 0} / medium \${m.medium || 0} / long \${m.long || 0}\${budget}\`;
+    const model = h.status.agentHost?.providerModel ?? "";
+    const configured = h.status.agentHost?.providerConfigured;
+    const providerLabel = model ? \`\${provider} · \${model}\` : provider;
+    const budgetLabel = b ? \`$\${b.spentUsd.toFixed(2)} / $\${b.dailyUsdLimit.toFixed(2)}\` : "";
+    // Render as discrete nowrap pills so the header wraps cleanly between
+    // pieces instead of breaking mid-pill (which produced the orphaned
+    // "· $0.07 / $10.00" line in the old textContent layout).
+    const pills = [
+      \`<span class="status-pill">online</span>\`,
+      \`<span class="status-pill">\${escapeHtml(providerLabel)} \${configured ? "✓" : "(no key)"}</span>\`,
+      budgetLabel ? \`<span class="status-pill">\${escapeHtml(budgetLabel)}</span>\` : ""
+    ].filter(Boolean);
+    $("status").innerHTML = pills.join("");
     if (p) renderProviderSwitch(p);
   } catch {
-    $("status").textContent = "runtime offline";
+    $("status").innerHTML = '<span class="status-pill">offline</span>';
   }
 }
 
