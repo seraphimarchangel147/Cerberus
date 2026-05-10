@@ -1371,6 +1371,71 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("IMessagePollerSource: skips when not enabled or self-handle missing", async () => {
+  const { IMessagePollerSource } = await import("../src/integrations/imessage-poller.js");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-im-"));
+
+  // Save and clear env so the constructor doesn't pick up an enabled
+  // state from the user's real shell.
+  const savedEnabled = process.env.IMESSAGE_ENABLED;
+  const savedHandle = process.env.IMESSAGE_SELF_HANDLE;
+  delete process.env.IMESSAGE_ENABLED;
+  delete process.env.IMESSAGE_SELF_HANDLE;
+
+  const fakeRuntime = { tasks: { add: () => {} } };
+  const src = new IMessagePollerSource({ runtime: fakeRuntime, dataDir: tmp });
+
+  let result = await src.sync();
+  assert.equal(result.skipped, true, "skips when not enabled");
+  assert.match(result.reason, /IMESSAGE_ENABLED/);
+
+  process.env.IMESSAGE_ENABLED = "1";
+  result = await src.sync();
+  assert.equal(result.skipped, true, "still skips when self-handle missing");
+  assert.match(result.reason, /SELF_HANDLE/);
+
+  if (savedEnabled !== undefined) process.env.IMESSAGE_ENABLED = savedEnabled; else delete process.env.IMESSAGE_ENABLED;
+  if (savedHandle !== undefined) process.env.IMESSAGE_SELF_HANDLE = savedHandle; else delete process.env.IMESSAGE_SELF_HANDLE;
+  fs.rmSync(tmp, { recursive: true });
+});
+
+test("IMessagePollerSource: status() reports permission error when chat.db unreadable", async () => {
+  const { IMessagePollerSource } = await import("../src/integrations/imessage-poller.js");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-im2-"));
+
+  // Point at a path that doesn't exist — status() should report dbExists:false.
+  const src = new IMessagePollerSource({
+    runtime: { tasks: { add: () => {} } },
+    dataDir: tmp,
+    dbPath: path.join(tmp, "no-such-db.sqlite")
+  });
+  const s = src.status();
+  assert.equal(s.dbExists, false);
+  assert.equal(s.readable, false);
+  assert.equal(s.requiresFullDiskAccess, false, "no FDA prompt when file simply doesn't exist");
+
+  // Now a real file with no read perms — should set requiresFullDiskAccess.
+  const blocked = path.join(tmp, "blocked.sqlite");
+  fs.writeFileSync(blocked, "fake");
+  fs.chmodSync(blocked, 0o000);
+  const src2 = new IMessagePollerSource({
+    runtime: { tasks: { add: () => {} } },
+    dataDir: tmp,
+    dbPath: blocked
+  });
+  const s2 = src2.status();
+  // (On macOS as root or as the file owner, chmod 0 may still allow read —
+  // skip the FDA assertion gracefully if we happen to be able to read.)
+  if (!s2.readable) {
+    assert.equal(s2.dbExists, true);
+    assert.equal(s2.requiresFullDiskAccess, true);
+    assert.match(s2.permissionError ?? "", /Full Disk Access|EACCES|denied/i);
+  }
+
+  fs.chmodSync(blocked, 0o600);
+  fs.rmSync(tmp, { recursive: true });
+});
+
 test("McpRegistry: stdio args get ${VAR} expansion (statsig mcp-remote bridge)", async () => {
   const { McpRegistry } = await import("../src/mcp-registry.js");
   const fs = await import("node:fs");

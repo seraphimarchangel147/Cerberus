@@ -682,6 +682,33 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             ]
           },
           {
+            id: "imessage",
+            name: "iMessage (text yourself as inbox)",
+            description: "Reads ~/Library/Messages/chat.db read-only and converts messages from a 1:1 self-chat into tasks. macOS only · requires Full Disk Access · opt-in.",
+            paths: [
+              (() => {
+                const s = runtime.imessagePoller?.status?.() ?? null;
+                return {
+                  kind: "api",
+                  label: "Local SQLite poll",
+                  configured: Boolean(s?.enabled && s?.readable && s?.selfHandle),
+                  envKeys: ["IMESSAGE_ENABLED", "IMESSAGE_SELF_HANDLE", "IMESSAGE_INTERVAL_MS", "IMESSAGE_MODE"],
+                  lastSyncedAt: s?.lastSyncedAt ?? null,
+                  feeds: "tasks",
+                  detail: !s
+                    ? "Module not initialized."
+                    : !s.enabled
+                      ? "Disabled. Set IMESSAGE_ENABLED=1 + IMESSAGE_SELF_HANDLE in .env to turn on."
+                      : !s.readable && s.dbExists
+                        ? "⚠ Cannot read chat.db — grant Full Disk Access in System Settings → Privacy & Security → Full Disk Access, then restart the daemon."
+                        : !s.selfHandle
+                          ? "Set IMESSAGE_SELF_HANDLE to the iCloud email or phone you text yourself from."
+                          : `Reading from ${s.selfHandle}. Last imported ROWID: ${s.lastImportedRowid ?? 0}.`
+                };
+              })()
+            ]
+          },
+          {
             id: "twilio",
             name: "Twilio SMS",
             kind: "channel",

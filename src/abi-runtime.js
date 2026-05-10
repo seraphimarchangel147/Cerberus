@@ -12,6 +12,7 @@ import { BudgetGuard } from "./budget-guard.js";
 import { registerRizeIntegration } from "./integrations/rize.js";
 import { registerLinearTaskSource } from "./integrations/linear-tasks.js";
 import { registerInboxWatcher } from "./integrations/inbox-watcher.js";
+import { registerIMessagePoller } from "./integrations/imessage-poller.js";
 import { registerBuildBetterTaskSource } from "./integrations/buildbetter-tasks.js";
 import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
@@ -266,6 +267,11 @@ export class AbiRuntime {
       // dropped in there it returns { processed: 0 } and moves on. Sources
       // like reMarkable / Obsidian / Bear can sync into .openagi/inbox/.
       registerInboxWatcher(this);
+      // iMessage chat.db poller. Off by default — requires explicit
+      // IMESSAGE_ENABLED=1 + a self-handle, and macOS Full Disk Access.
+      // The source attaches to runtime even when disabled so the dashboard
+      // can render the toggle + permission status.
+      registerIMessagePoller(this);
     }
   }
 
@@ -442,6 +448,10 @@ export class AbiRuntime {
       if (job.task === "inbox-sweep") {
         if (!this.inboxWatcher?.sweep) return { skipped: true, reason: "no inbox watcher" };
         return this.inboxWatcher.sweep();
+      }
+      if (job.task === "imessage-sync") {
+        if (!this.imessagePoller?.sync) return { skipped: true, reason: "no imessage poller" };
+        return this.imessagePoller.sync({ now });
       }
       if (job.task === "task-digest") {
         return this.runTaskDigest({ now });

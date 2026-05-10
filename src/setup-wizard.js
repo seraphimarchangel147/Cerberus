@@ -19,6 +19,7 @@ const WIZARD_FIELDS = [
   "RIZE_API_KEY",
   "LINEAR_API_KEY",
   "BUILDBETTER_API_KEY", "BUILDBETTER_USER_EMAIL", "BUILDBETTER_USER_NAME",
+  "IMESSAGE_ENABLED", "IMESSAGE_SELF_HANDLE", "IMESSAGE_INTERVAL_MS", "IMESSAGE_MODE",
   "OPENAGI_PUBLIC_URL",
   "OPENAGI_DAILY_USD_LIMIT",
   // Per-MCP bearer keys, declared by catalog entries via apiKeyEnvVar.
@@ -265,6 +266,21 @@ export function renderWizard({ proposedToken } = {}) {
         <summary>Inbox folder — drop files for tasks <span class="sub">no setup needed</span></summary>
         <div style="padding-top:10px;">
           <p class="sub">Always-on. Drop any <code>.md</code> or <code>.txt</code> file into <code>~/Library/Application Support/OpenAGI/inbox/</code> and OpenAGI parses GitHub-style checkboxes (<code>- [ ] foo</code>) and <code>TODO:</code> / <code>TASK:</code> / <code>REMINDER:</code> prefixes into tasks. Sweeps every 30 seconds. Works for reMarkable (point your Dropbox sync at the inbox folder), Obsidian, Bear, scanned paper notes.</p>
+        </div>
+      </details>
+
+      <details style="margin-top:8px;">
+        <summary>iMessage — text yourself as an inbox <span class="sub">macOS only · opt-in · needs Full Disk Access</span></summary>
+        <div style="padding-top:10px;">
+          <p class="sub"><strong>What this does:</strong> reads the local iMessage SQLite database at <code>~/Library/Messages/chat.db</code> (read-only) and turns texts you send to yourself into tasks. Convenient for capturing thoughts from your phone or watch. Sweeps every 60s.</p>
+          <p class="sub"><strong>Privacy:</strong> only messages from your declared self-handle in chats with no one else are imported. Group chats, threads with other contacts, and incoming messages from anyone but you are skipped — they're never read. State stays on your machine.</p>
+          <p class="sub"><strong>Permission required:</strong> macOS gates <code>chat.db</code> behind Full Disk Access. After saving this wizard, open <strong>System Settings → Privacy &amp; Security → Full Disk Access</strong> and toggle on <strong>OpenAGI</strong>. The dashboard's Integrations tab will tell you when it's working.</p>
+          <div class="opt" style="margin-top:8px;">
+            <input type="checkbox" id="imEnabled" name="IMESSAGE_ENABLED" value="1">
+            <label for="imEnabled" style="margin:0;">Enable iMessage sync</label>
+          </div>
+          <label style="margin-top:8px;">IMESSAGE_SELF_HANDLE <span class="sub">— your iCloud email or phone (e.g. <code>+14155551234</code> or <code>you@icloud.com</code>); the address you text yourself <em>to</em></span></label>
+          <input type="text" name="IMESSAGE_SELF_HANDLE" placeholder="+14155551234 or you@icloud.com">
         </div>
       </details>
     </div>
