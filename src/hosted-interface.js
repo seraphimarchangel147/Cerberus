@@ -1379,6 +1379,70 @@ function renderMarkdown(input) {
   return "<p>" + s + "</p>";
 }
 
+// Small chat composer surface that any tab can embed at the top so the
+// user can talk to the agent without leaving the structured view. The
+// reply appears inline below the input; the optional onAfterSend hook
+// re-runs the host tab's render to pick up state changes (e.g. a new
+// task the agent just created via add_task).
+function renderPageChatComposer(host, { placeholder = "Talk to your agent…", onAfterSend } = {}) {
+  if (!host) return;
+  host.innerHTML = \`
+    <form class="page-chat" style="display:flex; gap:6px; margin-bottom:14px; align-items:flex-start;">
+      <textarea class="page-chat-input" rows="1" placeholder="\${escapeHtml(placeholder)}" style="flex:1; min-width:200px; resize:vertical; padding:8px 10px; font:inherit;"></textarea>
+      <button type="submit" class="page-chat-send">Send</button>
+    </form>
+    <div class="page-chat-reply" style="display:none;"></div>
+  \`;
+  const form = host.querySelector("form.page-chat");
+  const input = host.querySelector(".page-chat-input");
+  const sendBtn = host.querySelector(".page-chat-send");
+  const reply = host.querySelector(".page-chat-reply");
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(180, input.scrollHeight) + "px";
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    sendBtn.disabled = true;
+    reply.style.display = "block";
+    reply.innerHTML = '<div class="muted" style="padding:10px 12px;">Thinking…</div>';
+    try {
+      const result = await postJson("/message", {
+        text,
+        channel: state.channel ?? "local",
+        from: state.from ?? "browser",
+        agentId: state.agentId,
+        sessionId: state.sessionId
+      });
+      if (result.session?.id) state.sessionId = result.session.id;
+      reply.innerHTML = \`
+        <div class="card" style="padding:12px; margin-bottom:14px;">
+          <div class="muted" style="font-size:11px; margin-bottom:6px;">openagi → \${escapeHtml(result.model?.model ?? "")}</div>
+          <div>\${renderMarkdown(result.reply ?? "")}</div>
+          <div style="margin-top:8px; font-size:11px;"><a href="/?tab=chat">continue in chat →</a></div>
+        </div>
+      \`;
+      input.value = "";
+      input.style.height = "auto";
+      if (typeof onAfterSend === "function") {
+        try { await onAfterSend(result); } catch { /* ignore */ }
+      }
+    } catch (err) {
+      reply.innerHTML = \`<div class="card err" style="padding:10px 12px;">\${escapeHtml(err.message)}</div>\`;
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+}
+
 function showToast(msg, ok = true) {
   const t = document.createElement("div");
   t.style.cssText = "position:fixed;top:20px;right:20px;z-index:99;padding:10px 14px;border-radius:6px;font-size:13px;max-width:360px;box-shadow:0 4px 12px rgba(0,0,0,.3);font-family:inherit;line-height:1.4;" +
@@ -2224,6 +2288,7 @@ function renderMemoryView() {
       <div class="row between" style="margin-bottom:14px;align-items:center;flex-wrap:wrap;gap:10px;">
         <h2 style="margin:0;">Memory <span class="muted" style="font-weight:400;font-size:14px;">· \${total} total · \${principles} principle\${principles===1?"":"s"}</span></h2>
       </div>
+      <div id="memoryPageChat"></div>
       <div class="row" style="gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
         <div class="tier-pills">
           <button data-tier="all" class="\${f.tier==='all'?'active':''}">All <span class="count">\${total}</span></button>
@@ -2236,6 +2301,15 @@ function renderMemoryView() {
       <div class="mem-grid" id="memList"></div>
     </div>
   \`;
+  renderPageChatComposer(document.getElementById("memoryPageChat"), {
+    placeholder: 'e.g. "Remember that my standup is 9am Mondays" or "what do I remember about Sarah?"',
+    onAfterSend: async () => {
+      // Reply may have caused a remember/recall — refresh the snapshot.
+      const snap = await fetchJson("/memory");
+      state.memorySnap = snap;
+      renderMemoryView();
+    }
+  });
   document.querySelectorAll("[data-tier]").forEach((b) =>
     b.addEventListener("click", () => { state.memoryFilter.tier = b.dataset.tier; renderMemoryView(); })
   );
@@ -2654,10 +2728,15 @@ async function renderSuggestions() {
     main.innerHTML = \`
       <div class="pane">
         <h2>Suggestions</h2>
+        <div id="suggestionsPageChat"></div>
         <p class="muted">Nothing new to surface right now. The proactive observer runs every 10 minutes and proposes one concrete next thing — a task, a skill, an MCP to connect, or a small automation — when it sees something worth saying.</p>
         <p class="muted">If you want to force a run now: <code>POST /proactive/observe</code>.</p>
       </div>
     \`;
+    renderPageChatComposer(document.getElementById("suggestionsPageChat"), {
+      placeholder: 'e.g. "What did you notice today?" or "ignore screenshots from Discord"',
+      onAfterSend: async () => { await renderSuggestions(); }
+    });
     return;
   }
   if (!Array.isArray(list) || list.length === 0) {
@@ -2665,9 +2744,14 @@ async function renderSuggestions() {
     main.innerHTML = \`
       <div class="pane">
         <h2>Suggestions</h2>
+        <div id="suggestionsPageChat"></div>
         \${pendingActionsHtml}
       </div>
     \`;
+    renderPageChatComposer(document.getElementById("suggestionsPageChat"), {
+      placeholder: 'e.g. "approve the Stripe MCP" or "deny it, I changed my mind"',
+      onAfterSend: async () => { await renderSuggestions(); }
+    });
     bindPendingActionButtons();
     return;
   }
@@ -2708,11 +2792,16 @@ async function renderSuggestions() {
   main.innerHTML = \`
     <div class="pane">
       <h2>Suggestions <span class="badge">\${list.length}</span></h2>
+      <div id="suggestionsPageChat"></div>
       <p class="muted">Proactive observer proposed these from your recent on-screen activity. Accept routes to the right place — tasks land in the Tasks tab, MCPs auto-register, skills become drafts.</p>
       \${list.map(card).join("")}
       \${pendingActionsHtml}
     </div>
   \`;
+  renderPageChatComposer(document.getElementById("suggestionsPageChat"), {
+    placeholder: 'Talk to the agent about these…',
+    onAfterSend: async () => { await renderSuggestions(); }
+  });
   bindPendingActionButtons();
 
   document.querySelectorAll("[data-suggestion-id]").forEach((el) => {
@@ -2986,97 +3075,76 @@ async function renderIntegrations() {
 }
 
 async function renderTasks() {
-  state.taskFilter = state.taskFilter || { queue: "user", bucket: "all" };
+  state.taskFilter = state.taskFilter || { bucket: "all" };
   const data = await fetchJson("/tasks?limit=200").catch(() => ({ tasks: [], stats: {} }));
   const tasks = data.tasks ?? [];
   const stats = data.stats ?? {};
-  const filterQ = state.taskFilter.queue;
   const filterB = state.taskFilter.bucket;
-  const filtered = tasks.filter((t) => {
-    if (filterQ !== "all" && t.queue !== filterQ) return false;
-    if (filterB !== "all" && t.bucket !== filterB) return false;
-    return true;
-  });
 
-  const bucketCount = (q, b) => {
-    if (!stats[q]) return 0;
-    return stats[q][b] ?? 0;
+  const taskRow = (t) => {
+    const isOverdue = t.dueDate && Date.parse(t.dueDate) < Date.now() && t.status !== "completed";
+    const dueDateStr = t.dueDate ? new Date(t.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+    const sourceBadge = t.source && t.source !== "manual"
+      ? (t.sourceUrl
+          ? \`<a class="badge" href="\${escapeHtml(t.sourceUrl)}" target="_blank" rel="noopener" style="font-size:10px; text-decoration:none;">\${escapeHtml(t.source)} ↗</a>\`
+          : \`<span class="badge" style="font-size:10px;">\${escapeHtml(t.source)}</span>\`)
+      : "";
+    return \`
+      <li data-task-id="\${t.id}" class="task" style="display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border-bottom:1px solid var(--line);">
+        <input type="checkbox" \${t.status === "completed" ? "checked" : ""} data-action="toggle" style="margin-top:3px;">
+        <div style="flex:1; min-width:0;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <span class="title" style="\${t.status === "completed" ? "text-decoration:line-through; color:var(--muted);" : ""}">\${escapeHtml(t.title)}</span>
+            <span class="badge" style="font-size:10px;">\${t.bucket.replace("_", " ")}</span>
+            \${t.priority >= 70 ? \`<span class="badge err" style="font-size:10px;">P\${t.priority}</span>\` : ""}
+            \${dueDateStr ? \`<span class="badge \${isOverdue ? "err" : ""}" style="font-size:10px;">\${isOverdue ? "⏰ overdue " : "due "}\${dueDateStr}</span>\` : ""}
+            \${sourceBadge}
+          </div>
+          \${t.description ? \`<div class="muted" style="font-size:12px; margin-top:4px;">\${escapeHtml(t.description.slice(0, 240))}</div>\` : ""}
+          \${t.sourceMeta?.identifier ? \`<div class="muted" style="font-size:11px; margin-top:2px;">\${escapeHtml(t.sourceMeta.identifier)}\${t.sourceMeta.team ? " · " + escapeHtml(t.sourceMeta.team) : ""}\${t.sourceMeta.project ? " · " + escapeHtml(t.sourceMeta.project) : ""}</div>\` : ""}
+          \${t.sourceMeta?.file ? \`<div class="muted" style="font-size:11px; margin-top:2px;">📎 \${escapeHtml(t.sourceMeta.file)} (line \${t.sourceMeta.line})</div>\` : ""}
+        </div>
+        <button data-action="delete" class="secondary" style="align-self:flex-start; font-size:11px; padding:2px 8px;">×</button>
+      </li>
+    \`;
   };
+
+  const inBucket = (t) => filterB === "all" || t.bucket === filterB;
+  const userTasks = tasks.filter((t) => t.queue === "user" && inBucket(t));
+  const agentTasks = tasks.filter((t) => t.queue === "agent" && inBucket(t));
+  const userTotal = stats.user?.total ?? 0;
+  const agentTotal = stats.agent?.total ?? 0;
 
   main.innerHTML = \`
     <div class="pane">
       <h2>Tasks</h2>
-      <p class="muted">Two queues — user todo (what you should do) and agent queue (what OpenAGI is working on). Configure task sources (Linear, BuildBetter, reMarkable, Rize) on the <a href="/?tab=integrations">Integrations</a> tab.</p>
+      <p class="muted">Talk to the agent below to add, complete, or rearrange tasks. Or click checkboxes directly. <strong>My tasks</strong> are what you should do; <strong>Agent tasks</strong> are what OpenAGI is working on for you.</p>
 
-      <form class="form" id="taskForm" style="margin:12px 0 18px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
-        <input name="title" placeholder="Add a task..." required style="flex:2; min-width:240px;">
-        <select name="queue" style="flex:0 0 auto;">
-          <option value="user">user</option>
-          <option value="agent">agent</option>
-        </select>
-        <select name="bucket" style="flex:0 0 auto;">
-          <option value="today">today</option>
-          <option value="this_week" selected>this week</option>
-          <option value="someday">someday</option>
-        </select>
-        <button type="submit">+ Add</button>
-      </form>
+      <div id="tasksPageChat"></div>
 
-      <div class="row" style="gap:6px; flex-wrap:wrap; margin-bottom:12px;">
-        <span class="muted" style="font-size:12px; align-self:center; margin-right:8px;">queue:</span>
-        \${["all", "user", "agent"].map((q) => \`<button class="chip \${filterQ === q ? "on" : ""}" data-qf="\${q}">\${q}\${q !== "all" ? \` (\${(stats[q]?.total ?? 0)})\` : ""}</button>\`).join("")}
-        <span class="muted" style="font-size:12px; align-self:center; margin:0 8px;">bucket:</span>
-        \${["all", "today", "this_week", "someday", "done"].map((b) => \`<button class="chip \${filterB === b ? "on" : ""}" data-bf="\${b}">\${b.replace("_", " ")}\${b !== "all" && filterQ !== "all" ? \` (\${bucketCount(filterQ, b)})\` : ""}</button>\`).join("")}
+      <div class="row" style="gap:6px; flex-wrap:wrap; margin-bottom:14px;">
+        <span class="muted" style="font-size:12px; align-self:center; margin-right:4px;">bucket:</span>
+        \${["all", "today", "this_week", "someday", "done"].map((b) => \`<button class="chip \${filterB === b ? "on" : ""}" data-bf="\${b}">\${b.replace("_", " ")}</button>\`).join("")}
       </div>
 
-      \${filtered.length === 0 ? \`<div class="empty">No tasks. Add one above, or just say things like "remind me to X" in chat — I'll auto-create them.</div>\` : ""}
+      <h3 style="margin:18px 0 6px;">My tasks <span class="muted" style="font-weight:400; font-size:13px;">· \${userTotal} total</span></h3>
+      \${userTasks.length === 0 ? \`<div class="empty" style="padding:14px;">Nothing here. Try saying "remind me to call Sarah tomorrow" or "add a task to fix the mouse bug".</div>\` : \`
+        <ul class="taskList" style="list-style:none; padding:0; margin:0;">\${userTasks.map(taskRow).join("")}</ul>
+      \`}
 
-      <ul class="taskList" style="list-style:none; padding:0; margin:0;">
-        \${filtered.map((t) => {
-          const isOverdue = t.dueDate && Date.parse(t.dueDate) < Date.now() && t.status !== "completed";
-          const dueDateStr = t.dueDate ? new Date(t.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
-          const sourceBadge = t.source && t.source !== "manual"
-            ? (t.sourceUrl
-                ? \`<a class="badge" href="\${escapeHtml(t.sourceUrl)}" target="_blank" rel="noopener" style="font-size:10px; text-decoration:none;">\${escapeHtml(t.source)} ↗</a>\`
-                : \`<span class="badge" style="font-size:10px;">\${escapeHtml(t.source)}</span>\`)
-            : "";
-          return \`
-          <li data-task-id="\${t.id}" class="task" style="display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border-bottom:1px solid var(--line);">
-            <input type="checkbox" \${t.status === "completed" ? "checked" : ""} data-action="toggle" style="margin-top:3px;">
-            <div style="flex:1; min-width:0;">
-              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                <span class="title" style="\${t.status === "completed" ? "text-decoration:line-through; color:var(--muted);" : ""}">\${escapeHtml(t.title)}</span>
-                <span class="badge" style="font-size:10px;">\${t.queue}</span>
-                <span class="badge" style="font-size:10px;">\${t.bucket.replace("_", " ")}</span>
-                \${t.priority >= 70 ? \`<span class="badge err" style="font-size:10px;">P\${t.priority}</span>\` : ""}
-                \${dueDateStr ? \`<span class="badge \${isOverdue ? "err" : ""}" style="font-size:10px;">\${isOverdue ? "⏰ overdue " : "due "}\${dueDateStr}</span>\` : ""}
-                \${sourceBadge}
-              </div>
-              \${t.description ? \`<div class="muted" style="font-size:12px; margin-top:4px;">\${escapeHtml(t.description.slice(0, 240))}</div>\` : ""}
-              \${t.sourceMeta?.identifier ? \`<div class="muted" style="font-size:11px; margin-top:2px;">\${escapeHtml(t.sourceMeta.identifier)}\${t.sourceMeta.team ? " · " + escapeHtml(t.sourceMeta.team) : ""}\${t.sourceMeta.project ? " · " + escapeHtml(t.sourceMeta.project) : ""}</div>\` : ""}
-              \${t.sourceMeta?.file ? \`<div class="muted" style="font-size:11px; margin-top:2px;">📎 \${escapeHtml(t.sourceMeta.file)} (line \${t.sourceMeta.line})</div>\` : ""}
-            </div>
-            <button data-action="delete" class="secondary" style="align-self:flex-start; font-size:11px; padding:2px 8px;">×</button>
-          </li>
-        \`}).join("")}
-      </ul>
+      <h3 style="margin:24px 0 6px;">Agent tasks <span class="muted" style="font-weight:400; font-size:13px;">· \${agentTotal} total</span></h3>
+      <p class="muted" style="font-size:12px; margin:0 0 6px;">Things OpenAGI has committed to do for you (or that the proactive observer queued).</p>
+      \${agentTasks.length === 0 ? \`<div class="empty" style="padding:14px;">No agent tasks. The agent will queue work here when it picks something up via the proactive observer or via "OpenAGI, please look into X" in chat.</div>\` : \`
+        <ul class="taskList" style="list-style:none; padding:0; margin:0;">\${agentTasks.map(taskRow).join("")}</ul>
+      \`}
     </div>
   \`;
 
-  $("taskForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const body = { title: fd.get("title"), queue: fd.get("queue") || "user", bucket: fd.get("bucket") || "today" };
-    try {
-      await postJson("/tasks", body);
-      e.target.reset();
-      await renderTasks();
-    } catch (err) {
-      showToast("Add task failed: " + err.message, false);
-    }
+  renderPageChatComposer(document.getElementById("tasksPageChat"), {
+    placeholder: 'e.g. "Add a task to fix the mouse bug today" or "show me what\\'s overdue"',
+    onAfterSend: async () => { await renderTasks(); }
   });
 
-  document.querySelectorAll("[data-qf]").forEach((b) => b.addEventListener("click", () => { state.taskFilter.queue = b.dataset.qf; renderTasks(); }));
   document.querySelectorAll("[data-bf]").forEach((b) => b.addEventListener("click", () => { state.taskFilter.bucket = b.dataset.bf; renderTasks(); }));
 
   document.querySelectorAll(".task").forEach((el) => {
