@@ -53,8 +53,9 @@ export const MCP_CATALOG = [
     description: "Access Jira issues and Confluence pages via Atlassian.",
     category: "project-management",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["atlassian.net", "jira.com", "confluence.com"], keywords: ["jira", "confluence"] }
+    status: "available",
+    matches: { hostnames: ["atlassian.net", "jira.com", "confluence.com"], keywords: ["jira", "confluence"] },
+    register: { url: "https://mcp.atlassian.com/v1/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "asana",
@@ -62,17 +63,19 @@ export const MCP_CATALOG = [
     description: "Manage Asana tasks, projects, and workflows.",
     category: "project-management",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["asana.com"], keywords: ["asana"] }
+    status: "available",
+    matches: { hostnames: ["asana.com"], keywords: ["asana"] },
+    register: { url: "https://mcp.asana.com/v2/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "monday",
     name: "monday.com",
     description: "Access monday.com boards, items, and automations.",
     category: "project-management",
-    authType: "api-key",
-    status: "coming-soon",
-    matches: { hostnames: ["monday.com"], keywords: ["monday.com"] }
+    authType: "oauth",
+    status: "available",
+    matches: { hostnames: ["monday.com"], keywords: ["monday.com"] },
+    register: { url: "https://mcp.monday.com/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "clickup",
@@ -80,8 +83,9 @@ export const MCP_CATALOG = [
     description: "Manage ClickUp tasks, spaces, and docs.",
     category: "project-management",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["clickup.com", "app.clickup.com"], keywords: ["clickup"] }
+    status: "available",
+    matches: { hostnames: ["clickup.com", "app.clickup.com"], keywords: ["clickup"] },
+    register: { url: "https://mcp.clickup.com/mcp", transport: "http", auth: "oauth" }
   },
 
   // ─── Analytics & Product Intelligence ───────────────────────────────
@@ -103,8 +107,9 @@ export const MCP_CATALOG = [
     description: "Access Mixpanel analytics, funnels, and retention data.",
     category: "analytics",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["mixpanel.com"], keywords: ["mixpanel"] }
+    status: "available",
+    matches: { hostnames: ["mixpanel.com"], keywords: ["mixpanel"] },
+    register: { url: "https://mcp.mixpanel.com/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "amplitude",
@@ -112,8 +117,9 @@ export const MCP_CATALOG = [
     description: "Query Amplitude analytics and behavioral data.",
     category: "analytics",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["amplitude.com"], keywords: ["amplitude"] }
+    status: "available",
+    matches: { hostnames: ["amplitude.com"], keywords: ["amplitude"] },
+    register: { url: "https://mcp.amplitude.com/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "pendo",
@@ -121,8 +127,9 @@ export const MCP_CATALOG = [
     description: "Access Pendo product analytics and user guides.",
     category: "analytics",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["pendo.io"], keywords: ["pendo"] }
+    status: "available",
+    matches: { hostnames: ["pendo.io"], keywords: ["pendo"] },
+    register: { url: "https://app.pendo.io/mcp/v0/shttp", transport: "http", auth: "oauth" }
   },
   {
     id: "datadog",
@@ -130,8 +137,9 @@ export const MCP_CATALOG = [
     description: "Query Datadog monitoring, metrics, and dashboards.",
     category: "analytics",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["datadoghq.com"], keywords: ["datadog"] }
+    status: "available",
+    matches: { hostnames: ["datadoghq.com"], keywords: ["datadog"] },
+    register: { url: "https://mcp.datadoghq.com/api/unstable/mcp-server/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "statsig",
@@ -139,8 +147,18 @@ export const MCP_CATALOG = [
     description: "Access Statsig feature flags and experiment results.",
     category: "analytics",
     authType: "api-key",
-    status: "coming-soon",
-    matches: { hostnames: ["statsig.com", "console.statsig.com"], keywords: ["statsig"] }
+    status: "available",
+    apiKeyEnvVar: "STATSIG_API_KEY",
+    apiKeyHelp: "Console API key from Statsig → Project Settings → Keys & Environments.",
+    matches: { hostnames: ["statsig.com", "console.statsig.com"], keywords: ["statsig"] },
+    // Statsig's hosted MCP needs a custom `statsig-api-key` header, which
+    // our http+bearer transport doesn't support directly. Use the
+    // mcp-remote stdio bridge instead — same UX, different wire shape.
+    register: {
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=\${STATSIG_API_KEY}"]
+    }
   },
   {
     id: "sentry",
@@ -148,8 +166,9 @@ export const MCP_CATALOG = [
     description: "Query Sentry error tracking and performance data.",
     category: "analytics",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["sentry.io"], keywords: ["sentry"] }
+    status: "available",
+    matches: { hostnames: ["sentry.io"], keywords: ["sentry"] },
+    register: { url: "https://mcp.sentry.dev/mcp", transport: "http", auth: "oauth" }
   },
 
   // ─── Developer Tools ────────────────────────────────────────────────
@@ -185,26 +204,29 @@ export const MCP_CATALOG = [
     description: "Manage Vercel deployments, projects, and domains.",
     category: "developer-tools",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["vercel.com"], keywords: ["vercel"] }
+    status: "available",
+    matches: { hostnames: ["vercel.com"], keywords: ["vercel"] },
+    register: { url: "https://mcp.vercel.com", transport: "http", auth: "oauth" }
   },
   {
     id: "gitlab",
     name: "GitLab",
-    description: "Access GitLab projects, merge requests, and pipelines.",
+    description: "Access GitLab projects, merge requests, and pipelines (gitlab.com — for self-hosted, register manually with your instance URL).",
     category: "developer-tools",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["gitlab.com"], keywords: ["gitlab"] }
+    status: "available",
+    matches: { hostnames: ["gitlab.com"], keywords: ["gitlab"] },
+    register: { url: "https://gitlab.com/api/v4/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "cloudflare",
     name: "Cloudflare",
     description: "Manage Cloudflare workers, pages, and DNS.",
     category: "developer-tools",
-    authType: "api-key",
-    status: "coming-soon",
-    matches: { hostnames: ["cloudflare.com", "dash.cloudflare.com"], keywords: ["cloudflare"] }
+    authType: "oauth",
+    status: "available",
+    matches: { hostnames: ["cloudflare.com", "dash.cloudflare.com"], keywords: ["cloudflare"] },
+    register: { url: "https://mcp.cloudflare.com/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "supabase",
@@ -212,17 +234,29 @@ export const MCP_CATALOG = [
     description: "Access Supabase databases, auth, and storage.",
     category: "developer-tools",
     authType: "api-key",
-    status: "coming-soon",
-    matches: { hostnames: ["supabase.com", "app.supabase.com"], keywords: ["supabase"] }
+    status: "available",
+    apiKeyEnvVar: "SUPABASE_ACCESS_TOKEN",
+    apiKeyHelp: "Personal access token from Supabase → Account → Access Tokens.",
+    matches: { hostnames: ["supabase.com", "app.supabase.com"], keywords: ["supabase"] },
+    // Supabase ships an stdio MCP via npm; the env block tells the
+    // child process where to find the token (which the registry
+    // expands from the user's .env at register time).
+    register: {
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@supabase/mcp-server-supabase"],
+      env: { SUPABASE_ACCESS_TOKEN: "\${SUPABASE_ACCESS_TOKEN}" }
+    }
   },
   {
     id: "neon",
     name: "Neon",
     description: "Manage Neon serverless Postgres databases and branches.",
     category: "developer-tools",
-    authType: "api-key",
-    status: "coming-soon",
-    matches: { hostnames: ["neon.tech", "console.neon.tech"], keywords: ["neon"] }
+    authType: "oauth",
+    status: "available",
+    matches: { hostnames: ["neon.tech", "console.neon.tech"], keywords: ["neon"] },
+    register: { url: "https://mcp.neon.tech/mcp", transport: "http", auth: "oauth" }
   },
 
   // ─── CRM & Customer ─────────────────────────────────────────────────
@@ -232,17 +266,19 @@ export const MCP_CATALOG = [
     description: "Access HubSpot CRM contacts, deals, and marketing data.",
     category: "crm",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["hubspot.com", "app.hubspot.com"], keywords: ["hubspot"] }
+    status: "available",
+    matches: { hostnames: ["hubspot.com", "app.hubspot.com"], keywords: ["hubspot"] },
+    register: { url: "https://mcp.hubspot.com/", transport: "http", auth: "oauth" }
   },
   {
     id: "intercom",
     name: "Intercom",
     description: "Query Intercom conversations and customer data.",
     category: "crm",
-    authType: "api-key",
-    status: "coming-soon",
-    matches: { hostnames: ["intercom.com", "app.intercom.com"], keywords: ["intercom"] }
+    authType: "oauth",
+    status: "available",
+    matches: { hostnames: ["intercom.com", "app.intercom.com"], keywords: ["intercom"] },
+    register: { url: "https://mcp.intercom.com/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "attio",
@@ -250,8 +286,9 @@ export const MCP_CATALOG = [
     description: "Access Attio CRM records and workflows.",
     category: "crm",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["attio.com", "app.attio.com"], keywords: ["attio"] }
+    status: "available",
+    matches: { hostnames: ["attio.com", "app.attio.com"], keywords: ["attio"] },
+    register: { url: "https://mcp.attio.com/mcp", transport: "http", auth: "oauth" }
   },
 
   // ─── Design & Docs ──────────────────────────────────────────────────
@@ -271,8 +308,9 @@ export const MCP_CATALOG = [
     description: "Access Figma designs, components, and variables.",
     category: "design-docs",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["figma.com"], keywords: ["figma"] }
+    status: "available",
+    matches: { hostnames: ["figma.com"], keywords: ["figma"] },
+    register: { url: "https://mcp.figma.com/mcp", transport: "http", auth: "oauth" }
   },
   {
     id: "miro",
@@ -280,17 +318,19 @@ export const MCP_CATALOG = [
     description: "Access Miro boards, frames, and sticky notes.",
     category: "design-docs",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["miro.com"], keywords: ["miro"] }
+    status: "available",
+    matches: { hostnames: ["miro.com"], keywords: ["miro"] },
+    register: { url: "https://mcp.miro.com/", transport: "http", auth: "oauth" }
   },
   {
     id: "webflow",
     name: "Webflow",
-    description: "Manage Webflow sites, collections, and CMS items.",
+    description: "Manage Webflow sites, collections, and CMS items (Designer Bridge App must be open for canvas tools).",
     category: "design-docs",
     authType: "oauth",
-    status: "coming-soon",
-    matches: { hostnames: ["webflow.com"], keywords: ["webflow"] }
+    status: "available",
+    matches: { hostnames: ["webflow.com"], keywords: ["webflow"] },
+    register: { url: "https://mcp.webflow.com/sse", transport: "http", auth: "oauth" }
   },
   {
     id: "remarkable",
@@ -307,15 +347,15 @@ export const MCP_CATALOG = [
   {
     id: "slack",
     name: "Slack",
-    description: "Access Slack channels, messages, and user data.",
+    description: "Access Slack channels, messages, and user data. Coming soon — Slack's hosted MCP requires you to register your own Slack app and provide its client_id + client_secret, which the wizard doesn't collect yet.",
     category: "communication",
     authType: "oauth",
     status: "coming-soon",
     matches: { bundleIds: ["com.tinyspeck.slackmacgap"], hostnames: ["slack.com", "app.slack.com"], keywords: ["slack"] }
-    // No register block until Slack ships an OAuth-shaped MCP. The stdio
-    // @modelcontextprotocol/server-slack path needs SLACK_BOT_TOKEN, which
-    // we'd need to add to WIZARD_FIELDS + collect during setup before
-    // marking this entry available.
+    // The hosted MCP at https://mcp.slack.com/mcp uses confidential
+    // OAuth — clientId/clientSecret are required, not just a redirect.
+    // Holding this until we surface clientId/clientSecret collection
+    // in the dashboard catalog card the same way we do API keys.
   },
 
   // ─── Calls & Meetings ───────────────────────────────────────────────

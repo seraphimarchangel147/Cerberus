@@ -1371,6 +1371,35 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("McpRegistry: stdio args get ${VAR} expansion (statsig mcp-remote bridge)", async () => {
+  const { McpRegistry } = await import("../src/mcp-registry.js");
+  const fs = await import("node:fs");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-mcp-args-"));
+  const r = new McpRegistry({
+    dataDir: tmpDir,
+    configPath: path.join(tmpDir, "mcp.json"),
+    permittedEnvKeys: new Set(["STATSIG_API_KEY"])
+  });
+  process.env.STATSIG_API_KEY = "secret-statsig-key";
+
+  const reg = r.registerServer({
+    name: "statsig",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=${STATSIG_API_KEY}"]
+  });
+
+  // Expanded form is what gets handed to the spawn — secret resolved.
+  assert.deepEqual(reg.args, ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=secret-statsig-key"]);
+
+  // Persisted form keeps the placeholder so the secret never lands on disk.
+  const onDisk = JSON.parse(fs.readFileSync(path.join(tmpDir, "mcp.json"), "utf8"));
+  assert.equal(onDisk.servers.statsig.args[4], "statsig-api-key=${STATSIG_API_KEY}");
+
+  fs.rmSync(tmpDir, { recursive: true });
+  delete process.env.STATSIG_API_KEY;
+});
+
 test("McpRegistry persist surfaces filesystem errors instead of swallowing", async () => {
   const { McpRegistry } = await import("../src/mcp-registry.js");
   // Point configPath at a file under a path that can't exist (component

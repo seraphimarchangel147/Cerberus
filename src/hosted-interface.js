@@ -505,9 +505,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         if (!entry) return sendJson(res, 404, { error: "not in catalog" });
         if (!entry.register) return sendJson(res, 400, { error: "catalog entry has no register info" });
         try {
-          // Bearer-auth path: capture the API key into .env if the request
-          // supplied one, or fail fast if neither request nor env has it.
-          if (entry.register.auth === "bearer" && entry.apiKeyEnvVar) {
+          // API-key path: any catalog entry that declares apiKeyEnvVar
+          // needs that env var populated before we register, regardless
+          // of transport. http+bearer points spec.apiKey at the var;
+          // stdio entries already reference it in their args/env block,
+          // so we just need it on disk + in the registry's allowlist.
+          if (entry.apiKeyEnvVar) {
             const incoming = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
             const existing = process.env[entry.apiKeyEnvVar] ?? "";
             if (incoming) {

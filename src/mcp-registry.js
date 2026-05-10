@@ -83,7 +83,11 @@ export class McpRegistry {
       transport,
       // stdio-specific
       command: server.command ?? null,
-      args: server.args ?? [],
+      // Args go through ${VAR} expansion too — mcp-remote in particular
+      // takes "--header statsig-api-key=${STATSIG_API_KEY}" as a CLI arg,
+      // not env, so the substitution has to happen here. _persist still
+      // writes the un-expanded original so secrets stay in .env.
+      args: (server.args ?? []).map((a) => expandValue(a, allowed)),
       env: expandEnv(server.env ?? {}, allowed),
       cwd: server.cwd ?? null,
       // http-specific
