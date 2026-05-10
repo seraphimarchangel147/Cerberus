@@ -50,6 +50,11 @@ export class IMessagePollerSource {
     //   "task" (default) — title becomes a user-queue task in 'today'
     //   "observation"    — recorded but no task created
     this.mode = options.mode ?? process.env.IMESSAGE_MODE ?? "task";
+    // First-sync behavior. Default forward-only — when iMessage is first
+    // enabled we don't want every text-to-self ever to land as a task in
+    // the user's Today bucket. Set IMESSAGE_BACKFILL_DAYS=7 (or similar)
+    // to seed the last N days as a one-time catch-up.
+    this.backfillDays = options.backfillDays ?? (Number(process.env.IMESSAGE_BACKFILL_DAYS ?? 0) || 0);
     this.lastSyncedAt = null;
     this.lastError = null;
     this.statePath = path.join(this.dataDir, "integrations", "imessage-state.json");
@@ -99,11 +104,44 @@ export class IMessagePollerSource {
   }
 
   _loadState() {
-    return readJsonFile(this.statePath, { lastRowid: 0 });
+    // initialized=false sentinel triggers the first-run bootstrap so we
+    // don't import a decade of self-texts the moment iMessage is enabled.
+    return readJsonFile(this.statePath, { lastRowid: 0, initialized: false });
   }
 
   _saveState(state) {
     writeJsonAtomic(this.statePath, state);
+  }
+
+  /// Pick the starting ROWID for the first sync after enable.
+  ///   - backfillDays > 0 → ROWIDs whose date >= now - N days (lower bound)
+  ///   - backfillDays = 0 → MAX(ROWID) so future messages only
+  /// Returns 0 if the table is empty.
+  _computeBootstrapRowid(db) {
+    if (this.backfillDays > 0) {
+      // chat.db `date` is nanoseconds since 2001-01-01 UTC. Apple epoch
+      // offset is 978307200000 ms.
+      const cutoffMs = Date.now() - this.backfillDays * 86400 * 1000;
+      const cutoffAppleNs = (cutoffMs - 978307200000) * 1e6;
+      try {
+        const row = db.prepare(`
+          SELECT MIN(ROWID) AS rowid
+          FROM message
+          WHERE date >= ?
+        `).get(cutoffAppleNs);
+        // Subtract 1 so the WHERE m.ROWID > sinceRowid in sync() includes
+        // the first message at the cutoff.
+        if (row?.rowid) return Math.max(0, row.rowid - 1);
+        // No messages in that window — fall through to MAX so we don't
+        // accidentally import everything older than the cutoff.
+      } catch { /* fall through */ }
+    }
+    try {
+      const row = db.prepare(`SELECT MAX(ROWID) AS rowid FROM message`).get();
+      return row?.rowid ?? 0;
+    } catch {
+      return 0;
+    }
   }
 
   async sync({ now = new Date() } = {}) {
@@ -135,7 +173,17 @@ export class IMessagePollerSource {
     }
 
     try {
-      const state = this._loadState();
+      let state = this._loadState();
+
+      // First-run bootstrap: avoid dumping years of historical self-texts
+      // into Today. Without this, sinceRowid=0 means "import everything",
+      // which is almost never what the user wants.
+      if (!state.initialized) {
+        const seedRowid = this._computeBootstrapRowid(db);
+        state = { lastRowid: seedRowid, initialized: true, bootstrappedAt: new Date().toISOString() };
+        this._saveState(state);
+      }
+
       const sinceRowid = state.lastRowid ?? 0;
 
       // Pull messages newer than our high-water mark, only from chats that
