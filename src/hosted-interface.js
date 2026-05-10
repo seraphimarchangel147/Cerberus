@@ -2060,12 +2060,12 @@ function openMcpComposer() {
           <input name="url" placeholder="https://mcp.example.com/mcp">
         </div>
         <div data-kind="http-bearer">
-          <label>API key (or \${ENV_VAR})</label>
-          <input name="apiKey" placeholder="\${MY_MCP_KEY}">
+          <label>API key (or \\\${ENV_VAR})</label>
+          <input name="apiKey" placeholder="\\\${MY_MCP_KEY}">
         </div>
         <div data-kind="http-oauth">
           <label>Pre-registered Client ID <span class="muted">· optional, only if your auth server doesn't support dynamic registration</span></label>
-          <input name="clientId" placeholder="\${OAUTH_CLIENT_ID} or literal">
+          <input name="clientId" placeholder="\\\${OAUTH_CLIENT_ID} or literal">
         </div>
         <div data-kind="http-oauth">
           <label>Client secret <span class="muted">· optional, only for confidential clients</span></label>
