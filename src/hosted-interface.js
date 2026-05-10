@@ -533,6 +533,44 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendJson(res, 400, { error: error.message });
         }
       }
+      if (method === "GET" && pathname === "/pending-actions") {
+        const status = url.searchParams.get("status") || undefined;
+        return sendJson(res, 200, {
+          actions: runtime.pendingActions?.list({ status }) ?? []
+        });
+      }
+      if (method === "POST" && pathname.startsWith("/pending-actions/") && pathname.endsWith("/approve")) {
+        const id = decodeURIComponent(pathname.slice("/pending-actions/".length, -"/approve".length));
+        const action = runtime.pendingActions?.get(id);
+        if (!action) return sendJson(res, 404, { error: "unknown pending action" });
+        if (action.status !== "pending") return sendJson(res, 409, { error: `action already ${action.status}` });
+        // Re-invoke the original tool with the bypass flag so the gate
+        // doesn't re-queue the same call. Persist the result on the action.
+        const invokeResult = await runtime.tools.invoke(action.toolName, action.args, {
+          ...action.context,
+          __confirmed: true
+        });
+        runtime.pendingActions.decide(id, {
+          decision: "approve",
+          decidedBy: "user",
+          result: invokeResult.ok ? invokeResult.result : null,
+          error: invokeResult.ok ? null : invokeResult.error
+        });
+        return sendJson(res, invokeResult.ok ? 200 : 400, invokeResult);
+      }
+      if (method === "POST" && pathname.startsWith("/pending-actions/") && pathname.endsWith("/deny")) {
+        const id = decodeURIComponent(pathname.slice("/pending-actions/".length, -"/deny".length));
+        const action = runtime.pendingActions?.get(id);
+        if (!action) return sendJson(res, 404, { error: "unknown pending action" });
+        if (action.status !== "pending") return sendJson(res, 409, { error: `action already ${action.status}` });
+        const body = await readJson(req).catch(() => ({}));
+        runtime.pendingActions.decide(id, {
+          decision: "deny",
+          decidedBy: "user",
+          error: body.reason ?? "denied by user"
+        });
+        return sendJson(res, 200, { id, status: "denied" });
+      }
       if (method === "POST" && pathname === "/control/restart") {
         // Bounce the daemon so .env changes pick up. The Mac app's
         // DaemonController has a terminationHandler that respawns after a
@@ -2444,8 +2482,36 @@ async function renderSuggestions() {
   // Live view of everything the proactive observer has proposed and is
   // waiting on the user to accept/reject. Tasks → Tasks tab, MCPs →
   // auto-register, automations → notes, knowledge → just FYI.
-  const list = await fetchJson("/proactive/suggestions?status=pending").catch(() => []);
-  if (!Array.isArray(list) || list.length === 0) {
+  // Plus: pending agent-initiated actions (catalog connects, daemon
+  // restarts) that need explicit human approval before they run.
+  const [list, pendingActions] = await Promise.all([
+    fetchJson("/proactive/suggestions?status=pending").catch(() => []),
+    fetchJson("/pending-actions?status=pending").catch(() => ({ actions: [] }))
+  ]);
+  const actions = pendingActions?.actions ?? [];
+
+  const pendingActionsHtml = actions.length === 0 ? "" : \`
+    <h3 style="margin-top:8px;">Agent actions awaiting approval <span class="badge">\${actions.length}</span></h3>
+    <p class="muted">The agent proposed these — they only run if you approve.</p>
+    \${actions.map((a) => \`
+      <div class="card" style="padding:14px; margin-bottom:10px;" data-pending-id="\${escapeHtml(a.id)}">
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span style="font-size:18px;">🤖</span>
+          <span style="font-weight:600;">\${escapeHtml(a.summary || a.toolName)}</span>
+          <span class="badge">\${escapeHtml(a.toolName)}</span>
+        </div>
+        \${a.reason ? \`<div class="muted" style="margin-top:6px; font-size:12px;">\${escapeHtml(a.reason)}</div>\` : ""}
+        <details style="margin-top:6px;"><summary class="muted" style="font-size:11px;">view args</summary><pre style="font-size:11px; margin-top:4px;">\${escapeHtml(JSON.stringify(a.args, null, 2))}</pre></details>
+        <div class="muted" style="margin-top:4px; font-size:11px;">queued \${escapeHtml(new Date(a.createdAt).toLocaleString())}</div>
+        <div class="row" style="gap:8px; margin-top:10px;">
+          <button data-pending-action="approve">Approve & run</button>
+          <button data-pending-action="deny" class="secondary">Deny</button>
+        </div>
+      </div>
+    \`).join("")}
+  \`;
+
+  if ((!Array.isArray(list) || list.length === 0) && actions.length === 0) {
     main.innerHTML = \`
       <div class="pane">
         <h2>Suggestions</h2>
@@ -2453,6 +2519,17 @@ async function renderSuggestions() {
         <p class="muted">If you want to force a run now: <code>POST /proactive/observe</code>.</p>
       </div>
     \`;
+    return;
+  }
+  if (!Array.isArray(list) || list.length === 0) {
+    // Only pending agent actions, no proactive suggestions.
+    main.innerHTML = \`
+      <div class="pane">
+        <h2>Suggestions</h2>
+        \${pendingActionsHtml}
+      </div>
+    \`;
+    bindPendingActionButtons();
     return;
   }
 
@@ -2494,8 +2571,10 @@ async function renderSuggestions() {
       <h2>Suggestions <span class="badge">\${list.length}</span></h2>
       <p class="muted">Proactive observer proposed these from your recent on-screen activity. Accept routes to the right place — tasks land in the Tasks tab, MCPs auto-register, skills become drafts.</p>
       \${list.map(card).join("")}
+      \${pendingActionsHtml}
     </div>
   \`;
+  bindPendingActionButtons();
 
   document.querySelectorAll("[data-suggestion-id]").forEach((el) => {
     const id = el.dataset.suggestionId;
@@ -2518,6 +2597,34 @@ async function renderSuggestions() {
           await renderSuggestions();
         } catch (err) {
           showToast("Action failed: " + err.message, false);
+        }
+      });
+    });
+  });
+}
+
+function bindPendingActionButtons() {
+  document.querySelectorAll("[data-pending-id]").forEach((card) => {
+    const id = card.dataset.pendingId;
+    card.querySelectorAll("[data-pending-action]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const decision = btn.dataset.pendingAction;
+        btn.disabled = true;
+        const originalLabel = btn.textContent;
+        btn.textContent = decision === "approve" ? "Running..." : "Denying...";
+        try {
+          const res = await postJson(\`/pending-actions/\${encodeURIComponent(id)}/\${decision}\`, {});
+          if (decision === "approve") {
+            const summary = res?.result?.note ?? res?.result?.message ?? \`Action ran (\${JSON.stringify(res?.result ?? res)})\`;
+            showToast(\`✓ \${summary}\`, true);
+          } else {
+            showToast("Action denied.", true);
+          }
+          await renderSuggestions();
+        } catch (err) {
+          showToast(\`\${decision} failed: \${err.message}\`, false);
+          btn.disabled = false;
+          btn.textContent = originalLabel;
         }
       });
     });

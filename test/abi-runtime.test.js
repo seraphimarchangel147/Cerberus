@@ -1305,6 +1305,72 @@ test("McpRegistry allowEnvKey extends the in-memory permitted set", async () => 
   delete process.env.POSTHOG_MCP_API_KEY;
 });
 
+test("ToolRegistry: needsConfirmation gate queues action instead of running", async () => {
+  const { ToolRegistry } = await import("../src/tool-registry.js");
+  const { PendingActionStore } = await import("../src/pending-actions.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pending-"));
+  const pending = new PendingActionStore({ dir });
+  const tools = new ToolRegistry();
+  tools.bindPendingActions(pending);
+
+  let ran = 0;
+  tools.register({
+    name: "do_thing",
+    description: "test",
+    needsConfirmation: true,
+    summarize: (args) => `Do thing with ${args.x}`,
+    handler: async (args) => { ran++; return { didIt: args.x }; }
+  });
+
+  // Without __confirmed, the call queues instead of running.
+  const queued = await tools.invoke("do_thing", { x: 42 }, { sessionId: "s1" });
+  assert.equal(ran, 0, "handler did not execute");
+  assert.equal(queued.ok, true);
+  assert.equal(queued.result.status, "awaiting_confirmation");
+  assert.equal(queued.result.summary, "Do thing with 42");
+
+  const list = pending.list({ status: "pending" });
+  assert.equal(list.length, 1);
+  assert.equal(list[0].toolName, "do_thing");
+  assert.equal(list[0].args.x, 42);
+  assert.equal(list[0].context.sessionId, "s1");
+
+  // With __confirmed, it bypasses the queue and runs.
+  const ok = await tools.invoke("do_thing", { x: 99 }, { __confirmed: true });
+  assert.equal(ran, 1);
+  assert.deepEqual(ok.result, { didIt: 99 });
+
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("PendingActionStore: enqueue + decide + replay across instances", async () => {
+  const { PendingActionStore } = await import("../src/pending-actions.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pending-replay-"));
+  const a = new PendingActionStore({ dir });
+  const action = a.enqueue({
+    toolName: "connect_catalog_mcp",
+    args: { catalogId: "stripe", apiKey: "sk_test_x" },
+    context: { sessionId: "s1", channel: "local" },
+    summary: "Connect MCP: stripe"
+  });
+  assert.equal(action.status, "pending");
+  const decided = a.decide(action.id, { decision: "approve", decidedBy: "user", result: { ok: true } });
+  assert.equal(decided.status, "approved");
+
+  // New instance reads journal and recovers the same state.
+  const b = new PendingActionStore({ dir });
+  const recovered = b.get(action.id);
+  assert.equal(recovered.status, "approved");
+  assert.equal(recovered.summary, "Connect MCP: stripe");
+  assert.equal(recovered.toolName, "connect_catalog_mcp");
+
+  // Re-deciding a decided action is idempotent (returns existing state).
+  const noop = b.decide(action.id, { decision: "deny" });
+  assert.equal(noop.status, "approved", "second decide does not flip an already-decided action");
+
+  fs.rmSync(dir, { recursive: true });
+});
+
 test("McpRegistry persist surfaces filesystem errors instead of swallowing", async () => {
   const { McpRegistry } = await import("../src/mcp-registry.js");
   // Point configPath at a file under a path that can't exist (component

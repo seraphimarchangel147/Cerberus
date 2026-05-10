@@ -14,10 +14,21 @@ export class ToolRegistry {
       parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
       source: tool.source ?? "internal",
       handler: tool.handler,
+      // When true, invoke() queues a pending-action and returns
+      // {status:"awaiting_confirmation"} instead of running. The action is
+      // surfaced in the dashboard for the user to approve/deny.
+      needsConfirmation: Boolean(tool.needsConfirmation),
+      // Short human-readable summary used in the approval UI when the args
+      // alone don't describe the action well. Optional fn(args) -> string.
+      summarize: typeof tool.summarize === "function" ? tool.summarize : null,
       metadata: tool.metadata ?? {}
     };
     this.tools.set(normalized.name, normalized);
     return normalized;
+  }
+
+  bindPendingActions(pendingActions) {
+    this.pendingActions = pendingActions;
   }
 
   unregister(name) {
@@ -58,6 +69,28 @@ export class ToolRegistry {
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
     }
+    // Confirmation gate. When set, divert the call into the pending-action
+    // queue UNLESS context.__confirmed is true (which the approve endpoint
+    // sets after a human OKs the action).
+    if (tool.needsConfirmation && !context?.__confirmed && this.pendingActions) {
+      const summary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
+      const action = this.pendingActions.enqueue({
+        toolName: name,
+        args,
+        context,
+        summary,
+        reason: context.__reason ?? null
+      });
+      return {
+        ok: true,
+        result: {
+          status: "awaiting_confirmation",
+          actionId: action.id,
+          summary: action.summary,
+          message: `Queued for human approval. Visit the dashboard's Approvals tab (or run /pending-actions) to approve or deny.`
+        }
+      };
+    }
     try {
       const result = await tool.handler(args ?? {}, context);
       return { ok: true, result };
@@ -65,6 +98,10 @@ export class ToolRegistry {
       return { ok: false, error: error.message ?? String(error) };
     }
   }
+}
+
+function safeSummarize(fn, args) {
+  try { return String(fn(args ?? {})).slice(0, 240); } catch { return null; }
 }
 
 export function registerCoreTools(registry, runtime) {
@@ -330,7 +367,9 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "register_mcp_server",
-    description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with static API key), http+oauth (URL with browser-based OAuth). After registering, the user typically needs to call connect_mcp_server.",
+    description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with static API key), http+oauth (URL with browser-based OAuth). After registering, the user typically needs to call connect_mcp_server. THIS REQUIRES USER APPROVAL — registering an MCP can mean spawning an arbitrary process or contacting an arbitrary host. Prefer connect_catalog_mcp when the server is already in the curated catalog.",
+    needsConfirmation: true,
+    summarize: (args) => `Register MCP '${args.name}' (${args.transport ?? (args.url ? "http" : "stdio")})`,
     parameters: {
       type: "object",
       properties: {
@@ -564,6 +603,110 @@ export function registerCoreTools(registry, runtime) {
     handler: async () => {
       const task = runtime.tasks.agentPickNext?.() ?? null;
       return task ? { task } : { task: null, reason: "agent queue empty" };
+    }
+  });
+
+  // ─── Catalog-aware integration tools (require user approval) ───────────
+
+  registry.register({
+    name: "list_mcp_catalog",
+    description: "List the MCP servers in OpenAGI's curated catalog — names, descriptions, auth mode (api-key vs oauth), availability (available vs coming-soon), and required env-var name for bearer-auth entries. Use BEFORE connect_catalog_mcp to confirm an entry exists and learn what credentials it needs.",
+    parameters: {
+      type: "object",
+      properties: {
+        category: { type: "string", description: "Optional filter: project-management, analytics, developer-tools, crm, design-docs, communication, calls-meetings, filesystem." },
+        availableOnly: { type: "boolean", description: "If true, only return entries with status='available' (skip OAuth-pending ones)." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      const { MCP_CATALOG } = await import("./mcp-catalog.js");
+      let entries = MCP_CATALOG;
+      if (args.category) entries = entries.filter((e) => e.category === args.category);
+      if (args.availableOnly) entries = entries.filter((e) => e.status === "available" && Boolean(e.register));
+      const registered = new Set((runtime.mcp?.listServers?.() ?? []).map((s) => s.name?.toLowerCase()));
+      return {
+        count: entries.length,
+        entries: entries.map((e) => ({
+          id: e.id,
+          name: e.name,
+          description: e.description,
+          category: e.category,
+          authType: e.authType,
+          status: e.status,
+          apiKeyEnvVar: e.apiKeyEnvVar ?? null,
+          apiKeyHelp: e.apiKeyHelp ?? null,
+          alreadyRegistered: registered.has(e.id),
+          connectable: e.status === "available" && Boolean(e.register)
+        }))
+      };
+    }
+  });
+
+  registry.register({
+    name: "connect_catalog_mcp",
+    description: "One-click register an MCP server from the curated catalog by id. For bearer-auth entries (Stripe, PostHog, etc.), pass the user's API key via apiKey — it'll be persisted to .env under the entry's declared env var, then the MCP is registered with `${VAR}` indirection. For OAuth entries (Linear, Notion, GitHub), no key is needed; the OAuth handshake will surface in the dashboard's MCP tab. THIS REQUIRES USER APPROVAL — you'll get back {status:'awaiting_confirmation'} and the user must approve via the dashboard before the registration actually runs.",
+    parameters: {
+      type: "object",
+      properties: {
+        catalogId: { type: "string", description: "Catalog entry id (see list_mcp_catalog)." },
+        apiKey: { type: "string", description: "Required for bearer-auth entries when their env var isn't already populated. Never invent — only pass a key the user has explicitly given you." }
+      },
+      required: ["catalogId"],
+      additionalProperties: false
+    },
+    needsConfirmation: true,
+    summarize: (args) => `Connect MCP: ${args.catalogId}${args.apiKey ? " (with API key you provided)" : ""}`,
+    handler: async (args) => {
+      const { MCP_CATALOG } = await import("./mcp-catalog.js");
+      const entry = MCP_CATALOG.find((e) => e.id === args.catalogId);
+      if (!entry) throw new Error(`Catalog entry '${args.catalogId}' not found. Use list_mcp_catalog to see what's available.`);
+      if (!entry.register) throw new Error(`Catalog entry '${entry.id}' has no register info (likely status=coming-soon).`);
+      if (entry.register.auth === "bearer" && entry.apiKeyEnvVar) {
+        const incoming = typeof args.apiKey === "string" ? args.apiKey.trim() : "";
+        const existing = process.env[entry.apiKeyEnvVar] ?? "";
+        if (incoming) {
+          const { saveEnv } = await import("./setup-wizard.js");
+          const path = await import("node:path");
+          const dataDir = process.env.OPENAGI_DATA_DIR ?? path.join(process.cwd(), ".openagi");
+          saveEnv({ dataDir, values: { [entry.apiKeyEnvVar]: incoming } });
+        } else if (!existing) {
+          throw new Error(`Catalog entry '${entry.id}' uses ${entry.apiKeyEnvVar} which isn't set. Ask the user for their key, then call this tool again with apiKey set.`);
+        }
+        runtime.mcp.allowEnvKey?.(entry.apiKeyEnvVar);
+      }
+      const spec = { name: entry.id, ...entry.register };
+      if (entry.register.auth === "bearer" && entry.apiKeyEnvVar) {
+        spec.apiKey = `\${${entry.apiKeyEnvVar}}`;
+      }
+      const server = runtime.mcp.registerServer(spec);
+      if (runtime.mcp?.connect) runtime.mcp.connect(server.name).catch(() => { /* OAuth surfaces via SSE */ });
+      return {
+        name: server.name,
+        transport: server.transport,
+        note: entry.register.auth === "oauth"
+          ? "OAuth handshake initiated — user should complete it in the dashboard's MCP tab."
+          : "Registered. Use list_mcp_tools to see what's available."
+      };
+    }
+  });
+
+  registry.register({
+    name: "restart_daemon",
+    description: "Bounce the OpenAGI process so .env changes (new credentials, providers, etc) take effect. Existing integration constructors only re-read env at boot, so this is required after save_integration_credentials or a credentials change. THIS REQUIRES USER APPROVAL — restart drops in-flight chat connections briefly. Use sparingly; only when an integration won't work otherwise.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Why a restart is needed — surfaced in the approval UI so the user understands the trigger." }
+      },
+      additionalProperties: false
+    },
+    needsConfirmation: true,
+    summarize: (args) => args.reason ? `Restart daemon (reason: ${args.reason})` : "Restart daemon",
+    handler: async () => {
+      // Same pattern as /control/restart — schedule exit so the response can flush.
+      setTimeout(() => process.exit(0), 200);
+      return { restarting: true };
     }
   });
 

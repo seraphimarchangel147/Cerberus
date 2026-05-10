@@ -23,6 +23,7 @@ import { PatternMiner } from "./pattern-miner.js";
 import { SessionMiner } from "./session-miner.js";
 import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
+import { PendingActionStore } from "./pending-actions.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
 import { SkillReplay } from "./skill-replay.js";
 import { ScrutinyJudge } from "./scrutiny-judge.js";
@@ -98,6 +99,13 @@ export class AbiRuntime {
     this.mcp = options.mcp ?? new McpRegistry(options.mcpOptions ?? {});
     this.tools = options.tools ?? new ToolRegistry();
     this.mcp.bindToolRegistry(this.tools);
+    // Pending-action queue: tools flagged needsConfirmation route through
+    // here so the user can approve/deny before the agent's intent runs.
+    this.pendingActions = options.pendingActions ?? new PendingActionStore({
+      dir: options.dataDir ? path.join(options.dataDir, "pending-actions") : undefined,
+      ...(options.pendingActionStoreOptions ?? {})
+    });
+    this.tools.bindPendingActions(this.pendingActions);
     this.skills = options.skills ?? null;
     this.budget = options.budget ?? new BudgetGuard(options.budgetOptions ?? {});
     this.outcomes = options.outcomes ?? new OutcomeStore(options.outcomeOptions ?? {});
