@@ -3717,7 +3717,8 @@ function escapeHtml(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":
 // obscure terms in dense panes so users don't have to leave the page to
 // understand what something means. Returns markup; caller composes it
 // into the surrounding template literal.
-//   Memory tier <span ...>${uiHelp("Short is RAM, medium is day-to-day, long is durable principles.")}</span>
+// Example (with escaped dollar so the outer renderApp Node template
+// doesn't try to interpolate it): Memory tier \\\${uiHelp("Short is RAM...")}
 function uiHelp(text) {
   return \`<span class="ui-help" tabindex="0" aria-label="\${escapeHtml(text)}">?<span class="ui-help-tip">\${escapeHtml(text)}</span></span>\`;
 }
