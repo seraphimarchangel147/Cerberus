@@ -109,12 +109,20 @@ export function renderWizard({ proposedToken } = {}) {
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
     body { margin:0; background:#0e1411; color:#e8efea; font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif; min-height:100vh; }
-    .wrap { max-width: 720px; margin: 0 auto; padding: 32px 20px 80px; }
-    header { display:flex; align-items:baseline; gap:12px; margin-bottom: 18px; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 0 20px 80px; }
+    /* Sticky progress bar — keeps a sense of how far through 8 steps the
+       user is even when they scroll deep into a long step (esp. step 6
+       MCPs which is the densest). */
+    .progress-shell { position: sticky; top: 0; background:#0e1411; z-index: 10; padding: 24px 0 12px; }
+    .progress-shell header { display:flex; align-items:baseline; gap:12px; margin: 0 0 12px; }
+    .progress-bar { height: 4px; background:#1d2722; border-radius: 999px; overflow: hidden; }
+    .progress-fill { height: 100%; background:#6fe1b1; width: 12.5%; transition: width .25s ease; }
+    .progress-label { display:flex; justify-content: space-between; font-size: 11px; color:#8da59a; margin-top: 6px; }
     h1 { margin:0; font-size: 22px; letter-spacing: -0.01em; }
     .sub { color:#8da59a; font-size: 13px; }
-    .step { background:#161d19; border:1px solid #2a352f; border-radius:10px; padding:18px 20px; margin-bottom:16px; }
-    .step h2 { margin:0 0 4px; font-size: 15px; letter-spacing: 0.02em; text-transform: uppercase; color:#6fe1b1; }
+    .step { background:#161d19; border:1px solid #2a352f; border-radius:10px; padding:18px 20px; margin-bottom:16px; scroll-margin-top: 80px; }
+    .step.active { border-color:#3d5b4d; box-shadow: 0 0 0 1px rgba(111,225,177,0.10); }
+    .step h2 { margin:0 0 4px; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color:#6fe1b1; font-weight: 700; }
     .step h3 { margin: 0 0 10px; font-size: 17px; }
     .step p { color:#8da59a; margin: 4px 0 12px; }
     label { display:block; font-size:12px; color:#8da59a; margin-bottom:4px; }
@@ -154,10 +162,14 @@ export function renderWizard({ proposedToken } = {}) {
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>OpenAGI</h1>
-    <span class="sub">first-run setup</span>
-  </header>
+  <div class="progress-shell">
+    <header>
+      <h1>OpenAGI</h1>
+      <span class="sub">first-run setup</span>
+    </header>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-label"><span id="progressStep">Step 1 of 8</span><span id="progressName">welcome</span></div>
+  </div>
 
   <form id="form">
     <div class="step">
@@ -323,6 +335,47 @@ export function renderWizard({ proposedToken } = {}) {
   </form>
 </div>
 <script>
+  // Walk each .step div, observe which is the topmost one in view, update
+  // the sticky progress bar. Uses IntersectionObserver so it costs nothing
+  // when the user isn't scrolling. We add .active to the visible step
+  // for a subtle border highlight so the step you're filling in feels
+  // distinct from the ones you've passed.
+  (function initProgress() {
+    const steps = Array.from(document.querySelectorAll('.step'));
+    if (steps.length === 0) return;
+    const fill = document.getElementById('progressFill');
+    const stepLabel = document.getElementById('progressStep');
+    const nameLabel = document.getElementById('progressName');
+    const total = steps.length;
+    function setActive(idx) {
+      const clamped = Math.max(0, Math.min(total - 1, idx));
+      steps.forEach((el, i) => el.classList.toggle('active', i === clamped));
+      fill.style.width = (((clamped + 1) / total) * 100).toFixed(2) + '%';
+      stepLabel.textContent = 'Step ' + (clamped + 1) + ' of ' + total;
+      // Pull a friendly name out of the step's h2 ("2 / 8 · model" → "model").
+      const h2 = steps[clamped].querySelector('h2');
+      const parts = (h2?.textContent ?? '').split('·');
+      nameLabel.textContent = (parts[1] ?? parts[0] ?? '').trim().toLowerCase();
+    }
+    const visible = new Map();
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) visible.set(e.target, e.intersectionRatio);
+        else visible.delete(e.target);
+      }
+      if (visible.size === 0) return;
+      // Topmost visible step wins.
+      let best = null; let bestY = Infinity;
+      for (const [el] of visible) {
+        const y = el.getBoundingClientRect().top;
+        if (y >= 0 && y < bestY) { bestY = y; best = el; }
+      }
+      if (best) setActive(steps.indexOf(best));
+    }, { rootMargin: '-80px 0px -50% 0px', threshold: [0, 0.1, 0.5, 1] });
+    steps.forEach((s) => io.observe(s));
+    setActive(0);
+  })();
+
   function refreshToken() {
     const len = 32;
     const arr = new Uint8Array(len);

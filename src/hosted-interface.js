@@ -1792,7 +1792,15 @@ function renderChat() {
   \`;
   const thread = $("thread");
   if (state.messages.length === 0) {
-    thread.innerHTML = '<div class="empty">Start a new conversation. Try "Remind me in 60 seconds to drink water" or "Remember that my standup is 9am Mondays".</div>';
+    // First-run welcome card: when this user has never had any session
+    // (just landed from /setup) and hasn't dismissed before, show the
+    // 4 things worth doing next. localStorage dismiss persists across
+    // sessions in the same browser; after the first real session exists,
+    // we fall back to the lighter prompt automatically.
+    const noSessions = (state.sessions ?? []).length === 0;
+    let dismissed = false;
+    try { dismissed = localStorage.getItem("openagi.welcomeDismissed") === "1"; } catch { /* ignore */ }
+    thread.innerHTML = (noSessions && !dismissed) ? renderFirstRunWelcome() : renderChatPlaceholder();
   }
   for (const m of state.messages) appendMessage(m, false);
   thread.scrollTop = thread.scrollHeight;
@@ -1802,6 +1810,27 @@ function renderChat() {
   // agent-action approvals — clicking buttons here calls the same
   // backend endpoints the Suggestions tab does.
   renderChatDeepLink();
+  // First-run welcome card click routing. Each card has a data-welcome-target
+  // saying where it should send the user. Dismiss persists in localStorage
+  // so it doesn't reappear next session.
+  document.querySelectorAll("[data-welcome-target]").forEach((card) => {
+    card.addEventListener("click", () => {
+      const target = card.dataset.welcomeTarget;
+      if (target === "integrations") switchTab("integrations");
+      else if (target === "tasks") switchTab("tasks");
+      else if (target === "capture") {
+        showToast("Open the menu bar icon → Capture → Enable to turn on screen observation.", true);
+      } else if (target === "chat-self") {
+        const inp = $("input");
+        if (inp) { inp.value = "What can you do?"; inp.focus(); inp.dispatchEvent(new Event("input")); }
+      }
+    });
+  });
+  document.getElementById("dismissWelcome")?.addEventListener("click", () => {
+    try { localStorage.setItem("openagi.welcomeDismissed", "1"); } catch { /* ignore */ }
+    const thread = $("thread");
+    if (thread) thread.innerHTML = renderChatPlaceholder();
+  });
   const input = $("input");
   // ?compose=<intent> seeds the input with a starter sentence so the user
   // can finish typing and Enter — agent picks up via add_task /
@@ -1969,6 +1998,44 @@ async function renderChatDeepLink() {
   } catch (err) {
     host.innerHTML = \`<div class="card" style="padding:10px 14px;"><span class="err">Failed to load: \${escapeHtml(err.message)}</span></div>\`;
   }
+}
+
+function renderChatPlaceholder() {
+  // Lighter prompt shown after the first session exists — assumes the
+  // user knows what kind of thing they can say. Kept terse on purpose.
+  return '<div class="ui-empty" style="margin: var(--space-4) 0;">Start a new conversation. Try "Remind me in 60 seconds to drink water" or "Remember that my standup is 9am Mondays".</div>';
+}
+
+function renderFirstRunWelcome() {
+  // First-run dashboard card. Points the user at the 4 high-value next
+  // moves so they're not staring at an empty chat input wondering what
+  // OpenAGI is for. Each card is a real link to the right tab/action,
+  // no fake content. Kept compact — this is a welcome, not a tutorial.
+  return \`
+    <div class="ui-card ui-card-elev" style="margin: var(--space-4) 0; padding: var(--space-5);">
+      <h2 style="margin: 0 0 var(--space-2); font-size: 18px;">Welcome to OpenAGI 👋</h2>
+      <p class="ui-muted" style="margin: 0 0 var(--space-4);">You're set up. Here's what's worth doing first — talk to your agent any time you want, but most users start with one of these:</p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3);">
+        <a class="ui-card" data-welcome-target="integrations" style="cursor:pointer; text-decoration:none; color:inherit;">
+          <div style="font-weight: 600; margin-bottom: 4px;">🔌 Connect your tools</div>
+          <div class="ui-meta">Link Linear, Notion, GitHub, Stripe, PostHog and ~20 more so the agent has real data to act on.</div>
+        </a>
+        <a class="ui-card" data-welcome-target="tasks" style="cursor:pointer; text-decoration:none; color:inherit;">
+          <div style="font-weight: 600; margin-bottom: 4px;">📋 Add what's on your plate</div>
+          <div class="ui-meta">Drop in tasks you're carrying. The agent will help you triage and remind you when they're due.</div>
+        </a>
+        <a class="ui-card" data-welcome-target="capture" style="cursor:pointer; text-decoration:none; color:inherit;">
+          <div style="font-weight: 600; margin-bottom: 4px;">👀 Enable screen capture (optional)</div>
+          <div class="ui-meta">Lets the proactive observer notice routines and propose skills. From the menu bar → Capture → Enable.</div>
+        </a>
+        <a class="ui-card" data-welcome-target="chat-self" style="cursor:pointer; text-decoration:none; color:inherit;">
+          <div style="font-weight: 600; margin-bottom: 4px;">💬 Just say hi</div>
+          <div class="ui-meta">Type "what can you do?" below. The agent will tell you what it has access to right now.</div>
+        </a>
+      </div>
+      <button class="ui-btn ui-btn-ghost ui-btn-sm" id="dismissWelcome" style="margin-top: var(--space-3);">Don't show again</button>
+    </div>
+  \`;
 }
 
 function appendMessage(msg, autoscroll = true) {
