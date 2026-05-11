@@ -46,6 +46,21 @@ Decide if anything needs action right now: a follow-up to send, a memory to reco
 - If nothing needs doing, reply with exactly one short sentence describing what you observed and "standing by".
 Do not invent work. Be conservative — fewer actions, higher signal.`;
 
+// Default pulse that actually drains the agent's queue. Without this
+// being scheduled by default, the agent queue ("things I committed to
+// do for the user") would just sit there waiting. Fires every 30 min,
+// queue-first: pull the next task, work it via tools, complete or update.
+// Conservative on the empty path so we don't burn LLM cycles inventing
+// work. Users who want a different cadence can edit the cron job in
+// the dashboard; setting it to disabled turns the autopilot off entirely.
+const AGENT_PULSE_PROMPT = `Agent autopilot pulse. Drain your queue.
+
+1. Call \`agent_pick_next\` to get the highest-priority task you've committed to do.
+2. If there's a task: work on it. Use tools as needed (\`recall\`, \`run_mcp_tool\`, \`send_message\`, \`schedule_message\`, etc). When the task is done, call \`complete_task\` with the task id. If it's still in progress or needs to be deferred, call \`move_task\` to update its status / bucket / due date.
+3. If the queue is empty (\`{task: null}\`): you don't need to invent work. Glance at recent sessions only if something obviously needs a follow-up — otherwise reply "standing by" in one sentence and stop.
+
+The user is not in this conversation — the only output that matters is what you DO via tools, not what you say. Take no action if you have no committed work; do not summarize, do not editorialize.`;
+
 const HARSH_REVIEW_PROMPT = `Weekly harsh review. Be skeptical and direct, not generous.
 
 1. Call \`recall\` for "this week" and surface the most repeated themes.
@@ -145,6 +160,17 @@ export class AbiRuntime {
         enabled: true,
         task: "condense",
         dailyAt: "03:30"
+      });
+      this.cron.addJob({
+        id: "agent-pulse",
+        name: "Agent autopilot — drain agent queue every 30 min",
+        enabled: true,
+        task: "autopilot",
+        intervalMs: 30 * 60 * 1000,
+        input: {
+          agentId: "main",
+          prompt: AGENT_PULSE_PROMPT
+        }
       });
       this.cron.addJob({
         id: "weekly-harsh-review",

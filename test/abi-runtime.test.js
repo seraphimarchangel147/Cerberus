@@ -206,6 +206,25 @@ test("durable runtime reloads memory and does not duplicate default cron", () =>
   assert.equal(second.cron.listJobs().filter((job) => job.id === "daily-adaptation-review").length, 1);
 });
 
+test("agent-pulse cron job is registered by default + idempotent across reloads", () => {
+  // The agent queue is useless if nothing drains it. This pins the
+  // default "agent-pulse" autopilot job so an upgrade can't quietly
+  // drop it (which would leave agent-queue tasks inert forever).
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pulse-"));
+  const first = createDurableRuntime({ dataDir });
+  const firstPulse = first.cron.listJobs().filter((job) => job.id === "agent-pulse");
+  assert.equal(firstPulse.length, 1, "agent-pulse registered on first start");
+  assert.equal(firstPulse[0].task, "autopilot");
+  assert.equal(firstPulse[0].enabled, true);
+  assert.equal(firstPulse[0].intervalMs, 30 * 60 * 1000, "default cadence 30 min");
+  assert.match(firstPulse[0].input?.prompt ?? "", /agent_pick_next/, "prompt tells agent to drain queue");
+
+  // Restart: should still be exactly one (idempotent).
+  const second = createDurableRuntime({ dataDir });
+  const secondPulse = second.cron.listJobs().filter((job) => job.id === "agent-pulse");
+  assert.equal(secondPulse.length, 1, "agent-pulse not duplicated on restart");
+});
+
 test("core tools registered with runtime", () => {
   const runtime = createDefaultRuntime();
   const names = runtime.tools.list().map((t) => t.name);
