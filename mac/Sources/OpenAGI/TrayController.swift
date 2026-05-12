@@ -39,6 +39,10 @@ struct TrayLabel: View {
 
 struct TrayMenu: View {
   @ObservedObject var state: AppState
+  // Observe CaptureSettings.shared so the Capture submenu re-renders when
+  // `enabled` or `pausedUntil` flips — otherwise after Disable the label
+  // stays "Disable capture" until the menu is reopened.
+  @ObservedObject var captureSettings: CaptureSettings = CaptureSettings.shared
 
   var body: some View {
     Group {
@@ -176,10 +180,13 @@ struct TrayMenu: View {
   }
 
   private func captureLabel() -> String {
-    if CaptureSettings.shared.enabled {
+    // Read through the @ObservedObject so SwiftUI knows to rebuild the
+    // menu when CaptureSettings.shared.enabled changes. captureSettings
+    // and CaptureSettings.shared are the same instance.
+    if captureSettings.enabled {
       return "Disable capture"
     }
-    return "Enable capture (asks for permission)"
+    return "Resume capture"
   }
 
   private func copyAuthToken() {
