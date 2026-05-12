@@ -74,17 +74,44 @@ export class SkillRegistry {
     const agentName = `skill:${skill.name}`;
     const instructions = skill.systemPrompt ||
       `You are executing the "${skill.name}" skill. ${skill.description}\nReturn only the user-visible output. Use tools when helpful.`;
-    const result = await provider.generate({
-      input: rendered,
-      agent: { id: agentName, name: agentName, systemPrompt: skill.systemPrompt ?? "" },
-      memoryHits: [],
-      messages: [],
-      tools: this.runtime.tools?.toOpenAITools?.() ?? [],
-      toolRegistry: this.runtime.tools,
-      instructions,
-      context: { ...context, skill: skill.name }
-    });
-    return { skill: skill.name, output: result.text, toolCalls: result.toolCalls ?? [] };
+    // Story 2: record outcome lineage for the skill run. If the skill
+    // was materialized from a proactive-suggestion, the outcome carries
+    // that suggestion id forward so /proactive/suggestions/:id/outcome
+    // can later report "this proposal led to N runs at X% quality".
+    let outcome = null;
+    if (this.runtime?.outcomes?.record) {
+      outcome = this.runtime.outcomes.record({
+        kind: "skill-run",
+        refId: skill.name,
+        sessionId: context?.sessionId ?? null,
+        agentId: agentName,
+        channel: context?.channel ?? null,
+        metadata: {
+          skill: skill.name,
+          sourceSuggestionId: skill.sourceSuggestionId ?? null,
+          input: input.slice(0, 200)
+        }
+      });
+    }
+    try {
+      const result = await provider.generate({
+        input: rendered,
+        agent: { id: agentName, name: agentName, systemPrompt: skill.systemPrompt ?? "" },
+        memoryHits: [],
+        messages: [],
+        tools: this.runtime.tools?.toOpenAITools?.() ?? [],
+        toolRegistry: this.runtime.tools,
+        instructions,
+        context: { ...context, skill: skill.name }
+      });
+      // Successful skill run scores 0.7 by default. The resolveSweep
+      // can downgrade later if user feedback is negative.
+      if (outcome) this.runtime.outcomes.resolve(outcome.id, 0.7, "skill-completed");
+      return { skill: skill.name, output: result.text, toolCalls: result.toolCalls ?? [] };
+    } catch (error) {
+      if (outcome) this.runtime.outcomes.resolve(outcome.id, 0.1, "skill-failed", error.message);
+      throw error;
+    }
   }
 }
 
@@ -105,6 +132,12 @@ function parseSkill(filePath, dir) {
     description: meta.description ?? "",
     systemPrompt: meta.systemPrompt ?? meta["system-prompt"] ?? "",
     parameters: meta.parameters ?? null,
+    // Story 2: lineage back to the proactive-suggestion that birthed
+    // this skill (set by skill-materialize.js when the user accepts
+    // a category=skill proposal). null for hand-authored skills.
+    sourceSuggestionId: meta.sourceSuggestionId ?? null,
+    createdBy: meta.createdBy ?? null,
+    createdAt: meta.createdAt ?? null,
     body,
     dir,
     path: filePath

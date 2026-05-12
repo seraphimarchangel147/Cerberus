@@ -918,6 +918,20 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
         return sendJson(res, 200, candidate);
       }
+      if (method === "GET" && pathname.startsWith("/proactive/suggestions/") && pathname.endsWith("/outcome")) {
+        // Story 2: did the thing this suggestion proposed actually pan out?
+        // Returns the suggestion record + a summary of every outcome that
+        // carried sourceSuggestionId === id (skill runs, task completions).
+        const id = decodeURIComponent(pathname.slice("/proactive/suggestions/".length, -"/outcome".length));
+        const all = runtime.proactiveObserver?.list?.() ?? [];
+        const suggestion = (Array.isArray(all) ? all : []).find((s) => s.id === id);
+        if (!suggestion) return sendJson(res, 404, { error: "unknown suggestion" });
+        return sendJson(res, 200, {
+          suggestion,
+          outcomes: runtime.outcomes?.bySuggestion?.(id) ?? [],
+          summary: runtime.outcomes?.aggregateBySuggestion?.(id) ?? null
+        });
+      }
       if (method === "GET" && pathname === "/observations/recent-context") {
         if (!runtime.observations?.getRecentContext) return sendJson(res, 503, { error: "no observation store" });
         const minutes = Math.max(1, Math.min(60, Number(url.searchParams.get("minutes") ?? 10)));

@@ -87,6 +87,34 @@ export class OutcomeStore {
     return [...this.outcomes.values()].filter((o) => o.metadata?.specialistId === specialistId);
   }
 
+  /// Story 2: outcomes whose metadata.sourceSuggestionId matches. Used
+  /// by /proactive/suggestions/:id/outcome to report on "did the thing
+  /// the agent proposed actually pan out?"
+  bySuggestion(suggestionId) {
+    if (!suggestionId) return [];
+    return [...this.outcomes.values()].filter((o) => o.metadata?.sourceSuggestionId === suggestionId);
+  }
+
+  /// Compact summary of a suggestion's downstream runs. Avg quality
+  /// across resolved outcomes; counts by kind. Returns null when the
+  /// suggestion has no associated outcomes yet.
+  aggregateBySuggestion(suggestionId) {
+    const list = this.bySuggestion(suggestionId);
+    if (list.length === 0) return null;
+    const resolved = list.filter((o) => o.resolved && typeof o.qualityScore === "number");
+    const avgQuality = resolved.length === 0 ? null : resolved.reduce((a, b) => a + b.qualityScore, 0) / resolved.length;
+    const byKind = {};
+    for (const o of list) byKind[o.kind] = (byKind[o.kind] || 0) + 1;
+    return {
+      total: list.length,
+      resolved: resolved.length,
+      pending: list.length - resolved.length,
+      avgQuality: avgQuality === null ? null : Number(avgQuality.toFixed(3)),
+      byKind,
+      lastAt: list[list.length - 1]?.at ?? null
+    };
+  }
+
   aggregate(windowDays = 7, filter = null) {
     const cutoff = Date.now() - windowDays * 24 * 3600 * 1000;
     const list = [...this.outcomes.values()].filter((o) => {

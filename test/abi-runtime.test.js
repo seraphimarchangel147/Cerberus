@@ -1390,6 +1390,46 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("OutcomeStore: bySuggestion + aggregateBySuggestion link runs back to proposal", async () => {
+  const { OutcomeStore } = await import("../src/outcome-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-outcome-lineage-"));
+  const store = new OutcomeStore({ dir });
+
+  // Two outcomes from one suggestion, plus a noise outcome from elsewhere.
+  const a = store.record({
+    kind: "skill-run",
+    refId: "morning-standup",
+    metadata: { skill: "morning-standup", sourceSuggestionId: "sug-1" }
+  });
+  store.resolve(a.id, 0.8, "skill-completed");
+  const b = store.record({
+    kind: "skill-run",
+    refId: "morning-standup",
+    metadata: { skill: "morning-standup", sourceSuggestionId: "sug-1" }
+  });
+  store.resolve(b.id, 0.6, "skill-completed");
+  store.record({
+    kind: "skill-run",
+    refId: "another-skill",
+    metadata: { skill: "another-skill", sourceSuggestionId: "different-sug" }
+  });
+
+  const linked = store.bySuggestion("sug-1");
+  assert.equal(linked.length, 2, "two outcomes carry the suggestion id");
+
+  const summary = store.aggregateBySuggestion("sug-1");
+  assert.equal(summary.total, 2);
+  assert.equal(summary.resolved, 2);
+  assert.equal(summary.pending, 0);
+  assert.equal(summary.avgQuality, 0.7, "(0.8 + 0.6) / 2 = 0.7");
+  assert.equal(summary.byKind["skill-run"], 2);
+
+  // No outcomes → null (callers can render "not yet observed").
+  assert.equal(store.aggregateBySuggestion("never-existed"), null);
+
+  fs.rmSync(dir, { recursive: true });
+});
+
 test("skill-materialize: accepted skill suggestion writes SKILL.md with stamped lineage", async () => {
   const { createSkillFromSuggestion, slugify, dedupeSlug } = await import("../src/skill-materialize.js");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-skill-mat-"));

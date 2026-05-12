@@ -112,7 +112,28 @@ export class TaskStore {
   }
 
   complete(id, via = "manual") {
-    return this.update(id, { status: "completed", completedVia: via });
+    const next = this.update(id, { status: "completed", completedVia: via });
+    // Story 2: completing a task records an outcome with the lineage
+    // back to the proactive-suggestion that proposed it (when present).
+    // Aggregator can then report "this proposal led to N completed tasks".
+    if (next && this.runtime?.outcomes?.record) {
+      const suggestionId = next.sourceMeta?.suggestionId ?? null;
+      const outcome = this.runtime.outcomes.record({
+        kind: "task-completed",
+        refId: next.id,
+        metadata: {
+          task: next.id,
+          sourceSuggestionId: suggestionId,
+          title: next.title,
+          completedVia: via
+        }
+      });
+      // Completed-via-user is the strongest positive signal we have.
+      // Auto-complete from observed activity scores slightly lower.
+      const score = via === "manual" || via === "user" ? 0.9 : 0.7;
+      this.runtime.outcomes.resolve(outcome.id, score, "task-completed");
+    }
+    return next;
   }
 
   remove(id) {
