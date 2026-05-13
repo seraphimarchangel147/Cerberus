@@ -1390,6 +1390,89 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("suggestion-feed: aggregates observer + miner candidates, normalizes shape, resolves to right source", async () => {
+  const { listAllSuggestions, findSuggestion, resolveSuggestion } = await import("../src/suggestion-feed.js");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-feed-"));
+  const obsDir = path.join(dataDir, "proactive", "suggestions");
+  const minedDir = path.join(dataDir, "skills-suggested");
+  fs.mkdirSync(obsDir, { recursive: true });
+  fs.mkdirSync(minedDir, { recursive: true });
+
+  // Observer-style suggestion (already-normalized envelope).
+  fs.writeFileSync(path.join(obsDir, "prop_obs1.json"), JSON.stringify({
+    id: "prop_obs1",
+    proposedAt: "2026-05-12T10:00:00Z",
+    category: "task",
+    title: "Reply to Sarah",
+    rationale: "Email open in front",
+    status: "pending"
+  }));
+  // Pattern-miner candidate (richer shape — proposal nested, sequence stats).
+  fs.writeFileSync(path.join(minedDir, "sug_pm1.json"), JSON.stringify({
+    id: "sug_pm1",
+    fingerprint: "x->y->z",
+    proposedAt: "2026-05-12T11:00:00Z",
+    sequence: { apps: ["x", "y", "z"], count: 8, startHour: 9, confidence: 0.95 },
+    proposal: { pass: true, name: "morning-triage", description: "Triage standup channels", body: "1. Call recall..." },
+    status: "pending"
+  }));
+  // Session-miner candidate (same dir, different id prefix).
+  fs.writeFileSync(path.join(minedDir, "ses_sm1.json"), JSON.stringify({
+    id: "ses_sm1",
+    proposedAt: "2026-05-12T08:00:00Z",
+    proposal: { pass: true, name: "weekly-recap", description: "Summarize the week", body: "..." },
+    sequence: { count: 4, confidence: 0.7 },
+    status: "pending"
+  }));
+  // One resolved candidate — should be filtered out when status=pending.
+  fs.writeFileSync(path.join(minedDir, "sug_done.json"), JSON.stringify({
+    id: "sug_done",
+    proposedAt: "2026-05-12T07:00:00Z",
+    proposal: { name: "old-thing", body: "..." },
+    status: "rejected"
+  }));
+
+  const fakeRuntime = {
+    dataDir,
+    proactiveObserver: { dataDir },
+    patternMiner: { dataDir }
+  };
+
+  const pending = listAllSuggestions(fakeRuntime, { status: "pending" });
+  assert.equal(pending.length, 3, "three pending across all sources");
+  const ids = pending.map((s) => s.id);
+  assert.ok(ids.includes("prop_obs1") && ids.includes("sug_pm1") && ids.includes("ses_sm1"));
+  assert.equal(pending.find((s) => s.id === "prop_obs1").source, "observer");
+  assert.equal(pending.find((s) => s.id === "sug_pm1").source, "pattern-miner");
+  assert.equal(pending.find((s) => s.id === "ses_sm1").source, "session-miner");
+
+  // Newest first.
+  assert.equal(pending[0].id, "sug_pm1", "11:00 proposal sorts before 10:00");
+
+  // Miner candidate normalized: title from proposal.name, draftBody from
+  // proposal.body, rationale composed with count + confidence.
+  const pm = pending.find((s) => s.id === "sug_pm1");
+  assert.equal(pm.title, "morning-triage");
+  assert.equal(pm.category, "skill");
+  assert.match(pm.draftBody, /Call recall/);
+  assert.match(pm.rationale, /8×/);
+  assert.match(pm.rationale, /confidence 0\.95/);
+
+  // findSuggestion / resolveSuggestion work across sources.
+  assert.equal(findSuggestion(fakeRuntime, "sug_pm1").title, "morning-triage");
+  const resolved = resolveSuggestion(fakeRuntime, "sug_pm1", "accepted");
+  assert.equal(resolved.status, "accepted");
+  // Original file is updated, not a copy.
+  const onDisk = JSON.parse(fs.readFileSync(path.join(minedDir, "sug_pm1.json"), "utf8"));
+  assert.equal(onDisk.status, "accepted");
+
+  // status=null returns everything (including resolved).
+  const all = listAllSuggestions(fakeRuntime, { status: null });
+  assert.equal(all.length, 4, "status=null includes resolved");
+
+  fs.rmSync(dataDir, { recursive: true });
+});
+
 test("SuggestionFeedback: stats, preferenceSummary, multipliers, mute", async () => {
   const { SuggestionFeedback } = await import("../src/suggestion-feedback.js");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-feedback-"));

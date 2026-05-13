@@ -849,8 +849,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, ok ? 200 : 404, { ok, id });
       }
       if (method === "GET" && pathname === "/proactive/suggestions") {
-        if (!runtime.proactiveObserver?.list) return sendJson(res, 503, { error: "no observer" });
-        return sendJson(res, 200, runtime.proactiveObserver.list({ status: url.searchParams.get("status") }));
+        // Story 4: merge observer suggestions + miner candidates. Both go
+        // through the unified envelope so the dashboard renders them with
+        // the same card shape; source badge tells them apart.
+        const { listAllSuggestions } = await import("./suggestion-feed.js");
+        const status = url.searchParams.get("status");
+        return sendJson(res, 200, listAllSuggestions(runtime, {
+          status: status === "null" ? null : (status ?? "pending")
+        }));
       }
       if (method === "POST" && pathname === "/proactive/observe") {
         if (!runtime.proactiveObserver?.observe) return sendJson(res, 503, { error: "no observer" });
@@ -864,7 +870,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const id = decodeURIComponent(parts[3]);
         const action = parts[4];
         const status = action === "accept" ? "accepted" : action === "reject" ? "rejected" : "dismissed";
-        const candidate = runtime.proactiveObserver.resolve(id, status);
+        // Story 4: status writes go through the unified feed so they
+        // land in the right source file (observer OR miner). Same id
+        // namespace; resolveSuggestion locates the file by id.
+        const { resolveSuggestion } = await import("./suggestion-feed.js");
+        const candidate = resolveSuggestion(runtime, id, status);
         if (!candidate) return sendJson(res, 404, { error: "unknown suggestion" });
 
         // For MCP suggestions, accepting auto-registers + connects the server.
@@ -3281,17 +3291,35 @@ async function renderSuggestions() {
     } else if (s.category === "mcp" && s.mcpId) {
       meta.push(\`catalog id: \${s.mcpId}\`);
     }
+    // Story 4: source badge differentiates miner-detected patterns
+    // (real activity signal, sometimes with count + confidence) from
+    // observer's one-shot proposals (LLM read of the last 10 min).
+    const sourceBadge = s.source === "pattern-miner"
+      ? '<span class="ui-badge" title="Detected by activity pattern miner — observed multiple times.">pattern</span>'
+      : s.source === "session-miner"
+        ? '<span class="ui-badge" title="Detected by chat-session miner — recurring across conversations.">session</span>'
+        : "";
+    let sequenceMeta = null;
+    if (s.sequence) {
+      const conf = (s.sequence.confidence ?? 0).toFixed(2);
+      const hourPart = s.sequence.startHour != null
+        ? " · around " + String(s.sequence.startHour).padStart(2, "0") + ":00"
+        : "";
+      sequenceMeta = "observed " + s.sequence.count + "× · confidence " + conf + hourPart;
+    }
     return \`
       <div class="card" style="padding:14px; margin-bottom:10px;" data-suggestion-id="\${s.id}">
         <div class="row between" style="align-items:flex-start; gap:8px;">
           <div style="flex:1; min-width:0;">
-            <div style="display:flex; gap:8px; align-items:center;">
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
               <span style="font-size:18px;">\${icon}</span>
               <span style="font-weight:600;">\${escapeHtml(s.title || "(untitled)")}</span>
               <span class="badge">\${escapeHtml(s.category || "?")}</span>
+              \${sourceBadge}
             </div>
             <div class="muted" style="margin-top:6px; font-size:12px;">\${escapeHtml(s.rationale || "")}</div>
             \${meta.length > 0 ? \`<div class="muted" style="margin-top:4px; font-size:11px;">\${meta.map(escapeHtml).join(" · ")}</div>\` : ""}
+            \${sequenceMeta ? \`<div class="muted" style="margin-top:4px; font-size:11px;">\${escapeHtml(sequenceMeta)}</div>\` : ""}
             \${proposedAt ? \`<div class="muted" style="margin-top:4px; font-size:11px;">proposed \${escapeHtml(proposedAt)}</div>\` : ""}
           </div>
         </div>
