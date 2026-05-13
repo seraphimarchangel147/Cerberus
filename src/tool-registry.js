@@ -612,6 +612,26 @@ export function registerCoreTools(registry, runtime) {
     }
   });
 
+  registry.register({
+    name: "daily_recap",
+    description: "Answer 'what did I get done today?' Returns a structured summary of completed tasks, skills run, agent actions approved, time tracked, and themes. Pass a date (YYYY-MM-DD) to recap a specific day; defaults to today in the user's local timezone. format='markdown' returns a human-readable chat reply; format='json' returns the raw structure for further processing.",
+    parameters: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "YYYY-MM-DD. Defaults to today (user's local timezone)." },
+        format: { type: "string", enum: ["markdown", "json"], description: "Output format. Default 'markdown'." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      const { computeDailyRecap, renderDailyRecapMarkdown } = await import("./daily-recap.js");
+      const date = args.date ? new Date(args.date + "T12:00:00") : new Date();
+      const recap = computeDailyRecap(runtime, { date });
+      if (args.format === "json") return recap;
+      return { markdown: renderDailyRecapMarkdown(recap), counts: recap.counts };
+    }
+  });
+
   // ─── Catalog-aware integration tools (require user approval) ───────────
 
   registry.register({

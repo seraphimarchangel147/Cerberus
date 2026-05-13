@@ -262,6 +262,16 @@ export class AbiRuntime {
         task: "task-digest",
         dailyAt: "08:00"
       });
+      // Story 7: evening recap. Fires at 18:00 local, builds the daily
+      // recap, fires a "daily-recap" event so the Mac app can show a
+      // notification that taps into chat with the recap pre-loaded.
+      this.cron.addJob({
+        id: "daily-recap-evening",
+        name: "Daily evening recap — what did you get done today",
+        enabled: true,
+        task: "daily-recap",
+        dailyAt: "18:00"
+      });
       // Due-date reminders — every 15 min, check if any task crossed its
       // dueDate since the last check. Fires a 'task-reminder' event the
       // SSE relay + Mac notify pipeline picks up.
@@ -503,6 +513,9 @@ export class AbiRuntime {
       if (job.task === "task-digest") {
         return this.runTaskDigest({ now });
       }
+      if (job.task === "daily-recap") {
+        return this.runDailyRecap({ now });
+      }
       if (job.task === "task-reminders") {
         return this.runTaskReminders({ now });
       }
@@ -532,6 +545,55 @@ export class AbiRuntime {
       body: titles.join(" · ") + more
     });
     return { fired: 1, count: todayPending.length };
+  }
+
+  // Story 7: evening recap. Builds the daily recap, persists a short
+  // summary to long-tier memory, fires a notification the Mac app
+  // surfaces. Skipped silently if nothing happened today (the recap
+  // would be empty).
+  async runDailyRecap({ now = new Date() } = {}) {
+    const { computeDailyRecap, renderDailyRecapMarkdown } = await import("./daily-recap.js");
+    const recap = computeDailyRecap(this, { date: now });
+    const total = (recap.counts.completedTasks ?? 0)
+      + (recap.counts.skillRuns ?? 0)
+      + (recap.counts.approvedActions ?? 0);
+    if (total === 0 && (!recap.activity || (recap.activity.hoursTracked ?? 0) < 0.5)) {
+      return { skipped: true, reason: "no meaningful activity today" };
+    }
+    const markdown = renderDailyRecapMarkdown(recap);
+    // Persist to memory so tomorrow's observer has historical context.
+    try {
+      this.memory?.remember?.(
+        {
+          source: "daily-recap",
+          scope: "main",
+          content: markdown,
+          tags: ["retro", "daily", `day-${recap.date.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}`],
+          kind: "daily-retrospective",
+          risk: 0.5,
+          repetition: 0.3,
+          novelty: 0.6
+        },
+        { source: "daily-recap", strength: 0.7 }
+      );
+    } catch { /* memory write is best-effort */ }
+    // Fire a notification. Mac app's notification routing already
+    // handles "daily-recap" → land in chat with the recap pre-loaded.
+    const headline = [
+      recap.counts.completedTasks ? `${recap.counts.completedTasks} task${recap.counts.completedTasks === 1 ? "" : "s"}` : null,
+      recap.counts.skillRuns ? `${recap.counts.skillRuns} skill run${recap.counts.skillRuns === 1 ? "" : "s"}` : null,
+      recap.activity?.hoursTracked ? `${recap.activity.hoursTracked}h tracked` : null
+    ].filter(Boolean).join(" · ");
+    this.events?.emit?.("daily-recap", {
+      kind: "evening",
+      at: nowIso(),
+      date: recap.dateISO,
+      dateLabel: recap.date,
+      title: `Today's recap · ${recap.date}`,
+      body: headline || "Quiet day. Tap to see anyway.",
+      markdown
+    });
+    return { fired: 1, date: recap.date, counts: recap.counts };
   }
 
   // Due-date reminders: tasks whose dueDate just crossed (since the last

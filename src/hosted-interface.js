@@ -59,6 +59,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("task-reminder", (data) => broadcast("task-reminder", data));
   events.on("task-auto-changed", (data) => broadcast("task-auto-changed", data));
   events.on("pending-action", (data) => broadcast("pending-action", data));
+  events.on("daily-recap", (data) => broadcast("daily-recap", data));
   if (runtime.skillReplay) runtime.skillReplay.bindEvents(events);
   if (runtime.pendingActions?.bindEvents) runtime.pendingActions.bindEvents(events);
   if (runtime.computerUseLog?.bindEvents) runtime.computerUseLog.bindEvents(events);
@@ -985,6 +986,18 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           summary: runtime.outcomes?.aggregateBySuggestion?.(id) ?? null
         });
       }
+      if (method === "GET" && pathname === "/recap/daily") {
+        // Story 7: "what did I get done today" endpoint. Pulls the
+        // structured recap; ?date=YYYY-MM-DD for past days.
+        const { computeDailyRecap, renderDailyRecapMarkdown } = await import("./daily-recap.js");
+        const dateParam = url.searchParams.get("date");
+        const date = dateParam ? new Date(dateParam + "T12:00:00") : new Date();
+        const recap = computeDailyRecap(runtime, { date });
+        return sendJson(res, 200, {
+          recap,
+          markdown: renderDailyRecapMarkdown(recap)
+        });
+      }
       if (method === "GET" && pathname === "/observations/recent-context") {
         if (!runtime.observations?.getRecentContext) return sendJson(res, 503, { error: "no observation store" });
         const minutes = Math.max(1, Math.min(60, Number(url.searchParams.get("minutes") ?? 10)));
@@ -1674,6 +1687,7 @@ function renderApp() {
           </div>
           <div class="nav-more-section">
             <div class="nav-more-label">Diagnostics</div>
+            <button data-tab="today" title="What you got done today — completed tasks, skills run, actions approved, time tracked, themes.">Today</button>
             <button data-tab="activity" title="Ambient capture log — what you were doing on screen (if capture is enabled).">Activity</button>
             <button data-tab="computer-use" title="Computer use (beta) — every action the agent intended to take, with the reasoning it gave.">Computer Use</button>
             <button data-tab="budget" title="Today's LLM spend + 14-day history.">Budget</button>
@@ -2000,6 +2014,9 @@ async function switchTab(tab) {
   } else if (tab === "computer-use") {
     showSidebar(false);
     await renderComputerUse();
+  } else if (tab === "today") {
+    showSidebar(false);
+    await renderToday();
   } else if (tab === "tasks") {
     showSidebar(false);
     await renderTasks();
@@ -3752,6 +3769,74 @@ async function renderTasks() {
   });
 }
 
+async function renderToday() {
+  // Story 7: the daily recap view. Pulls the same data the daily_recap
+  // tool returns and renders it as a single-page view. Date picker lets
+  // the user scroll back to past days; on mount, defaults to today.
+  const qsDate = new URLSearchParams(window.location.search).get("date");
+  const today = new Date().toISOString().slice(0, 10);
+  const date = qsDate || today;
+  const data = await fetchJson("/recap/daily?date=" + encodeURIComponent(date)).catch(() => null);
+  if (!data) {
+    main.innerHTML = '<div class="pane"><h2>Today</h2><div class="ui-empty">Couldn\\'t load today\\'s recap.</div></div>';
+    return;
+  }
+  const r = data.recap;
+
+  const section = (title, rows, renderRow) => rows.length === 0 ? "" : \`
+    <section class="ui-section">
+      <div class="ui-section-header"><h3>\${title}</h3><span class="ui-section-meta">· \${rows.length}</span></div>
+      <ul class="ui-stack" style="list-style:none; padding-left:0; gap: var(--space-1);">\${rows.map(renderRow).join("")}</ul>
+    </section>
+  \`;
+
+  main.innerHTML = \`
+    <div class="pane">
+      <div class="ui-row" style="justify-content: space-between; align-items: flex-start; margin-bottom: var(--space-3);">
+        <div>
+          <h2 style="margin: 0;">\${escapeHtml(r.date)}</h2>
+          <div class="ui-meta">What you got done.</div>
+        </div>
+        <input type="date" id="todayDate" value="\${escapeHtml(date)}" class="ui-input" style="width: auto;">
+      </div>
+
+      <div class="ui-row" style="gap: var(--space-2); margin-bottom: var(--space-4);">
+        <span class="ui-badge ui-badge-accent">\${r.counts.completedTasks ?? 0} tasks</span>
+        <span class="ui-badge">\${r.counts.skillRuns ?? 0} skill runs</span>
+        <span class="ui-badge">\${r.counts.approvedActions ?? 0} agent actions</span>
+        \${r.activity?.hoursTracked ? \`<span class="ui-badge">\${r.activity.hoursTracked}h tracked</span>\` : ""}
+      </div>
+
+      \${section("✅ Completed", r.completedTasks, (t) => \`<li>\${escapeHtml(t.title)}\${t.queue === "agent" ? ' <span class="ui-meta">(agent)</span>' : ""}</li>\`)}
+      \${section("✨ Skills run", r.skillRuns, (s) => \`<li>\${escapeHtml(s.skill ?? "(unknown)")}\${typeof s.qualityScore === "number" ? \` <span class="ui-meta">quality \${s.qualityScore.toFixed(2)}</span>\` : ""}</li>\`)}
+      \${section("🤖 Agent actions approved", r.approvedActions, (a) => \`<li>\${escapeHtml(a.summary ?? a.toolName)}</li>\`)}
+      \${(r.activity?.topApps?.length ?? 0) === 0 ? "" : \`
+        <section class="ui-section">
+          <div class="ui-section-header"><h3>⏱ Time</h3></div>
+          <div class="ui-row" style="flex-wrap: wrap; gap: var(--space-2);">
+            \${r.activity.topApps.map((a) => \`<span class="ui-badge"><strong>\${escapeHtml(a.app)}</strong> · \${a.hours}h</span>\`).join("")}
+          </div>
+        </section>
+      \`}
+      \${section("🧵 Themes", r.themes, (t) => \`<li>\${escapeHtml(t)}</li>\`)}
+      \${section("🔓 Unblocked", r.unblocked, (u) => \`<li>\${escapeHtml(u.title)}</li>\`)}
+
+      \${(r.counts.completedTasks ?? 0) + (r.counts.skillRuns ?? 0) + (r.counts.approvedActions ?? 0) === 0 && (r.activity?.hoursTracked ?? 0) < 0.5
+        ? '<div class="ui-empty">Quiet day. Nothing logged.</div>'
+        : ""}
+    </div>
+  \`;
+
+  document.getElementById("todayDate")?.addEventListener("change", (e) => {
+    const newDate = e.target.value;
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "today");
+    url.searchParams.set("date", newDate);
+    history.replaceState(null, "", url.toString());
+    renderToday();
+  });
+}
+
 async function renderComputerUse() {
   // Computer-use beta — the agent's intent + reasoning log. Shows every
   // action the agent decided to take in a session, with the reasoning
@@ -4198,7 +4283,7 @@ refreshAmbientBadge();
 
 // Honor ?tab=X in URL on first load — notifications + Mac tray menu deep-link
 // to specific tabs and we need to land on them. Defaults to chat.
-const VALID_TABS = new Set(["chat","tasks","memory","cron","skills","mcp","integrations","agents","channels","budget","outcomes","scrutiny","vocab","health","activity","suggestions","computer-use"]);
+const VALID_TABS = new Set(["chat","tasks","memory","cron","skills","mcp","integrations","agents","channels","budget","outcomes","scrutiny","vocab","health","activity","suggestions","computer-use","today"]);
 const initialTab = (() => {
   try {
     const t = new URLSearchParams(window.location.search).get("tab");

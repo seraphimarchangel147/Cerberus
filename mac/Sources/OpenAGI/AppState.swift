@@ -263,6 +263,15 @@ final class AppState: ObservableObject {
       let pathPart = suggestionId.isEmpty ? "/?tab=chat" : "/?tab=chat&suggestion=\(urlEncode(suggestionId))"
       notify(title: title, body: body, path: pathPart)
     }
+    if event == "daily-recap" {
+      // Story 7: evening "what did you get done today" notification.
+      // Tap routes to the Today tab; data has the markdown loaded.
+      let title = parseField(data, "title") ?? "Today's recap"
+      let body = parseField(data, "body") ?? "Tap to see what you got done."
+      let date = parseField(data, "date") ?? ""
+      let pathPart = date.isEmpty ? "/?tab=today" : "/?tab=today&date=\(urlEncode(date))"
+      notify(title: title, body: body, path: pathPart)
+    }
     if event == "pending-action" {
       // Agent queued something that needs approval (gated tool). Land in
       // chat with the action id so the inline approval card renders.

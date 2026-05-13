@@ -1390,6 +1390,76 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("daily-recap: aggregates completed tasks, skill runs, agent actions for the day", async () => {
+  const { computeDailyRecap, renderDailyRecapMarkdown } = await import("../src/daily-recap.js");
+  const now = new Date("2026-05-13T18:00:00Z");
+  const todayAt = (h, m = 0) => new Date(`2026-05-13T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`).toISOString();
+  const yesterdayAt = (h) => new Date(`2026-05-12T${String(h).padStart(2, "0")}:00:00Z`).toISOString();
+
+  const fakeRuntime = {
+    tasks: {
+      list: ({ status }) => status === "completed" ? [
+        { id: "t1", title: "Fix mouse bug", queue: "user", bucket: "today", updatedAt: todayAt(10), completedVia: "manual" },
+        { id: "t2", title: "Old task", queue: "user", bucket: "done", updatedAt: yesterdayAt(15), completedVia: "manual" },
+        { id: "t3", title: "Agent picked this up", queue: "agent", bucket: "today", updatedAt: todayAt(14), completedVia: "agent" }
+      ] : []
+    },
+    outcomes: {
+      recent: (limit, kind) => kind === "skill-run" ? [
+        { id: "o1", refId: "morning-brief", at: todayAt(9), qualityScore: 0.8, metadata: { skill: "morning-brief" } },
+        { id: "o2", refId: "old-skill", at: yesterdayAt(10), qualityScore: 0.5, metadata: { skill: "old-skill" } }
+      ] : []
+    },
+    pendingActions: {
+      list: ({ status }) => status === "approved" ? [
+        { id: "p1", toolName: "connect_catalog_mcp", summary: "Connect Linear", decidedAt: todayAt(11), createdAt: todayAt(11) }
+      ] : []
+    },
+    computerUseLog: { listActions: () => [] },
+    observations: { _recentCache: null, search: () => [] },
+    proactiveObserver: { list: () => [
+      { id: "s1", title: "Ship docs site", proposedAt: todayAt(12) },
+      { id: "s2", title: "Old idea", proposedAt: yesterdayAt(9) }
+    ]},
+    agentHost: { store: { listSessions: () => [{ id: "sess1", lastActivityAt: todayAt(13) }] } }
+  };
+
+  const recap = computeDailyRecap(fakeRuntime, { date: now, timezone: "UTC" });
+  assert.equal(recap.counts.completedTasks, 2, "two completed today (yesterday's filtered out)");
+  assert.equal(recap.counts.skillRuns, 1);
+  assert.equal(recap.counts.approvedActions, 1);
+  assert.equal(recap.completedTasks.find((t) => t.id === "t1").title, "Fix mouse bug");
+  assert.ok(recap.themes.includes("Ship docs site"), "today's theme included");
+  assert.ok(!recap.themes.includes("Old idea"), "yesterday's theme filtered out");
+  assert.equal(recap.sessions.length, 1);
+
+  const md = renderDailyRecapMarkdown(recap);
+  assert.match(md, /What you got done/);
+  assert.match(md, /Fix mouse bug/);
+  assert.match(md, /morning-brief/);
+  assert.match(md, /Connect Linear/);
+  assert.match(md, /Ship docs site/);
+
+  // dateISO is YYYY-MM-DD for the URL surface.
+  assert.match(recap.dateISO, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("daily-recap: quiet day renders an empty-state line, not a wall of zeros", async () => {
+  const { computeDailyRecap, renderDailyRecapMarkdown } = await import("../src/daily-recap.js");
+  const recap = computeDailyRecap({
+    tasks: { list: () => [] },
+    outcomes: { recent: () => [] },
+    pendingActions: { list: () => [] },
+    computerUseLog: { listActions: () => [] },
+    observations: { _recentCache: null },
+    proactiveObserver: { list: () => [] },
+    agentHost: { store: { listSessions: () => [] } }
+  }, { date: new Date("2026-05-13T18:00:00Z"), timezone: "UTC" });
+  const md = renderDailyRecapMarkdown(recap);
+  assert.match(md, /Nothing logged today/);
+  assert.doesNotMatch(md, /0 task/);
+});
+
 test("skill-materialize: miner candidate → SKILL.md with sequence + lineage", async () => {
   const { createSkillFromCandidate } = await import("../src/skill-materialize.js");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-skill-mat-cand-"));
