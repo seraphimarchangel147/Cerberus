@@ -60,6 +60,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("task-auto-changed", (data) => broadcast("task-auto-changed", data));
   events.on("pending-action", (data) => broadcast("pending-action", data));
   events.on("daily-recap", (data) => broadcast("daily-recap", data));
+  events.on("task-unblocked", (data) => broadcast("task-unblocked", data));
   if (runtime.skillReplay) runtime.skillReplay.bindEvents(events);
   if (runtime.pendingActions?.bindEvents) runtime.pendingActions.bindEvents(events);
   if (runtime.computerUseLog?.bindEvents) runtime.computerUseLog.bindEvents(events);

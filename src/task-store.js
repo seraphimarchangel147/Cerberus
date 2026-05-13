@@ -40,6 +40,10 @@ export class TaskStore {
     ensureDir(this.taskDir);
     this.tasks = new Map(); // id → task
     this.goals = new Map(); // id → goal
+    // Story 12: ring buffer of recent unblock events for the daily recap.
+    // Kept in-memory only — these are ephemeral and recoverable from the
+    // task status history if we ever need to.
+    this.recentUnblocks = [];
     this.loadFromDisk();
     // Story 8: one-shot migration. Tasks already in "someday" with a real
     // dueDate get re-bucketed to the right horizon. Pending tasks only —
@@ -115,12 +119,23 @@ export class TaskStore {
       scheduledFor: input.scheduledFor ?? null,
       // Story 11: link to a parent goal so rollup progress works.
       parentGoalId: input.parentGoalId ?? null,
+      // Story 12: tasks that block this one. When all deps complete, this
+      // task auto-flips from blocked → pending; status fires a "task-
+      // unblocked" event the daily recap picks up.
+      dependsOn: Array.isArray(input.dependsOn) ? input.dependsOn.filter((id) => typeof id === "string") : [],
       createdAt: nowIso(),
       updatedAt: nowIso(),
       completedAt: null,
       completedVia: null
     };
     if (!task.title) throw new Error("task requires a title");
+    // Story 12: if any dep is unmet (exists + not completed), flip the
+    // initial status to "blocked" so the agent + UI know not to surface
+    // this task in pickup queues. The dep-complete handler in complete()
+    // unblocks it later.
+    if (task.dependsOn.length > 0 && this._anyDepUnmet(task.dependsOn)) {
+      task.status = "blocked";
+    }
     this.tasks.set(id, task);
     this.appendEvent(queue, { op: "create", task });
     // Snapshot after every add so a fresh load (which short-circuits on
@@ -156,6 +171,9 @@ export class TaskStore {
     // null is a meaningful value (unlink), so use 'in patch' rather than
     // an undefined check to allow explicit null.
     if ("parentGoalId" in patch) next.parentGoalId = patch.parentGoalId ?? null;
+    if ("dependsOn" in patch) {
+      next.dependsOn = Array.isArray(patch.dependsOn) ? patch.dependsOn.filter((id) => typeof id === "string") : [];
+    }
     next.updatedAt = nowIso();
     this.tasks.set(id, next);
     this.appendEvent(next.queue, { op: "update", id, patch });
@@ -186,7 +204,41 @@ export class TaskStore {
       const score = via === "manual" || via === "user" ? 0.9 : 0.7;
       this.runtime.outcomes.resolve(outcome.id, score, "task-completed");
     }
+    // Story 12: auto-unblock dependents. Any task with dependsOn that
+    // includes this one — and now has all its deps complete — flips
+    // from blocked → pending and fires a "task-unblocked" event the
+    // daily recap collects under its "🔓 Unblocked" section.
+    if (next) {
+      for (const dep of this.tasks.values()) {
+        if (dep.status !== "blocked") continue;
+        if (!Array.isArray(dep.dependsOn) || !dep.dependsOn.includes(id)) continue;
+        if (this._anyDepUnmet(dep.dependsOn)) continue;
+        const unblocked = this.update(dep.id, { status: "pending" });
+        if (unblocked) {
+          const event = { task: unblocked, completedDepId: id, at: nowIso() };
+          this.recentUnblocks.push(event);
+          // Cap memory — anything older than 24h is irrelevant to the
+          // daily recap and we can drop it.
+          const cutoff = Date.now() - 86_400_000;
+          this.recentUnblocks = this.recentUnblocks.filter((e) => Date.parse(e.at) >= cutoff);
+          this.runtime?.events?.emit?.("task-unblocked", event);
+        }
+      }
+    }
     return next;
+  }
+
+  // Story 12: a dep is "unmet" if any of the referenced tasks still
+  // exists and is not in a terminal state (completed/cancelled).
+  // Missing dep tasks (deleted) count as met — caller can't be blocked
+  // by something that no longer exists.
+  _anyDepUnmet(depIds) {
+    for (const depId of depIds) {
+      const dep = this.tasks.get(depId);
+      if (!dep) continue;
+      if (dep.status !== "completed" && dep.status !== "cancelled") return true;
+    }
+    return false;
   }
 
   remove(id) {

@@ -1390,6 +1390,46 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("task-store: dependsOn — blocked tasks auto-unblock when all deps complete", async () => {
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-deps-"));
+  const events = [];
+  const store = new TaskStore({
+    dataDir: dir,
+    runtime: { events: { emit: (name, data) => events.push({ name, data }) } }
+  });
+
+  const a = store.add({ title: "Write the spec" });
+  const b = store.add({ title: "Ship the code", dependsOn: [a.id] });
+  // b is blocked until a completes.
+  assert.equal(store.tasks.get(b.id).status, "blocked", "task with unmet dep starts blocked");
+
+  // Completing a should auto-unblock b + fire event.
+  store.complete(a.id, "manual");
+  assert.equal(store.tasks.get(b.id).status, "pending", "dependent auto-flipped to pending");
+  const unblockEvent = events.find((e) => e.name === "task-unblocked");
+  assert.ok(unblockEvent, "task-unblocked event fired");
+  assert.equal(unblockEvent.data.task.id, b.id);
+  assert.equal(unblockEvent.data.completedDepId, a.id);
+
+  // Recent unblocks ring buffer captures it for the daily recap.
+  assert.equal(store.recentUnblocks.length, 1);
+
+  // Multi-dep: c needs both a and b. Already a is done, but b still
+  // pending → c starts blocked.
+  const c = store.add({ title: "Tell the team", dependsOn: [a.id, b.id] });
+  assert.equal(store.tasks.get(c.id).status, "blocked");
+  // Complete b → c unblocks.
+  store.complete(b.id, "manual");
+  assert.equal(store.tasks.get(c.id).status, "pending");
+
+  // Missing dep id (task deleted) shouldn't count as unmet.
+  const d = store.add({ title: "Standalone", dependsOn: ["task_nonexistent"] });
+  assert.equal(store.tasks.get(d.id).status, "pending", "missing dep doesn't block");
+
+  fs.rmSync(dir, { recursive: true });
+});
+
 test("task-store: goals as parents — addGoal, linkTaskToGoal, goalProgress rollup", async () => {
   const { TaskStore } = await import("../src/task-store.js");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-goals-"));

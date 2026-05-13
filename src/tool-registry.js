@@ -526,7 +526,8 @@ export function registerCoreTools(registry, runtime) {
         tags: { type: "array", items: { type: "string" } },
         dueDate: { type: "string", description: "ISO 8601 due date (optional)." },
         sourceMeta: { type: "object", description: "Where this task came from — e.g. {sessionId, snippet}." },
-        parentGoalId: { type: "string", description: "Optional — link the task to a parent goal. Use list_goals first to find the right id." }
+        parentGoalId: { type: "string", description: "Optional — link the task to a parent goal. Use list_goals first to find the right id." },
+        dependsOn: { type: "array", items: { type: "string" }, description: "Optional — task ids that must complete before this one is actionable. Task starts in 'blocked' status until all deps complete, then auto-flips to 'pending' and the daily recap surfaces it as 'Unblocked'." }
       },
       required: ["title"],
       additionalProperties: false

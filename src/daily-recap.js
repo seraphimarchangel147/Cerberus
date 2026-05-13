@@ -275,9 +275,13 @@ function pullSessions(runtime, startISO, endISO) {
 }
 
 function pullUnblocked(runtime, startISO, endISO) {
-  // Story 12 will fill this from a task-unblocked event log. For now an
-  // empty array — the section just doesn't render when there's nothing.
-  return [];
+  // Story 12: read from TaskStore's in-memory ring buffer of recent
+  // unblock events. Filtered to events that fired during the recap's
+  // day bounds.
+  const events = runtime?.tasks?.recentUnblocks ?? [];
+  return events
+    .filter((e) => e.at >= startISO && e.at < endISO)
+    .map((e) => ({ id: e.task?.id, title: e.task?.title ?? "(unknown)", completedDepId: e.completedDepId, at: e.at }));
 }
 
 // ─── day boundaries (timezone-aware) ───────────────────────────────────
