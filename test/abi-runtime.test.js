@@ -1390,6 +1390,65 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("skill-materialize: miner candidate → SKILL.md with sequence + lineage", async () => {
+  const { createSkillFromCandidate } = await import("../src/skill-materialize.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-skill-mat-cand-"));
+  const bundled = path.join(dir, "bundled");
+  const userDir = path.join(dir, "user");
+  fs.mkdirSync(bundled, { recursive: true });
+  fs.mkdirSync(userDir, { recursive: true });
+  const fakeRuntime = { skills: { dirs: [bundled, userDir], reload: () => {} } };
+
+  const candidate = {
+    id: "sug_xyz",
+    source: "pattern-miner",
+    category: "skill",
+    title: "evening-sms-slack-sync",
+    fingerprint: "com.apple.mobilesms→com.tinyspeck.slackmacgap",
+    sequence: {
+      apps: ["com.apple.MobileSMS", "com.tinyspeck.slackmacgap", "com.apple.MobileSMS"],
+      count: 10,
+      startHour: 21,
+      confidence: 1
+    },
+    proposal: {
+      pass: false,
+      name: "evening-sms-slack-sync",
+      description: "Cross-reference SMS + Slack each evening",
+      body: "When this routine kicks off, surface unread Slack DMs + recent SMS threads.",
+      scheduleHint: "daily at 21:00"
+    }
+  };
+
+  const result = createSkillFromCandidate({ runtime: fakeRuntime, candidate });
+  assert.equal(result.slug, "evening-sms-slack-sync");
+  assert.equal(result.scheduleHint, "daily at 21:00");
+
+  const written = fs.readFileSync(result.path, "utf8");
+  assert.match(written, /sourceCandidateId: sug_xyz/, "lineage stamped");
+  assert.match(written, /createdBy: pattern-miner/);
+  assert.match(written, /observedCount: 10/);
+  assert.match(written, /observedConfidence: 1/);
+  assert.match(written, /Detected from 10 occurrences around 21:00/, "description includes provenance");
+  assert.match(written, /Observed app sequence:/, "appended outline of app sequence");
+
+  // Session miner candidate produces same shape, different createdBy.
+  const ses = createSkillFromCandidate({
+    runtime: fakeRuntime,
+    candidate: { ...candidate, id: "ses_abc", source: "session-miner", proposal: { ...candidate.proposal, name: "weekly-recap" } }
+  });
+  const sesWritten = fs.readFileSync(ses.path, "utf8");
+  assert.match(sesWritten, /createdBy: session-miner/);
+
+  // Refuses without proposal.body.
+  assert.throws(() => createSkillFromCandidate({
+    runtime: fakeRuntime,
+    candidate: { id: "x", proposal: { name: "x" } }
+  }), /proposal\.body/);
+
+  fs.rmSync(dir, { recursive: true });
+});
+
 test("pattern-miner: high-confidence sequence bypasses the judge's pass=true veto", async () => {
   // Direct unit test of the bypass logic — wire up a fake provider that
   // always says pass: true, plus a sequence at confidence=1, count=10.

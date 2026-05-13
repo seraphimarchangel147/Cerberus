@@ -907,26 +907,52 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             return sendJson(res, 200, { ...candidate, taskCreateError: error.message });
           }
         }
-        // Story 1: accepting a skill suggestion materializes it into a
-        // real SKILL.md file under the user skills dir, then reloads
-        // the registry so it shows up in list_skills + as a skill_<name>
-        // tool immediately. The lineage (sourceSuggestionId) is stamped
-        // into the file's frontmatter so Story 2 can score outcomes
-        // back against the proposal that birthed it.
+        // Story 1 + 6: accepting a skill suggestion materializes it into
+        // a real SKILL.md file under the user skills dir. Dispatches by
+        // source: observer suggestions use createSkillFromSuggestion
+        // (Story 1 shape — flat title + draftBody), miner candidates use
+        // createSkillFromCandidate (Story 6 shape — proposal.body +
+        // sequence stats + scheduleHint). Both write to the same dir.
         if (status === "accepted" && candidate.category === "skill" && runtime.skills?.reload) {
           try {
-            const { createSkillFromSuggestion } = await import("./skill-materialize.js");
-            const result = createSkillFromSuggestion({
-              runtime,
-              suggestion: candidate
-            });
+            const { createSkillFromSuggestion, createSkillFromCandidate } = await import("./skill-materialize.js");
+            const isMined = candidate.source === "pattern-miner" || candidate.source === "session-miner";
+            const result = isMined
+              ? createSkillFromCandidate({ runtime, candidate })
+              : createSkillFromSuggestion({ runtime, suggestion: candidate });
             runtime.skills.reload();
-            return sendJson(res, 200, { ...candidate, skillSlug: result.slug, skillPath: result.path });
+            return sendJson(res, 200, {
+              ...candidate,
+              skillSlug: result.slug,
+              skillPath: result.path,
+              scheduleHint: result.scheduleHint ?? null,
+              // When the candidate had a scheduleHint, the dashboard
+              // asks the user whether to also create a cron job.
+              requiresScheduleConfirm: Boolean(result.scheduleHint)
+            });
           } catch (error) {
             return sendJson(res, 200, { ...candidate, skillCreateError: error.message });
           }
         }
         return sendJson(res, 200, candidate);
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/schedule$/)) {
+        // Story 6: follow-up after accepting a miner candidate with
+        // scheduleHint. User confirms (or skips) creating a cron job
+        // that fires the new skill at the hinted time.
+        const slug = decodeURIComponent(pathname.split("/")[2]);
+        const body = await readJson(req).catch(() => ({}));
+        if (!body.dailyAt) return sendJson(res, 400, { error: "dailyAt required, e.g. \"09:00\"" });
+        if (!runtime.cron?.addJob) return sendJson(res, 503, { error: "no cron scheduler" });
+        const job = runtime.cron.addJob({
+          id: `skill-cron-${slug}`,
+          name: `Auto-fire skill: ${slug}`,
+          enabled: true,
+          task: "prompt",
+          dailyAt: body.dailyAt,
+          input: { prompt: `Run the "${slug}" skill.`, channel: "local", target: null }
+        });
+        return sendJson(res, 200, { slug, jobId: job.id, dailyAt: body.dailyAt });
       }
       if (method === "GET" && pathname === "/proactive/preferences") {
         if (!runtime.suggestionFeedback) return sendJson(res, 503, { error: "no feedback module" });

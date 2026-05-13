@@ -14,30 +14,106 @@ import { ensureDir, writeTextAtomic } from "./file-utils.js";
 export function createSkillFromSuggestion({ runtime, suggestion }) {
   if (!suggestion?.title) throw new Error("suggestion has no title");
   if (!suggestion?.draftBody) throw new Error("suggestion has no draftBody — observer must have proposed an automation, not a skill");
+  return writeSkillFile({
+    runtime,
+    title: suggestion.title,
+    description: suggestion.rationale,
+    body: suggestion.draftBody,
+    lineage: { sourceSuggestionId: suggestion.id, createdBy: "proactive-observer" }
+  });
+}
 
+/// Story 6: miner candidates have a different shape than observer
+/// suggestions — proposal.{name, body, scheduleHint} + sequence stats
+/// — but produce the same end artifact: a runnable SKILL.md. Wraps
+/// the shared writer with miner-specific lineage stamps. Returns
+/// { slug, path, scheduleHint } so the caller can ask the user
+/// whether to also create a cron job at the hinted time.
+export function createSkillFromCandidate({ runtime, candidate }) {
+  const proposal = candidate?.proposal ?? null;
+  if (!proposal?.name && !candidate?.title) throw new Error("candidate has no proposal.name or title");
+  if (!proposal?.body && !candidate?.draftBody) throw new Error("candidate has no proposal.body — cannot materialize");
+
+  const seq = candidate?.sequence ?? {};
+  const summary = composeMinedDescription(candidate);
+  const body = buildMinedBody(proposal, seq);
+
+  const result = writeSkillFile({
+    runtime,
+    title: proposal?.name ?? candidate.title,
+    description: summary,
+    body,
+    lineage: {
+      sourceCandidateId: candidate.id,
+      createdBy: candidate.source === "session-miner" ? "session-miner" : "pattern-miner",
+      observedCount: seq.count ?? null,
+      observedConfidence: typeof seq.confidence === "number" ? seq.confidence : null,
+      sequenceFingerprint: candidate.fingerprint ?? null
+    }
+  });
+  return { ...result, scheduleHint: proposal?.scheduleHint ?? null };
+}
+
+// Compose a description string that includes the observed stats so the
+// user (and the skill itself) has provenance — "this was learned from
+// 10 observations between Slack and Linear at 21:00 every weekday."
+function composeMinedDescription(candidate) {
+  const proposal = candidate.proposal ?? {};
+  const seq = candidate.sequence ?? {};
+  const parts = [];
+  if (proposal.description) parts.push(proposal.description.trim());
+  if (seq.count) {
+    const hour = typeof seq.startHour === "number" ? ` around ${String(seq.startHour).padStart(2, "0")}:00` : "";
+    parts.push(`Detected from ${seq.count} occurrences${hour}.`);
+  }
+  return parts.join(" ").trim().slice(0, 1024);
+}
+
+// Mined skill body: lead with the proposal's prose, then append a
+// "When this fires" outline of the app sequence so the agent has
+// concrete steps to follow if the prose is vague.
+function buildMinedBody(proposal, seq) {
+  const body = String(proposal?.body ?? "").trim();
+  const apps = Array.isArray(seq?.apps) ? seq.apps : [];
+  if (apps.length === 0) return body;
+  const appLines = apps.map((a, i) => `${i + 1}. ${a}`).join("\n");
+  // Avoid duplicating if the model already wrote a step list.
+  if (/^\d+\.\s/m.test(body)) return body;
+  return body + "\n\n**Observed app sequence:**\n" + appLines + "\n";
+}
+
+// Shared writer for both shapes. Keeps slug + frontmatter logic in one
+// place so observer-sourced + miner-sourced skills look identical
+// after materialization (different lineage keys, same structure).
+function writeSkillFile({ runtime, title, description, body, lineage = {} }) {
   const userDir = pickUserSkillsDir(runtime);
   if (!userDir) throw new Error("no user skills directory available (runtime not durable?)");
   ensureDir(userDir);
 
-  const slug = dedupeSlug(userDir, slugify(suggestion.title));
+  const slug = dedupeSlug(userDir, slugify(title));
   const skillDir = path.join(userDir, slug);
   ensureDir(skillDir);
   const skillPath = path.join(skillDir, "SKILL.md");
 
-  const description = (suggestion.rationale ?? suggestion.title ?? "").slice(0, 1024);
-  const body = String(suggestion.draftBody ?? "").trim();
+  const desc = String(description ?? title ?? "").slice(0, 1024);
+  const bodyText = String(body ?? "").trim();
+
+  const lineageLines = [];
+  for (const [key, value] of Object.entries(lineage)) {
+    if (value === null || value === undefined) continue;
+    lineageLines.push(`${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+  }
   const frontmatter = [
     "---",
     `name: ${slug}`,
-    `description: ${jsonInlineString(description)}`,
-    suggestion.id ? `sourceSuggestionId: ${suggestion.id}` : null,
+    `description: ${jsonInlineString(desc)}`,
+    ...lineageLines,
     `createdAt: ${new Date().toISOString()}`,
-    "createdBy: proactive-observer",
     "---",
     ""
   ].filter(Boolean).join("\n");
 
-  writeTextAtomic(skillPath, frontmatter + body + "\n");
+  writeTextAtomic(skillPath, frontmatter + bodyText + "\n");
   return { slug, path: skillPath };
 }
 
