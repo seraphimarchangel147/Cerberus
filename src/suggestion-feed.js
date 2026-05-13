@@ -19,7 +19,7 @@ const ENVELOPE_FIELDS = [
   "draftBody", "taskQueue", "taskBucket", "mcpId", "mcpRegister",
   "context", "resolvedAt", "note", "source",
   // Miner-only fields surface as-is so the UI can show count + confidence
-  "sequence", "fingerprint", "proposal"
+  "sequence", "fingerprint", "proposal", "judgeBypass"
 ];
 
 /// Walk all three source dirs and return suggestions normalized to one
@@ -109,6 +109,7 @@ function normalize(raw, filePath, forceSource = null) {
     sequence: raw.sequence ?? null,
     fingerprint: raw.fingerprint ?? null,
     proposal: raw.proposal ?? null,
+    judgeBypass: raw.judgeBypass ?? false,
     resolvedAt: raw.resolvedAt ?? null,
     source
   });

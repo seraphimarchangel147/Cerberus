@@ -1390,6 +1390,61 @@ test("PendingActionStore: enqueue + decide + replay across instances", async () 
   fs.rmSync(dir, { recursive: true });
 });
 
+test("pattern-miner: high-confidence sequence bypasses the judge's pass=true veto", async () => {
+  // Direct unit test of the bypass logic — wire up a fake provider that
+  // always says pass: true, plus a sequence at confidence=1, count=10.
+  // The candidate should still get persisted and stamped judgeBypass.
+  const { PatternMiner } = await import("../src/pattern-miner.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-judge-bypass-"));
+
+  // Stub provider that always says pass=true (judge wants to skip).
+  const fakeProvider = {
+    isConfigured: () => true,
+    generate: async () => ({ text: JSON.stringify({ pass: true, reason: "not interesting" }) })
+  };
+  // Stub observation-store that returns a 10x repeating sequence.
+  const apps = ["com.apple.Slack", "com.linear", "com.github.Desktop"];
+  const occurrences = [];
+  for (let i = 0; i < 10; i++) {
+    for (const app of apps) {
+      occurrences.push({
+        kind: "activity",
+        event: "focus",
+        app,
+        at: new Date(Date.now() - (10 - i) * 600 * 1000 + apps.indexOf(app) * 30 * 1000).toISOString()
+      });
+    }
+  }
+  const fakeObservations = { search: async () => occurrences };
+  const fakeRuntime = {
+    dataDir: dir,
+    observations: fakeObservations,
+    agentHost: { modelProvider: fakeProvider },
+    events: { emit: () => {} }
+  };
+  const miner = new PatternMiner({
+    runtime: fakeRuntime,
+    dataDir: dir,
+    minOccurrences: 5,
+    minSequenceLen: 3,
+    maxSequenceLen: 4,
+    minConfidence: 0.7
+  });
+
+  const result = await miner.mine({ now: new Date() });
+  // Should have persisted at least one candidate despite judge's pass=true.
+  assert.ok(result.candidates >= 1, "judge-bypassed candidate should land");
+  const persistedFiles = fs.readdirSync(path.join(dir, "skills-suggested"));
+  assert.ok(persistedFiles.length >= 1);
+  const persisted = JSON.parse(fs.readFileSync(path.join(dir, "skills-suggested", persistedFiles[0]), "utf8"));
+  assert.equal(persisted.judgeBypass, true, "stamped judgeBypass: true");
+  assert.equal(persisted.proposal.pass, false, "pass overridden");
+  assert.ok(persisted.proposal.name, "fallback name filled in");
+  assert.ok(persisted.proposal.body, "fallback body filled in");
+
+  fs.rmSync(dir, { recursive: true });
+});
+
 test("suggestion-feed: aggregates observer + miner candidates, normalizes shape, resolves to right source", async () => {
   const { listAllSuggestions, findSuggestion, resolveSuggestion } = await import("../src/suggestion-feed.js");
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-feed-"));

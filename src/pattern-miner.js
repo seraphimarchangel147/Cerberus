@@ -69,15 +69,41 @@ export class PatternMiner {
       // Skip sequences we've already proposed to avoid duplicates.
       if (this.alreadyProposed(seq)) continue;
       const proposal = await this.llmProposal(seq);
-      if (!proposal || proposal.pass === true) continue;
-      const candidate = this.persistCandidate(seq, proposal);
+      if (!proposal) continue;
+      // Story 5: high-confidence repeating signals bypass the judge's
+      // pass=true veto. A sequence the user has actually done 5+ times
+      // at confidence >= 0.9 is real data — we don't let the LLM tell
+      // us "skip it, not a real routine." We still keep the LLM's
+      // title + body suggestion (just override the veto), and stamp
+      // judgeBypass: true on the candidate so the dashboard can show
+      // "auto-passed (high-confidence signal)".
+      const highConfidence = (seq.confidence ?? 0) >= 0.9 && (seq.count ?? 0) >= 5;
+      let judgeBypass = false;
+      if (proposal.pass === true) {
+        if (!highConfidence) continue;
+        judgeBypass = true;
+        proposal.pass = false;
+        // If the judge tried to skip, it likely didn't produce a name/
+        // body either — fill in the deterministic template fallback.
+        if (!proposal.name) {
+          proposal.name = `routine-${seq.apps.map((a) => a.replace(/\W/g, "")).join("-").slice(0, 40).toLowerCase()}`;
+        }
+        if (!proposal.body) {
+          proposal.body = `When this routine kicks off, walk through these apps in order:\n${seq.apps.map((a, i) => `${i + 1}. ${a}`).join("\n")}\n\nThis was auto-detected from your activity ${seq.count} times in the last ${this.lookbackDays} days.`;
+        }
+        if (!proposal.description) {
+          proposal.description = `Repeating routine across ${seq.apps.length} apps, ${seq.count} occurrences.`;
+        }
+      }
+      const candidate = this.persistCandidate(seq, proposal, { judgeBypass });
       candidates.push(candidate);
       this.runtime?.events?.emit?.("skill-candidate", {
         source: "pattern-miner",
         id: candidate.id,
         name: proposal.name,
         description: proposal.description,
-        occurrences: seq.count
+        occurrences: seq.count,
+        judgeBypass
       });
     }
     return { mined: sequences.length, scored: scored.length, candidates: candidates.length, items: candidates };
@@ -158,7 +184,7 @@ export class PatternMiner {
     }
   }
 
-  persistCandidate(seq, proposal) {
+  persistCandidate(seq, proposal, { judgeBypass = false } = {}) {
     const id = createId("sug");
     const candidate = {
       id,
@@ -166,6 +192,7 @@ export class PatternMiner {
       proposedAt: nowIso(),
       sequence: seq,
       proposal,
+      judgeBypass,
       status: "pending"
     };
     writeJsonAtomic(path.join(this.suggestedDir, `${id}.json`), candidate);
@@ -295,12 +322,12 @@ function sequenceFingerprint(apps) {
 
 const PROPOSAL_SYSTEM_PROMPT = `You are auto-detecting routines from a user's observed app-focus sequences.
 
-For each candidate sequence, decide whether it's a real routine the user would want as a runnable skill. Be conservative: it's better to pass than to propose a routine that doesn't actually exist.
+For each candidate sequence, decide whether the user would benefit from a skill that helps them through this routine. The sequence has already passed a statistical confidence bar — your job is to write a usable name + body, not to second-guess whether the user really does this. Be inclusive: if the sequence is plausible, propose a skill. Only set pass=true when the sequence is genuinely meaningless (e.g. just opening Finder twice between other apps).
 
 Output STRICTLY as JSON, no preamble. Schema:
 
 {
-  "pass": false,                          // true = this isn't a real routine; skip it
+  "pass": false,                          // true = this sequence is noise, not a routine
   "name": "kebab-case-slug",              // short, no spaces
   "description": "1 sentence",
   "body": "Markdown body for the skill, plain prose, no fluff. Tell the agent what the user is doing during this sequence and what would help them complete it (e.g. fetch latest tickets, summarize Slack DMs).",

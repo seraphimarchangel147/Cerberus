@@ -3299,6 +3299,12 @@ async function renderSuggestions() {
       : s.source === "session-miner"
         ? '<span class="ui-badge" title="Detected by chat-session miner — recurring across conversations.">session</span>'
         : "";
+    // Story 5: when high-confidence signals bypass the judge's pass=true
+    // veto, badge it so the user knows the LLM tried to skip this but
+    // the deterministic confidence floor kept it.
+    const bypassBadge = s.judgeBypass
+      ? '<span class="ui-badge ui-badge-accent" title="High-confidence signal — bypassed the LLM judge.">auto-passed</span>'
+      : "";
     let sequenceMeta = null;
     if (s.sequence) {
       const conf = (s.sequence.confidence ?? 0).toFixed(2);
@@ -3316,6 +3322,7 @@ async function renderSuggestions() {
               <span style="font-weight:600;">\${escapeHtml(s.title || "(untitled)")}</span>
               <span class="badge">\${escapeHtml(s.category || "?")}</span>
               \${sourceBadge}
+              \${bypassBadge}
             </div>
             <div class="muted" style="margin-top:6px; font-size:12px;">\${escapeHtml(s.rationale || "")}</div>
             \${meta.length > 0 ? \`<div class="muted" style="margin-top:4px; font-size:11px;">\${meta.map(escapeHtml).join(" · ")}</div>\` : ""}
