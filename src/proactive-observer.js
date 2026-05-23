@@ -310,24 +310,109 @@ export class ProactiveObserver {
 // move-to-in-progress at medium. Everything is logged via task-updated
 // SSE events so the user sees what we did and can revert.
 const TASK_SCAN_SYSTEM_PROMPT = [
-  "You review a list of the user's pending tasks against what was recently on their screen.",
-  "For each task, decide if there's STRONG evidence in the OCR snippets that it just got done, or that the user is actively working on it.",
-  "Output STRICT JSON: {\"updates\": [{\"taskId\": \"...\", \"action\": \"complete\"|\"in_progress\", \"confidence\": 0-1, \"evidence\": \"<short>\"}]} — empty updates array is fine.",
-  "Be conservative. 'complete' requires explicit evidence (PR merged, ticket closed, message sent). 'in_progress' requires the user actively working on it (editor open, commits being made, in a related call).",
-  "Don't propose updates without specific OCR text supporting them — quote a fragment in the evidence field."
+  "You review the user's pending tasks against multiple EVIDENCE SOURCES, each tagged with a provenance label:",
+  "  [ocr] — what was recently on their screen (apps + OCR text).",
+  "  [rize] — time actually tracked today: categories, projects, and session titles. Tells you WHERE they spent time.",
+  "  [buildbetter] — recent call topics, for context on whether a task is still live or was superseded.",
+  "For each task, decide if there's STRONG evidence it just got done ('complete'), or that the user is actively working on it ('in_progress').",
+  "Weigh CORROBORATION: when two or more independent sources point the same way (e.g. [ocr] shows a merged PR AND [rize] logged 2h in the matching project), be more confident. When sources disagree or only one weak signal exists, stay conservative and lower confidence.",
+  "Output STRICT JSON: {\"updates\": [{\"taskId\": \"...\", \"action\": \"complete\"|\"in_progress\", \"confidence\": 0-1, \"evidence\": \"<short>\", \"sources\": [\"ocr\"|\"rize\"|\"buildbetter\"]}]} — empty updates array is fine.",
+  "'complete' requires explicit evidence (PR merged, ticket closed, message sent). 'in_progress' requires active work (editor open, commits being made, in a related call, or significant tracked time in a matching project).",
+  "Never propose an update without citing specific evidence — quote a fragment and list which source(s) support it in the 'sources' array. Time tracked alone ([rize] only) is 'in_progress' at most, not 'complete'."
 ].join("\n");
+
+// Assemble a multi-source evidence bundle for task reconciliation. Each
+// source is gathered independently and try/caught so one failing or
+// unconfigured source can't sink the whole scan. Returns
+// { ocr, rize, buildbetter } where any field may be null when that
+// source is unavailable.
+//
+// Why multiple sources: a single signal (screen OCR) is noisy — you might
+// have a doc open without finishing it. Corroboration across "what was on
+// screen" (OCR), "where you actually spent time" (Rize), and "what you
+// discussed on calls" (BuildBetter) lets the model auto-complete with far
+// higher confidence, and lets it stay conservative when sources disagree.
+ProactiveObserver.prototype.gatherReconciliationEvidence = async function ({ now = new Date() } = {}) {
+  const evidence = { ocr: null, rize: null, buildbetter: null };
+
+  // Source 1: on-screen activity (OCR) — the original signal.
+  try {
+    if (this.runtime?.observations?.getRecentContext) {
+      evidence.ocr = await this.runtime.observations.getRecentContext({
+        minutes: 30,
+        maxChars: 2400,
+        maxSnippets: 10
+      });
+    }
+  } catch {
+    /* one bad source shouldn't sink the scan */
+  }
+
+  // Source 2: Rize time-tracking. We invoke the already-registered tools
+  // rather than importing RizeClient — so this is a clean no-op when
+  // RIZE_API_KEY isn't set (the tools simply aren't on the registry).
+  try {
+    const summaryTool = this.runtime?.tools?.get?.("rize_today_summary");
+    const sessionsTool = this.runtime?.tools?.get?.("rize_recent_sessions");
+    if (summaryTool?.handler || sessionsTool?.handler) {
+      const [summary, sessions] = await Promise.all([
+        summaryTool?.handler ? summaryTool.handler({}).catch(() => null) : null,
+        sessionsTool?.handler ? sessionsTool.handler({ limit: 12 }).catch(() => null) : null
+      ]);
+      if (summary || (Array.isArray(sessions) && sessions.length)) {
+        evidence.rize = { summary: summary ?? null, sessions: Array.isArray(sessions) ? sessions : [] };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // Source 3: recent BuildBetter call topics, read off already-synced
+  // BuildBetter-sourced tasks (cheap — no extra API call). Gives the model
+  // context on what was discussed on calls in the last few days, so it can
+  // tell whether a task is still live, was superseded, or was mentioned as
+  // already handled. (Transcript-level "I confirmed I sent it" matching is
+  // a richer follow-up that needs a BuildBetter transcript query.)
+  try {
+    const sinceMs = now.getTime() - 3 * 86_400_000;
+    const bb = (this.runtime?.tasks?.list?.({ limit: 200 }) ?? [])
+      .filter((t) => t.source === "buildbetter")
+      .filter((t) => Date.parse(t.sourceMeta?.callStartedAt ?? t.createdAt ?? 0) >= sinceMs)
+      .slice(0, 12)
+      .map((t) => ({
+        summary: t.title,
+        callName: t.sourceMeta?.callName ?? null,
+        at: t.sourceMeta?.callStartedAt ?? t.createdAt,
+        types: t.sourceMeta?.extractionTypes ?? []
+      }));
+    if (bb.length) evidence.buildbetter = bb;
+  } catch {
+    /* ignore */
+  }
+
+  return evidence;
+};
+
+// Render a Rize summary's seconds into a compact human string for the prompt.
+function rizeMinutes(seconds) {
+  const m = Math.round((Number(seconds) || 0) / 60);
+  if (m >= 60) return `${(m / 60).toFixed(1)}h`;
+  return `${m}m`;
+}
 
 ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = new Date() } = {}) {
   if (!this.runtime?.tasks?.list) return { skipped: true, reason: "no task store" };
-  if (!this.runtime?.observations?.getRecentContext) return { skipped: true, reason: "no observation store" };
 
-  const ctx = await this.runtime.observations.getRecentContext({
-    minutes: 30,
-    maxChars: 2400,
-    maxSnippets: 10
-  });
-  if ((ctx.snippets?.length ?? 0) < 2) {
-    return { skipped: true, reason: "insufficient activity" };
+  const evidence = await this.gatherReconciliationEvidence({ now });
+  const ocr = evidence.ocr ?? { apps: [], snippets: [] };
+
+  // Bail only when EVERY source is empty — Rize or BuildBetter may carry
+  // evidence even on a day with thin on-screen OCR.
+  const ocrThin = (ocr.snippets?.length ?? 0) < 2;
+  const noRize = !evidence.rize;
+  const noBuildBetter = !evidence.buildbetter;
+  if (ocrThin && noRize && noBuildBetter) {
+    return { skipped: true, reason: "insufficient activity across all sources" };
   }
 
   const candidates = this.runtime.tasks
@@ -341,16 +426,48 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
     return { skipped: true, reason: "no LLM provider for task scan" };
   }
 
-  const prompt = [
+  const promptLines = [
     "Pending tasks:",
     ...candidates.map((t) => `  - id=${t.id} · "${t.title}"${t.description ? ` (${t.description.slice(0, 120)})` : ""}`),
     "",
-    "Recent on-screen activity (apps + OCR snippets):",
-    ...(ctx.apps ?? []).slice(0, 5).map((a) => `  - app: ${a.app} (${a.n} focus events)`),
-    ...(ctx.snippets ?? []).slice(0, 10).map((s) => `  - [${s.app}] ${s.text}`),
+    "=== EVIDENCE SOURCES ===",
     "",
-    "Which tasks just got done or are actively being worked on?"
-  ].join("\n");
+    "[ocr] Recent on-screen activity (apps + OCR snippets):"
+  ];
+  promptLines.push(...(ocr.apps ?? []).slice(0, 5).map((a) => `  - app: ${a.app} (${a.n} focus events)`));
+  promptLines.push(...(ocr.snippets ?? []).slice(0, 10).map((s) => `  - [${s.app}] ${s.text}`));
+  if (ocrThin) promptLines.push("  (little on-screen activity captured)");
+
+  promptLines.push("");
+  if (evidence.rize) {
+    const s = evidence.rize.summary;
+    promptLines.push("[rize] Time actually tracked today (where the user spent time):");
+    if (s) {
+      promptLines.push(`  - total ${rizeMinutes(s.totalSeconds)}, focus ${rizeMinutes(s.focusSeconds)}`);
+      for (const c of (s.categories ?? []).slice(0, 6)) promptLines.push(`  - category: ${c.name} (${rizeMinutes(c.totalSeconds)})`);
+      for (const p of (s.projects ?? []).slice(0, 6)) promptLines.push(`  - project: ${p.name} (${rizeMinutes(p.totalSeconds)})`);
+    }
+    for (const sess of (evidence.rize.sessions ?? []).slice(0, 8)) {
+      const tag = [sess.category?.name, sess.project?.name].filter(Boolean).join("/");
+      promptLines.push(`  - session: ${sess.title ?? "(untitled)"}${tag ? ` [${tag}]` : ""}`);
+    }
+  } else {
+    promptLines.push("[rize] (not configured or no tracked time)");
+  }
+
+  promptLines.push("");
+  if (evidence.buildbetter) {
+    promptLines.push("[buildbetter] Recent call topics (context — was this discussed / superseded?):");
+    for (const ex of evidence.buildbetter) {
+      promptLines.push(`  - "${ex.summary}"${ex.callName ? ` (call: ${ex.callName})` : ""}${ex.types?.length ? ` [${ex.types.join(",")}]` : ""}`);
+    }
+  } else {
+    promptLines.push("[buildbetter] (no recent call topics)");
+  }
+
+  promptLines.push("");
+  promptLines.push("Which tasks just got done or are actively being worked on? Weigh corroborating sources together.");
+  const prompt = promptLines.join("\n");
 
   let raw;
   try {
@@ -389,15 +506,26 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
     const task = this.runtime.tasks.get(u.taskId);
     if (!task || task.status === "completed") continue;
     const confidence = Number(u.confidence ?? 0);
+    const sources = Array.isArray(u.sources) ? u.sources.filter((s) => typeof s === "string") : [];
 
-    if (u.action === "complete" && confidence >= 0.7) {
+    // Defensive guard mirroring the system prompt: tracked time alone
+    // (only [rize] cited) is never enough to mark something DONE — at most
+    // it's in-progress. Downgrade a rize-only "complete" to in_progress.
+    let action = u.action;
+    if (action === "complete" && sources.length === 1 && sources[0] === "rize") {
+      action = "in_progress";
+    }
+
+    if (action === "complete" && confidence >= 0.7) {
       this.runtime.tasks.complete(task.id, "observed");
-      // Annotate with evidence so the user can sanity-check.
+      // Annotate with evidence + corroborating sources so the user can
+      // sanity-check WHY it was auto-completed.
       this.runtime.tasks.update(task.id, {
         sourceMeta: {
           ...(task.sourceMeta ?? {}),
           autoCompletedEvidence: u.evidence,
-          autoCompletedConfidence: confidence
+          autoCompletedConfidence: confidence,
+          autoCompletedSources: sources
         }
       });
       this.runtime?.events?.emit?.("task-auto-changed", {
@@ -405,17 +533,19 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
         taskId: task.id,
         title: task.title,
         evidence: u.evidence,
-        confidence
+        confidence,
+        sources
       });
       completed += 1;
-      applied.push({ id: task.id, action: "complete" });
-    } else if (u.action === "in_progress" && confidence >= 0.5 && task.status !== "in_progress") {
+      applied.push({ id: task.id, action: "complete", sources });
+    } else if (action === "in_progress" && confidence >= 0.5 && task.status !== "in_progress") {
       this.runtime.tasks.update(task.id, {
         status: "in_progress",
         sourceMeta: {
           ...(task.sourceMeta ?? {}),
           inProgressEvidence: u.evidence,
-          inProgressConfidence: confidence
+          inProgressConfidence: confidence,
+          inProgressSources: sources
         }
       });
       this.runtime?.events?.emit?.("task-auto-changed", {
@@ -423,10 +553,11 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
         taskId: task.id,
         title: task.title,
         evidence: u.evidence,
-        confidence
+        confidence,
+        sources
       });
       inProgressed += 1;
-      applied.push({ id: task.id, action: "in_progress" });
+      applied.push({ id: task.id, action: "in_progress", sources });
     }
   }
 

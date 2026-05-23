@@ -2354,3 +2354,129 @@ test("McpRegistry persist surfaces filesystem errors instead of swallowing", asy
 
   fs.rmSync(dir, { recursive: true });
 });
+
+test("proactive-observer: multi-source reconciliation fuses OCR + Rize + BuildBetter evidence", async () => {
+  const { ProactiveObserver } = await import("../src/proactive-observer.js");
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-reconcile-"));
+  const tasks = new TaskStore({ dataDir: dir });
+
+  const shipped = tasks.add({ title: "Ship the Acme proposal" }, { source: "manual", queue: "user" });
+  const designing = tasks.add({ title: "Redesign onboarding in Figma" }, { source: "manual", queue: "user" });
+
+  // Capture the prompt the provider receives + the events emitted.
+  let seenPrompt = null;
+  const events = [];
+  const fakeProvider = {
+    isConfigured: () => true,
+    generate: async ({ input }) => {
+      seenPrompt = input;
+      return {
+        text: JSON.stringify({
+          updates: [
+            // Corroborated complete: OCR shows the send + Rize logged time.
+            { taskId: shipped.id, action: "complete", confidence: 0.9, evidence: "Gmail 'Message sent' + 0.5h in Email", sources: ["ocr", "rize"] },
+            // Rize-only 'complete' must be downgraded to in_progress by the guard.
+            { taskId: designing.id, action: "complete", confidence: 0.95, evidence: "2.1h in Figma", sources: ["rize"] }
+          ]
+        })
+      };
+    }
+  };
+
+  const runtime = {
+    dataDir: dir,
+    tasks,
+    events: { emit: (name, data) => events.push({ name, data }) },
+    agentHost: { modelProvider: fakeProvider },
+    observations: {
+      getRecentContext: async () => ({
+        apps: [{ app: "com.google.Chrome", n: 8 }],
+        snippets: [
+          { app: "com.google.Chrome", text: "Gmail — Message sent to acme@example.com" },
+          { app: "com.figma", text: "Onboarding v3 — editing" }
+        ]
+      })
+    },
+    tools: {
+      get: (name) => {
+        if (name === "rize_today_summary") {
+          return { handler: async () => ({ totalSeconds: 9360, focusSeconds: 7200, categories: [{ name: "Design", totalSeconds: 7560 }, { name: "Email", totalSeconds: 1800 }], projects: [{ name: "Onboarding", totalSeconds: 7560 }] }) };
+        }
+        if (name === "rize_recent_sessions") {
+          return { handler: async () => ([{ title: "Figma onboarding", category: { name: "Design" }, project: { name: "Onboarding" } }]) };
+        }
+        return undefined;
+      }
+    }
+  };
+
+  const observer = new ProactiveObserver({ runtime, dataDir: dir });
+
+  // gatherReconciliationEvidence pulls all three sources.
+  const ev = await observer.gatherReconciliationEvidence({ now: new Date() });
+  assert.ok(ev.ocr?.snippets?.length === 2, "OCR gathered");
+  assert.ok(ev.rize?.summary?.totalSeconds === 9360, "Rize summary gathered");
+  // BuildBetter: add a recent bb-sourced task so source 3 has something.
+  tasks.add(
+    { title: "Follow up with Dana re pricing", sourceId: "buildbetter:x1", sourceMeta: { callName: "Dana sync", callStartedAt: new Date().toISOString(), extractionTypes: ["follow_up"] } },
+    { source: "buildbetter", queue: "user" }
+  );
+  const ev2 = await observer.gatherReconciliationEvidence({ now: new Date() });
+  assert.ok(ev2.buildbetter?.length === 1, "BuildBetter call topics gathered");
+
+  const result = await observer.scanTasksAgainstActivity({ now: new Date() });
+
+  // Prompt carries all three provenance-tagged source blocks.
+  assert.match(seenPrompt, /\[ocr\]/);
+  assert.match(seenPrompt, /\[rize\]/);
+  assert.match(seenPrompt, /Time actually tracked today/);
+
+  // Corroborated task auto-completed with sources annotated.
+  assert.equal(tasks.get(shipped.id).status, "completed");
+  assert.deepEqual(tasks.get(shipped.id).sourceMeta.autoCompletedSources, ["ocr", "rize"]);
+
+  // Rize-only "complete" was downgraded to in_progress, NOT completed.
+  assert.equal(tasks.get(designing.id).status, "in_progress");
+  assert.deepEqual(tasks.get(designing.id).sourceMeta.inProgressSources, ["rize"]);
+
+  assert.equal(result.completed, 1);
+  assert.equal(result.inProgressed, 1);
+
+  // Events carry sources for the dashboard.
+  const completeEvent = events.find((e) => e.name === "task-auto-changed" && e.data.action === "complete");
+  assert.deepEqual(completeEvent.data.sources, ["ocr", "rize"]);
+
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("proactive-observer: reconciliation degrades gracefully when Rize + BuildBetter absent", async () => {
+  const { ProactiveObserver } = await import("../src/proactive-observer.js");
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-reconcile-bare-"));
+  const tasks = new TaskStore({ dataDir: dir });
+  tasks.add({ title: "Some task" }, { source: "manual", queue: "user" });
+
+  const runtime = {
+    dataDir: dir,
+    tasks,
+    events: { emit: () => {} },
+    agentHost: { modelProvider: { isConfigured: () => true, generate: async () => ({ text: JSON.stringify({ updates: [] }) }) } },
+    observations: {
+      getRecentContext: async () => ({ apps: [], snippets: [{ app: "x", text: "a" }, { app: "x", text: "b" }] })
+    },
+    tools: { get: () => undefined } // no Rize tools registered
+  };
+  const observer = new ProactiveObserver({ runtime, dataDir: dir });
+
+  const ev = await observer.gatherReconciliationEvidence({ now: new Date() });
+  assert.equal(ev.rize, null, "Rize null when tools absent");
+  assert.equal(ev.buildbetter, null, "BuildBetter null when no bb tasks");
+
+  // Scan still runs (OCR alone is enough to not bail).
+  const result = await observer.scanTasksAgainstActivity({ now: new Date() });
+  assert.equal(result.skipped, undefined);
+  assert.equal(result.completed, 0);
+
+  fs.rmSync(dir, { recursive: true });
+});

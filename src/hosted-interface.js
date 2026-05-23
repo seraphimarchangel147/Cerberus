@@ -4249,7 +4249,10 @@ evt.addEventListener("task-auto-changed", (e) => {
     const verb = data.action === "complete" ? "Completed" : "Started";
     const icon = data.action === "complete" ? "✓" : "▶";
     const conf = data.confidence ? \` (\${Math.round(data.confidence * 100)}%)\` : "";
-    showToast(\`\${icon} Auto-\${verb.toLowerCase()}: \${data.title}\${conf}\${data.evidence ? " — " + data.evidence : ""}\`, true);
+    // Show which evidence sources corroborated, so an auto-change is never a
+    // black box — e.g. "via ocr+rize".
+    const srcs = Array.isArray(data.sources) && data.sources.length ? \` · via \${data.sources.join("+")}\` : "";
+    showToast(\`\${icon} Auto-\${verb.toLowerCase()}: \${data.title}\${conf}\${data.evidence ? " — " + data.evidence : ""}\${srcs}\`, true);
     if (state.tab === "tasks") renderTasks();
   } catch {}
 });
