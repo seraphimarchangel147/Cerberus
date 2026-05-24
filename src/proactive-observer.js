@@ -499,6 +499,7 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
   const updates = Array.isArray(parsed?.updates) ? parsed.updates : [];
   let completed = 0;
   let inProgressed = 0;
+  let clarified = 0;
   const applied = [];
 
   for (const u of updates) {
@@ -558,10 +559,27 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
       });
       inProgressed += 1;
       applied.push({ id: task.id, action: "in_progress", sources });
+    } else if (action === "complete" && confidence >= 0.4 && this.runtime?.clarifications?.add) {
+      // The ambiguous band: there's real signal it's done, but not enough
+      // to flip it without risking a wrong auto-complete. Rather than
+      // silently dropping it (the old behavior), park a question — the
+      // user answers in one tap and that answer trains future confidence.
+      const c = this.runtime.clarifications.add({
+        taskId: task.id,
+        question: `Did you finish "${task.title}"?`,
+        context: u.evidence ?? "",
+        proposedAction: "complete",
+        confidence,
+        sources
+      });
+      if (c) {
+        clarified += 1;
+        applied.push({ id: task.id, action: "clarify", sources });
+      }
     }
   }
 
-  return { scanned: candidates.length, completed, inProgressed, applied };
+  return { scanned: candidates.length, completed, inProgressed, clarified, applied };
 };
 
 function parseProposal(text) {

@@ -2480,3 +2480,124 @@ test("proactive-observer: reconciliation degrades gracefully when Rize + BuildBe
 
   fs.rmSync(dir, { recursive: true });
 });
+
+test("clarification-store: ambiguous reconciliation parks a question, answer resolves task + records outcome", async () => {
+  const { ClarificationStore } = await import("../src/clarification-store.js");
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-clar-"));
+  const tasks = new TaskStore({ dataDir: dir });
+  const recorded = [];
+  const resolved = [];
+  const events = [];
+  const runtime = {
+    tasks,
+    events: { emit: (name, data) => events.push({ name, data }) },
+    outcomes: {
+      record: (o) => { const rec = { id: "out_" + recorded.length, ...o }; recorded.push(rec); return rec; },
+      resolve: (id, score, kind) => resolved.push({ id, score, kind })
+    }
+  };
+  const clar = new ClarificationStore({ dir: path.join(dir, "clar"), runtime });
+
+  const t = tasks.add({ title: "Send the Acme proposal" }, { source: "manual", queue: "user" });
+  const c = clar.add({
+    taskId: t.id,
+    question: 'Did you finish "Send the Acme proposal"?',
+    context: "Rize logged 40m in Docs, no send detected",
+    proposedAction: "complete",
+    confidence: 0.55,
+    sources: ["rize"]
+  });
+  assert.match(c.id, /^clar_/);
+  assert.equal(c.status, "pending");
+  assert.equal(events.find((e) => e.name === "clarification-created")?.data.id, c.id);
+
+  // Dedup: a second add for the same pending task returns the same item.
+  const dup = clar.add({ taskId: t.id, question: "again?", proposedAction: "complete" });
+  assert.equal(dup.id, c.id, "no duplicate pending clarification per task");
+  assert.equal(clar.list({ status: "pending" }).length, 1);
+
+  // Answer "yes" → task completes via user, outcome recorded high.
+  const result = clar.answer(c.id, "yes");
+  assert.equal(result.task.status, "completed");
+  assert.equal(result.task.completedVia, "user");
+  assert.equal(clar.get(c.id).status, "answered");
+  assert.equal(clar.list({ status: "pending" }).length, 0);
+  assert.equal(recorded[0].kind, "clarification-answered");
+  assert.equal(resolved[0].score, 0.95, "yes is a strong positive signal");
+
+  // Persistence round-trip.
+  const clar2 = new ClarificationStore({ dir: path.join(dir, "clar"), runtime });
+  assert.equal(clar2.get(c.id).answer, "yes");
+
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("clarification-store: answers map to the right task transitions", async () => {
+  const { ClarificationStore } = await import("../src/clarification-store.js");
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-clar2-"));
+  const tasks = new TaskStore({ dataDir: dir });
+  const runtime = { tasks, events: { emit: () => {} } };
+  const clar = new ClarificationStore({ dir: path.join(dir, "clar"), runtime });
+
+  const mk = (title) => {
+    const t = tasks.add({ title }, { source: "manual", queue: "user" });
+    return clar.add({ taskId: t.id, question: "?", proposedAction: "complete", confidence: 0.5, sources: ["ocr"] });
+  };
+
+  const inProg = mk("a"); clar.answer(inProg.id, "in_progress");
+  assert.equal(tasks.get(inProg.taskId).status, "in_progress");
+
+  const dropped = mk("b"); clar.answer(dropped.id, "dropped");
+  assert.equal(tasks.get(dropped.taskId).status, "cancelled");
+
+  const notYet = mk("c"); clar.answer(notYet.id, "no");
+  assert.equal(tasks.get(notYet.taskId).status, "pending", "'no' leaves it pending to resurface");
+
+  // Invalid answer rejected; dismiss works.
+  const d = mk("d");
+  assert.throws(() => clar.answer(d.id, "maybe"), /invalid answer/);
+  clar.dismiss(d.id);
+  assert.equal(clar.get(d.id).status, "dismissed");
+
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("proactive-observer: mid-band complete creates a clarification instead of dropping", async () => {
+  const { ProactiveObserver } = await import("../src/proactive-observer.js");
+  const { ClarificationStore } = await import("../src/clarification-store.js");
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-clar3-"));
+  const tasks = new TaskStore({ dataDir: dir });
+  const clar = new ClarificationStore({ dir: path.join(dir, "clar"), runtime: { tasks, events: { emit: () => {} } } });
+  const t = tasks.add({ title: "Maybe-done task" }, { source: "manual", queue: "user" });
+
+  const runtime = {
+    dataDir: dir,
+    tasks,
+    clarifications: clar,
+    events: { emit: () => {} },
+    agentHost: {
+      modelProvider: {
+        isConfigured: () => true,
+        // 0.55 confidence complete → mid-band → clarification.
+        generate: async () => ({ text: JSON.stringify({ updates: [{ taskId: t.id, action: "complete", confidence: 0.55, evidence: "doc open but no send", sources: ["ocr"] }] }) })
+      }
+    },
+    observations: { getRecentContext: async () => ({ apps: [], snippets: [{ app: "x", text: "a" }, { app: "x", text: "b" }] }) },
+    tools: { get: () => undefined }
+  };
+  clar.bindRuntime(runtime);
+  const observer = new ProactiveObserver({ runtime, dataDir: dir });
+
+  const result = await observer.scanTasksAgainstActivity({ now: new Date() });
+  assert.equal(result.completed, 0, "not auto-completed in mid-band");
+  assert.equal(result.clarified, 1, "parked a clarification");
+  assert.equal(tasks.get(t.id).status, "pending", "task untouched until user answers");
+  const pending = clar.list({ status: "pending" });
+  assert.equal(pending.length, 1);
+  assert.match(pending[0].question, /Maybe-done task/);
+
+  fs.rmSync(dir, { recursive: true });
+});

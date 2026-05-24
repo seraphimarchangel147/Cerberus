@@ -26,6 +26,7 @@ import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ComputerUseLog } from "./computer-use-log.js";
+import { ClarificationStore } from "./clarification-store.js";
 import { registerComputerUseTools, isComputerUseEnabled } from "./integrations/computer-use.js";
 import { SuggestionFeedback } from "./suggestion-feedback.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
@@ -160,6 +161,12 @@ export class AbiRuntime {
     // a compact summary into the observer's system prompt each pass.
     this.suggestionFeedback = options.suggestionFeedback ?? new SuggestionFeedback({ runtime: this, dataDir: options.dataDir });
     this.tasks = options.tasks ?? new TaskStore({ runtime: this, dataDir: options.dataDir, ...(options.taskStoreOptions ?? {}) });
+    // The "ask me" queue: ambiguous task-reconciliation outcomes become
+    // questions instead of bad guesses. dataDir-scoped like other stores.
+    this.clarifications = options.clarifications ?? new ClarificationStore({
+      runtime: this,
+      dir: options.dataDir ? `${options.dataDir}/clarifications` : undefined
+    });
     this.skillReplay = options.skillReplay ?? new SkillReplay({ runtime: this, dataDir: options.dataDir, ...(options.skillReplayOptions ?? {}) });
     this.outputs = [];
     this.feedback = [];

@@ -56,6 +56,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("cron-catchup", (data) => broadcast("cron-catchup", data));
   events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
   events.on("task-updated", (data) => broadcast("task-updated", data));
+  events.on("clarification-created", (data) => broadcast("clarification-created", data));
+  events.on("clarification-resolved", (data) => broadcast("clarification-resolved", data));
   events.on("task-reminder", (data) => broadcast("task-reminder", data));
   events.on("task-auto-changed", (data) => broadcast("task-auto-changed", data));
   events.on("pending-action", (data) => broadcast("pending-action", data));
@@ -849,6 +851,29 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const id = decodeURIComponent(pathname.split("/")[2]);
         const ok = runtime.tasks.remove(id);
         return sendJson(res, ok ? 200 : 404, { ok, id });
+      }
+      // Clarification queue — the "ask me" loop. ids are looked up in an
+      // in-memory Map (never a filesystem path), so the strict-id concern
+      // from suggestion routes doesn't apply here.
+      if (method === "GET" && pathname === "/tasks/clarifications") {
+        if (!runtime.clarifications?.list) return sendJson(res, 503, { error: "no clarification store" });
+        const status = url.searchParams.get("status");
+        return sendJson(res, 200, runtime.clarifications.list({ status: status === "null" ? null : (status ?? "pending") }));
+      }
+      if (method === "POST" && pathname.match(/^\/tasks\/clarifications\/[^/]+\/answer$/)) {
+        if (!runtime.clarifications?.answer) return sendJson(res, 503, { error: "no clarification store" });
+        const id = decodeURIComponent(pathname.split("/")[3]);
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          const result = runtime.clarifications.answer(id, body.answer);
+          return result ? sendJson(res, 200, result) : sendJson(res, 404, { error: "unknown or already-resolved clarification" });
+        } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      }
+      if (method === "POST" && pathname.match(/^\/tasks\/clarifications\/[^/]+\/dismiss$/)) {
+        if (!runtime.clarifications?.dismiss) return sendJson(res, 503, { error: "no clarification store" });
+        const id = decodeURIComponent(pathname.split("/")[3]);
+        const item = runtime.clarifications.dismiss(id);
+        return item ? sendJson(res, 200, item) : sendJson(res, 404, { error: "unknown or already-resolved clarification" });
       }
       if (method === "GET" && pathname === "/proactive/suggestions") {
         // Story 4: merge observer suggestions + miner candidates. Both go
@@ -3779,12 +3804,38 @@ async function renderToday() {
   const qsDate = new URLSearchParams(window.location.search).get("date");
   const today = new Date().toISOString().slice(0, 10);
   const date = qsDate || today;
-  const data = await fetchJson("/recap/daily?date=" + encodeURIComponent(date)).catch(() => null);
+  const [data, clarifications] = await Promise.all([
+    fetchJson("/recap/daily?date=" + encodeURIComponent(date)).catch(() => null),
+    fetchJson("/tasks/clarifications?status=pending").catch(() => [])
+  ]);
   if (!data) {
     main.innerHTML = '<div class="pane"><h2>Today</h2><div class="ui-empty">Couldn\\'t load today\\'s recap.</div></div>';
     return;
   }
   const r = data.recap;
+
+  // "Needs your call" — the clarification queue. Only shown for today (the
+  // questions are about what just happened, not a historical date).
+  const showClarify = date === today && Array.isArray(clarifications) && clarifications.length > 0;
+  const clarifyHtml = !showClarify ? "" : \`
+    <section class="ui-section" id="clarifySection">
+      <div class="ui-section-header"><h3>❓ Needs your call</h3><span class="ui-section-meta">· \${clarifications.length}</span></div>
+      <ul class="ui-stack" style="list-style:none; padding-left:0; gap: var(--space-2);">
+        \${clarifications.map((c) => \`
+          <li class="ui-card" data-clar="\${escapeHtml(c.id)}" style="padding: var(--space-3);">
+            <div style="font-weight:600;">\${escapeHtml(c.question)}</div>
+            \${c.context ? \`<div class="ui-meta" style="margin:4px 0;">\${escapeHtml(c.context)}\${Array.isArray(c.sources) && c.sources.length ? " · via " + escapeHtml(c.sources.join("+")) : ""}</div>\` : ""}
+            <div class="ui-row" style="gap: var(--space-2); margin-top: var(--space-2); flex-wrap:wrap;">
+              <button class="ui-btn ui-btn-accent" data-clar-answer="yes" data-id="\${escapeHtml(c.id)}">Yes, done</button>
+              <button class="ui-btn" data-clar-answer="in_progress" data-id="\${escapeHtml(c.id)}">Still working</button>
+              <button class="ui-btn" data-clar-answer="no" data-id="\${escapeHtml(c.id)}">Not yet</button>
+              <button class="ui-btn ui-btn-ghost" data-clar-answer="dropped" data-id="\${escapeHtml(c.id)}">Dropped it</button>
+            </div>
+          </li>
+        \`).join("")}
+      </ul>
+    </section>
+  \`;
 
   const section = (title, rows, renderRow) => rows.length === 0 ? "" : \`
     <section class="ui-section">
@@ -3809,6 +3860,8 @@ async function renderToday() {
         <span class="ui-badge">\${r.counts.approvedActions ?? 0} agent actions</span>
         \${r.activity?.hoursTracked ? \`<span class="ui-badge">\${r.activity.hoursTracked}h tracked</span>\` : ""}
       </div>
+
+      \${clarifyHtml}
 
       \${section("✅ Completed", r.completedTasks, (t) => \`<li>\${escapeHtml(t.title)}\${t.queue === "agent" ? ' <span class="ui-meta">(agent)</span>' : ""}</li>\`)}
       \${section("✨ Skills run", r.skillRuns, (s) => \`<li>\${escapeHtml(s.skill ?? "(unknown)")}\${typeof s.qualityScore === "number" ? \` <span class="ui-meta">quality \${s.qualityScore.toFixed(2)}</span>\` : ""}</li>\`)}
@@ -3837,6 +3890,26 @@ async function renderToday() {
     url.searchParams.set("date", newDate);
     history.replaceState(null, "", url.toString());
     renderToday();
+  });
+
+  // Clarification quick-answers. One tap resolves the task + records the
+  // outcome server-side, then re-renders so the question disappears.
+  main.querySelectorAll("[data-clar-answer]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-id");
+      const answer = btn.getAttribute("data-clar-answer");
+      btn.closest("[data-clar]")?.style && (btn.closest("[data-clar]").style.opacity = "0.5");
+      try {
+        await fetch("/tasks/clarifications/" + encodeURIComponent(id) + "/answer", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ answer })
+        });
+        showToast("Thanks — updated.", true);
+      } catch { showToast("Couldn't save that.", false); }
+      renderToday();
+    });
   });
 }
 
@@ -4254,6 +4327,19 @@ evt.addEventListener("task-auto-changed", (e) => {
     const srcs = Array.isArray(data.sources) && data.sources.length ? \` · via \${data.sources.join("+")}\` : "";
     showToast(\`\${icon} Auto-\${verb.toLowerCase()}: \${data.title}\${conf}\${data.evidence ? " — " + data.evidence : ""}\${srcs}\`, true);
     if (state.tab === "tasks") renderTasks();
+  } catch {}
+});
+
+// Clarification queued — the agent needs your call on a task. Toast +
+// refresh the Today tab if it's open so the question appears immediately.
+evt.addEventListener("clarification-created", (e) => {
+  try {
+    const data = JSON.parse(e.data);
+    showToast("❓ " + (data.question || "Need your call on a task"), true);
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("Needs your call", { body: data.question || "" });
+    }
+    if (state.tab === "today") renderToday();
   } catch {}
 });
 
