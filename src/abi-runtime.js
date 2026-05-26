@@ -14,6 +14,7 @@ import { registerLinearTaskSource } from "./integrations/linear-tasks.js";
 import { registerInboxWatcher } from "./integrations/inbox-watcher.js";
 import { registerIMessagePoller } from "./integrations/imessage-poller.js";
 import { registerBuildBetterTaskSource } from "./integrations/buildbetter-tasks.js";
+import { registerCalendarIntegration } from "./integrations/calendar.js";
 import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
 import { MemoryCondenser } from "./memory-condenser.js";
@@ -344,6 +345,9 @@ export class AbiRuntime {
 
     if (options.integrations !== false) {
       registerRizeIntegration(this);
+      // Calendar via secret ICS feed — env-gated on CALENDAR_ICS_URL.
+      // Feeds reconciliation ("did the meeting happen?") + daily planner.
+      registerCalendarIntegration(this);
       // Linear is env-gated — silently no-ops if LINEAR_API_KEY isn't set.
       registerLinearTaskSource(this);
       // BuildBetter is env-gated too. Needs BUILDBETTER_API_KEY plus either

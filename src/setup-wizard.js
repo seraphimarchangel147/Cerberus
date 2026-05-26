@@ -17,6 +17,7 @@ const WIZARD_FIELDS = [
   "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
   "TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_POLLING",
   "RIZE_API_KEY",
+  "CALENDAR_ICS_URL",
   "LINEAR_API_KEY",
   "BUILDBETTER_API_KEY", "BUILDBETTER_USER_EMAIL", "BUILDBETTER_USER_NAME",
   "IMESSAGE_ENABLED", "IMESSAGE_SELF_HANDLE", "IMESSAGE_INTERVAL_MS", "IMESSAGE_MODE", "IMESSAGE_BACKFILL_DAYS",
@@ -278,6 +279,15 @@ export function renderWizard({ proposedToken } = {}) {
           <p class="sub">Activity tracking surfaces "what did I work on today?" via the <code>rize_*</code> agent tools. Get a key at <a href="https://my.rize.io/settings/api" target="_blank" rel="noopener">my.rize.io/settings/api</a>.</p>
           <label>RIZE_API_KEY</label>
           <input type="password" name="RIZE_API_KEY" autocomplete="off">
+        </div>
+      </details>
+
+      <details>
+        <summary>Calendar — did the meeting happen?</summary>
+        <div style="padding-top:10px;">
+          <p class="sub">Paste your calendar's <strong>secret iCal/ICS URL</strong> (Google: Settings → your calendar → "Secret address in iCal format"; Outlook/Apple have an equivalent). Used to reconcile whether scheduled meetings occurred and to plan your day. Comma-separate multiple calendars. No OAuth required.</p>
+          <label>CALENDAR_ICS_URL</label>
+          <input type="password" name="CALENDAR_ICS_URL" autocomplete="off" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics">
         </div>
       </details>
 

@@ -2601,3 +2601,108 @@ test("proactive-observer: mid-band complete creates a clarification instead of d
 
   fs.rmSync(dir, { recursive: true });
 });
+
+test("calendar: ICS parsing — timed, all-day, line folding, and WEEKLY recurrence", async () => {
+  const { parseICS, CalendarClient } = await import("../src/integrations/calendar.js");
+
+  // A folded SUMMARY line (continuation begins with a space) + timed event.
+  const ics = [
+    "BEGIN:VCALENDAR",
+    "BEGIN:VEVENT",
+    "UID:1",
+    "SUMMARY:Acme sync with a very long title that gets ",
+    " folded across lines",
+    "DTSTART:20260525T160000Z",
+    "DTEND:20260525T170000Z",
+    "STATUS:CONFIRMED",
+    "END:VEVENT",
+    "BEGIN:VEVENT",
+    "UID:2",
+    "SUMMARY:All day offsite",
+    "DTSTART;VALUE=DATE:20260525",
+    "DTEND;VALUE=DATE:20260526",
+    "END:VEVENT",
+    "BEGIN:VEVENT",
+    "UID:3",
+    "SUMMARY:Daily standup",
+    "DTSTART:20260101T090000Z",
+    "DTEND:20260101T091500Z",
+    "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR",
+    "END:VEVENT",
+    "END:VCALENDAR"
+  ].join("\r\n");
+
+  const events = parseICS(ics);
+  assert.equal(events.length, 3);
+  assert.equal(events[0].summary, "Acme sync with a very long title that gets folded across lines");
+  assert.equal(events[1].dtstart.allDay, true);
+  assert.equal(events[2].rrule.FREQ, "WEEKLY");
+
+  // Use the client to expand events overlapping a single day (Mon 2026-05-25).
+  const client = new CalendarClient({
+    icsUrl: "https://example.com/cal.ics",
+    fetchImpl: async () => ({ ok: true, text: async () => ics })
+  });
+  assert.equal(client.isConfigured(), true);
+  const day = await client.eventsBetween("2026-05-25T00:00:00Z", "2026-05-25T23:59:59Z");
+  const summaries = day.map((e) => e.summary);
+  assert.ok(summaries.includes("Acme sync with a very long title that gets folded across lines"), "timed event present");
+  assert.ok(summaries.includes("All day offsite"), "all-day event present");
+  // 2026-05-25 is a Monday → the MO/WE/FR standup should produce an instance.
+  assert.ok(summaries.includes("Daily standup"), "weekly recurrence expanded onto Monday");
+
+  // A Tuesday should NOT contain the MO/WE/FR standup.
+  const tue = await client.eventsBetween("2026-05-26T00:00:00Z", "2026-05-26T23:59:59Z");
+  assert.ok(!tue.map((e) => e.summary).includes("Daily standup"), "no standup on Tuesday");
+});
+
+test("calendar: unconfigured client + integration registration is a no-op", async () => {
+  const { CalendarClient, registerCalendarIntegration } = await import("../src/integrations/calendar.js");
+  const bare = new CalendarClient({ icsUrl: "" });
+  assert.equal(bare.isConfigured(), false);
+
+  const registered = [];
+  const runtime = { tools: { register: (t) => registered.push(t.name) } };
+  const result = registerCalendarIntegration(runtime, { client: bare });
+  assert.equal(result.registered, false);
+  assert.equal(registered.length, 0, "no tools registered when unconfigured");
+});
+
+test("proactive-observer: calendar event feeds reconciliation as a 4th source", async () => {
+  const { ProactiveObserver } = await import("../src/proactive-observer.js");
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-cal-recon-"));
+  const tasks = new TaskStore({ dataDir: dir });
+
+  let seenPrompt = null;
+  const now = new Date();
+  const earlier = new Date(now.getTime() - 3600_000).toISOString();
+  const runtime = {
+    dataDir: dir,
+    tasks,
+    events: { emit: () => {} },
+    agentHost: { modelProvider: { isConfigured: () => true, generate: async ({ input }) => { seenPrompt = input; return { text: JSON.stringify({ updates: [] }) }; } } },
+    observations: { getRecentContext: async () => ({ apps: [], snippets: [] }) },
+    tools: {
+      get: (name) => {
+        if (name === "calendar_today_events") {
+          return { handler: async () => ([{ summary: "Acme sync", start: earlier, end: now.toISOString(), status: "confirmed" }]) };
+        }
+        return undefined;
+      }
+    }
+  };
+  const observer = new ProactiveObserver({ runtime, dataDir: dir });
+
+  const ev = await observer.gatherReconciliationEvidence({ now });
+  assert.equal(ev.calendar.length, 1, "occurred event captured");
+  assert.equal(ev.calendar[0].summary, "Acme sync");
+
+  // Scan should run on calendar evidence alone (OCR empty) and include the block.
+  tasks.add({ title: "Acme sync" }, { source: "manual", queue: "user" });
+  await observer.scanTasksAgainstActivity({ now });
+  assert.match(seenPrompt, /\[calendar\]/);
+  assert.match(seenPrompt, /Acme sync/);
+
+  fs.rmSync(dir, { recursive: true });
+});

@@ -314,9 +314,10 @@ const TASK_SCAN_SYSTEM_PROMPT = [
   "  [ocr] — what was recently on their screen (apps + OCR text).",
   "  [rize] — time actually tracked today: categories, projects, and session titles. Tells you WHERE they spent time.",
   "  [buildbetter] — recent call topics, for context on whether a task is still live or was superseded.",
+  "  [calendar] — scheduled events that already occurred today; a meeting that happened corroborates a 'meet/sync/call X' task.",
   "For each task, decide if there's STRONG evidence it just got done ('complete'), or that the user is actively working on it ('in_progress').",
   "Weigh CORROBORATION: when two or more independent sources point the same way (e.g. [ocr] shows a merged PR AND [rize] logged 2h in the matching project), be more confident. When sources disagree or only one weak signal exists, stay conservative and lower confidence.",
-  "Output STRICT JSON: {\"updates\": [{\"taskId\": \"...\", \"action\": \"complete\"|\"in_progress\", \"confidence\": 0-1, \"evidence\": \"<short>\", \"sources\": [\"ocr\"|\"rize\"|\"buildbetter\"]}]} — empty updates array is fine.",
+  "Output STRICT JSON: {\"updates\": [{\"taskId\": \"...\", \"action\": \"complete\"|\"in_progress\", \"confidence\": 0-1, \"evidence\": \"<short>\", \"sources\": [\"ocr\"|\"rize\"|\"buildbetter\"|\"calendar\"]}]} — empty updates array is fine.",
   "'complete' requires explicit evidence (PR merged, ticket closed, message sent). 'in_progress' requires active work (editor open, commits being made, in a related call, or significant tracked time in a matching project).",
   "Never propose an update without citing specific evidence — quote a fragment and list which source(s) support it in the 'sources' array. Time tracked alone ([rize] only) is 'in_progress' at most, not 'complete'."
 ].join("\n");
@@ -333,7 +334,7 @@ const TASK_SCAN_SYSTEM_PROMPT = [
 // discussed on calls" (BuildBetter) lets the model auto-complete with far
 // higher confidence, and lets it stay conservative when sources disagree.
 ProactiveObserver.prototype.gatherReconciliationEvidence = async function ({ now = new Date() } = {}) {
-  const evidence = { ocr: null, rize: null, buildbetter: null };
+  const evidence = { ocr: null, rize: null, buildbetter: null, calendar: null };
 
   // Source 1: on-screen activity (OCR) — the original signal.
   try {
@@ -390,6 +391,27 @@ ProactiveObserver.prototype.gatherReconciliationEvidence = async function ({ now
     /* ignore */
   }
 
+  // Source 4: today's calendar. A scheduled event that occurred is strong
+  // corroboration that a "meet/sync/call X" task happened. No-op when
+  // CALENDAR_ICS_URL isn't set (tool absent).
+  try {
+    const calTool = this.runtime?.tools?.get?.("calendar_today_events");
+    if (calTool?.handler) {
+      const events = await calTool.handler({}).catch(() => null);
+      if (Array.isArray(events) && events.length) {
+        // Only events that have already started by `now` count as "occurred".
+        const nowMs = now.getTime();
+        evidence.calendar = events
+          .filter((e) => +new Date(e.start) <= nowMs)
+          .slice(0, 12)
+          .map((e) => ({ summary: e.summary, start: e.start, end: e.end, status: e.status }));
+        if (!evidence.calendar.length) evidence.calendar = null;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
   return evidence;
 };
 
@@ -406,12 +428,10 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
   const evidence = await this.gatherReconciliationEvidence({ now });
   const ocr = evidence.ocr ?? { apps: [], snippets: [] };
 
-  // Bail only when EVERY source is empty — Rize or BuildBetter may carry
-  // evidence even on a day with thin on-screen OCR.
+  // Bail only when EVERY source is empty — any of Rize / BuildBetter /
+  // calendar may carry evidence even on a day with thin on-screen OCR.
   const ocrThin = (ocr.snippets?.length ?? 0) < 2;
-  const noRize = !evidence.rize;
-  const noBuildBetter = !evidence.buildbetter;
-  if (ocrThin && noRize && noBuildBetter) {
+  if (ocrThin && !evidence.rize && !evidence.buildbetter && !evidence.calendar) {
     return { skipped: true, reason: "insufficient activity across all sources" };
   }
 
@@ -463,6 +483,17 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
     }
   } else {
     promptLines.push("[buildbetter] (no recent call topics)");
+  }
+
+  promptLines.push("");
+  if (evidence.calendar) {
+    promptLines.push("[calendar] Scheduled events that already occurred today (a meeting that happened corroborates a 'meet/sync/call' task):");
+    for (const e of evidence.calendar) {
+      const when = e.start ? new Date(e.start).toISOString().slice(11, 16) + "Z" : "";
+      promptLines.push(`  - ${when} "${e.summary}"${e.status && e.status !== "confirmed" ? ` [${e.status}]` : ""}`);
+    }
+  } else {
+    promptLines.push("[calendar] (no calendar feed or no events yet today)");
   }
 
   promptLines.push("");
