@@ -2706,3 +2706,74 @@ test("proactive-observer: calendar event feeds reconciliation as a 4th source", 
 
   fs.rmSync(dir, { recursive: true });
 });
+
+test("reconciliation-calibration: yes-rate moves the auto-complete threshold per source combo", async () => {
+  const { buildReconciliationCalibration, BASE_COMPLETE_THRESHOLD } = await import("../src/reconciliation-calibration.js");
+
+  const mk = (sources, answer) => ({ kind: "clarification-answered", metadata: { proposedAction: "complete", sources, answer } });
+
+  // Combo [ocr,rize]: 8 answers, 7 "yes" → high yes-rate → low threshold.
+  // Combo [rize]: 8 answers, 1 "yes" → low yes-rate → high threshold.
+  const outcomes = [];
+  for (let i = 0; i < 8; i++) outcomes.push(mk(["ocr", "rize"], i < 7 ? "yes" : "no"));
+  for (let i = 0; i < 8; i++) outcomes.push(mk(["rize"], i < 1 ? "yes" : "no"));
+
+  const calib = buildReconciliationCalibration(outcomes);
+
+  const trusted = calib.thresholdFor(["rize", "ocr"]); // order-insensitive
+  assert.equal(trusted.basis, "combo");
+  assert.ok(trusted.threshold <= 0.65, `trusted combo should lower the bar, got ${trusted.threshold}`);
+
+  const flaky = calib.thresholdFor(["rize"]);
+  assert.equal(flaky.basis, "combo");
+  assert.ok(flaky.threshold >= 0.8, `flaky combo should raise the bar, got ${flaky.threshold}`);
+
+  // Unknown combo with no global data falls back to base.
+  const fresh = buildReconciliationCalibration([]);
+  assert.equal(fresh.thresholdFor(["calendar"]).threshold, BASE_COMPLETE_THRESHOLD);
+  assert.equal(fresh.thresholdFor(["calendar"]).basis, "default");
+
+  // Summary is shaped for the transparency endpoint.
+  assert.equal(calib.summary.combos.length, 2);
+  assert.ok(calib.summary.combos[0].samples >= calib.summary.combos[1].samples, "sorted by samples desc");
+});
+
+test("reconciliation-calibration: a learned-low threshold auto-completes what used to be a clarification", async () => {
+  const { ProactiveObserver } = await import("../src/proactive-observer.js");
+  const { TaskStore } = await import("../src/task-store.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-calib-scan-"));
+  const tasks = new TaskStore({ dataDir: dir });
+  const t = tasks.add({ title: "Borderline task" }, { source: "manual", queue: "user" });
+
+  // Outcomes that have taught us [ocr,rize] @ mid-band is almost always "yes".
+  const history = [];
+  for (let i = 0; i < 8; i++) history.push({ kind: "clarification-answered", metadata: { proposedAction: "complete", sources: ["ocr", "rize"], answer: i < 7 ? "yes" : "no" } });
+
+  let clarifyAdds = 0;
+  const runtime = {
+    dataDir: dir,
+    tasks,
+    clarifications: { add: () => { clarifyAdds += 1; return { id: "c1" }; } },
+    outcomes: { recent: () => history },
+    events: { emit: () => {} },
+    agentHost: {
+      modelProvider: {
+        isConfigured: () => true,
+        // 0.62 confidence: BELOW the 0.7 base (would have clarified) but
+        // ABOVE the learned ~0.6 bar for [ocr,rize] → should auto-complete.
+        generate: async () => ({ text: JSON.stringify({ updates: [{ taskId: t.id, action: "complete", confidence: 0.62, evidence: "PR merged + 1h tracked", sources: ["ocr", "rize"] }] }) })
+      }
+    },
+    observations: { getRecentContext: async () => ({ apps: [], snippets: [{ app: "x", text: "a" }, { app: "x", text: "b" }] }) },
+    tools: { get: () => undefined }
+  };
+  const observer = new ProactiveObserver({ runtime, dataDir: dir });
+
+  const result = await observer.scanTasksAgainstActivity({ now: new Date() });
+  assert.equal(result.completed, 1, "learned-low threshold auto-completes the borderline case");
+  assert.equal(clarifyAdds, 0, "no clarification needed anymore");
+  assert.equal(tasks.get(t.id).status, "completed");
+  assert.equal(tasks.get(t.id).sourceMeta.autoCompletedThreshold <= 0.65, true);
+
+  fs.rmSync(dir, { recursive: true });
+});

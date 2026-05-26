@@ -855,6 +855,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // Clarification queue — the "ask me" loop. ids are looked up in an
       // in-memory Map (never a filesystem path), so the strict-id concern
       // from suggestion routes doesn't apply here.
+      if (method === "GET" && pathname === "/tasks/reconciliation/calibration") {
+        // Transparency: how the auto-complete threshold has self-tuned from
+        // the user's clarification answers, per evidence-source combo.
+        const { buildReconciliationCalibration } = await import("./reconciliation-calibration.js");
+        const outcomes = runtime.outcomes?.recent?.(200, "clarification-answered") ?? [];
+        return sendJson(res, 200, buildReconciliationCalibration(outcomes).summary);
+      }
       if (method === "GET" && pathname === "/tasks/clarifications") {
         if (!runtime.clarifications?.list) return sendJson(res, 503, { error: "no clarification store" });
         const status = url.searchParams.get("status");

@@ -16,6 +16,7 @@ import fs from "node:fs";
 import { ensureDir, writeJsonAtomic, readJsonFile } from "./file-utils.js";
 import { createId, nowIso } from "./utils.js";
 import { matchCatalog } from "./mcp-catalog.js";
+import { buildReconciliationCalibration } from "./reconciliation-calibration.js";
 
 const SUGGEST_DIR = "proactive/suggestions";
 const DEDUPE_WINDOW_MS = 6 * 60 * 60 * 1000; // 6h — don't repeat the same proposal within a 6h window
@@ -533,12 +534,20 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
   let clarified = 0;
   const applied = [];
 
+  // Self-tuning: build the auto-complete threshold table from how the user
+  // answered past clarifications. A source-combo we've been consistently
+  // right about gets a lower bar (auto-complete sooner, ask less).
+  const calibration = buildReconciliationCalibration(
+    this.runtime?.outcomes?.recent?.(200, "clarification-answered") ?? []
+  );
+
   for (const u of updates) {
     if (!u?.taskId) continue;
     const task = this.runtime.tasks.get(u.taskId);
     if (!task || task.status === "completed") continue;
     const confidence = Number(u.confidence ?? 0);
     const sources = Array.isArray(u.sources) ? u.sources.filter((s) => typeof s === "string") : [];
+    const completeThreshold = calibration.thresholdFor(sources).threshold;
 
     // Defensive guard mirroring the system prompt: tracked time alone
     // (only [rize] cited) is never enough to mark something DONE — at most
@@ -548,7 +557,7 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
       action = "in_progress";
     }
 
-    if (action === "complete" && confidence >= 0.7) {
+    if (action === "complete" && confidence >= completeThreshold) {
       this.runtime.tasks.complete(task.id, "observed");
       // Annotate with evidence + corroborating sources so the user can
       // sanity-check WHY it was auto-completed.
@@ -557,7 +566,8 @@ ProactiveObserver.prototype.scanTasksAgainstActivity = async function ({ now = n
           ...(task.sourceMeta ?? {}),
           autoCompletedEvidence: u.evidence,
           autoCompletedConfidence: confidence,
-          autoCompletedSources: sources
+          autoCompletedSources: sources,
+          autoCompletedThreshold: completeThreshold
         }
       });
       this.runtime?.events?.emit?.("task-auto-changed", {
