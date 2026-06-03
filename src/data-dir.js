@@ -10,9 +10,10 @@ let cached = null;
 // .app, launchd, and re-clones — the cause of "my keys got wiped").
 // OPENAGI_DATA_DIR overrides it (Docker sets /data; the Mac app sets ~/.openagi).
 export function resolveDataDir() {
-  if (cached) return cached;
+  if (cached !== null) return cached;
   const override = process.env.OPENAGI_DATA_DIR;
-  cached = override ? path.resolve(override) : path.join(os.homedir(), ".openagi");
+  const trimmed = override && override.trim();
+  cached = trimmed ? path.resolve(trimmed) : path.join(os.homedir(), ".openagi");
   return cached;
 }
 

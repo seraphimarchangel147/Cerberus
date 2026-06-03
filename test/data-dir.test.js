@@ -31,3 +31,12 @@ test("resolves a relative OPENAGI_DATA_DIR to absolute", () => {
   if (prev !== undefined) process.env.OPENAGI_DATA_DIR = prev; else delete process.env.OPENAGI_DATA_DIR;
   _resetDataDirCache();
 });
+
+test("treats an empty or whitespace OPENAGI_DATA_DIR as unset", () => {
+  const prev = process.env.OPENAGI_DATA_DIR;
+  process.env.OPENAGI_DATA_DIR = "   ";
+  _resetDataDirCache();
+  assert.equal(resolveDataDir(), path.join(os.homedir(), ".openagi"));
+  if (prev !== undefined) process.env.OPENAGI_DATA_DIR = prev; else delete process.env.OPENAGI_DATA_DIR;
+  _resetDataDirCache();
+});
