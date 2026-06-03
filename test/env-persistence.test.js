@@ -21,6 +21,7 @@ test("saveEnv writes under OPENAGI_DATA_DIR and survives a reload", () => {
 
   if (prev !== undefined) process.env.OPENAGI_DATA_DIR = prev; else delete process.env.OPENAGI_DATA_DIR;
   _resetDataDirCache();
+  delete process.env.ANTHROPIC_API_KEY;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 

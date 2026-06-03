@@ -7,7 +7,7 @@ const dataDir = resolveDataDir();
 
 // Load env in priority order — canonical data dir wins over local-dev overrides.
 loadEnvFile(path.join(dataDir, ".env")); // canonical (loadEnvFile is first-wins)
-loadEnvFile(".env");                      // optional local-dev override in cwd
+loadEnvFile(".env");                       // fills in keys absent from the canonical file (cwd, local dev)
 
 const port = Number.parseInt(process.env.PORT ?? "43210", 10);
 const host = process.env.HOST ?? "127.0.0.1";
