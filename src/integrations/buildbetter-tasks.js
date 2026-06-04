@@ -26,6 +26,8 @@ export class BuildBetterTaskSource {
     // that one more run is owed, and run it once when the current finishes.
     this._syncing = false;
     this._syncPending = false;
+    const mode = (options.ingestMode ?? process.env.BUILDBETTER_INGEST_MODE ?? "signals").toLowerCase();
+    this.ingestMode = ["signals", "transcripts", "both"].includes(mode) ? mode : "signals";
   }
 
   isConfigured() {
@@ -114,7 +116,7 @@ export class BuildBetterTaskSource {
   /**
    * Run one sync pass. Returns { created, updated, scanned } or skip reason.
    */
-  async sync({ now = new Date() } = {}) {
+  async syncSignals({ now = new Date() } = {}) {
     if (!this.apiKey) return { skipped: true, reason: "BUILDBETTER_API_KEY not set" };
     if (!this.userEmail && !this.userName) return { skipped: true, reason: "BUILDBETTER_USER_EMAIL or BUILDBETTER_USER_NAME required" };
     if (!this.runtime?.tasks?.add) return { skipped: true, reason: "task store not available" };
@@ -176,6 +178,83 @@ export class BuildBetterTaskSource {
 
     this.lastSyncedAt = now.toISOString();
     return { scanned: extractions.length, calls: calls.length, created };
+  }
+
+  // Fetch the full transcript text for a call, using the verified
+  // interview → monologues schema. Returns "" when no transcript exists.
+  async getTranscript(callId) {
+    const query = `
+      query Transcript($id: bigint!) {
+        interview(where: { id: { _eq: $id } }, limit: 1) {
+          id
+          transcript_status
+          monologues(order_by: { start_sec: asc }) {
+            speaker
+            text
+            attendee { person { first_name last_name } }
+          }
+        }
+      }
+    `;
+    const data = await this.query(query, { id: Number(callId) });
+    const iv = data?.interview?.[0];
+    const rows = iv?.monologues ?? [];
+    if (!rows.length) return "";
+    return rows.map((m) => {
+      const p = m.attendee?.person;
+      const name = p ? [p.first_name, p.last_name].filter(Boolean).join(" ").trim() : "";
+      const speaker = name || `Speaker ${m.speaker}`;
+      return `${speaker}: ${m.text ?? ""}`.trim();
+    }).filter(Boolean).join("\n");
+  }
+
+  // Record one transcript observation per recent call, deduped by ref.
+  async syncTranscripts({ now = new Date() } = {}) {
+    if (!this.apiKey) return { skipped: true, reason: "BUILDBETTER_API_KEY not set" };
+    if (!this.runtime?.observations?.record) return { skipped: true, reason: "no observation store" };
+
+    const sinceIso = new Date(now.getTime() - LOOKBACK_DAYS * 86400 * 1000).toISOString();
+    let calls;
+    try {
+      calls = await this.getRecentCalls(sinceIso);
+    } catch (err) {
+      return { skipped: true, reason: `recent calls: ${err.message}` };
+    }
+
+    let created = 0;
+    for (const call of calls) {
+      const ref = `buildbetter:call:${call.id}`;
+      if (await this.runtime.observations.existsRef(ref)) continue;
+      let text;
+      try {
+        text = await this.getTranscript(call.id);
+      } catch (err) {
+        continue; // skip this call; retry next sweep
+      }
+      if (!text) continue;
+      await this.runtime.observations.record({
+        kind: "transcript",
+        at: call.started_at ?? now.toISOString(),
+        app: "BuildBetter",
+        window: call.name ?? "Call",
+        text,
+        ref
+      });
+      created += 1;
+    }
+    return { scanned: calls.length, created };
+  }
+
+  // Mode-aware dispatcher invoked by the cron handler and triggerSync().
+  async sync({ now = new Date() } = {}) {
+    const out = {};
+    if (this.ingestMode === "signals" || this.ingestMode === "both") {
+      out.signals = await this.syncSignals({ now });
+    }
+    if (this.ingestMode === "transcripts" || this.ingestMode === "both") {
+      out.transcripts = await this.syncTranscripts({ now });
+    }
+    return out;
   }
 
   // Webhook entry point: coalesce concurrent pings into a single in-flight
