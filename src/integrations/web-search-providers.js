@@ -5,7 +5,10 @@
 
 const TIMEOUT_MS = 15_000;
 
-async function postJson(url, { headers = {}, body, apiKey } = {}) {
+// Strip credential query params so they never reach error messages / logs.
+const sanitizeUrl = (url) => String(url).replace(/([?&](?:api_key|key)=)[^&]*/gi, "$1[REDACTED]");
+
+async function postJson(url, { headers = {}, body } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
@@ -15,7 +18,7 @@ async function postJson(url, { headers = {}, body, apiKey } = {}) {
       body: JSON.stringify(body),
       signal: controller.signal
     });
-    if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+    if (!res.ok) throw new Error(`${sanitizeUrl(url)} -> ${res.status}`);
     return await res.json();
   } finally {
     clearTimeout(timer);
@@ -27,7 +30,7 @@ async function getJson(url, { headers = {} } = {}) {
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(url, { headers, signal: controller.signal });
-    if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+    if (!res.ok) throw new Error(`${sanitizeUrl(url)} -> ${res.status}`);
     return await res.json();
   } finally {
     clearTimeout(timer);
@@ -107,7 +110,7 @@ export const brave = {
     );
     return (data.web?.results ?? []).map((r) => ({
       title: str(r.title), url: str(r.url), snippet: str(r.description).slice(0, 400),
-      publishedDate: r.age ?? undefined
+      publishedDate: r.page_age ?? undefined
     }));
   }
 };
