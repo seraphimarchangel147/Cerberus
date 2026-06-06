@@ -5,6 +5,7 @@ import { McpHttpClient } from "./mcp-http-client.js";
 import { McpOAuthClient } from "./mcp-oauth.js";
 import { ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { assertSafePublicUrl } from "./url-guard.js";
 
 // Whitelist of executables permitted as the `command` for stdio MCP servers.
 // Anything not in this set is rejected at registerServer() — closes the
@@ -422,32 +423,10 @@ function loadDotenvKeys(dataDir) {
 
 // Reject MCP URLs that point at loopback / link-local / RFC1918 / cloud
 // metadata endpoints. Combined with the env-var allowlist this closes the
-// SSRF + secret-exfil chain through `/mcp/register`.
+// SSRF + secret-exfil chain through `/mcp/register`. Delegates to the shared
+// url-guard (same guard the fetch_url tool uses).
 function assertSafeMcpUrl(value) {
-  let u;
-  try { u = new URL(value); } catch { throw new Error(`Invalid MCP url: ${value}`); }
-  if (u.protocol !== "http:" && u.protocol !== "https:") {
-    throw new Error(`MCP url protocol must be http or https, got "${u.protocol}".`);
-  }
-  const host = u.hostname.toLowerCase();
-  if (
-    host === "localhost" || host === "0.0.0.0" || host === "::" ||
-    host.endsWith(".localhost") ||
-    /^127\./.test(host) ||
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-    /^169\.254\./.test(host) ||
-    host === "169.254.169.254" || // AWS / GCP IMDS
-    /^fd[0-9a-f]{2}:/.test(host) || // ULA
-    /^fe80:/.test(host) || // link-local
-    host === "::1"
-  ) {
-    throw new Error(
-      `MCP url host "${host}" is not allowed (loopback, private, or link-local). ` +
-      `Use a public hostname.`
-    );
-  }
+  assertSafePublicUrl(value, "MCP url");
 }
 
 // For OAuth discovery, use the MCP endpoint's origin as the resource URL

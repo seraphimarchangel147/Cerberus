@@ -1,5 +1,6 @@
 // src/integrations/web-search.js
 import { PROVIDERS, PROVIDER_BY_NAME, firecrawl } from "./web-search-providers.js";
+import { assertSafePublicUrl, safeFetch } from "../url-guard.js";
 
 const PROVIDER_NAMES = PROVIDERS.map((p) => p.name);
 
@@ -66,7 +67,14 @@ export function registerWebSearchTools(runtime, opts = {}) {
       additionalProperties: false
     },
     handler: async (args) => {
-      const format = args.format ?? "markdown";
+      // SSRF guard: reject loopback / private / link-local / metadata hosts and
+      // non-http(s) protocols before touching the network. Done up front so the
+      // Firecrawl path can't be used to reach internal hosts either.
+      try {
+        assertSafePublicUrl(args.url, "fetch_url url");
+      } catch (err) {
+        return { error: err.message };
+      }
       if (firecrawl.isConfigured()) {
         try {
           const content = await firecrawl.fetch(args.url);
@@ -76,7 +84,9 @@ export function registerWebSearchTools(runtime, opts = {}) {
         }
       }
       try {
-        const res = await fetch(args.url, { headers: { "user-agent": "OpenAGI/1.0" } });
+        // safeFetch re-validates the host on every redirect hop so a public URL
+        // can't 30x-redirect into an internal address.
+        const res = await safeFetch(args.url, { headers: { "user-agent": "OpenAGI/1.0" } }, { label: "fetch_url url" });
         if (!res.ok) return { error: `${args.url} -> ${res.status}` };
         const html = await res.text();
         const text = html

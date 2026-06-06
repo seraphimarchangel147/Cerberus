@@ -4335,7 +4335,11 @@ function renderActivityResults(results) {
   list.innerHTML = results.map((r) => {
     const meta = [r.app, r.window].filter(Boolean).map(escapeHtml).join(" · ");
     const when = r.at ? new Date(r.at).toLocaleString() : "";
-    const snippet = r.snippet || r.text || r.window || r.event || "";
+    const rawSnippet = r.snippet || r.text || r.window || r.event || "";
+    // Stored observation text (BuildBetter transcripts, OCR of viewed pages)
+    // is untrusted — escape it before innerHTML, but keep the FTS <mark>
+    // highlight tags the search injects.
+    const snippet = escapeHtml(rawSnippet).replaceAll("&lt;mark&gt;", "<mark>").replaceAll("&lt;/mark&gt;", "</mark>");
     return \`<div class="card">
       <div class="row between"><span class="name">\${escapeHtml(meta) || "(no app)"}</span><span class="muted" style="font-size:11px;">\${escapeHtml(when)}</span></div>
       <div class="desc" style="margin-top:6px;line-height:1.5;">\${snippet}</div>
