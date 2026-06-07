@@ -143,12 +143,13 @@ export class OpenAIResponsesProvider {
       });
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(json?.error?.message ?? `OpenAI request failed with ${response.status}`);
+      const callTools = (json.output ?? []).filter((item) => item.type === "function_call").map((item) => item.name);
       this.budgetGuard?.record(json.usage, this.model, {
         channel: context.channel,
         agentId: context.agentId,
         sessionId: context.sessionId,
         from: context.from,
-        tools: toolCalls.map((c) => c.name)
+        tools: callTools
       });
       return json;
     } finally {
@@ -256,12 +257,13 @@ export class AnthropicProvider {
       });
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(json?.error?.message ?? `Anthropic request failed with ${response.status}`);
+      const callTools = (json.content ?? []).filter((b) => b.type === "tool_use").map((b) => b.name);
       this.budgetGuard?.record(json.usage, this.model, {
         channel: context.channel,
         agentId: context.agentId,
         sessionId: context.sessionId,
         from: context.from,
-        tools: toolCalls.map((c) => c.name)
+        tools: callTools
       });
       return json;
     } finally {
