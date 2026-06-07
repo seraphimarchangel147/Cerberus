@@ -89,7 +89,7 @@ export class OpenAIResponsesProvider {
         input: conversationInput
       };
       if (toolList.length > 0) body.tools = toolList;
-      response = await this.postResponses(body);
+      response = await this.postResponses(body, context, toolCalls);
 
       const calls = extractFunctionCalls(response);
       if (calls.length === 0) break;
@@ -128,7 +128,7 @@ export class OpenAIResponsesProvider {
     };
   }
 
-  async postResponses(body) {
+  async postResponses(body, context = {}, toolCalls = []) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -143,7 +143,13 @@ export class OpenAIResponsesProvider {
       });
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(json?.error?.message ?? `OpenAI request failed with ${response.status}`);
-      this.budgetGuard?.record(json.usage, this.model);
+      this.budgetGuard?.record(json.usage, this.model, {
+        channel: context.channel,
+        agentId: context.agentId,
+        sessionId: context.sessionId,
+        from: context.from,
+        tools: toolCalls.map((c) => c.name)
+      });
       return json;
     } finally {
       clearTimeout(timeout);
@@ -198,7 +204,7 @@ export class AnthropicProvider {
         system,
         messages: convo,
         ...(tools.length > 0 ? { tools } : {})
-      });
+      }, context, toolCalls);
 
       convo.push({ role: "assistant", content: response.content });
 
@@ -234,7 +240,7 @@ export class AnthropicProvider {
     };
   }
 
-  async postMessages(body) {
+  async postMessages(body, context = {}, toolCalls = []) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -250,7 +256,13 @@ export class AnthropicProvider {
       });
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(json?.error?.message ?? `Anthropic request failed with ${response.status}`);
-      this.budgetGuard?.record(json.usage, this.model);
+      this.budgetGuard?.record(json.usage, this.model, {
+        channel: context.channel,
+        agentId: context.agentId,
+        sessionId: context.sessionId,
+        from: context.from,
+        tools: toolCalls.map((c) => c.name)
+      });
       return json;
     } finally {
       clearTimeout(timeout);
