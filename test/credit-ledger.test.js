@@ -86,6 +86,16 @@ test("days=7 includes today plus the previous 6 calendar days", () => {
   assert.equal(rows[0].at, "2026-05-31T10:00:00.000Z");
 });
 
+test("enforces 30-day retention on disk even below the compaction threshold", () => {
+  const L = tmpLedger({ compactBytes: 10 * 1024 * 1024 }); // never size-compacts
+  const now = new Date("2026-06-06T10:00:00.000Z");
+  L.record(entry({ at: "2026-04-01T10:00:00.000Z" }), { now }); // ~66 days old → pruned
+  L.record(entry({ at: "2026-06-06T09:00:00.000Z" }), { now }); // within window
+  const onDisk = fs.readFileSync(L.storePath, "utf8").split("\n").filter(Boolean);
+  assert.equal(onDisk.length, 1, "old row physically removed despite a small file");
+  assert.match(onDisk[0], /2026-06-06T09:00/);
+});
+
 test("creates the ledger file with private 0600 permissions", { skip: process.platform === "win32" }, () => {
   const L = tmpLedger();
   L.record(entry());

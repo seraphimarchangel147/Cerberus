@@ -20,6 +20,7 @@ export class CreditLedger {
     // size so a ledger whose retained 30-day window legitimately exceeds
     // compactBytes doesn't read+rewrite the whole file on every append.
     this._nextCompactBytes = this.compactBytes;
+    this._lastPruneAt = 0; // epoch ms of the last retention prune (0 → prune on first record)
     ensureDir(path.dirname(this.storePath));
     // The ledger holds attribution (from/sessionId/agentId/tools/spend) — not
     // world-readable. New files are created 0600 (mode on append/write below);
@@ -62,20 +63,30 @@ export class CreditLedger {
       tools: Array.isArray(entry.tools) ? entry.tools : []
     };
     fs.appendFileSync(this.storePath, JSON.stringify(row) + "\n", { mode: 0o600 });
-    this._maybeCompact(now);
+    this._maybeMaintain(now);
     return row;
   }
 
-  _maybeCompact(now) {
+  // Prune to the retention window when the file has grown past the (re-armed)
+  // compaction threshold OR at least once a day — so rows older than the window
+  // are physically removed even on low-volume installs that never hit the size
+  // cap. This enforces the 30-day retention/privacy guarantee on disk, not just
+  // at read time. Appending stays O(1); this only does work when size- or
+  // time-triggered.
+  _maybeMaintain(now) {
     let size = 0;
     try { size = fs.statSync(this.storePath).size; } catch { return; }
-    if (size < this._nextCompactBytes) return;
+    const dueByTime = (now.getTime() - this._lastPruneAt) >= 86400 * 1000;
+    if (size < this._nextCompactBytes && !dueByTime) return;
     const cutoff = this._cutoff(this.retentionDays, now);
-    const kept = this._readAll().filter((r) => (r.at ?? "") >= cutoff);
-    fs.writeFileSync(this.storePath, kept.map((r) => JSON.stringify(r)).join("\n") + (kept.length ? "\n" : ""), { mode: 0o600 });
-    // Re-arm: only compact again after the file roughly doubles past the
-    // retained size, so a large-but-legitimate window amortizes the rewrite
-    // instead of compacting on every subsequent append.
+    const all = this._readAll();
+    const kept = all.filter((r) => (r.at ?? "") >= cutoff);
+    if (kept.length !== all.length) {
+      fs.writeFileSync(this.storePath, kept.map((r) => JSON.stringify(r)).join("\n") + (kept.length ? "\n" : ""), { mode: 0o600 });
+    }
+    this._lastPruneAt = now.getTime();
+    // Re-arm: only size-compact again after the file roughly doubles past the
+    // retained size, so a large-but-legitimate window amortizes the rewrite.
     let newSize = 0;
     try { newSize = fs.statSync(this.storePath).size; } catch { /* ignore */ }
     this._nextCompactBytes = Math.max(this.compactBytes, newSize * 2);
