@@ -26,6 +26,16 @@ test("blocks IPv4-mapped IPv6 addresses (the bypass)", () => {
   blocks("http://[::ffff:a9fe:a9fe]/");       // hex form of 169.254.169.254
 });
 
+test("blocks the full IPv6 ULA (fc00::/7) and link-local (fe80::/10) ranges", () => {
+  blocks("http://[fc00::1]/");   // ULA — was missed (only fd* matched before)
+  blocks("http://[fcff::1]/");
+  blocks("http://[fd00::1]/");
+  blocks("http://[fdab::1]/");
+  blocks("http://[fe80::1]/");   // link-local
+  blocks("http://[fe81::1]/");   // was missed (only exactly fe80 matched before)
+  blocks("http://[febf::1]/");
+});
+
 test("rejects non-http(s) protocols", () => {
   blocks("file:///etc/passwd");
   blocks("gopher://127.0.0.1/");

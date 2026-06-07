@@ -19,8 +19,8 @@ function isBlockedHost(host) {
     /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
     /^169\.254\./.test(host) ||
     host === "169.254.169.254" || // AWS / GCP IMDS
-    /^fd[0-9a-f]{2}:/.test(host) || // ULA
-    /^fe80:/.test(host) || // link-local
+    /^f[cd][0-9a-f]{2}:/.test(host) || // ULA fc00::/7 (fc00–fdff)
+    /^fe[89ab][0-9a-f]:/.test(host) || // link-local fe80::/10 (fe80–febf)
     host === "::1"
   );
 }
