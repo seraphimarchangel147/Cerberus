@@ -86,6 +86,13 @@ test("days=7 includes today plus the previous 6 calendar days", () => {
   assert.equal(rows[0].at, "2026-05-31T10:00:00.000Z");
 });
 
+test("creates the ledger file with private 0600 permissions", { skip: process.platform === "win32" }, () => {
+  const L = tmpLedger();
+  L.record(entry());
+  const mode = fs.statSync(L.storePath).mode & 0o777;
+  assert.equal(mode, 0o600, `expected 0600, got 0o${mode.toString(8)}`);
+});
+
 test("re-arms the compaction threshold so it doesn't rewrite on every append", () => {
   const L = tmpLedger({ compactBytes: 1 }); // would compact on every append without re-arming
   const now = new Date("2026-06-06T10:00:00.000Z");

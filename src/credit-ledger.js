@@ -21,6 +21,10 @@ export class CreditLedger {
     // compactBytes doesn't read+rewrite the whole file on every append.
     this._nextCompactBytes = this.compactBytes;
     ensureDir(path.dirname(this.storePath));
+    // The ledger holds attribution (from/sessionId/agentId/tools/spend) — not
+    // world-readable. New files are created 0600 (mode on append/write below);
+    // tighten an existing file once at startup in case it predates this.
+    try { if (fs.existsSync(this.storePath)) fs.chmodSync(this.storePath, 0o600); } catch { /* best effort */ }
   }
 
   // Calendar-day cutoff (UTC, matching BudgetGuard.todayKey): the start of the
@@ -57,7 +61,7 @@ export class CreditLedger {
       from: entry.from ?? null,
       tools: Array.isArray(entry.tools) ? entry.tools : []
     };
-    fs.appendFileSync(this.storePath, JSON.stringify(row) + "\n");
+    fs.appendFileSync(this.storePath, JSON.stringify(row) + "\n", { mode: 0o600 });
     this._maybeCompact(now);
     return row;
   }
@@ -68,7 +72,7 @@ export class CreditLedger {
     if (size < this._nextCompactBytes) return;
     const cutoff = this._cutoff(this.retentionDays, now);
     const kept = this._readAll().filter((r) => (r.at ?? "") >= cutoff);
-    fs.writeFileSync(this.storePath, kept.map((r) => JSON.stringify(r)).join("\n") + (kept.length ? "\n" : ""));
+    fs.writeFileSync(this.storePath, kept.map((r) => JSON.stringify(r)).join("\n") + (kept.length ? "\n" : ""), { mode: 0o600 });
     // Re-arm: only compact again after the file roughly doubles past the
     // retained size, so a large-but-legitimate window amortizes the rewrite
     // instead of compacting on every subsequent append.
