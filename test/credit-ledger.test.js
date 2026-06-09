@@ -96,6 +96,16 @@ test("enforces 30-day retention on disk even below the compaction threshold", ()
   assert.match(onDisk[0], /2026-06-06T09:00/);
 });
 
+test("clamps query/analytics to the retention window (stale on-disk rows never surface)", () => {
+  const L = tmpLedger();
+  // Write an aged-out row directly, bypassing record()'s prune, to simulate
+  // data still on disk past the window.
+  fs.writeFileSync(L.storePath, JSON.stringify({ at: "2026-04-01T10:00:00.000Z", model: "x", usd: 1, channel: "chat", tools: [] }) + "\n");
+  const now = new Date("2026-06-06T10:00:00.000Z");
+  assert.equal(L.query({ days: 90, now }).length, 0, "days=90 must not return a >30-day-old row");
+  assert.equal(L.analytics({ days: 90, now }).totalCalls, 0);
+});
+
 test("creates the ledger file with private 0600 permissions", { skip: process.platform === "win32" }, () => {
   const L = tmpLedger();
   L.record(entry());

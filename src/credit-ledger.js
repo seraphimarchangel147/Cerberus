@@ -93,7 +93,11 @@ export class CreditLedger {
   }
 
   query({ days = this.retentionDays, now = new Date() } = {}) {
-    const cutoff = this._cutoff(days, now);
+    // Clamp to the retention window: the ledger only promises 30 days, and rows
+    // older than that may still be on disk (pruning runs lazily on record), so a
+    // wider days= must never surface aged-out attribution.
+    const window = Math.min(Math.max(1, days), this.retentionDays);
+    const cutoff = this._cutoff(window, now);
     return this._readAll()
       .filter((r) => (r.at ?? "") >= cutoff)
       .sort((a, b) => (b.at ?? "").localeCompare(a.at ?? ""));
