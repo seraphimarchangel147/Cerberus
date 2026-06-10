@@ -341,8 +341,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/budget/ledger") {
         const ledger = runtime.budget?.ledger;
         if (!ledger) return sendJson(res, 200, { error: "no-ledger" });
-        const days = Math.max(1, Math.min(90, Number.parseInt(url.searchParams.get("days") ?? "30", 10) || 30));
-        return sendJson(res, 200, { days, entries: ledger.query({ days }), analytics: ledger.analytics({ days }) });
+        // Cap at the ledger's retention window so the reported `days` always
+        // matches the data actually returned (query/analytics clamp the same way).
+        const maxDays = ledger.retentionDays ?? 30;
+        const requested = Math.max(1, Number.parseInt(url.searchParams.get("days") ?? "30", 10) || 30);
+        const days = Math.min(maxDays, requested);
+        return sendJson(res, 200, { days, requestedDays: requested, retentionDays: maxDays, entries: ledger.query({ days }), analytics: ledger.analytics({ days }) });
       }
 
       // ─── Ambient capture / observations ─────────────────────────────────

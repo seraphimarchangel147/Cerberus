@@ -278,14 +278,15 @@ export function registerCoreTools(registry, runtime) {
     parameters: {
       type: "object",
       properties: {
-        days: { type: "integer", minimum: 1, maximum: 90, description: "Look-back window in days (default 1 = today)." }
+        days: { type: "integer", minimum: 1, maximum: 30, description: "Look-back window in days (default 1 = today; the local ledger retains 30 days)." }
       },
       additionalProperties: false
     },
     handler: async (args) => {
       const ledger = runtime.budget?.ledger;
       if (!ledger) return { error: "no credit ledger available" };
-      const days = args.days ?? 1;
+      // Clamp to the retained window so the reported `days` matches the data.
+      const days = Math.min(args.days ?? 1, ledger.retentionDays ?? 30);
       const analytics = ledger.analytics({ days });
       const top = ledger.query({ days })
         .slice()
