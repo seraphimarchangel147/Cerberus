@@ -6,8 +6,13 @@
 // being steered by injected web/transcript content into fetching
 // http://169.254.169.254/... and returning the response).
 //
-// This is a host-string check (it does not resolve DNS) — matching the
-// project's existing baseline. It is intentionally conservative.
+// assertSafePublicUrl is a host-string check; safeFetch additionally resolves
+// the hostname and rejects URLs whose DNS answers land in blocked space, so a
+// public-looking name (attacker DNS, localtest.me/nip.io) can't smuggle a
+// fetch into loopback/private/metadata addresses.
+
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 
 function isBlockedHost(host) {
   return (
@@ -65,12 +70,40 @@ export function assertSafePublicUrl(value, label = "url") {
   return u;
 }
 
-// fetch() that re-validates the host on EVERY redirect hop, so a public URL
-// cannot 30x-redirect into an internal address. Returns the final Response.
+// Resolve a hostname and throw if ANY A/AAAA answer is a blocked address.
+// Literal IPs are skipped (assertSafePublicUrl already vetted the string).
+// Note: the subsequent fetch() does its own lookup, so a fast-rebinding DNS
+// server retains a small TOCTOU window — but plain private-DNS / rebind names
+// (the common fetch_url injection vector) are rejected here.
+export async function assertHostResolvesPublic(hostname, label = "url", { lookupFn = lookup } = {}) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isIP(host)) return;
+  let answers;
+  try {
+    answers = await lookupFn(host, { all: true, verbatim: true });
+  } catch (error) {
+    throw new Error(`${label} host "${host}" did not resolve: ${error.code ?? error.message}`);
+  }
+  for (const { address } of answers) {
+    const addr = String(address).toLowerCase();
+    const mappedV4 = ipv4FromMappedV6(addr);
+    if (isBlockedHost(addr) || (mappedV4 && isBlockedHost(mappedV4))) {
+      throw new Error(
+        `${label} host "${host}" resolves to "${address}", which is not allowed ` +
+        `(loopback, private, or link-local).`
+      );
+    }
+  }
+}
+
+// fetch() that re-validates the host — including its DNS resolution — on EVERY
+// redirect hop, so a public URL cannot 30x-redirect into an internal address.
+// Returns the final Response.
 export async function safeFetch(url, init = {}, { label = "url", maxRedirects = 5 } = {}) {
   let current = String(url);
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    assertSafePublicUrl(current, label);
+    const parsed = assertSafePublicUrl(current, label);
+    await assertHostResolvesPublic(parsed.hostname, label);
     const res = await fetch(current, { ...init, redirect: "manual" });
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get("location");
