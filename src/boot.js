@@ -40,11 +40,38 @@ export function loadBootEnv() {
   return dataDir;
 }
 
+// A misconfigured, unreachable, or reauth-needed MCP server rejects
+// asynchronously during connect — a 401 (expired/invalid token), an OAuth
+// callback timeout, a DNS failure. Those are recoverable: the server just needs
+// to be reconnected or re-authed, and it already records its own lastError +
+// surfaces "needs auth" via status/SSE. But Node 15+ TERMINATES the process on
+// any unhandled rejection, so without a top-level guard one stray MCP error
+// takes down the whole agent — and the supervisor restarts it straight into the
+// same failure (a crash loop). Log and keep running instead. Installed once,
+// before the runtime/MCP connects, so it covers every daemon launch (the CLI,
+// this example, systemd, the Mac DaemonController) identically.
+let crashGuardsInstalled = false;
+export function installCrashGuards() {
+  if (crashGuardsInstalled) return;
+  crashGuardsInstalled = true;
+  process.on("unhandledRejection", (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    console.error(`[openagi] unhandled rejection (kept alive): ${err.stack || err.message}`);
+  });
+  // An uncaught synchronous exception can leave state undefined, but for a
+  // supervised, always-on daemon staying up beats crash-looping; the error is
+  // logged loudly so it's still diagnosable in daemon.log / journald.
+  process.on("uncaughtException", (err) => {
+    console.error(`[openagi] uncaught exception (kept alive): ${err?.stack || err}`);
+  });
+}
+
 // Boot env + start the hosted interface. Returns the listen address.
 // host/port fall back to HOST/PORT env then sane defaults; callers (the CLI)
 // can override. Binding to 0.0.0.0 is safe because the HTTP interface enforces
 // the bearer token — but we warn so it's a deliberate choice.
 export async function startServer({ host, port } = {}) {
+  installCrashGuards();
   const dataDir = loadBootEnv();
   const resolvedHost = host ?? process.env.HOST ?? "127.0.0.1";
   const resolvedPort = Number.parseInt(String(port ?? process.env.PORT ?? "43210"), 10);
