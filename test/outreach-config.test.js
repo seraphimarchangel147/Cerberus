@@ -29,3 +29,9 @@ test("quietHours window check handles overnight wrap", () => {
   assert.equal(c.inQuietHours(new Date("2026-06-16T07:00:00")), true);
   assert.equal(c.inQuietHours(new Date("2026-06-16T12:00:00")), false);
 });
+
+test("non-numeric cadence/stalled env values are ignored (no NaN)", () => {
+  const c = normalizeOutreachConfig({}, { OPENAGI_OUTREACH_CADENCE_HOURS: "3h", OPENAGI_OUTREACH_STALLED_DAYS: "" });
+  assert.equal(c.cadenceHours, 3);   // default kept, not NaN
+  assert.equal(c.stalledDays, 3);
+});

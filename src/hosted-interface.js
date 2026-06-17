@@ -15,7 +15,6 @@ import {
 } from "./auth.js";
 import { ChannelManager } from "./channels.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
-import { composeDigest } from "./outreach-digest.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -663,10 +662,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { items, cursor: runtime.outreach?.nextSeq ? runtime.outreach.nextSeq - 1 : since });
       }
       if (method === "GET" && pathname === "/outreach/digest") {
-        const digest = runtime.outreachConfig
-          ? composeDigest(runtime.outreach, runtime.outreachConfig, { now: new Date() })
-          : null;
+        const digest = runtime.outreach?.list().find((i) => i.type === "digest") ?? null;
         return sendJson(res, 200, { digest });
+      }
+      if (method === "GET" && pathname === "/outreach/config") {
+        const c = runtime.outreachConfig;
+        return sendJson(res, 200, c
+          ? { enabled: c.enabled, cadenceHours: c.cadenceHours, quietHours: c.quietHours, stalledDays: c.stalledDays }
+          : { enabled: false });
       }
       if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/act")) {
         const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/act".length));
@@ -1509,6 +1512,7 @@ async function applyOutreachAction(runtime, item, action, note) {
       if (action === "do") {
         const a = runtime.pendingActions?.get(ref.id);
         if (!a) throw new Error("pending action gone");
+        if (a.status !== "pending") return; // already decided elsewhere — don't re-run the side-effecting tool
         const r = await runtime.tools.invoke(a.toolName, a.args, { ...a.context, __confirmed: true });
         runtime.pendingActions.decide(ref.id, { decision: "approve", decidedBy: "user", result: r.ok ? r.result : null, error: r.ok ? null : r.error });
         if (!r.ok) throw new Error(r.error ?? "tool failed");
@@ -1519,6 +1523,8 @@ async function applyOutreachAction(runtime, item, action, note) {
       if (action === "accept") return;
       throw new Error(`unsupported suggestion action: ${action}`);
     case "clarification":
+      if (!runtime.clarifications?.answer) throw new Error("no clarification store");
+      if (!runtime.clarifications.answer(ref.id, action)) throw new Error("clarification not answerable");
       return;
     default:
       return;

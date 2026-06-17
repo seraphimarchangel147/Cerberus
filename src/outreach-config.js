@@ -23,8 +23,10 @@ function minutes(hhmm) {
 export function normalizeOutreachConfig(fileCfg = {}, env = process.env) {
   const merged = { ...OUTREACH_DEFAULTS, ...fileCfg };
   merged.quietHours = { ...OUTREACH_DEFAULTS.quietHours, ...(fileCfg.quietHours ?? {}) };
-  if (env.OPENAGI_OUTREACH_CADENCE_HOURS) merged.cadenceHours = Number(env.OPENAGI_OUTREACH_CADENCE_HOURS);
-  if (env.OPENAGI_OUTREACH_STALLED_DAYS) merged.stalledDays = Number(env.OPENAGI_OUTREACH_STALLED_DAYS);
+  const cadence = Number(env.OPENAGI_OUTREACH_CADENCE_HOURS);
+  if (Number.isFinite(cadence) && cadence > 0) merged.cadenceHours = cadence;
+  const stalled = Number(env.OPENAGI_OUTREACH_STALLED_DAYS);
+  if (Number.isFinite(stalled) && stalled > 0) merged.stalledDays = stalled;
   if (env.OPENAGI_OUTREACH_DISABLED === "1") merged.enabled = false;
 
   merged.inQuietHours = (date = new Date()) => {

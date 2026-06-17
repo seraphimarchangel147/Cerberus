@@ -88,3 +88,31 @@ test("POST /outreach/:id/reply forwards the text to the agent with item context"
   assert.match(lastForward.text, /Stalled: X/);
   await app.close?.();
 });
+
+test("GET /outreach/digest is read-only (no new digest item, queue not consumed)", async () => {
+  const { runtime, app, base } = await bootApp();
+  runtime.outreach.append({ type: "draft", title: "D1" });
+  await (await fetch(`${base}/outreach/digest`)).json();
+  await (await fetch(`${base}/outreach/digest`)).json();
+  assert.equal(runtime.outreach.list().filter((i) => i.type === "digest").length, 0, "GET must not append a digest");
+  assert.equal(runtime.outreach.list({ status: "unseen" }).filter((i) => i.type === "draft").length, 1, "GET must not markSeen the queue");
+  await app.close?.();
+});
+
+test("POST /outreach/:id/act on a clarification answers it and resolves the task", async () => {
+  const { runtime, app, base } = await bootApp();
+  // Seed a task + a clarification gating it (real ClarificationStore.add API).
+  const task = runtime.tasks.add({ title: "Did I finish X?" });
+  const clar = runtime.clarifications.add({
+    taskId: task.id,
+    question: "Finish X?",
+    proposedAction: "complete",
+    confidence: 0.5,
+    sources: ["ocr"]
+  });
+  const item = runtime.outreach.append({ type: "clarification", sourceRef: { kind: "clarification", id: clar.id }, title: "Finish X?", needsDecision: true, actions: ["yes","no","in_progress","dropped"] });
+  const res = await fetch(`${base}/outreach/${item.id}/act`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "yes" }) });
+  assert.equal(res.status, 200);
+  assert.equal(runtime.clarifications.get(clar.id).status, "answered");
+  await app.close?.();
+});
