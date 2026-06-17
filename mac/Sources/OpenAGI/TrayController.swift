@@ -43,11 +43,14 @@ struct TrayMenu: View {
   // `enabled` or `pausedUntil` flips — otherwise after Disable the label
   // stays "Disable capture" until the menu is reopened.
   @ObservedObject var captureSettings: CaptureSettings = CaptureSettings.shared
+  // Observe the outreach consumer so the pending-count line stays live.
+  @ObservedObject var outreach: OutreachConsumer = OutreachConsumer.shared
 
   var body: some View {
     Group {
       headerSection
       Divider()
+      outreachSection
       tasksSection
       Divider()
       sessionsSection
@@ -73,6 +76,19 @@ struct TrayMenu: View {
       Button("View all tasks…") { state.openDashboard(path: "/?tab=tasks") }
     }
     Button("+ Add task…") { state.openDashboard(path: "/?tab=chat&compose=add-task") }
+  }
+
+  // Proactive-outreach items needing the user. Count acts as the tray "badge";
+  // opening it summons the Quick Ask overlay where the full list + buttons live.
+  @ViewBuilder private var outreachSection: some View {
+    let count = outreach.items.count
+    if count > 0 {
+      Button("● \(count) need\(count == 1 ? "s" : "") you…") {
+        OverlayController.shared.show()
+        OverlayState.shared.expanded = true
+      }
+      Divider()
+    }
   }
 
   private func taskLabel(_ t: AppState.TaskSummary) -> String {
