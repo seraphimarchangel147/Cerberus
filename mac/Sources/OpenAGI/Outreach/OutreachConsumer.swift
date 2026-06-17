@@ -22,6 +22,7 @@ final class OutreachConsumer: ObservableObject {
   private var baseURL: URL?
   private var token: String = ""
   private var sse: OutreachSSEDelegate?
+  private var sseSession: URLSession?
 
   private var cursor: Int { UserDefaults.standard.integer(forKey: "outreachCursor") }
   private func setCursor(_ v: Int) { UserDefaults.standard.set(v, forKey: "outreachCursor") }
@@ -97,13 +98,19 @@ final class OutreachConsumer: ObservableObject {
   }
 
   private func startSSE() {
+    // Tear down the previous session before creating a new one so reconnects
+    // and reconfigures don't leak sessions or leave overlapping streams.
+    sseSession?.invalidateAndCancel()
+    sseSession = nil
+    sse = nil
+
     guard let base = baseURL else { return }
     let url = base.appendingPathComponent("events")
     var req = URLRequest(url: url)
     authed(&req)
     let delegate = OutreachSSEDelegate()
     self.sse = delegate
-    delegate.start(req)
+    self.sseSession = delegate.start(req)
   }
 
   // Called by the SSE delegate after a disconnect: re-pull (lossless) and
@@ -122,7 +129,8 @@ final class OutreachSSEDelegate: NSObject, URLSessionDataDelegate {
   private var session: URLSession?
   private var task: URLSessionDataTask?
 
-  func start(_ req: URLRequest) {
+  @discardableResult
+  func start(_ req: URLRequest) -> URLSession {
     let cfg = URLSessionConfiguration.default
     cfg.timeoutIntervalForRequest = 0
     cfg.timeoutIntervalForResource = 0
@@ -131,6 +139,7 @@ final class OutreachSSEDelegate: NSObject, URLSessionDataDelegate {
     let task = session.dataTask(with: req)
     self.task = task
     task.resume()
+    return session
   }
 
   func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
