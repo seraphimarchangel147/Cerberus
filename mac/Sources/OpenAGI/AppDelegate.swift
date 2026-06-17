@@ -12,6 +12,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
       NSApp.setActivationPolicy(.accessory) // No Dock icon, only menubar.
 
       UNUserNotificationCenter.current().delegate = self
+      // Register outreach categories (inline action buttons) up front so any
+      // banner that lands carries its buttons. AppDelegate stays the single
+      // notification-center delegate; outreach actions are routed through it
+      // (see userNotificationCenter(_:didReceive:)) rather than swapping the
+      // delegate, so existing path-deeplink handling is preserved.
+      NotificationPresenter.shared.registerCategories()
       // Fire-and-forget: requesting notification auth shows a system prompt the
       // user may sit on — don't block daemon/UI startup waiting for their answer.
       Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
@@ -27,6 +33,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
       OverlayController.shared.startIfEnabled()
       HotkeyManager.shared.onHotkey = { OverlayController.shared.toggle() }
       HotkeyManager.shared.register()
+
+      // Start the durable outreach consumer if a remote main is configured.
+      // Backfills from the persisted cursor so nothing queued while the app was
+      // closed is lost.
+      if !AppState.shared.outreachRemoteURL.isEmpty {
+        OutreachConsumer.shared.reconfigure(
+          url: AppState.shared.outreachRemoteURL,
+          token: AppState.shared.outreachToken)
+      }
 
       // Wake observer: the moment macOS resumes from sleep we (1) probe
       // /health to see if the daemon survived the sleep cycle, restart
@@ -69,6 +84,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
+    // Outreach notifications carry an "outreachId" and (for buttons) route to
+    // the remote main. Handle them first; only fall through to the legacy
+    // path-deeplink behavior for non-outreach notifications.
+    if NotificationPresenter.isOutreachResponse(response) {
+      Task { @MainActor in
+        _ = NotificationPresenter.shared.handleAction(response)
+        completionHandler()
+      }
+      return
+    }
+
     let info = response.notification.request.content.userInfo
     let path = info["path"] as? String ?? "/"
     Task { @MainActor in
