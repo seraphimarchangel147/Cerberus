@@ -15,6 +15,7 @@ import {
 } from "./auth.js";
 import { ChannelManager } from "./channels.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
+import { composeDigest } from "./outreach-digest.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -73,6 +74,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   if (runtime.pendingActions?.bindEvents) runtime.pendingActions.bindEvents(events);
   if (runtime.computerUseLog?.bindEvents) runtime.computerUseLog.bindEvents(events);
   events.on("computer-use", (data) => broadcast("computer-use", data));
+  events.on("outreach", (data) => broadcast("outreach", data));
+  events.on("outreach-resolved", (data) => broadcast("outreach-resolved", data));
 
   // Expose the bus to runtime subsystems (pattern miner, session miner) so
   // they can emit "skill-candidate" without holding a reference to this
@@ -653,6 +656,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, {
           actions: runtime.pendingActions?.list({ status }) ?? []
         });
+      }
+      if (method === "GET" && pathname === "/outreach/feed") {
+        const since = Number(url.searchParams.get("since") ?? 0);
+        const items = runtime.outreach?.since(since) ?? [];
+        return sendJson(res, 200, { items, cursor: runtime.outreach?.nextSeq ? runtime.outreach.nextSeq - 1 : since });
+      }
+      if (method === "GET" && pathname === "/outreach/digest") {
+        const digest = runtime.outreachConfig
+          ? composeDigest(runtime.outreach, runtime.outreachConfig, { now: new Date() })
+          : null;
+        return sendJson(res, 200, { digest });
       }
       if (method === "POST" && pathname.startsWith("/pending-actions/") && pathname.endsWith("/approve")) {
         const id = decodeURIComponent(pathname.slice("/pending-actions/".length, -"/approve".length));
