@@ -1479,11 +1479,11 @@ if !AppState.shared.outreachRemoteURL.isEmpty {
 - [ ] **Step 2: Point it at the Distiller (one-time, from the running app or via defaults)**
 
 ```bash
-defaults write app.openagi.OpenAGI outreachRemoteURL "http://100.73.29.88:43210"
-defaults write app.openagi.OpenAGI outreachToken "<the main's OPENAGI_AUTH_TOKEN>"
+defaults write app.openagi.daemon outreachRemoteURL "http://<your-main-host>:43210"
+defaults write app.openagi.daemon outreachToken "<the main's OPENAGI_AUTH_TOKEN>"
 ```
 
-(Replace the bundle id with the real one from `mac/Resources/Info.plist` `CFBundleIdentifier`.)
+`<your-main-host>` is wherever your main runs — e.g. `distiller.local`, a LAN IP, or a Tailscale MagicDNS name. The bundle id `app.openagi.daemon` is from `mac/Resources/Info.plist` `CFBundleIdentifier` (verify if it changes).
 
 - [ ] **Step 3: Build + run**
 
