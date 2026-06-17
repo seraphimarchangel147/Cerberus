@@ -162,9 +162,14 @@ final class OutreachSSEDelegate: NSObject, URLSessionDataDelegate {
   }
 
   func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-    // Reconnect through the consumer so a fresh request (current token/URL) is
-    // built and a NEW live stream is established; backfill on reconnect catches
-    // up anything missed while down.
+    // An intentional teardown (startSSE invalidating the prior session on
+    // reconnect/reconfigure) completes with NSURLErrorCancelled. The replacement
+    // stream is already being started, so do NOT schedule another reconnect —
+    // otherwise we'd tear down the working session and rebuild it every 5s.
+    if (error as NSError?)?.code == NSURLErrorCancelled { return }
+    // A genuine drop: reconnect through the consumer so a fresh request (current
+    // token/URL) is built and a NEW live stream is established; backfill on
+    // reconnect catches up anything missed while down.
     DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
       Task { @MainActor in OutreachConsumer.shared.reconnectSSE() }
     }
