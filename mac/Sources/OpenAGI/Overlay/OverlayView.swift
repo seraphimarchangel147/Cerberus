@@ -3,8 +3,15 @@ import SwiftUI
 struct OverlayView: View {
   @ObservedObject var state = OverlayState.shared
   @ObservedObject var app = AppState.shared
+  @ObservedObject var outreach = OutreachConsumer.shared
   @FocusState private var fieldFocused: Bool
   @State private var pillHovered = false
+  // Per-item reply text for the targeted chat field, keyed by outreach id.
+  @State private var replyText: [String: String] = [:]
+
+  private func replyBinding(for id: String) -> Binding<String> {
+    Binding(get: { replyText[id] ?? "" }, set: { replyText[id] = $0 })
+  }
   var onCollapse: () -> Void = {}
   var onExpand: () -> Void = {}
   var onContentChange: () -> Void = {}
@@ -30,8 +37,12 @@ struct OverlayView: View {
     .onChange(of: state.error) { _, _ in onContentChange() }
     .onChange(of: state.contextNote) { _, _ in onContentChange() }
     .onChange(of: app.nudges.count) { _, _ in onContentChange() }
+    .onChange(of: outreach.items.count) { _, _ in onContentChange() }
     .onChange(of: app.status) { _, _ in onContentChange() }
   }
+
+  // Combined attention count shown on the collapsed pill badge.
+  private var pillBadgeCount: Int { app.nudges.count + outreach.items.count }
 
   private var pill: some View {
     Button(action: {
@@ -40,8 +51,8 @@ struct OverlayView: View {
     }) {
       ZStack {
         Circle().fill(Color.accentColor).frame(width: 18, height: 18)
-        if !app.nudges.isEmpty {
-          Text("\(app.nudges.count)")
+        if pillBadgeCount > 0 {
+          Text("\(pillBadgeCount)")
             .font(.system(size: 9, weight: .bold)).foregroundColor(.white)
         }
       }
@@ -110,6 +121,18 @@ struct OverlayView: View {
           .help("Clear the answer")
         }
       }
+      if !outreach.items.isEmpty {
+        Divider()
+        Text("Needs you").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+        ScrollView {
+          VStack(alignment: .leading, spacing: 8) {
+            ForEach(outreach.items.prefix(6)) { item in
+              outreachRow(item)
+            }
+          }
+        }
+        .frame(maxHeight: 240)
+      }
       if !app.nudges.isEmpty {
         Divider()
         Text("Nudges").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
@@ -138,5 +161,49 @@ struct OverlayView: View {
     .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.1), lineWidth: 1))
     .onAppear { fieldFocused = true }
     .onChange(of: state.expanded) { _, expanded in if expanded { fieldFocused = true } }
+  }
+
+  // One proactive-outreach item: title, summary, its inline action buttons, and
+  // a targeted reply field that routes a freeform message to /outreach/:id/reply.
+  @ViewBuilder private func outreachRow(_ item: OutreachItem) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(item.title).font(.system(size: 12, weight: .semibold)).lineLimit(2)
+      if !item.summary.isEmpty {
+        Text(item.summary).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3)
+      }
+      if !item.actions.isEmpty {
+        HStack(spacing: 6) {
+          ForEach(item.actions, id: \.self) { a in
+            Button(actionLabel(a)) {
+              Task { await outreach.act(item.id, action: a) }
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11))
+          }
+        }
+      }
+      HStack(spacing: 6) {
+        TextField("Reply…", text: replyBinding(for: item.id))
+          .textFieldStyle(.roundedBorder)
+          .font(.system(size: 11))
+          .onSubmit { sendReply(item.id) }
+        Button("Send") { sendReply(item.id) }
+          .buttonStyle(.borderless)
+          .font(.system(size: 11))
+          .disabled((replyText[item.id] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+      }
+    }
+  }
+
+  private func sendReply(_ id: String) {
+    let text = (replyText[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty else { return }
+    replyText[id] = ""
+    Task { await outreach.reply(id, text: text) }
+  }
+
+  // "in_progress" → "In Progress"; default capitalizes the action verb.
+  private func actionLabel(_ a: String) -> String {
+    a.split(separator: "_").map { $0.capitalized }.joined(separator: " ")
   }
 }

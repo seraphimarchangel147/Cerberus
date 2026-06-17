@@ -15,6 +15,7 @@ import {
 } from "./auth.js";
 import { ChannelManager } from "./channels.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
+import { composeDigest } from "./outreach-digest.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -24,7 +25,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   const getPublicUrl = () => options.publicUrl ?? process.env.OPENAGI_PUBLIC_URL ?? null;
   const getTwilioAuthToken = () => options.twilioAuthToken ?? process.env.TWILIO_AUTH_TOKEN ?? null;
   const getTelegramSecret = () => options.telegramSecret ?? process.env.TELEGRAM_WEBHOOK_SECRET ?? null;
-  const channels =
+  let channels =
     options.channels ??
     (runtime.agentHost
       ? new ChannelManager({
@@ -73,6 +74,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   if (runtime.pendingActions?.bindEvents) runtime.pendingActions.bindEvents(events);
   if (runtime.computerUseLog?.bindEvents) runtime.computerUseLog.bindEvents(events);
   events.on("computer-use", (data) => broadcast("computer-use", data));
+  events.on("outreach", (data) => broadcast("outreach", data));
+  events.on("outreach-resolved", (data) => broadcast("outreach-resolved", data));
 
   // Expose the bus to runtime subsystems (pattern miner, session miner) so
   // they can emit "skill-candidate" without holding a reference to this
@@ -80,6 +83,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   if (!runtime.events) {
     Object.defineProperty(runtime, "events", { value: events, enumerable: false });
   }
+  // Proactive outreach mapper subscribes here: it was constructed before the
+  // bus existed, so we late-bind the same bus now (mirrors bindEvents above).
+  if (runtime.bindOutreachEvents) runtime.bindOutreachEvents(runtime.events);
 
   if (runtime.tunnelWatcher) {
     runtime.tunnelWatcher.on("tunnel-url", (data) => events.emit("tunnel", { op: "url", ...data }));
@@ -650,6 +656,46 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, {
           actions: runtime.pendingActions?.list({ status }) ?? []
         });
+      }
+      if (method === "GET" && pathname === "/outreach/feed") {
+        const since = Number(url.searchParams.get("since") ?? 0);
+        const items = runtime.outreach?.since(since) ?? [];
+        return sendJson(res, 200, { items, cursor: runtime.outreach?.nextSeq ? runtime.outreach.nextSeq - 1 : since });
+      }
+      if (method === "GET" && pathname === "/outreach/digest") {
+        const digest = runtime.outreachConfig
+          ? composeDigest(runtime.outreach, runtime.outreachConfig, { now: new Date() })
+          : null;
+        return sendJson(res, 200, { digest });
+      }
+      if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/act")) {
+        const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/act".length));
+        const item = runtime.outreach?.get(id);
+        if (!item) return sendJson(res, 404, { error: "unknown outreach item" });
+        if (item.status === "acted" || item.status === "dismissed") {
+          return sendJson(res, 200, { item });
+        }
+        const body = await readJson(req).catch(() => ({}));
+        const action = String(body.action ?? "");
+        try {
+          await applyOutreachAction(runtime, item, action, body.note);
+          const status = action === "dismiss" ? "dismissed" : "acted";
+          const updated = runtime.outreach.resolve(id, { action, by: "user", note: body.note ?? null }, { status });
+          return sendJson(res, 200, { item: updated });
+        } catch (error) {
+          const updated = runtime.outreach.resolve(id, { action, by: "user" }, { status: "error", error: error.message });
+          return sendJson(res, 400, { item: updated, error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/reply")) {
+        const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/reply".length));
+        const item = runtime.outreach?.get(id);
+        if (!item) return sendJson(res, 404, { error: "unknown outreach item" });
+        if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
+        const body = await readJson(req);
+        const forward = `Re: "${item.title}" (${item.type}, actions: ${item.actions.join("/")}).\nUser says: ${body.text ?? ""}\nInterpret intent and take the appropriate action.`;
+        const turn = await channels.handleLocalMessage({ text: forward, from: `outreach:${id}` });
+        return sendJson(res, 200, { reply: turn.reply ?? null });
       }
       if (method === "POST" && pathname.startsWith("/pending-actions/") && pathname.endsWith("/approve")) {
         const id = decodeURIComponent(pathname.slice("/pending-actions/".length, -"/approve".length));
@@ -1340,11 +1386,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
     }
   });
 
-  return {
+  const app = {
     runtime,
     channels,
     events,
     server,
+    // Test seam: inject a fake agent host so /outreach/:id/reply and the
+    // /channels/* routes can be exercised without a real model. The route
+    // handlers close over the `channels` variable, so reassigning it here
+    // takes effect immediately.
+    __setChannels(c) { channels = c; },
     listen() {
       return new Promise((resolve) => {
         server.listen(port, host, () => {
@@ -1368,13 +1419,15 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         if (tickerHandle) clearInterval(tickerHandle);
         for (const client of sseClients) try { client.end(); } catch { /* ignore */ }
         sseClients.clear();
-        channels?.stop();
+        channels?.stop?.();
         runtime.tunnelWatcher?.stop?.();
         runtime.mcp?.disconnectAll?.().catch(() => {});
         server.close((error) => (error ? reject(error) : resolve()));
       });
     }
   };
+
+  return app;
 }
 
 function handleSse(req, res, clients) {
@@ -1434,6 +1487,42 @@ function sendJson(res, status, value) {
   const body = JSON.stringify(value, null, 2);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
   res.end(body);
+}
+
+// Map an outreach action to the real action on the underlying source. Throws
+// on a failed delegation so the route can mark the item status:"error".
+async function applyOutreachAction(runtime, item, action, note) {
+  if (action === "dismiss") return;
+  const ref = item.sourceRef ?? {};
+  switch (ref.kind) {
+    case "draft":
+      if (action === "approve") { if (!runtime.drafts?.approve(ref.id)) throw new Error("draft not approvable"); return; }
+      if (action === "edit") return;
+      throw new Error(`unsupported draft action: ${action}`);
+    case "task":
+      // TaskStore has no dedicated cancel(); update(id,{status:"cancelled"})
+      // is the canonical cancel path (returns the task, or null if unknown).
+      if (action === "close") { if (!runtime.tasks?.update(ref.id, { status: "cancelled" })) throw new Error("task not cancellable"); return; }
+      if (action === "keep" || action === "snooze") return;
+      throw new Error(`unsupported task action: ${action}`);
+    case "pending-action":
+      if (action === "do") {
+        const a = runtime.pendingActions?.get(ref.id);
+        if (!a) throw new Error("pending action gone");
+        const r = await runtime.tools.invoke(a.toolName, a.args, { ...a.context, __confirmed: true });
+        runtime.pendingActions.decide(ref.id, { decision: "approve", decidedBy: "user", result: r.ok ? r.result : null, error: r.ok ? null : r.error });
+        if (!r.ok) throw new Error(r.error ?? "tool failed");
+        return;
+      }
+      throw new Error(`unsupported pending-action action: ${action}`);
+    case "suggestion":
+      if (action === "accept") return;
+      throw new Error(`unsupported suggestion action: ${action}`);
+    case "clarification":
+      return;
+    default:
+      return;
+  }
 }
 
 function sendXml(res, status, value) {
