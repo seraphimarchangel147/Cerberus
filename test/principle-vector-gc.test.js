@@ -14,7 +14,7 @@ import {
   createDefaultRuntime,
   createDurableRuntime
 } from "../src/index.js";
-import { AgentHost } from "../src/agent-host.js";
+import { AgentHost, filterPrincipleHits } from "../src/agent-host.js";
 
 function tmpVectorStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pvgc-"));
@@ -94,4 +94,91 @@ test("createDurableRuntime reconciles orphaned principle vectors at boot", async
   });
 
   assert.equal(runtime.vectorStore.list("principle").length, 0, "boot reconcile removed the orphan");
+});
+
+test("filterPrincipleHits drops missing, superseded, and quarantined hits; top-N cut applies after filtering", async () => {
+  const memory = new MemorySystem();
+  const vectors = tmpVectorStore();
+  const addPrinciple = async (content, metadata = {}) => {
+    const item = memory.remember({ content, kind: "principle", metadata }, { tier: "long" });
+    await vectors.upsert("principle", item.id, content);
+    return item;
+  };
+
+  const liveA = await addPrinciple("Standup meeting principle A: schedule prep before standup meetings.");
+  const liveB = await addPrinciple("Standup meeting principle B: schedule notes after standup meetings.");
+  const liveC = await addPrinciple("Standup meeting principle C: schedule follow-ups from standup meetings.");
+  const expired = await addPrinciple("Standup meeting principle D: schedule demos in standup meetings.", {
+    quarantineUntil: new Date(Date.now() - 86400 * 1000).toISOString()
+  });
+  const superseded = await addPrinciple("Standup meeting principle E: superseded standup meetings advice.");
+  superseded.metadata = { ...superseded.metadata, supersededBy: "mem_medium_fake_2" };
+  const quarantined = await addPrinciple("Standup meeting principle F: quarantined standup meetings hunch.", {
+    quarantineUntil: new Date(Date.now() + 86400 * 1000).toISOString()
+  });
+  await vectors.upsert("principle", "mem_long_missing_9", "Standup meeting principle G: orphaned standup meetings vector.");
+
+  const hits = await vectors.search("principle", "schedule standup meetings", { limit: 20, minScore: 0 });
+  assert.equal(hits.length, 7);
+
+  const eligible = filterPrincipleHits(hits, memory, { limit: 10 });
+  const ids = eligible.map((h) => h.id);
+  assert.equal(eligible.length, 4, "only live + expired-quarantine principles remain");
+  assert.deepEqual(ids.slice().sort(), [liveA.id, liveB.id, liveC.id, expired.id].sort());
+  assert.ok(!ids.includes(superseded.id));
+  assert.ok(!ids.includes(quarantined.id));
+  assert.ok(!ids.includes("mem_long_missing_9"));
+
+  const capped = filterPrincipleHits(hits, memory, { limit: 3 });
+  assert.equal(capped.length, 3, "top-3 cut applies AFTER filtering");
+});
+
+test("handleMessage injects live principles but never quarantined ones", async () => {
+  const memory = new MemorySystem();
+  const vectors = tmpVectorStore();
+  memory.bindVectorStore(vectors);
+
+  const live = memory.remember(
+    { content: "Standup meetings run at 9am; block prep time before standup meetings.", kind: "principle" },
+    { tier: "long" }
+  );
+  await vectors.upsert("principle", live.id, live.content);
+  const quarantined = memory.remember(
+    {
+      content: "Quarantined hunch: cancel standup meetings on Fridays.",
+      kind: "principle",
+      metadata: { quarantineUntil: new Date(Date.now() + 86400 * 1000).toISOString() }
+    },
+    { tier: "long" }
+  );
+  await vectors.upsert("principle", quarantined.id, quarantined.content);
+
+  const captured = {};
+  const runtime = {
+    memory,
+    vectorStore: vectors,
+    outcomes: null,
+    processSignal: () => ({
+      id: "out_1",
+      scrutiny: { action: "act", score: 0.7, reasons: ["stub"], dimensions: { novelty: 0.4, risk: 0.3, repetition: 0.3 } },
+      customContext: [],
+      propagation: { created: false }
+    })
+  };
+  const host = new AgentHost({
+    runtime,
+    modelProvider: {
+      isConfigured: () => true,
+      model: "stub",
+      generate: async (args) => {
+        captured.instructions = args.instructions;
+        return { text: "ok", provider: "stub", model: "stub", id: "r1", toolCalls: [] };
+      }
+    }
+  });
+
+  await host.handleMessage({ text: "when do standup meetings run?", channel: "local", from: "u" });
+
+  assert.match(captured.instructions, /block prep time before standup meetings/, "live principle injected as intuition");
+  assert.doesNotMatch(captured.instructions, /Quarantined hunch/, "quarantined principle NOT injected");
 });

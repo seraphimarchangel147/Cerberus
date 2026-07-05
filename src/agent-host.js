@@ -115,7 +115,8 @@ export class AgentHost {
     let intuitions = [];
     if (this.runtime.vectorStore) {
       try {
-        intuitions = await this.runtime.vectorStore.search("principle", text, { limit: 3, minScore: 0.1 });
+        const rawHits = await this.runtime.vectorStore.search("principle", text, { limit: 10, minScore: 0.1 });
+        intuitions = filterPrincipleHits(rawHits, this.runtime.memory, { limit: 3 });
       } catch { /* best effort */ }
     }
 
@@ -365,6 +366,21 @@ Stay inside the bounded scope. If the user's request falls outside it, say so an
       sessions: this.store.listSessions()
     };
   }
+}
+
+export function filterPrincipleHits(hits, memory, { limit = 3, now = Date.now() } = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const out = [];
+  for (const hit of hits ?? []) {
+    const item = memory?.items?.get?.(hit.id);
+    if (!item) continue;
+    if (item.metadata?.supersededBy) continue;
+    const quarantineUntil = item.metadata?.quarantineUntil;
+    if (quarantineUntil && new Date(quarantineUntil).getTime() > nowMs) continue;
+    out.push(hit);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 // What each scrutiny verdict means for THIS turn — matches the enforcement
