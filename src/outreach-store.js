@@ -71,6 +71,15 @@ export class OutreachStore {
     if (changed) this.snapshot();
   }
 
+  markNudged(ids = [], { now = new Date() } = {}) {
+    let changed = false;
+    for (const id of ids) {
+      const i = this.items.get(id);
+      if (i) { i.lastNudgedAt = now.toISOString(); changed = true; }
+    }
+    if (changed) this.snapshot();
+  }
+
   resolve(id, decision, { status = "acted", error = null } = {}) {
     const i = this.items.get(id);
     if (!i) return null;

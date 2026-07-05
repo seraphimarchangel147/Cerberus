@@ -49,3 +49,41 @@ test("unseen skill items roll into the digest", () => {
   assert.match(digest.title, /1 skill/);
   assert.match(digest.summary, /morning-triage/);
 });
+
+test("seen skill items older than 48h reappear under a still-waiting header", () => {
+  const s = store();
+  const item = s.append({ type: "skill", sourceRef: { kind: "skill-candidate", id: "sug_old" }, title: "morning-triage" });
+  s.markSeen([item.id]);
+  s.get(item.id).createdAt = "2026-06-13T12:00:00.000Z"; // 3 days before `now`
+  const cfg = normalizeOutreachConfig({}, {});
+  const digest = composeDigest(s, cfg, { now: new Date("2026-06-16T12:00:00") });
+  assert.ok(digest, "stale skill items must produce a digest");
+  assert.match(digest.title, /still-waiting skill/);
+  assert.match(digest.summary, /Still waiting:/);
+  assert.match(digest.summary, /morning-triage/);
+  assert.ok(s.get(item.id).lastNudgedAt, "item must be stamped so it is not re-pinged every cadence");
+});
+
+test("still-waiting re-ping happens at most once per 24h", () => {
+  const s = store();
+  const item = s.append({ type: "skill", sourceRef: { kind: "skill-candidate", id: "sug_np" }, title: "weekly-report" });
+  s.markSeen([item.id]);
+  s.get(item.id).createdAt = "2026-06-10T12:00:00.000Z";
+  const cfg = normalizeOutreachConfig({}, {});
+  const first = composeDigest(s, cfg, { now: new Date("2026-06-16T12:00:00") });
+  assert.ok(first);
+  const oneHourLater = composeDigest(s, cfg, { now: new Date("2026-06-16T13:00:00") });
+  assert.equal(oneHourLater, null, "must not re-ping within 24h");
+  const nextDay = composeDigest(s, cfg, { now: new Date("2026-06-17T13:00:00") });
+  assert.ok(nextDay, "after 24h the item is eligible again");
+  assert.match(nextDay.title, /still-waiting skill/);
+});
+
+test("seen skill items younger than 48h do not trigger a digest", () => {
+  const s = store();
+  const item = s.append({ type: "skill", sourceRef: { kind: "skill-candidate", id: "sug_new" }, title: "fresh-skill" });
+  s.markSeen([item.id]);
+  s.get(item.id).createdAt = new Date(new Date("2026-06-16T12:00:00").getTime() - 24 * 3600 * 1000).toISOString();
+  const cfg = normalizeOutreachConfig({}, {});
+  assert.equal(composeDigest(s, cfg, { now: new Date("2026-06-16T12:00:00") }), null);
+});
