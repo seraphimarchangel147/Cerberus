@@ -1526,6 +1526,19 @@ async function applyOutreachAction(runtime, item, action, note) {
       if (!runtime.clarifications?.answer) throw new Error("no clarification store");
       if (!runtime.clarifications.answer(ref.id, action)) throw new Error("clarification not answerable");
       return;
+    case "skill-candidate": {
+      if (action !== "accept") throw new Error(`unsupported skill-candidate action: ${action}`);
+      const { findSuggestion, resolveSuggestion } = await import("./suggestion-feed.js");
+      const candidate = findSuggestion(runtime, ref.id);
+      if (!candidate) throw new Error("skill candidate gone");
+      if (candidate.status === "accepted") return;
+      const { createSkillFromCandidate } = await import("./skill-materialize.js");
+      createSkillFromCandidate({ runtime, candidate });
+      resolveSuggestion(runtime, ref.id, "accepted");
+      runtime.skills?.reload?.();
+      runtime.events?.emit?.("suggestion-resolved", { id: ref.id, status: "accepted", category: "skill" });
+      return;
+    }
     default:
       return;
   }
