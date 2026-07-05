@@ -57,3 +57,41 @@ test("cap eviction deletes the evicted item's principle vector", async () => {
   assert.equal(memory.items.has(weak.id), false, "weaker item was evicted");
   assert.equal(vectors.list("principle").length, 0, "evicted item's vector removed");
 });
+
+test("reconcilePrincipleVectors removes orphaned and superseded vectors, keeps live ones", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pvgc-rec-"));
+  const runtime = createDefaultRuntime({
+    agentHost: false,
+    embedderOptions: { forceHash: true },
+    vectorStoreOptions: { dir }
+  });
+
+  const live = runtime.memory.remember({ content: "Live principle about calendar hygiene.", kind: "principle" }, { tier: "long" });
+  await runtime.vectorStore.upsert("principle", live.id, live.content);
+  await runtime.vectorStore.upsert("principle", "mem_long_wiped_1", "Orphan principle whose memory item is gone.");
+  const stale = runtime.memory.remember({ content: "Stale principle later corrected.", kind: "principle" }, { tier: "long" });
+  await runtime.vectorStore.upsert("principle", stale.id, stale.content);
+  // Simulate a supersede that happened before the GC wiring existed.
+  stale.metadata = { ...stale.metadata, supersededBy: "mem_medium_fake_1" };
+
+  const result = runtime.reconcilePrincipleVectors();
+
+  assert.equal(result.checked, 3);
+  assert.equal(result.removed, 2);
+  assert.deepEqual(runtime.vectorStore.list("principle").map((e) => e.id), [live.id]);
+});
+
+test("createDurableRuntime reconciles orphaned principle vectors at boot", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pvgc-boot-"));
+  const seed = new VectorStore({ embedder: new HashBagEmbedder(), dir: path.join(dataDir, "vectors") });
+  await seed.upsert("principle", "mem_long_wiped_2", "Orphan vector from a wiped memory state.");
+
+  const runtime = createDurableRuntime({
+    dataDir,
+    agentHost: false,
+    autoConnectMcp: false,
+    embedderOptions: { forceHash: true }
+  });
+
+  assert.equal(runtime.vectorStore.list("principle").length, 0, "boot reconcile removed the orphan");
+});

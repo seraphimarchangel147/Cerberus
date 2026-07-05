@@ -1005,6 +1005,23 @@ export class AbiRuntime {
     return result;
   }
 
+  reconcilePrincipleVectors() {
+    if (!this.vectorStore || !this.memory?.items) return { checked: 0, removed: 0 };
+    const entries = this.vectorStore.list("principle");
+    let removed = 0;
+    for (const entry of entries) {
+      const item = this.memory.items.get(entry.id);
+      if (!item || item.metadata?.supersededBy) {
+        this.vectorStore.delete("principle", entry.id);
+        removed += 1;
+      }
+    }
+    if (removed > 0) {
+      console.log(`[openagi] principle-vector reconcile: removed ${removed} of ${entries.length} vectors (orphaned or superseded)`);
+    }
+    return { checked: entries.length, removed };
+  }
+
   status() {
     return {
       context: this.context,
@@ -1095,6 +1112,7 @@ export function createDurableRuntime(options = {}) {
   // Apply persona.md (if present) to the main agent — name + system prompt.
   // Re-applied every boot so editing the file + restarting updates the agent.
   applyPersona(runtime, dataDir);
+  runtime.reconcilePrincipleVectors();
   // Reconnect previously-authorized MCP servers on boot, silently — servers
   // with a cached OAuth token / bearer key / stdio command come back "live"
   // instead of showing "idle" until someone clicks Connect. Never opens a
