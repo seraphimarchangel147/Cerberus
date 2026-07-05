@@ -17,6 +17,20 @@ export class MemorySystem {
     this.items = new Map();
     this.limits = { ...DEFAULT_LIMITS, ...(options.limits ?? {}) };
     this.ttlMs = { ...DEFAULT_TTL_MS, ...(options.ttlMs ?? {}) };
+    this.vectors = null;
+  }
+
+  bindVectorStore(vectorStore) {
+    this.vectors = vectorStore;
+  }
+
+  dropPrincipleVector(id) {
+    if (!this.vectors) return false;
+    try {
+      return this.vectors.delete("principle", id);
+    } catch {
+      return false;
+    }
   }
 
   remember(observation, context = {}) {
@@ -172,6 +186,7 @@ export class MemorySystem {
     const at = nowIso();
     for (const target of targets) {
       target.metadata = { ...target.metadata, supersededBy: corrected.id, supersededAt: at };
+      this.dropPrincipleVector(target.id);
     }
 
     return { item: corrected, superseded: targets };
@@ -304,6 +319,9 @@ export class MemorySystem {
       .filter((item) => !item.locked)
       .sort((a, b) => a.strength - b.strength || a.lastAccessedAt.localeCompare(b.lastAccessedAt))
       .slice(0, Math.max(0, tierItems.length - limit))
-      .forEach((item) => this.items.delete(item.id));
+      .forEach((item) => {
+        this.items.delete(item.id);
+        this.dropPrincipleVector(item.id);
+      });
   }
 }

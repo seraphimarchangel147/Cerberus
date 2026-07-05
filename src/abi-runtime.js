@@ -160,6 +160,7 @@ export class AbiRuntime {
     this.embedder = options.embedder ?? createEmbedder({ budgetGuard: this.budget, ...(options.embedderOptions ?? {}) });
     this.vectorStore = options.vectorStore ?? new VectorStore({ embedder: this.embedder, ...(options.vectorStoreOptions ?? {}) });
     if (typeof this.propagation.bindVectorStore === "function") this.propagation.bindVectorStore(this.vectorStore);
+    if (typeof this.memory.bindVectorStore === "function") this.memory.bindVectorStore(this.vectorStore);
     this.specialistRouter = options.specialistRouter ?? new SpecialistRouter({ vectorStore: this.vectorStore, ...(options.routerOptions ?? {}) });
     this.condenser = options.condenser ?? new MemoryCondenser({ runtime: this, ...(options.condenserOptions ?? {}) });
     this.scrutinyFitter = options.scrutinyFitter ?? new ScrutinyFitter({
