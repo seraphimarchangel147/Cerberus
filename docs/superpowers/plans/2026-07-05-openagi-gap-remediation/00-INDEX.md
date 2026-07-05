@@ -60,6 +60,25 @@ Phase files: `phase-a-close-the-loops.md` (A1–A3), `phase-b-real-feedback.md` 
 2. **Before B3's real migration run:** show Spencer the dry-run counts (`OPENAGI_MIGRATE_DRY_RUN=1`) of outcome rows to be purged, and get an explicit yes. A timestamped backup is mandatory either way.
 3. **Anything not in a task.** If a task's quoted "current code" no longer matches the file, stop and report the drift instead of guessing — the repo may have moved since 2026-07-05.
 
+## Shared-file collision table (expected quote drift)
+
+Tasks were each verified against the repo as of 2026-07-05. Executing in week order means later tasks will find these files already changed by earlier tasks — that drift is expected; apply the edit by intent (see the Drift rule in each phase file). Any OTHER drift means the repo moved: stop and report.
+
+| File | Edited by (in execution order) |
+|------|-------------------------------|
+| `src/outreach-mapper.js` | A1, B2, D1 |
+| `src/outreach-store.js` | A1, B2 |
+| `src/outreach-config.js` | A1, E2 |
+| `src/outreach-digest.js` | A1, E2 |
+| `src/hosted-interface.js` | A1, A3, B2, D1, E2, F1 |
+| `src/outcome-store.js` | B1, B2 |
+| `src/abi-runtime.js` | A2, C1, D1, E1, E2, F1 |
+| `src/agent-host.js` | A2, B2, C2, D2, E1, F1 |
+| `src/tool-registry.js` | A3, E1, E3, F1 |
+| `src/index.js` | B1, C1, C2, E1, F1 |
+| `src/channels.js` | E2, F1 |
+| `test/abi-runtime.test.js` | B2, B3, F1 |
+
 ## What is deliberately NOT in this plan
 
 - No terminal/file/browser execution surface (amplifying an agent that can't yet grade its own success — revisit after Phase B proves out).
