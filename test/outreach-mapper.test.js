@@ -62,3 +62,41 @@ test("attach is idempotent — calling attach twice yields one item per event", 
   events.emit("draft-created", { id: "draft_idem", title: "Once" });
   assert.equal(store.list().filter((i) => i.sourceRef?.id === "draft_idem").length, 1);
 });
+
+test("skill-candidate maps to a durable skill outreach item", () => {
+  const { events, store } = harness();
+  events.emit("skill-candidate", {
+    source: "pattern-miner",
+    id: "sug_abc",
+    name: "morning-triage",
+    description: "Morning triage routine across Slack, Linear, Xcode",
+    occurrences: 6,
+    judgeBypass: false
+  });
+  const items = store.list();
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "skill");
+  assert.equal(items[0].needsDecision, false);
+  assert.deepEqual(items[0].sourceRef, { kind: "skill-candidate", id: "sug_abc" });
+  assert.deepEqual(items[0].actions, ["accept", "dismiss"]);
+  assert.match(items[0].title, /morning-triage/);
+  assert.match(items[0].summary, /Morning triage routine/);
+});
+
+test("re-emitting the same skill-candidate does not create a second open item", () => {
+  const { events, store } = harness();
+  const payload = { source: "session-miner", id: "ses_dup", name: "weekly-report", description: "Recurring weekly report request", occurrences: 3 };
+  events.emit("skill-candidate", payload);
+  events.emit("skill-candidate", payload);
+  assert.equal(store.list().filter((i) => i.sourceRef?.id === "ses_dup").length, 1);
+});
+
+test("a resolved skill item does not block a new item for the same candidate", () => {
+  const { events, store } = harness();
+  const payload = { source: "pattern-miner", id: "sug_res", name: "standup-prep", description: "prep standup notes", occurrences: 4 };
+  events.emit("skill-candidate", payload);
+  const first = store.list()[0];
+  store.resolve(first.id, { action: "dismiss", by: "user" }, { status: "dismissed" });
+  events.emit("skill-candidate", payload);
+  assert.equal(store.list().filter((i) => i.sourceRef?.id === "sug_res").length, 2);
+});

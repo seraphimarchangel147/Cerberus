@@ -20,7 +20,15 @@ export class OutreachStore {
 
   bindRuntime(runtime) { this.runtime = runtime; }
 
-  append({ type, sourceRef = null, title, summary = "", needsDecision = false, actions = [] }) {
+  append({ type, sourceRef = null, title, summary = "", needsDecision = false, actions = [], dedupeOpen = false }) {
+    if (dedupeOpen && sourceRef?.id) {
+      const existing = [...this.items.values()].find((i) =>
+        (i.status === "unseen" || i.status === "seen") &&
+        i.sourceRef?.kind === sourceRef.kind &&
+        i.sourceRef?.id === sourceRef.id
+      );
+      if (existing) return existing;
+    }
     const item = {
       id: createId("out"),
       seq: this.nextSeq++,

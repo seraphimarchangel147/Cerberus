@@ -35,6 +35,15 @@ const MAP = {
     summary: d.context ?? "",
     needsDecision: true,
     actions: ["yes", "no", "in_progress", "dropped"]
+  }),
+  "skill-candidate": (d) => ({
+    type: "skill",
+    sourceRef: { kind: "skill-candidate", id: d.id },
+    title: d.name ?? "New skill candidate",
+    summary: d.description ? d.description : (d.occurrences ? `Observed ${d.occurrences} times` : ""),
+    needsDecision: false,
+    actions: ["accept", "dismiss"],
+    dedupeOpen: true
   })
 };
 

@@ -39,3 +39,13 @@ test("digest returns null when nothing is pending", () => {
   const cfg = normalizeOutreachConfig({}, {});
   assert.equal(composeDigest(s, cfg, { now: new Date("2026-06-16T12:00:00") }), null);
 });
+
+test("unseen skill items roll into the digest", () => {
+  const s = store();
+  s.append({ type: "skill", sourceRef: { kind: "skill-candidate", id: "sug_1" }, title: "morning-triage" });
+  const cfg = normalizeOutreachConfig({}, {});
+  const digest = composeDigest(s, cfg, { now: new Date("2026-06-16T12:00:00") });
+  assert.ok(digest, "skill items must produce a digest");
+  assert.match(digest.title, /1 skill/);
+  assert.match(digest.summary, /morning-triage/);
+});
