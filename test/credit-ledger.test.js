@@ -18,9 +18,10 @@ const entry = (over = {}) => ({
 
 test("records and queries entries newest-first", () => {
   const L = tmpLedger();
-  L.record(entry({ usd: 0.01, at: "2026-06-05T10:00:00.000Z" }));
-  L.record(entry({ usd: 0.02, at: "2026-06-06T10:00:00.000Z" }));
-  const rows = L.query({ days: 30, now: new Date("2026-06-06T12:00:00.000Z") });
+  const now = new Date("2026-06-06T12:00:00.000Z");
+  L.record(entry({ usd: 0.01, at: "2026-06-05T10:00:00.000Z" }), { now });
+  L.record(entry({ usd: 0.02, at: "2026-06-06T10:00:00.000Z" }), { now });
+  const rows = L.query({ days: 30, now });
   assert.equal(rows.length, 2);
   assert.equal(rows[0].usd, 0.02);
   assert.equal(rows[0].channel, "chat");
@@ -78,9 +79,9 @@ test("days=1 means today (UTC calendar day), not a rolling 24h window", () => {
 
 test("days=7 includes today plus the previous 6 calendar days", () => {
   const L = tmpLedger();
-  L.record(entry({ at: "2026-05-31T10:00:00.000Z" })); // 6 days before the 6th — included
-  L.record(entry({ at: "2026-05-30T10:00:00.000Z" })); // 7 days before — excluded
   const now = new Date("2026-06-06T08:00:00.000Z");
+  L.record(entry({ at: "2026-05-31T10:00:00.000Z" }), { now }); // 6 days before the 6th — included
+  L.record(entry({ at: "2026-05-30T10:00:00.000Z" }), { now }); // 7 days before — excluded
   const rows = L.query({ days: 7, now });
   assert.equal(rows.length, 1);
   assert.equal(rows[0].at, "2026-05-31T10:00:00.000Z");

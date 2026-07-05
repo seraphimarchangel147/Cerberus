@@ -9,6 +9,11 @@ test("ephemeral turns leave no session, task, memory, or outcome", async () => {
   const runtime = createDefaultRuntime();
   const memBefore = runtime.memory.items.size;
   const outcomesBefore = runtime.outcomes.recent(100).length;
+  // Delta check, not an absolute zero — createDefaultRuntime()'s TaskStore
+  // defaults to the real ~/.openagi task store when no dataDir is given, so
+  // this must compare before/after like the memory and outcomes checks below
+  // rather than assert an absolute count of 0.
+  const tasksBefore = runtime.tasks.list({ limit: 50 }).length;
 
   const turn = await runtime.agentHost.handleMessage({
     from: "setup",
@@ -18,7 +23,7 @@ test("ephemeral turns leave no session, task, memory, or outcome", async () => {
 
   assert.ok(turn.reply.length > 0, "still produces a reply");
   assert.equal(runtime.agentHost.store.listSessions().length, 0, "no session persisted");
-  assert.equal(runtime.tasks.list({ limit: 50 }).length, 0, "no auto-task created");
+  assert.equal(runtime.tasks.list({ limit: 50 }).length, tasksBefore, "no auto-task created");
   assert.equal(runtime.memory.items.size, memBefore, "no memory written (signal or turn)");
   assert.equal(runtime.outcomes.recent(100).length, outcomesBefore, "no outcome recorded");
 });

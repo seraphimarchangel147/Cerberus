@@ -305,7 +305,15 @@ test("budget guard throws when daily limit exceeded", () => {
 });
 
 test("autopilot task type fires through agent host", async () => {
-  const runtime = createDefaultRuntime();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-autopilot-"));
+  // Isolate the budget store to this temp dir — otherwise it shares the real
+  // ~/.openagi/budget/usage.json, and once the live daily spend crosses the
+  // $10 default cap the autopilot pulse is skipped for budget reasons instead
+  // of actually running (same class of bug as the observation-store isolation
+  // above: a test sharing real accumulated state from the live install).
+  const runtime = createDefaultRuntime({
+    budgetOptions: { storePath: path.join(dataDir, "budget", "usage.json") }
+  });
   runtime.cron.addJob({
     id: "auto-test",
     name: "auto",
@@ -1608,9 +1616,12 @@ test("task-store: month/quarter/year buckets exist, auto-bucket from dueDate, mi
   assert.equal(bucketFromDueDate("2026-10-15T12:00:00Z", now), "this_year", "<365 days");
   assert.equal(bucketFromDueDate("2028-01-01T12:00:00Z", now), "someday", "beyond a year");
 
-  // Auto-bucket from dueDate on add (no explicit bucket).
+  // Auto-bucket from dueDate on add (no explicit bucket). Use a due date a
+  // few months out (not a hardcoded absolute date) so this assertion doesn't
+  // rot as wall-clock time passes — same rationale as someYearFromNow below.
   const store = new TaskStore({ dataDir: dir });
-  const t = store.add({ title: "Quarterly review", dueDate: "2026-08-01T12:00:00Z" });
+  const quarterDueDate = new Date(Date.now() + 60 * 86_400_000).toISOString();
+  const t = store.add({ title: "Quarterly review", dueDate: quarterDueDate });
   assert.equal(t.bucket, "this_quarter", "auto-bucketed from due date");
 
   // Migration: write a pre-existing someday task with a due date,
