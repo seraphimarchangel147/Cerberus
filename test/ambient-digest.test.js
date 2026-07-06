@@ -45,3 +45,76 @@ test("buildAmbientDigest returns null when the window has no activity rows", asy
   const digest = await buildAmbientDigest({ observations: store, sinceMs: nowMs - 60 * 60 * 1000, nowMs });
   assert.equal(digest, null);
 });
+
+test("ambient-digest cron job feeds observation digests into processIntegrationEvent", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-ambient-cron-"));
+  // Isolate every file-backed store to the temp dir — the default dirs would
+  // share the real ~/.openagi stores (same trap the pattern-miner test notes).
+  const runtime = createDefaultRuntime({
+    dataDir,
+    observationOptions: { dir: path.join(dataDir, "observations") },
+    outcomeOptions: { dir: path.join(dataDir, "outcomes") },
+    vectorStoreOptions: { dir: path.join(dataDir, "vectors") }
+  });
+  await runtime.observations.ready;
+  await runtime.observations.record([
+    { kind: "activity", at: "2026-07-01T09:10:00Z", app: "Cursor", window: "Cursor · openagi", event: "focus" },
+    { kind: "activity", at: "2026-07-01T09:20:00Z", app: "Cursor", window: "Cursor · openagi", event: "focus" }
+  ]);
+
+  const calls = [];
+  const original = runtime.processIntegrationEvent.bind(runtime);
+  runtime.processIntegrationEvent = (source, payload) => {
+    calls.push({ source, payload });
+    return original(source, payload);
+  };
+
+  // Make only ambient-digest due; push every other default job out a day.
+  const now = new Date("2026-07-01T10:00:00Z");
+  for (const job of runtime.cron.listJobs()) {
+    runtime.cron.updateJob(job.id, {
+      nextRunAt: job.id === "ambient-digest"
+        ? now.toISOString()
+        : new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
+    });
+  }
+
+  const first = await runtime.tick(now);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].job.id, "ambient-digest");
+  assert.equal(first[0].result.fired, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].source, "abi");
+  assert.equal(calls[0].payload.taskType, "ambient-capture");
+  assert.equal(calls[0].payload.domain, "app-cursor");
+  assert.notEqual(calls[0].payload.domain, "general");
+  assert.equal(calls[0].payload.risk, 0.1);
+  assert.equal(calls[0].payload.urgency, 0.2);
+  assert.equal(calls[0].payload.impact, 0.4);
+  assert.equal(calls[0].payload.confidence, 0.7);
+  assert.equal(calls[0].payload.specificity, 0.6);
+  assert.equal(calls[0].payload.repetition, 0);
+  assert.equal(calls[0].payload.novelty, 1);
+
+  // The signal went through the full Signals→Scrutiny→Memory loop and absorbed:
+  // only an "ignore" verdict skips memory, and these axes score well above the
+  // panel's ignore band.
+  const ambientOutputs = runtime.outputs.filter((o) => o.signal.taskType === "ambient-capture");
+  assert.equal(ambientOutputs.length, 1);
+  assert.ok(ambientOutputs[0].memory, "digest signal should absorb into tiered memory");
+  assert.ok(ambientOutputs[0].memory.tags.includes("ambient-capture"));
+  assert.ok(ambientOutputs[0].memory.tags.includes("app-cursor"));
+
+  // Second hour: repetition is measured from the memory the first digest left.
+  await runtime.observations.record([
+    { kind: "activity", at: "2026-07-01T10:30:00Z", app: "Cursor", window: "Cursor · openagi", event: "focus" }
+  ]);
+  await runtime.tick(new Date("2026-07-01T11:00:00Z"));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].payload.repetition, 0.071); // min(1, 1/14) rounded to 3dp
+  assert.equal(calls[1].payload.novelty, 0.929);
+
+  // Idle hour: no activity rows in the 11:00-12:00 window → no signal at all.
+  await runtime.tick(new Date("2026-07-01T12:00:00Z"));
+  assert.equal(calls.length, 2);
+});

@@ -22,6 +22,7 @@ import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
 import { MemoryCondenser } from "./memory-condenser.js";
 import { ObservationStore } from "./observation-store.js";
+import { buildAmbientDigest } from "./ambient-digest.js";
 import { OutcomeStore } from "./outcome-store.js";
 import { Introspector } from "./introspector.js";
 import { PatternMiner } from "./pattern-miner.js";
@@ -425,6 +426,18 @@ export class AbiRuntime {
         task: "outreach-digest",
         intervalMs: this.outreachConfig.cadenceHours * 60 * 60 * 1000
       });
+      // G1: hourly rollup of the ambient observation stream into ONE ABI
+      // signal (see runAmbientDigest). Deterministic, no LLM, and quiet when
+      // idle — buildAmbientDigest returns null when the window has no
+      // activity rows, so an idle machine produces no signal and no memory
+      // write.
+      this.cron.addJob({
+        id: "ambient-digest",
+        name: "Hourly ambient observation digest",
+        enabled: true,
+        task: "ambient-digest",
+        intervalMs: 60 * 60 * 1000
+      });
       registerCoreTools(this.tools, this);
       // Computer-use tools register only when explicitly opted-in via env
       // (OPENAGI_COMPUTER_USE=1). Default install doesn't expose them so
@@ -729,6 +742,9 @@ export class AbiRuntime {
       if (job.task === "outreach-digest") {
         return this.runOutreachDigest({ now });
       }
+      if (job.task === "ambient-digest") {
+        return this.runAmbientDigest({ now });
+      }
       return { skipped: true, reason: `No handler for task ${job.task}` };
     }, now);
   }
@@ -750,6 +766,67 @@ export class AbiRuntime {
     if (!this.outreachConfig?.enabled) return { skipped: true, reason: "outreach disabled" };
     const item = composeDigest(this.outreach, this.outreachConfig, { now });
     return item ? { ok: true, digestId: item.id, title: item.title } : { ok: true, empty: true };
+  }
+
+  // G1 fix: the core severed hop. Roll the last hour of ambient observations
+  // into ONE deterministic ABI signal (no LLM) so the capture stream flows
+  // through Signals→Scrutiny→Memory instead of sitting inert in the side
+  // SQLite store. Axes are measured, not template constants: repetition
+  // grows with how often this domain's digest recurred in the last 7 days,
+  // novelty is its complement. Expected steady state: scrutiny verdicts stay
+  // mid-band (watch/ask) and the digest absorbs into tiered memory — only an
+  // ignore verdict skips memory. Act/propagate emerges from repetition alone
+  // (propagate needs pressure >= 0.72, i.e. ~11 same-domain digests in 7d).
+  async runAmbientDigest({ now = new Date() } = {}) {
+    const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+    const digest = await buildAmbientDigest({
+      observations: this.observations,
+      sinceMs: nowMs - 60 * 60 * 1000,
+      nowMs
+    });
+    if (!digest) return { skipped: true, reason: "no activity in window" };
+    const rawRepetition = Math.min(1, this.countAmbientMemories(digest.domain, nowMs) / 14);
+    const repetition = Number(rawRepetition.toFixed(3));
+    const novelty = Number((1 - rawRepetition).toFixed(3));
+    const outputs = this.processIntegrationEvent("abi", {
+      source: "ambient-digest",
+      type: "ambient-capture",
+      domain: digest.domain,
+      taskType: "ambient-capture",
+      summary: digest.summary,
+      content: digest.summary,
+      tags: ["ambient", "digest"],
+      urgency: 0.2,
+      impact: 0.4,
+      novelty,
+      repetition,
+      risk: 0.1,
+      confidence: 0.7,
+      specificity: 0.6,
+      metadata: { stats: digest.stats }
+    });
+    const output = outputs[0] ?? null;
+    return { fired: 1, domain: digest.domain, action: output ? output.action : null, repetition };
+  }
+
+  // Repetition denominator for ambient digests: memory items prior digests
+  // left behind for this domain in the last 7 days. Chosen over the outcome
+  // store because processSignal writes a memory item tagged with the signal's
+  // domain + taskType but records nothing in the OutcomeStore — memory is the
+  // only durable trace prior digests leave, and iterating the in-RAM items
+  // Map (present on MemorySystem and FileBackedMemorySystem alike) is
+  // O(items) with zero I/O.
+  countAmbientMemories(domain, nowMs) {
+    if (!this.memory?.items) return 0;
+    const since = nowMs - 7 * 24 * 60 * 60 * 1000;
+    let count = 0;
+    for (const item of this.memory.items.values()) {
+      if (!Array.isArray(item.tags)) continue;
+      if (!item.tags.includes("ambient-capture") || !item.tags.includes(domain)) continue;
+      const createdMs = new Date(item.createdAt).getTime();
+      if (Number.isFinite(createdMs) && createdMs >= since) count += 1;
+    }
+    return count;
   }
 
   // Morning digest: roll up pending today-bucket user tasks into one
