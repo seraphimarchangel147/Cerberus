@@ -7,22 +7,25 @@ const MAP = {
   "draft-created": (d) => ({
     type: "draft",
     sourceRef: { kind: "draft", id: d.id },
+    outcomeId: d.outcomeId ?? null,
     title: d.title ?? "Draft ready",
     summary: (d.body ?? "").slice(0, 160),
     needsDecision: false,
-    actions: ["approve", "edit", "dismiss"]
+    actions: ["approve", "edit", "dismiss", "up", "down"]
   }),
   "proactive-suggestion": (d) => ({
     type: "suggestion",
     sourceRef: { kind: "suggestion", id: d.id },
+    outcomeId: d.outcomeId ?? null,
     title: d.title ?? "New suggestion",
     summary: d.rationale ?? "",
     needsDecision: false,
-    actions: ["accept", "dismiss"]
+    actions: ["accept", "dismiss", "up", "down"]
   }),
   "pending-action": (d) => ({
     type: "pending-action",
     sourceRef: { kind: "pending-action", id: d.id },
+    outcomeId: d.outcomeId ?? null,
     title: d.summary ?? "Action needs approval",
     summary: d.reason ?? "",
     needsDecision: true,
@@ -31,6 +34,7 @@ const MAP = {
   "clarification-created": (d) => ({
     type: "clarification",
     sourceRef: { kind: "clarification", id: d.id },
+    outcomeId: d.outcomeId ?? null,
     title: d.question ?? "Quick question",
     summary: d.context ?? "",
     needsDecision: true,
@@ -39,6 +43,7 @@ const MAP = {
   "skill-candidate": (d) => ({
     type: "skill",
     sourceRef: { kind: "skill-candidate", id: d.id },
+    outcomeId: d.outcomeId ?? null,
     title: d.name ?? "New skill candidate",
     summary: d.description ? d.description : (d.occurrences ? `Observed ${d.occurrences} times` : ""),
     needsDecision: false,

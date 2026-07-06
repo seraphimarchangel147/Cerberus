@@ -100,3 +100,15 @@ test("a resolved skill item does not block a new item for the same candidate", (
   events.emit("skill-candidate", payload);
   assert.equal(store.list().filter((i) => i.sourceRef?.id === "sug_res").length, 2);
 });
+
+test("mapped items carry outcomeId and digest types offer thumbs actions", () => {
+  const { events, store } = harness();
+  events.emit("draft-created", { id: "draft_2", title: "With outcome", outcomeId: "out_123" });
+  events.emit("proactive-suggestion", { id: "prop_2", title: "Suggests", category: "automation", rationale: "r" });
+  const draft = store.list().find((i) => i.sourceRef?.id === "draft_2");
+  const suggestion = store.list().find((i) => i.sourceRef?.id === "prop_2");
+  assert.equal(draft.outcomeId, "out_123");
+  assert.equal(suggestion.outcomeId, null);
+  assert.ok(draft.actions.includes("up") && draft.actions.includes("down"));
+  assert.ok(suggestion.actions.includes("up") && suggestion.actions.includes("down"));
+});
