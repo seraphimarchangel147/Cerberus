@@ -47,7 +47,10 @@ final class CaptureBridge {
       copy.removeValue(forKey: "_table")
       return copy
     }
-    let envelope: [String: Any] = ["observations": payload]
+    let envelope: [String: Any] = [
+      "observations": payload,
+      "sourceMachineId": AppState.sourceMachineId()
+    ]
     do {
       req.httpBody = try JSONSerialization.data(withJSONObject: envelope)
     } catch {

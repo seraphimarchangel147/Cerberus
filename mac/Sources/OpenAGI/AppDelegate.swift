@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
       Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
 
       LoginItem.registerOnFirstLaunchIfNeeded()
+      _ = AppState.sourceMachineId()
 
       DaemonController.shared.start()
       AppState.shared.startPolling()

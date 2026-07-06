@@ -55,6 +55,16 @@ final class AppState: ObservableObject {
     UserDefaults.standard.set(token, forKey: "daemonToken")
   }
 
+  // Stable per-install machine id stamped on every observation batch so a
+  // main receiving capture from several nodes can tell the streams apart.
+  nonisolated static func sourceMachineId() -> String {
+    let key = "sourceMachineId"
+    if let existing = UserDefaults.standard.string(forKey: key), !existing.isEmpty { return existing }
+    let fresh = UUID().uuidString
+    UserDefaults.standard.set(fresh, forKey: key)
+    return fresh
+  }
+
   struct Nudge: Identifiable, Equatable {
     let id: String
     let title: String
