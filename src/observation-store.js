@@ -96,22 +96,33 @@ export class ObservationStore {
         tokenize='porter unicode61'
       );
     `);
+    this.migrate();
   }
 
-  async record(observations) {
+  migrate() {
+    for (const table of ["activity", "frames"]) {
+      const cols = this.db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+      if (!cols.includes("source_machine_id")) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN source_machine_id TEXT`);
+      }
+    }
+  }
+
+  async record(observations, meta = {}) {
     await this.ready;
     if (!Array.isArray(observations)) observations = [observations];
+    const batchMachineId = (typeof meta.sourceMachineId === "string" && meta.sourceMachineId) ? meta.sourceMachineId : null;
     if (this.fallback) {
-      const lines = observations.map((o) => JSON.stringify({ ...o, ingestedAt: nowIso() }) + "\n").join("");
+      const lines = observations.map((o) => JSON.stringify({ ...o, sourceMachineId: o.sourceMachineId ?? batchMachineId, ingestedAt: nowIso() }) + "\n").join("");
       fs.appendFileSync(this.fallbackPath, lines);
       return { count: observations.length, mode: "fallback-jsonl" };
     }
 
     const insertActivity = this.db.prepare(
-      `INSERT INTO activity (at, app, window, event, metadata) VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO activity (at, app, window, event, metadata, source_machine_id) VALUES (?, ?, ?, ?, ?, ?)`
     );
     const insertFrame = this.db.prepare(
-      `INSERT OR IGNORE INTO frames (frame_uid, captured_at, app, window, thumbnail_path, confidence) VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT OR IGNORE INTO frames (frame_uid, captured_at, app, window, thumbnail_path, confidence, source_machine_id) VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
     const insertText = this.db.prepare(
       `INSERT INTO texts (kind, ref, at, app, window, text) VALUES (?, ?, ?, ?, ?, ?)`
@@ -122,12 +133,13 @@ export class ObservationStore {
     try {
       for (const o of observations) {
         if (!o || !o.kind) continue;
+        const machineId = (typeof o.sourceMachineId === "string" && o.sourceMachineId) ? o.sourceMachineId : batchMachineId;
         if (o.kind === "activity") {
-          insertActivity.run(o.at ?? nowIso(), o.app ?? null, o.window ?? null, o.event ?? "focus", o.metadata ? JSON.stringify(o.metadata) : null);
-          if (o.window) insertText.run("activity", String(o.app ?? "") + ":" + String(o.window ?? ""), o.at ?? nowIso(), o.app ?? "", o.window ?? "", o.window);
+          const inserted = insertActivity.run(o.at ?? nowIso(), o.app ?? null, o.window ?? null, o.event ?? "focus", o.metadata ? JSON.stringify(o.metadata) : null, machineId);
+          if (o.window) insertText.run("activity", String(inserted.lastInsertRowid), o.at ?? nowIso(), o.app ?? "", o.window ?? "", o.window);
         } else if (o.kind === "frame" || o.kind === "frame-summary") {
           const uid = o.frameId ? String(o.frameId) : createId("frm");
-          insertFrame.run(uid, o.at ?? nowIso(), o.app ?? null, o.window ?? null, o.thumbnail ?? null, typeof o.confidence === "number" ? o.confidence : null);
+          insertFrame.run(uid, o.at ?? nowIso(), o.app ?? null, o.window ?? null, o.thumbnail ?? null, typeof o.confidence === "number" ? o.confidence : null, machineId);
           if (o.ocrText) insertText.run("frame", uid, o.at ?? nowIso(), o.app ?? "", o.window ?? "", o.ocrText);
         } else if (o.kind === "transcript") {
           // Long-form text (e.g. a BuildBetter call transcript) recorded so it's
@@ -145,7 +157,7 @@ export class ObservationStore {
     return { count, mode: "sqlite" };
   }
 
-  async search({ query, since, until, app, limit = 25 } = {}) {
+  async search({ query, since, until, app, machine, limit = 25 } = {}) {
     await this.ready;
     if (this.fallback) {
       // Naive fallback search through the JSONL log.
@@ -157,6 +169,7 @@ export class ObservationStore {
         out = out.filter((o) => (o.ocrText || "").toLowerCase().includes(q) || (o.window || "").toLowerCase().includes(q) || (o.text || "").toLowerCase().includes(q));
       }
       if (app) out = out.filter((o) => o.app === app);
+      if (machine) out = out.filter((o) => o.sourceMachineId === machine);
       if (since) out = out.filter((o) => (o.at ?? "") >= since);
       if (until) out = out.filter((o) => (o.at ?? "") <= until);
       return out.sort((a, b) => (b.at ?? "").localeCompare(a.at ?? "")).slice(0, limit).map(capTranscriptText);
@@ -166,18 +179,24 @@ export class ObservationStore {
       // FTS5 query — escape doubled-quotes for the MATCH expression
       const escaped = String(query).replace(/"/g, '""');
       const matchExpr = `"${escaped}"`;
+      const machineClause = machine
+        ? `AND ((kind = 'frame' AND ref IN (SELECT frame_uid FROM frames WHERE source_machine_id = ?))
+            OR (kind = 'activity' AND ref IN (SELECT CAST(id AS TEXT) FROM activity WHERE source_machine_id = ?)))`
+        : "";
       const rows = this.db.prepare(
         `SELECT kind, ref, at, app, window, snippet(texts, 5, '<mark>', '</mark>', '…', 16) AS snippet, text
          FROM texts WHERE texts MATCH ?
          ${app ? "AND app = ?" : ""}
          ${since ? "AND at >= ?" : ""}
          ${until ? "AND at <= ?" : ""}
+         ${machineClause}
          ORDER BY at DESC LIMIT ?`
       );
       const params = [matchExpr];
       if (app) params.push(app);
       if (since) params.push(since);
       if (until) params.push(until);
+      if (machine) { params.push(machine); params.push(machine); }
       params.push(limit);
       return rows.all(...params).map(capTranscriptText);
     }
@@ -187,8 +206,9 @@ export class ObservationStore {
     if (app) { where += " AND app = ?"; params.push(app); }
     if (since) { where += " AND at >= ?"; params.push(since); }
     if (until) { where += " AND at <= ?"; params.push(until); }
+    if (machine) { where += " AND source_machine_id = ?"; params.push(machine); }
     params.push(limit);
-    return this.db.prepare(`SELECT 'activity' AS kind, app, window, at, event FROM activity WHERE ${where} ORDER BY at DESC LIMIT ?`).all(...params);
+    return this.db.prepare(`SELECT 'activity' AS kind, app, window, at, event, source_machine_id AS sourceMachineId FROM activity WHERE ${where} ORDER BY at DESC LIMIT ?`).all(...params);
   }
 
   async existsRef(ref) {

@@ -408,8 +408,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/observations") {
         const body = await readJson(req);
         const observations = Array.isArray(body) ? body : (Array.isArray(body.observations) ? body.observations : [body]);
+        const sourceMachineId = (!Array.isArray(body) && typeof body.sourceMachineId === "string" && body.sourceMachineId) ? body.sourceMachineId : null;
         try {
-          const result = await runtime.observations.record(observations);
+          const result = await runtime.observations.record(observations, { sourceMachineId });
           return sendJson(res, 200, result);
         } catch (error) {
           return sendJson(res, 500, { error: error.message });
