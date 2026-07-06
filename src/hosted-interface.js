@@ -14,6 +14,7 @@ import {
   verifyBuildBetterWebhook
 } from "./auth.js";
 import { ChannelManager } from "./channels.js";
+import { inferToneScore } from "./outcome-store.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
@@ -692,12 +693,38 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendJson(res, 400, { item: updated, error: error.message });
         }
       }
+      if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/feedback")) {
+        const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/feedback".length));
+        const item = runtime.outreach?.get(id);
+        if (!item) return sendJson(res, 404, { error: "unknown outreach item" });
+        if (item.status === "acted" || item.status === "dismissed") {
+          return sendJson(res, 200, { item });
+        }
+        const body = await readJson(req).catch(() => ({}));
+        const verdict = String(body.verdict ?? "");
+        if (verdict !== "up" && verdict !== "down") {
+          return sendJson(res, 400, { error: "verdict must be 'up' or 'down'" });
+        }
+        try {
+          await applyOutreachFeedback(runtime, item, verdict, body.note ?? null);
+          const updated = runtime.outreach.resolve(id, { action: verdict, by: "user", note: body.note ?? null }, { status: "acted" });
+          return sendJson(res, 200, { item: updated });
+        } catch (error) {
+          const updated = runtime.outreach.resolve(id, { action: verdict, by: "user" }, { status: "error", error: error.message });
+          return sendJson(res, 400, { item: updated, error: error.message });
+        }
+      }
       if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/reply")) {
         const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/reply".length));
         const item = runtime.outreach?.get(id);
         if (!item) return sendJson(res, 404, { error: "unknown outreach item" });
         if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
         const body = await readJson(req);
+        if (item.outcomeId && runtime.outcomes?.resolve) {
+          try {
+            runtime.outcomes.resolve(item.outcomeId, inferToneScore(String(body.text ?? "")), "user-followup", "tone of outreach reply");
+          } catch { /* best effort */ }
+        }
         const forward = `Re: "${item.title}" (${item.type}, actions: ${item.actions.join("/")}).\nUser says: ${body.text ?? ""}\nInterpret intent and take the appropriate action.`;
         const turn = await channels.handleLocalMessage({ text: forward, from: `outreach:${id}` });
         return sendJson(res, 200, { reply: turn.reply ?? null });
@@ -1498,6 +1525,7 @@ function sendJson(res, status, value) {
 // on a failed delegation so the route can mark the item status:"error".
 async function applyOutreachAction(runtime, item, action, note) {
   if (action === "dismiss") return;
+  if (action === "up" || action === "down") return applyOutreachFeedback(runtime, item, action, note);
   const ref = item.sourceRef ?? {};
   switch (ref.kind) {
     case "draft":
@@ -1544,6 +1572,27 @@ async function applyOutreachAction(runtime, item, action, note) {
     default:
       return;
   }
+}
+
+async function applyOutreachFeedback(runtime, item, verdict, note = null) {
+  const score = verdict === "up" ? 0.9 : 0.15;
+  const resolutionNote = note ?? `outreach thumbs-${verdict} on "${item.title}"`;
+  let resolved = null;
+  if (item.outcomeId && runtime.outcomes?.resolve) {
+    resolved = runtime.outcomes.resolve(item.outcomeId, score, "explicit-rating", resolutionNote);
+  }
+  if (!resolved && runtime.outcomes?.record) {
+    const fresh = runtime.outcomes.record({
+      kind: "explicit-feedback",
+      refId: item.id,
+      metadata: { outreachType: item.type, sourceRef: item.sourceRef ?? null, verdict }
+    });
+    resolved = runtime.outcomes.resolve(fresh.id, score, "explicit-rating", resolutionNote);
+  }
+  if (item.sourceRef?.kind === "suggestion" && runtime.proactiveObserver?.resolve) {
+    runtime.proactiveObserver.resolve(item.sourceRef.id, verdict === "up" ? "accepted" : "rejected", resolutionNote);
+  }
+  return resolved;
 }
 
 function sendXml(res, status, value) {

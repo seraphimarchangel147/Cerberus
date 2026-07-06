@@ -1162,7 +1162,10 @@ test("observation store records activity + frames and surfaces stats", async () 
 });
 
 test("recall_activity tool returns observations matching a query", async () => {
-  const runtime = createDefaultRuntime();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-recall-activity-"));
+  const runtime = createDefaultRuntime({
+    observationOptions: { dir: path.join(dataDir, "observations") }
+  });
   await runtime.observations.ready;
   await runtime.observations.record([
     { kind: "activity", at: "2026-05-08T09:30:00Z", app: "Calendar", window: "Standup · 9am Mondays", event: "focus" },
