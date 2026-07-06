@@ -37,10 +37,11 @@ test("query window excludes entries older than days", () => {
 
 test("analytics groups by day, model, activity", () => {
   const L = tmpLedger();
-  L.record(entry({ usd: 0.10, channel: "autopilot", model: "claude-opus-4-7", at: "2026-06-06T09:00:00.000Z" }));
-  L.record(entry({ usd: 0.04, channel: "chat", model: "gpt-5", at: "2026-06-06T10:00:00.000Z" }));
-  L.record(entry({ usd: 0.01, channel: "chat", model: "gpt-5", at: "2026-06-05T10:00:00.000Z" }));
-  const a = L.analytics({ days: 30, now: new Date("2026-06-06T12:00:00.000Z") });
+  const now = new Date("2026-06-06T12:00:00.000Z");
+  L.record(entry({ usd: 0.10, channel: "autopilot", model: "claude-opus-4-7", at: "2026-06-06T09:00:00.000Z" }), { now });
+  L.record(entry({ usd: 0.04, channel: "chat", model: "gpt-5", at: "2026-06-06T10:00:00.000Z" }), { now });
+  L.record(entry({ usd: 0.01, channel: "chat", model: "gpt-5", at: "2026-06-05T10:00:00.000Z" }), { now });
+  const a = L.analytics({ days: 30, now });
   assert.equal(a.totalCalls, 3);
   assert.equal(a.totalUsd, 0.15);
   assert.equal(a.byActivity.find((x) => x.activity === "autopilot").usd, 0.10);
