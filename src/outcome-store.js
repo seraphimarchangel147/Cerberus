@@ -141,10 +141,12 @@ export class OutcomeStore {
    * Heuristic resolution sweep — inspects pending outcomes and tries to score them.
    * - agent-reply with a follow-up user message → score from follow-up tone
    * - sent-message with no reply within 6h → 0.4 (delivered, no engagement)
-   * - cron-fire / autopilot-fire with tool calls -> graded by per-call ok flags via scoreFromToolCalls (all ok 0.7, some failed 0.45, all failed 0.1); 'standing by' -> 0.5 quiet
+   * - cron-fire / autopilot-fire with tool calls -> graded by per-call ok flags
+   *   only once older than followupWindowMinutes, so feedback can land first;
+   *   'standing by' -> 0.5 quiet
    * - anything pending > 24h with no signal → resolve null with source 'timeout'
    */
-  resolveSweep({ now = new Date(), agentStore = null, timeoutHours = 24, replyWindowHours = 6 } = {}) {
+  resolveSweep({ now = new Date(), agentStore = null, timeoutHours = 24, replyWindowHours = 6, followupWindowMinutes = 30 } = {}) {
     const resolutions = [];
     const tNow = now instanceof Date ? now.getTime() : new Date(now).getTime();
     for (const o of this.pending()) {
@@ -165,7 +167,7 @@ export class OutcomeStore {
       }
 
       if (score === null && (o.kind === "cron-fire" || o.kind === "autopilot-fire")) {
-        if (Array.isArray(o.toolCalls) && o.toolCalls.length > 0) {
+        if (Array.isArray(o.toolCalls) && o.toolCalls.length > 0 && age > followupWindowMinutes * 60 * 1000) {
           const failedCalls = o.toolCalls.filter((c) => !(c?.ok)).length;
           score = scoreFromToolCalls(o.toolCalls);
           source = "system-inferred";
@@ -218,6 +220,18 @@ export class OutcomeStore {
     return this.resolve(target.id, qualityScore, "explicit-rating", note);
   }
 
+  /**
+   * Push-path tone resolution: the next user message in a session resolves
+   * the newest pending agent-reply outcome for that session.
+   */
+  resolveByUserFollowup(sessionId, text) {
+    if (!sessionId) return null;
+    const candidates = this.pending().filter((o) => o.kind === "agent-reply" && o.sessionId === sessionId);
+    if (candidates.length === 0) return null;
+    const target = candidates[candidates.length - 1];
+    return this.resolve(target.id, inferToneScore(text), "user-followup", "tone of next user message");
+  }
+
   persist() {
     // Snapshot keeps all pending + last N resolved.
     const all = [...this.outcomes.values()];
@@ -258,7 +272,7 @@ function clampScore(s) {
 const POSITIVE_HINTS = /\b(thanks|thank you|perfect|great|nice|awesome|good|love it|exactly|yes|yep|got it|works|cool)\b/i;
 const NEGATIVE_HINTS = /\b(no|wrong|incorrect|bad|nope|stop|cancel|undo|broken|nope|bug|error|fail)\b/i;
 
-function inferToneScore(text) {
+export function inferToneScore(text) {
   const t = String(text ?? "");
   const positive = POSITIVE_HINTS.test(t);
   const negative = NEGATIVE_HINTS.test(t);

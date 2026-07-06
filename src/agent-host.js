@@ -72,6 +72,10 @@ export class AgentHost {
           metadata: input.metadata ?? {}
         });
 
+    if (!ephemeral && channel !== "autopilot" && channel !== "cron") {
+      try { this.runtime.outcomes?.resolveByUserFollowup?.(sessionId, text); } catch { /* best effort */ }
+    }
+
     const signal = this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {} });
     const isSpecialist = agent.role === "specialist";
     const output = this.runtime.processSignal(signal, {

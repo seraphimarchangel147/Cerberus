@@ -41,7 +41,7 @@ test("resolveSweep grades cron/autopilot fires by tool-call results", () => {
     toolCalls: [{ name: "remember", ok: true }]
   });
 
-  const sweep = store.resolveSweep();
+  const sweep = store.resolveSweep({ now: new Date(Date.now() + 31 * 60 * 1000) });
   assert.equal(sweep.length, 3);
 
   const byId = new Map(sweep.map((r) => [r.id, r]));

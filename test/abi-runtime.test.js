@@ -399,7 +399,7 @@ test("outcome store records, resolves, aggregates, and reloads", () => {
   assert.equal(first.pending().length, 2);
 
   first.resolve(a.id, 0.85, "user-followup");
-  const sweep = first.resolveSweep();
+  const sweep = first.resolveSweep({ now: new Date(Date.now() + 31 * 60 * 1000) });
   assert.ok(sweep.length >= 1, "cron-fire with tool calls should resolve via sweep");
 
   const agg = first.aggregate(30);
