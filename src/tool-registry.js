@@ -379,6 +379,7 @@ export function registerCoreTools(registry, runtime) {
         since: { type: "string", description: "ISO 8601 lower bound (inclusive)." },
         until: { type: "string", description: "ISO 8601 upper bound (inclusive)." },
         app: { type: "string", description: "Filter to a specific app (e.g. 'com.apple.Safari' or 'Linear')." },
+        machine: { type: "string", description: "Filter to observations captured on one machine (its sourceMachineId). Omit to search every machine." },
         limit: { type: "integer", minimum: 1, maximum: 200 }
       },
       additionalProperties: false
@@ -390,6 +391,7 @@ export function registerCoreTools(registry, runtime) {
         since: args.since ?? null,
         until: args.until ?? null,
         app: args.app ?? null,
+        machine: args.machine ?? null,
         limit: args.limit ?? 25
       });
       return { count: results.length, results };

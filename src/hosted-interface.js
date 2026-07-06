@@ -421,8 +421,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const since = url.searchParams.get("since") ?? null;
         const until = url.searchParams.get("until") ?? null;
         const app = url.searchParams.get("app") ?? null;
+        const machine = url.searchParams.get("machine") ?? null;
         const limit = Number.parseInt(url.searchParams.get("limit") ?? "25", 10);
-        const results = await runtime.observations.search({ query, since, until, app, limit });
+        const results = await runtime.observations.search({ query, since, until, app, machine, limit });
         return sendJson(res, 200, results);
       }
       if (method === "GET" && pathname === "/observations/timeline") {
