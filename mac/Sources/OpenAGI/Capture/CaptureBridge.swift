@@ -30,12 +30,11 @@ final class CaptureBridge {
     let batch = CaptureStorage.shared.unpushedBatch(limit: 100)
     if batch.isEmpty { return }
 
-    // TODO(roadmap/remote-capture): make this configurable so the Mac
-    // can run as a capture-only client streaming to a remote daemon
-    // (e.g. a home Mac mini). Plumbing to a remote URL + bearer token
-    // is the same as localhost; just a settings field + UserDefaults.
-    // See docs/ROADMAP.md for the full design.
-    let url = URL(string: "http://127.0.0.1:43210/observations")!
+    let base = await captureBaseSafe()
+    guard let url = URL(string: base + "/observations") else {
+      NSLog("OpenAGI bridge: invalid capture base URL: \(base)")
+      return
+    }
     var req = URLRequest(url: url)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -77,8 +76,19 @@ final class CaptureBridge {
   }
 
   @MainActor
+  private func captureBaseSafe() async -> String {
+    let raw = AppState.shared.captureRemoteURL.trimmingCharacters(in: .whitespaces)
+    if raw.isEmpty { return "http://127.0.0.1:43210" }
+    return raw.hasSuffix("/") ? String(raw.dropLast()) : raw
+  }
+
+  @MainActor
   private func tokenSafe() async -> String? {
-    AppState.shared.authToken()
+    let remoteURL = AppState.shared.captureRemoteURL.trimmingCharacters(in: .whitespaces)
+    if !remoteURL.isEmpty, !AppState.shared.captureRemoteToken.isEmpty {
+      return AppState.shared.captureRemoteToken
+    }
+    return AppState.shared.authToken()
   }
 
   // Convenience: nudge the bridge to flush immediately (e.g. on app quit).

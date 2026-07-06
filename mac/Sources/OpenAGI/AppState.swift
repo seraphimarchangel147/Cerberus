@@ -43,6 +43,18 @@ final class AppState: ObservableObject {
     OutreachConsumer.shared.reconfigure(url: url, token: token)
   }
 
+  // Remote capture target. Empty means the local daemon, preserving the
+  // existing default. Seed with defaults write app.openagi.daemon daemonBaseURL.
+  @Published var captureRemoteURL: String = UserDefaults.standard.string(forKey: "daemonBaseURL") ?? ""
+  @Published var captureRemoteToken: String = UserDefaults.standard.string(forKey: "daemonToken") ?? ""
+
+  func setCaptureMain(url: String, token: String) {
+    captureRemoteURL = url
+    captureRemoteToken = token
+    UserDefaults.standard.set(url, forKey: "daemonBaseURL")
+    UserDefaults.standard.set(token, forKey: "daemonToken")
+  }
+
   struct Nudge: Identifiable, Equatable {
     let id: String
     let title: String
