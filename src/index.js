@@ -46,3 +46,4 @@ export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";
 export { registerCoreTools, ToolRegistry } from "./tool-registry.js";
 export { createHostedInterface } from "./hosted-interface.js";
+export { contentWords, countProperNouns, deriveSpecialistScope, measureAxes, measureSpecificity } from "./signal-axes.js";
