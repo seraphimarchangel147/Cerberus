@@ -2,6 +2,7 @@ import { InMemoryAgentStore } from "./agent-store.js";
 import { createModelProvider } from "./model-provider.js";
 import { createId, nowIso } from "./utils.js";
 import { detectTaskInChat } from "./task-store.js";
+import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZE_RE } from "./signal-axes.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -76,7 +77,7 @@ export class AgentHost {
       try { this.runtime.outcomes?.resolveByUserFollowup?.(sessionId, text); } catch { /* best effort */ }
     }
 
-    const signal = this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {} });
+    const signal = await this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {} });
     const isSpecialist = agent.role === "specialist";
     const output = this.runtime.processSignal(signal, {
       scope: isSpecialist ? `specialist:${agent.id}` : "main",
@@ -186,6 +187,7 @@ export class AgentHost {
       toolCalls: (modelResult.toolCalls ?? []).map((c) => ({ name: c.name, ok: c.result?.ok ?? false })),
       metadata: {
         specialistId: agent.role === "specialist" ? agent.id : null,
+        signalSummary: signal.summary,
         scrutinyScore: output.scrutiny.score,
         routing: routing ? {
           mode: routing.mode,
@@ -263,35 +265,44 @@ export class AgentHost {
     };
   }
 
-  messageToSignal({ text, channel, from, agent, sessionId, metadata }) {
+  async messageToSignal({ text, channel, from, agent, sessionId, metadata }) {
     const lower = text.toLowerCase();
-    const asksToRemember = /\bremember\b|\bsave\b|\bdon't forget\b/.test(lower);
-    const asksToSchedule = /\bevery\b|\bdaily\b|\bweekly\b|\btomorrow\b|\bremind\b|\bschedule\b/.test(lower);
-    const asksToSpecialize = /\bagent\b|\bspecialist\b|\bsub-?agent\b|\bdo this often\b|\bautomate\b/.test(lower);
-    const risk = /\bdelete\b|\bdeploy\b|\bpayment\b|\bproduction\b|\blegal\b|\bmedical\b|\bsecurity\b/.test(lower) ? 0.75 : 0.35;
-    const repetition = asksToSchedule || asksToSpecialize ? 0.82 : 0.35;
-    const novelty = asksToRemember || asksToSpecialize ? 0.65 : 0.4;
+    const asksToRemember = REMEMBER_RE.test(lower);
+    const asksToSchedule = SCHEDULE_RE.test(lower);
+    const asksToSpecialize = SPECIALIZE_RE.test(lower);
 
-    return {
+    // C2: measured axes replace the old per-signal constants. Deterministic
+    // heuristics over the text plus the runtime's stores; absent stores
+    // degrade to the previous keyword values (see src/signal-axes.js).
+    const axes = await measureAxes({
+      text,
+      memorySystem: this.runtime.memory ?? null,
+      vectorStore: this.runtime.vectorStore ?? null,
+      outcomeStore: this.runtime.outcomes ?? null
+    });
+
+    const taskType = asksToSpecialize ? "specialization-candidate" : "adaptation-review";
+
+    const signal = {
       id: createId("sig"),
       source: channel,
       type: "message",
       domain: "general",
-      taskType: asksToSpecialize ? "specialization-candidate" : "adaptation-review",
+      taskType,
       summary: text.slice(0, 240),
       content: text,
       citations: [`session:${sessionId}`, `agent:${agent.id}`, `from:${from}`],
       tags: ["message", channel, agent.id],
       urgency: metadata.urgent ? 0.85 : 0.45,
-      impact: asksToRemember || asksToSpecialize ? 0.72 : 0.55,
+      impact: axes.impact,
       externalPressure: 0.55,
       internalPressure: asksToSchedule ? 0.7 : 0.5,
-      novelty,
-      repetition,
-      risk,
+      novelty: axes.novelty,
+      repetition: axes.repetition,
+      risk: axes.risk,
       ambiguity: 0.35,
-      confidence: 0.7,
-      specificity: 0.65,
+      confidence: axes.confidence,
+      specificity: axes.specificity,
       conflict: 0,
       goalAlignment: 0.75,
       strategicFit: 0.7,
@@ -299,6 +310,23 @@ export class AgentHost {
       receivedAt: nowIso(),
       metadata
     };
+
+    // C2/G2: specialization candidates carry a content-derived bounded scope
+    // and success metric (propagation-controller.js:99-100 consumes them),
+    // plus a scope-derived goal — the dedupe signature hashes
+    // {workflow, domain, taskType, goal} (propagation-controller.js:177-184),
+    // so without a distinct goal every scope would still collapse into one
+    // general-specialization-candidate specialist.
+    if (taskType === "specialization-candidate") {
+      const scope = deriveSpecialistScope(text, signal.domain);
+      if (scope) {
+        signal.specialistScope = scope;
+        signal.successMetric = "outcome quality >= 0.6 over next 10 activations";
+        signal.goal = `Handle ${scope} tasks within a bounded scope.`;
+      }
+    }
+
+    return signal;
   }
 
   instructionsForAgent(agent, output, intuitions = [], ambientContext = null, screenContext = null) {
