@@ -19,6 +19,7 @@ import { resolveDataDir } from "./data-dir.js";
 const DEFAULT_MIN_SAMPLES = 50;
 const DEFAULT_MAX_DELTA = 0.05;
 const DEFAULT_WARMUP = 4;
+const VARIANCE_FLOOR = 0.02;
 const DIMENSIONS = ["environment", "company", "evidence", "memory", "uncertainty"];
 
 export class ScrutinyFitter {
@@ -149,7 +150,9 @@ export class ScrutinyFitter {
     this.state.cycles += 1;
     this.state.lastRunAt = (now instanceof Date ? now : new Date(now)).toISOString();
 
-    const autoApply = this.state.cycles > this.warmupCycles;
+    const flatDims = flatDimensions(outcomes, VARIANCE_FLOOR);
+    const guardTripped = flatDims.length >= 2;
+    const autoApply = this.state.cycles > this.warmupCycles && !guardTripped;
     if (autoApply) {
       this._applyAndPersist(proposals, { source: "auto-fit", cycle: this.state.cycles, at: this.state.lastRunAt });
     } else {
@@ -157,9 +160,13 @@ export class ScrutinyFitter {
         cycle: this.state.cycles,
         at: this.state.lastRunAt,
         proposals,
-        applied: false
+        applied: false,
+        ...(guardTripped ? { varianceGuard: { flatDimensions: flatDims, floor: VARIANCE_FLOOR } } : {})
       });
       this.persistPending();
+      if (guardTripped && this.state.cycles > this.warmupCycles) {
+        console.warn(`[scrutiny-fitter] variance guard: auto-apply skipped, ${flatDims.length} near-constant dimension(s) (stddev < ${VARIANCE_FLOOR}): ${flatDims.join(", ")}`);
+      }
     }
 
     // Drained signals are kept in the audit log but no longer affect future cycles.
@@ -169,6 +176,7 @@ export class ScrutinyFitter {
     return {
       cycle: this.state.cycles,
       autoApplied: autoApply,
+      varianceGuard: guardTripped ? { flatDimensions: flatDims, floor: VARIANCE_FLOOR } : null,
       sampleCount: outcomes.length,
       proposals
     };
@@ -255,6 +263,28 @@ function applyDeltas(weights, deltas, maxDelta) {
 function clampDelta(value, maxDelta) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(-maxDelta, Math.min(maxDelta, value));
+}
+
+function flatDimensions(outcomes, floor) {
+  const flat = [];
+  for (const dim of DIMENSIONS) {
+    const xs = [];
+    for (const o of outcomes) {
+      const x = o.scrutinyDimensions?.[dim];
+      if (typeof x === "number") xs.push(x);
+    }
+    if (xs.length === 0) continue;
+    if (stddev(xs) < floor) flat.push(dim);
+  }
+  return flat;
+}
+
+function stddev(xs) {
+  const n = xs.length;
+  const mean = xs.reduce((a, b) => a + b, 0) / n;
+  let sq = 0;
+  for (const x of xs) sq += (x - mean) * (x - mean);
+  return Math.sqrt(sq / n);
 }
 
 function pearson(xs, ys) {

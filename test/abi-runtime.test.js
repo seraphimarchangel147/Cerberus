@@ -756,7 +756,13 @@ test("fitter restore is a no-op without a weights file", () => {
 test("scrutiny fitter judge signal averages with correlation deltas", () => {
   const runtime = createDefaultRuntime();
   for (let i = 0; i < 50; i += 1) {
-    const dims = { environment: 0.5, company: 0.5, evidence: 0.5, memory: 0.5, uncertainty: 0.5 };
+    const dims = {
+      environment: 0.3 + (i % 10) * 0.05,
+      company: 0.3 + ((i + 2) % 10) * 0.05,
+      evidence: 0.3 + ((i + 4) % 10) * 0.05,
+      memory: 0.3 + ((i + 6) % 10) * 0.05,
+      uncertainty: 0.3 + ((i + 8) % 10) * 0.05
+    };
     const o = runtime.outcomes.record({ kind: "agent-reply", scrutinyAction: "act", scrutinyDimensions: dims });
     runtime.outcomes.resolve(o.id, 0.7, "system-inferred");
   }
