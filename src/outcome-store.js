@@ -141,7 +141,7 @@ export class OutcomeStore {
    * Heuristic resolution sweep — inspects pending outcomes and tries to score them.
    * - agent-reply with a follow-up user message → score from follow-up tone
    * - sent-message with no reply within 6h → 0.4 (delivered, no engagement)
-   * - cron-fire / autopilot-fire with tool calls → 0.7 productive; 'standing by' → 0.5 quiet
+   * - cron-fire / autopilot-fire with tool calls -> graded by per-call ok flags via scoreFromToolCalls (all ok 0.7, some failed 0.45, all failed 0.1); 'standing by' -> 0.5 quiet
    * - anything pending > 24h with no signal → resolve null with source 'timeout'
    */
   resolveSweep({ now = new Date(), agentStore = null, timeoutHours = 24, replyWindowHours = 6 } = {}) {
@@ -166,9 +166,10 @@ export class OutcomeStore {
 
       if (score === null && (o.kind === "cron-fire" || o.kind === "autopilot-fire")) {
         if (Array.isArray(o.toolCalls) && o.toolCalls.length > 0) {
-          score = 0.7;
+          const failedCalls = o.toolCalls.filter((c) => !(c?.ok)).length;
+          score = scoreFromToolCalls(o.toolCalls);
           source = "system-inferred";
-          note = `${o.toolCalls.length} tool call(s) executed`;
+          note = `${o.toolCalls.length} tool call(s) executed, ${failedCalls} failed`;
         } else if (age > 60 * 60 * 1000) {
           score = 0.5;
           source = "system-inferred";
@@ -232,6 +233,19 @@ export class OutcomeStore {
       this.outcomes = new Map([...pending, ...resolved].map((o) => [o.id, o]));
     }
   }
+}
+
+/**
+ * Grade a run by its recorded per-call ok flags: [{ name, ok }].
+ * Pure so it is unit-testable.
+ */
+export function scoreFromToolCalls(toolCalls) {
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  if (calls.length === 0) return 0.5;
+  const failed = calls.filter((c) => !(c?.ok)).length;
+  if (failed === 0) return 0.7;
+  if (failed === calls.length) return 0.1;
+  return 0.45;
 }
 
 function clampScore(s) {

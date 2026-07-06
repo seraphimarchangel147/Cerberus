@@ -27,7 +27,7 @@ export { McpStdioClient } from "./mcp-client.js";
 export { McpHttpClient } from "./mcp-http-client.js";
 export { McpOAuthClient } from "./mcp-oauth.js";
 export { MemoryCondenser } from "./memory-condenser.js";
-export { OutcomeStore } from "./outcome-store.js";
+export { OutcomeStore, scoreFromToolCalls } from "./outcome-store.js";
 export { ObservationStore } from "./observation-store.js";
 export { PatternMiner } from "./pattern-miner.js";
 export { SkillReplay, parseReplayBlock } from "./skill-replay.js";
