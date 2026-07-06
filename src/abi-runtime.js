@@ -217,6 +217,11 @@ export class AbiRuntime {
     this.skillReplay = options.skillReplay ?? new SkillReplay({ runtime: this, dataDir: options.dataDir, ...(options.skillReplayOptions ?? {}) });
     this.outputs = [];
     this.feedback = [];
+    // Overlap guard state for tick(): the hosted-interface ticker fires
+    // every 10s without awaiting, so a slow tick must cause later fires
+    // to skip instead of stacking concurrent runs of the same jobs.
+    this._tickInFlight = false;
+    this._tickSkips = 0;
 
     if (options.registerDefaults !== false) {
       this.integrations.register(createAbiIntegration());
@@ -596,6 +601,26 @@ export class AbiRuntime {
   }
 
   async tick(now = new Date()) {
+    // Skip, don't stack: if a previous tick is still awaiting (slow LLM call
+    // inside a cron job), this fire returns immediately. Log once per skip
+    // streak so a wedged tick is visible without spamming a line every 10s.
+    if (this._tickInFlight) {
+      this._tickSkips += 1;
+      if (this._tickSkips === 1) {
+        console.warn("[openagi] cron tick still in flight — skipping overlapping tick(s) until it finishes");
+      }
+      return [];
+    }
+    this._tickInFlight = true;
+    try {
+      return await this._tickOnce(now);
+    } finally {
+      this._tickInFlight = false;
+      this._tickSkips = 0;
+    }
+  }
+
+  async _tickOnce(now = new Date()) {
     this.memory.decay(now);
 
     // If any due jobs are >5min overdue, this tick is catching up after
