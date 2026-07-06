@@ -198,6 +198,17 @@ async function cmdMigrate(positional, flags) {
   return 0;
 }
 
+async function cmdPurgeOutcomes(flags) {
+  const { purgePoisonedOutcomes } = await import("../src/migrate.js");
+  const dryRun = flags.dryRun === true || flags.check === true || process.env.OPENAGI_MIGRATE_DRY_RUN === "1";
+  const result = purgePoisonedOutcomes({ dryRun });
+  if (flags.json) { console.log(JSON.stringify(result, null, 2)); return 0; }
+  if (result.dryRun) console.log(c(YELLOW, "\n(dry run - nothing changed. Stop the daemon, then re-run without --dry-run to purge.)"));
+  else if (result.removed > 0) console.log(c(GREEN, `✓ purged ${result.removed} poisoned outcomes (backup: ${result.backupPath})`) + c(DIM, "\nRestart the daemon so it reloads the cleaned snapshot."));
+  else console.log(c(GREEN, "✓ nothing to purge."));
+  return 0;
+}
+
 async function cmdImessageServer(flags) {
   const { createImessageServer } = await import("../src/integrations/imessage-server.js");
   const token = flags.token ?? process.env.OPENAGI_IMESSAGE_NODE_TOKEN ?? null;
@@ -342,6 +353,9 @@ ${c(BOLD, "Use it (local, or a remote main):")}
                               OPENAGI_AUTO_UPDATE=1 for a daily auto-update
   openagi migrate <openclaw|hermes> [--from D] [--dry-run]
                               import another agent's persona, memory + telegram
+  openagi purge-outcomes [--dry-run]
+                              drop poisoned Jun 7-16 old-format outcome rows
+                              from the snapshot (backs up first)
   openagi tick                fire a scheduler tick
   openagi models              show the model tiering plan + savings tips
 
@@ -383,6 +397,7 @@ async function main() {
       case "unpair": return cmdUnpair();
       case "update": return await cmdUpdate(positional, flags);
       case "migrate": return await cmdMigrate(positional, flags);
+      case "purge-outcomes": return await cmdPurgeOutcomes(flags);
       case "imessage-bridge": return await cmdImessageBridge(flags);
       case "imessage-search": return await cmdImessageSearch(positional, flags);
       case "imessage-server": return await cmdImessageServer(flags);

@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readJsonFile, writeJsonAtomic } from "./file-utils.js";
+import { nowIso } from "./utils.js";
+import { resolveDataDir } from "./data-dir.js";
 
 // Migrator: import an existing OpenClaw or Hermes Agent install into OpenAGI —
 // persona/identity, memory, and the Telegram bot — so the agent moves over as
@@ -151,4 +154,52 @@ export async function applyMigration({ extracted, dataDir, client, dryRun = fals
   }
 
   return { ...plan, importedMemories, notes: extracted.notes };
+}
+
+const PURGE_WINDOW_START = "2026-06-07";
+const PURGE_WINDOW_END_EXCLUSIVE = "2026-06-17";
+const CURRENT_DIMENSION_KEYS = ["risk", "novelty", "repetition"];
+
+export function isPoisonedOutcome(outcome) {
+  if (!outcome || outcome.resolved !== true) return false;
+  const dims = outcome.scrutinyDimensions;
+  if (!dims || typeof dims !== "object") return false;
+  const missingCurrentKey = CURRENT_DIMENSION_KEYS.some((key) => typeof dims[key] !== "number");
+  if (!missingCurrentKey) return false;
+  if (typeof outcome.resolvedAt !== "string") return false;
+  return outcome.resolvedAt >= PURGE_WINDOW_START && outcome.resolvedAt < PURGE_WINDOW_END_EXCLUSIVE;
+}
+
+export function purgePoisonedOutcomes({
+  dataDir = resolveDataDir(),
+  dryRun = process.env.OPENAGI_MIGRATE_DRY_RUN === "1",
+  log = console.log
+} = {}) {
+  const snapshotPath = path.join(dataDir, "outcomes", "snapshot.json");
+  const snap = readJsonFile(snapshotPath, null);
+  if (!snap || !Array.isArray(snap.outcomes)) {
+    log(`purge-outcomes: no snapshot at ${snapshotPath} - nothing to do.`);
+    return { dryRun, snapshotPath, total: 0, removed: 0, kept: 0, backupPath: null };
+  }
+
+  const kept = [];
+  const removed = [];
+  for (const outcome of snap.outcomes) {
+    if (isPoisonedOutcome(outcome)) removed.push(outcome);
+    else kept.push(outcome);
+  }
+
+  const label = dryRun ? "purge-outcomes (dry run)" : "purge-outcomes";
+  log(`${label}: ${snap.outcomes.length} outcomes in ${snapshotPath}`);
+  log(`${label}: removed=${removed.length} (old dims format, resolved 2026-06-07..2026-06-16 UTC), kept=${kept.length}${dryRun ? " - no changes written" : ""}`);
+
+  let backupPath = null;
+  if (!dryRun && removed.length > 0) {
+    backupPath = path.join(dataDir, "outcomes", `snapshot.backup-${nowIso().replace(/[:.]/g, "-")}.json`);
+    fs.copyFileSync(snapshotPath, backupPath);
+    writeJsonAtomic(snapshotPath, { version: snap.version ?? 1, updatedAt: nowIso(), outcomes: kept });
+    log(`${label}: backup written to ${backupPath}`);
+  }
+
+  return { dryRun, snapshotPath, total: snap.outcomes.length, removed: removed.length, kept: kept.length, backupPath };
 }
