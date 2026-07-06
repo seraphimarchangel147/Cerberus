@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir } from "./file-utils.js";
+import { scoreFromToolCalls } from "./outcome-store.js";
 
 export class SkillRegistry {
   constructor(options = {}) {
@@ -104,9 +105,13 @@ export class SkillRegistry {
         instructions,
         context: { ...context, skill: skill.name }
       });
-      // Successful skill run scores 0.7 by default. The resolveSweep
-      // can downgrade later if user feedback is negative.
-      if (outcome) this.runtime.outcomes.resolve(outcome.id, 0.7, "skill-completed");
+      // Tool-using skill completions are graded by their per-call results.
+      // Text-only completions keep the historical 0.7.
+      if (outcome) {
+        const calls = (result.toolCalls ?? []).map((c) => ({ name: c.name, ok: c.result?.ok ?? false }));
+        const completionScore = calls.length > 0 ? scoreFromToolCalls(calls) : 0.7;
+        this.runtime.outcomes.resolve(outcome.id, completionScore, "skill-completed");
+      }
       return { skill: skill.name, output: result.text, toolCalls: result.toolCalls ?? [] };
     } catch (error) {
       if (outcome) this.runtime.outcomes.resolve(outcome.id, 0.1, "skill-failed", error.message);

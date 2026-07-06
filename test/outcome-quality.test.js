@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { OutcomeStore, scoreFromToolCalls } from "../src/outcome-store.js";
+import { SkillRegistry } from "../src/skills.js";
 
 test("scoreFromToolCalls grades runs by per-call ok flags", () => {
   const cases = [
@@ -66,4 +67,44 @@ test("resolveSweep still scores a quiet old cron fire 0.5", () => {
   assert.equal(sweep[0].id, quiet.id);
   assert.equal(sweep[0].score, 0.5);
   assert.equal(sweep[0].source, "system-inferred");
+});
+
+test("skill run grades completion by tool-call results; tool-free run keeps 0.7", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-skill-quality-"));
+  const skillsRoot = path.join(root, "skills");
+  const skillDir = path.join(skillsRoot, "demo");
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(skillDir, "SKILL.md"),
+    "---\nname: demo\ndescription: test skill\n---\nDo the thing: {{input}}\n"
+  );
+
+  const outcomes = new OutcomeStore({ dir: path.join(root, "outcomes") });
+  let nextToolCalls = [
+    { name: "web_search", arguments: {}, result: { ok: false } },
+    { name: "remember", arguments: {}, result: { ok: false } }
+  ];
+  const runtime = {
+    outcomes,
+    agentHost: {
+      modelProvider: {
+        generate: async () => ({ text: "done", toolCalls: nextToolCalls })
+      }
+    }
+  };
+  const registry = new SkillRegistry({ runtime, dirs: [skillsRoot] });
+
+  const failedRun = await registry.run("demo", { input: "attempt one" });
+  assert.equal(failedRun.output, "done");
+  const failedOutcome = outcomes.recent(1)[0];
+  assert.equal(failedOutcome.kind, "skill-run");
+  assert.equal(failedOutcome.resolved, true);
+  assert.equal(failedOutcome.qualityScore, 0.1);
+  assert.equal(failedOutcome.source, "skill-completed", "source string is unchanged");
+
+  nextToolCalls = [];
+  await registry.run("demo", { input: "attempt two" });
+  const quietOutcome = outcomes.recent(10).find((o) => o.metadata.input === "attempt two");
+  assert.equal(quietOutcome.qualityScore, 0.7);
+  assert.equal(quietOutcome.source, "skill-completed");
 });
