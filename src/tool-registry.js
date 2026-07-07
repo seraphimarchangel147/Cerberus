@@ -483,7 +483,15 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "replay_skill",
-    description: "Trigger a skill's structured replay steps (open_app, keyboard_shortcut, type, applescript, etc.) on the user's Mac. Use only for skills with a `replay:` block in their SKILL.md. Set dryRun:true to log actions without executing — recommended for first-time use.",
+    // Drives the user's Mac (AppleScript / keyboard / app control) — always
+    // route through the pending-actions approval queue, same as
+    // register_mcp_server and restart_daemon. sideEffects is the default but
+    // is declared explicitly so an audit of gate flags reads unambiguously.
+    needsConfirmation: true,
+    sideEffects: true,
+    summarize: (args) =>
+      `Replay skill '${args.name}' on the Mac${args.dryRun ? " (dry run — logs only)" : " (AppleScript/keyboard control)"}`,
+    description: "Trigger a skill's structured replay steps (open_app, keyboard_shortcut, type, applescript, etc.) on the user's Mac. Use only for skills with a `replay:` block in their SKILL.md. Set dryRun:true to log actions without executing — recommended for first-time use. THIS REQUIRES USER APPROVAL — calls return {status:'awaiting_confirmation'} and run only after the user approves via the dashboard's Approvals tab.",
     parameters: {
       type: "object",
       properties: {
