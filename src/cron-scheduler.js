@@ -1,5 +1,26 @@
 import { createId, nowIso } from "./utils.js";
 
+// Per-job timeout: one hung handler (a stuck LLM call, a wedged MCP server)
+// must not stall every later scheduled job. Each handler invocation in
+// runDue() races a timer; on timeout the fire records as failed and
+// nextRunAt advances normally. HONEST LIMITATION: Promise.race abandons the
+// losing promise — the hung handler keeps running in the background; it is
+// NOT cancelled. Acceptable v1 because handlers are in-process async work we
+// cannot kill without worker isolation, and the property we need is that the
+// schedule keeps moving; the leaked promise is bounded by process lifetime.
+export const TIMEOUT_MS = 10 * 60 * 1000;
+
+const TIMED_OUT = Symbol("cron-job-timed-out");
+
+// Env override: OPENAGI_CRON_JOB_TIMEOUT_MS, parsed with Number and only
+// honored when finite and > 0; anything else falls back to TIMEOUT_MS.
+export function resolveJobTimeoutMs(env = process.env) {
+  const raw = env.OPENAGI_CRON_JOB_TIMEOUT_MS;
+  if (raw === undefined || raw === null || raw === "") return TIMEOUT_MS;
+  const parsed = Number(raw);
+  return (Number.isFinite(parsed) && parsed > 0) ? parsed : TIMEOUT_MS;
+}
+
 export class CronScheduler {
   constructor() {
     this.jobs = new Map();
@@ -35,10 +56,46 @@ export class CronScheduler {
     return this.listJobs().filter((job) => job.enabled && new Date(job.nextRunAt) <= current);
   }
 
-  async runDue(handler, now = new Date()) {
+  async runDue(handler, now = new Date(), options = {}) {
+    const timeoutMs = options.timeoutMs ?? resolveJobTimeoutMs();
     const results = [];
     for (const job of this.dueJobs(now)) {
-      const result = await handler(job);
+      // Mid-run marker hook: FileBackedCronScheduler persists a
+      // { runningJobId, startedAt } note so a daemon death mid-job is
+      // visible on the next boot. No-op on the in-memory scheduler.
+      this.noteJobStart?.(job);
+      let result;
+      let timer = null;
+      try {
+        const raced = await Promise.race([
+          handler(job),
+          new Promise((resolve) => {
+            // Deliberately ref'd: when the handler hangs, this timer is the
+            // only thing that resolves the race, so it must keep the event
+            // loop alive until it fires. It is always cleared in finally, so
+            // it never outlives the fire.
+            timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+          })
+        ]);
+        if (raced === TIMED_OUT) {
+          result = {
+            failed: true,
+            timedOut: true,
+            error: `Job ${job.id} timed out after ${timeoutMs}ms (handler abandoned, not cancelled)`
+          };
+          options.onTimeout?.(job, timeoutMs);
+        } else {
+          result = raced;
+        }
+      } catch (error) {
+        // A throwing handler used to abort the whole runDue loop, leaving
+        // this job due again next tick (hot retry every 10s) and later due
+        // jobs unfired. Record the failure and keep the schedule moving.
+        result = { failed: true, timedOut: false, error: error?.message ?? String(error) };
+      } finally {
+        if (timer) clearTimeout(timer);
+        this.noteJobEnd?.(job);
+      }
       job.lastRunAt = (now instanceof Date ? now : new Date(now)).toISOString();
       job.nextRunAt = this.computeNextRun(job, new Date(job.lastRunAt)).toISOString();
       results.push({ job, result });

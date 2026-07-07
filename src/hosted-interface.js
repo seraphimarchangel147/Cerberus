@@ -57,6 +57,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("skill-candidate", (data) => broadcast("skill-candidate", data));
   events.on("miner-result", (data) => broadcast("miner-result", data));
   events.on("cron-catchup", (data) => broadcast("cron-catchup", data));
+  events.on("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
   events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
   events.on("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
   events.on("task-updated", (data) => broadcast("task-updated", data));

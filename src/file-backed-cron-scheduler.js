@@ -47,8 +47,8 @@ export class FileBackedCronScheduler extends CronScheduler {
     return job;
   }
 
-  async runDue(handler, now = new Date()) {
-    const results = await super.runDue(handler, now);
+  async runDue(handler, now = new Date(), options = {}) {
+    const results = await super.runDue(handler, now, options);
     if (results.length > 0) this.save();
     return results;
   }

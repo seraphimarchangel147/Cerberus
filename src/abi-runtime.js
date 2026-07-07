@@ -771,7 +771,16 @@ export class AbiRuntime {
         return this.runAmbientDigest({ now });
       }
       return { skipped: true, reason: `No handler for task ${job.task}` };
-    }, now);
+    }, now, {
+      onTimeout: (job, timeoutMs) => {
+        this.events?.emit?.("cron-job-timeout", {
+          at: nowIso(),
+          jobId: job.id,
+          jobName: job.name,
+          timeoutMs
+        });
+      }
+    });
   }
 
   // Late-bind the event bus to the outreach mapper. hosted-interface.js owns
