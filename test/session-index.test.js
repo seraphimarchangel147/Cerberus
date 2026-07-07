@@ -243,3 +243,69 @@ test("init() never rejects: a DB-open failure degrades to the JSONL fallback ins
     process.off("unhandledRejection", onUnhandled);
   }
 });
+
+// Discovered live on a production install: msg_id is UNINDEXED in the FTS5
+// schema (search comment at src/session-index.js:113-114), so indexMessage's
+// per-row dedup lookup ("SELECT 1 FROM messages WHERE msg_id = ?") is a full
+// table scan — O(N) per insert, O(N^2) for a full backfill. Even wrapped in
+// one transaction (the earlier fix), a real history of 100k+ messages turned
+// this into a many-minutes-long stall that blocked the HTTP server entirely
+// (Node's single JS thread has no I/O wait to yield on anymore once
+// everything is one transaction). rebuildFromTranscripts only ever runs
+// against a freshly empty index (gated by stats().messages > 0 in
+// abi-runtime.js), so no duplicate can exist within its own walk — dedup is
+// providing zero protection there and can be skipped entirely for that path.
+test("rebuildFromTranscripts completes quickly on a large history (dedup skipped on the empty-index bulk path)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-scale-"));
+  const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
+  const MESSAGE_COUNT = 3000;
+  for (let i = 0; i < MESSAGE_COUNT; i++) {
+    store.appendMessage(`local:user:session-${i % 20}`, {
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `message number ${i} discussing topic ${i % 50} and widgets`,
+      agentId: "main", channel: "local", from: "user",
+      createdAt: new Date(Date.UTC(2026, 5, 1) + i * 1000).toISOString()
+    });
+  }
+  const index = new SessionIndex({ dir: path.join(dir, "agent-host") });
+  const startedAt = Date.now();
+  const result = await index.rebuildFromTranscripts(store);
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(result.indexed, MESSAGE_COUNT);
+  assert.ok(elapsedMs < 3000, `expected the ${MESSAGE_COUNT}-message backfill to finish in under 3s, took ${elapsedMs}ms (O(N^2) dedup regression?)`);
+  const stats = await index.stats();
+  assert.equal(stats.messages, MESSAGE_COUNT);
+});
+
+test("rebuildFromTranscripts never runs the O(N) dedup lookup; indexMessage still dedupes by default", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-dedupe-"));
+  const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
+  store.appendMessage("local:user:main", {
+    id: "msg_dedupe_check", role: "user", content: "checking dedupe behavior",
+    agentId: "main", channel: "local", from: "user", createdAt: "2026-06-01T10:00:00.000Z"
+  });
+  const index = new SessionIndex({ dir: path.join(dir, "agent-host") });
+  await index.ready;
+  const originalPrepare = index.db.prepare.bind(index.db);
+  const preparedSql = [];
+  index.db.prepare = (sql) => { preparedSql.push(sql); return originalPrepare(sql); };
+
+  await index.rebuildFromTranscripts(store);
+  assert.ok(
+    !preparedSql.some((sql) => sql.includes("WHERE msg_id")),
+    "rebuildFromTranscripts must never prepare the dedup lookup (skipDedupe: true)"
+  );
+
+  // The live incremental path (no skipDedupe) must still dedupe correctly.
+  preparedSql.length = 0;
+  const first = await index.indexMessage("local:user:live", "main", {
+    id: "msg_live_0001", role: "user", content: "live message", createdAt: "2026-07-07T00:00:00.000Z"
+  });
+  const second = await index.indexMessage("local:user:live", "main", {
+    id: "msg_live_0001", role: "user", content: "live message", createdAt: "2026-07-07T00:00:00.000Z"
+  });
+  assert.equal(first.indexed, 1);
+  assert.equal(second.indexed, 0, "duplicate id on the live path is still deduped");
+  assert.equal(second.deduped, true);
+  assert.ok(preparedSql.some((sql) => sql.includes("WHERE msg_id")), "live path still runs the dedup lookup");
+});

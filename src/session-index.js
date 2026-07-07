@@ -94,7 +94,7 @@ export class SessionIndex {
     }
   }
 
-  async indexMessage(sessionId, agentId, msg) {
+  async indexMessage(sessionId, agentId, msg, { skipDedupe = false } = {}) {
     await this.ready;
     if (!msg || typeof msg.content !== "string" || !msg.content.trim()) return { indexed: 0 };
     const row = {
@@ -112,7 +112,16 @@ export class SessionIndex {
     // Dedupe by message id so a boot-time backfill racing live appends can't
     // double-index a row. msg_id is UNINDEXED in the FTS5 table so this is a
     // scan — the same trade-off observation-store makes for transcript refs.
-    if (row.msgId) {
+    // skipDedupe (set only by rebuildFromTranscripts' fresh-index bulk walk)
+    // is a deliberate escape hatch: that walk only ever runs against an
+    // empty index, so no duplicate can exist within it, and the scan is
+    // O(N) per call — O(N^2) across a full backfill. On a production
+    // install with 100k+ historical messages this turned a bulk backfill
+    // into many minutes of the HTTP server being completely unresponsive
+    // (single-threaded Node has nothing to yield to once it's CPU-bound
+    // inside one transaction). The live incremental path (agent-host's
+    // per-turn indexMessage calls) keeps the dedup check.
+    if (row.msgId && !skipDedupe) {
       const existing = this.db.prepare(`SELECT 1 FROM messages WHERE msg_id = ? LIMIT 1`).get(row.msgId);
       if (existing) return { indexed: 0, deduped: true };
     }
@@ -178,7 +187,7 @@ export class SessionIndex {
         if (!session?.messages?.length) continue;
         sessions += 1;
         for (const msg of session.messages) {
-          const result = await this.indexMessage(session.id, msg.agentId ?? "main", msg);
+          const result = await this.indexMessage(session.id, msg.agentId ?? "main", msg, { skipDedupe: true });
           indexed += result.indexed ?? 0;
         }
       }
