@@ -24,6 +24,7 @@ import { MemoryCondenser } from "./memory-condenser.js";
 import { ObservationStore } from "./observation-store.js";
 import { buildAmbientDigest } from "./ambient-digest.js";
 import { OutcomeStore } from "./outcome-store.js";
+import { SessionIndex } from "./session-index.js";
 import { Introspector } from "./introspector.js";
 import { PatternMiner } from "./pattern-miner.js";
 import { SessionMiner } from "./session-miner.js";
@@ -151,6 +152,13 @@ export class AbiRuntime {
     this.budget = options.budget ?? new BudgetGuard(options.budgetOptions ?? {});
     this.outcomes = options.outcomes ?? new OutcomeStore(options.outcomeOptions ?? {});
     this.observations = options.observations ?? new ObservationStore(options.observationOptions ?? {});
+    // FTS5 index over the agent's own chat transcripts, so search_sessions can
+    // answer "what did we decide about X?" from the raw conversation record.
+    // Lives next to the transcripts at <dataDir>/agent-host/session-index.db.
+    this.sessionIndex = options.sessionIndex ?? new SessionIndex({
+      dir: options.dataDir ? path.join(options.dataDir, "agent-host") : undefined,
+      ...(options.sessionIndexOptions ?? {})
+    });
     // When an outcome resolves, push the quality into the matching specialist's running mean.
     this.outcomes.onResolve = (outcome) => {
       const specialistId = outcome.metadata?.specialistId;
@@ -1176,6 +1184,20 @@ export function createDefaultRuntime(options = {}) {
         modelProvider: options.modelProvider,
         modelProviderOptions: { ...(options.modelProviderOptions ?? {}), budgetGuard: runtime.budget }
       });
+  }
+  // First boot / backfill: when the session index is empty (missing DB, or a
+  // DB file created empty), seed it from the transcripts already on disk.
+  // Non-blocking and best-effort so a large history can't hold up startup;
+  // indexMessage dedupes by message id, so overlap with live appends during
+  // the walk is safe. The promise is kept on the index so tests can await it.
+  if (runtime.agentHost && runtime.sessionIndex) {
+    runtime.sessionIndex.rebuildPromise = Promise.resolve()
+      .then(async () => {
+        const s = await runtime.sessionIndex.stats();
+        if (s.messages > 0) return { skipped: true, reason: "index already populated" };
+        return runtime.sessionIndex.rebuildFromTranscripts(runtime.agentHost.store);
+      })
+      .catch(() => {});
   }
   // Note: we used to register a placeholder "openagi-mcp" entry here listing
   // memory-search / create-specialist / publish-output. Those are now real

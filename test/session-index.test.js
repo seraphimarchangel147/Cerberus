@@ -85,3 +85,51 @@ test("rebuildFromTranscripts backfills a fresh index from seeded transcripts", a
   assert.ok(hits.some((h) => h.sessionId === "telegram:42:main"));
   assert.ok(hits.some((h) => h.sessionId === "local:user:main"));
 });
+
+test("agent host indexes persisted chat turns; ephemeral turns are excluded", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-host-"));
+  const runtime = createDefaultRuntime({
+    modelProvider: new DeterministicModelProvider(),
+    dataDir: dir,
+    sessionIndexOptions: { dir: path.join(dir, "agent-host") },
+    observationOptions: { dir: path.join(dir, "observations") },
+    outcomeOptions: { dir: path.join(dir, "outcomes") }
+  });
+  assert.ok(runtime.sessionIndex, "runtime should construct a SessionIndex");
+
+  await runtime.agentHost.handleMessage({ channel: "local", from: "user", text: "please review the xylophone budget line" });
+  await runtime.agentHost.handleMessage({ channel: "local", from: "setup", text: "ephemeral xylograph check", ephemeral: true });
+
+  const hits = await runtime.sessionIndex.search("xylophone", { limit: 5 });
+  assert.ok(hits.length >= 1, "persisted user turn should be indexed");
+  assert.ok(hits.some((h) => h.role === "user"));
+
+  const ghost = await runtime.sessionIndex.search("xylograph", { limit: 5 });
+  assert.equal(ghost.length, 0, "ephemeral turns must not be indexed");
+});
+
+test("boot backfills an empty index from existing transcripts", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-boot-"));
+  const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
+  store.appendMessage("local:user:main", {
+    role: "user",
+    content: "archive the pelican dashboard next sprint",
+    agentId: "main",
+    channel: "local",
+    from: "user",
+    createdAt: "2026-06-06T08:00:00.000Z"
+  });
+
+  const runtime = createDefaultRuntime({
+    modelProvider: new DeterministicModelProvider(),
+    dataDir: dir,
+    agentStore: store,
+    observationOptions: { dir: path.join(dir, "observations") },
+    outcomeOptions: { dir: path.join(dir, "outcomes") }
+  });
+  assert.ok(runtime.sessionIndex.rebuildPromise, "boot should schedule a backfill");
+  await runtime.sessionIndex.rebuildPromise;
+  const hits = await runtime.sessionIndex.search("pelican", { limit: 5 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].sessionId, "local:user:main");
+});

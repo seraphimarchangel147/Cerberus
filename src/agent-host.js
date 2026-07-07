@@ -73,6 +73,14 @@ export class AgentHost {
           metadata: input.metadata ?? {}
         });
 
+    // Incremental session indexing (search_sessions): every persisted message
+    // is added to the FTS index as it lands. Best-effort — an indexing failure
+    // must never block a chat reply. Ephemeral turns leave no trace anywhere,
+    // including here.
+    if (!ephemeral && this.runtime.sessionIndex) {
+      this.runtime.sessionIndex.indexMessage(sessionId, agentId, sessionBefore.messages.at(-1)).catch(() => {});
+    }
+
     if (!ephemeral && channel !== "autopilot" && channel !== "cron") {
       try { this.runtime.outcomes?.resolveByUserFollowup?.(sessionId, text); } catch { /* best effort */ }
     }
@@ -225,6 +233,10 @@ export class AgentHost {
         });
 
     if (outcomeRecord) outcomeRecord.refId = sessionAfter.messages.at(-1)?.id ?? null;
+
+    if (!ephemeral && this.runtime.sessionIndex) {
+      this.runtime.sessionIndex.indexMessage(sessionId, agentId, sessionAfter.messages.at(-1)).catch(() => {});
+    }
 
     if (!ephemeral) {
       this.runtime.memory.remember(
