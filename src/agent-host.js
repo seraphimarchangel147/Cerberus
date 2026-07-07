@@ -85,7 +85,7 @@ export class AgentHost {
       try { this.runtime.outcomes?.resolveByUserFollowup?.(sessionId, text); } catch { /* best effort */ }
     }
 
-    const signal = await this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {} });
+    const signal = await this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {}, scrutinyOverrides: input.scrutinyOverrides ?? null });
     const isSpecialist = agent.role === "specialist";
     const output = this.runtime.processSignal(signal, {
       scope: isSpecialist ? `specialist:${agent.id}` : "main",
@@ -280,7 +280,7 @@ export class AgentHost {
     };
   }
 
-  async messageToSignal({ text, channel, from, agent, sessionId, metadata }) {
+  async messageToSignal({ text, channel, from, agent, sessionId, metadata, scrutinyOverrides = null }) {
     const lower = text.toLowerCase();
     const asksToRemember = REMEMBER_RE.test(lower);
     const asksToSchedule = SCHEDULE_RE.test(lower);
@@ -322,6 +322,7 @@ export class AgentHost {
       goalAlignment: 0.75,
       strategicFit: 0.7,
       requiresSpecialist: asksToSpecialize || asksToSchedule,
+      scrutinyOverrides,
       receivedAt: nowIso(),
       metadata
     };

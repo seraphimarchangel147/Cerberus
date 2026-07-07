@@ -95,6 +95,11 @@ Output four short bullets:
 
 No generalities. Cite specific session ids, job names, specialist ids.`;
 
+// B3 (docs/scope/abi-completion.md:116-127): the harsh review runs under a
+// raised scrutiny act threshold (0.68 -> 0.85) so the agent must clear a
+// much higher bar before acting unprompted during its own self-review turn.
+const HARSH_REVIEW_SCRUTINY_OVERRIDES = { act: 0.85 };
+
 function nextSundayEvening() {
   const d = new Date();
   d.setHours(20, 0, 0, 0);
@@ -263,7 +268,8 @@ export class AbiRuntime {
         nextRunAt: nextSundayEvening().toISOString(),
         input: {
           agentId: "main",
-          prompt: HARSH_REVIEW_PROMPT
+          prompt: HARSH_REVIEW_PROMPT,
+          scrutinyOverrides: HARSH_REVIEW_SCRUTINY_OVERRIDES
         }
       });
       this.cron.addJob({
@@ -502,7 +508,8 @@ export class AbiRuntime {
       signal,
       workflow,
       memories: memoryHits,
-      context: this.context
+      context: this.context,
+      overrides: signal.scrutinyOverrides ?? {}
     });
 
     const parentSpecialistId = options.parentSpecialistId ?? null;
@@ -1073,12 +1080,19 @@ export class AbiRuntime {
     const input = job.input ?? {};
     const sessionId = input.sessionId ?? `autopilot:${job.id}`;
     const prompt = input.prompt ?? AUTOPILOT_DEFAULT_PROMPT;
+    // B3: the harsh review runs under a raised act threshold. Cron stores
+    // persisted before this field existed keep their old saved input
+    // (CronScheduler.addJob returns the existing row), so fall back by job
+    // id — an already-deployed weekly-harsh-review still gets the bar.
+    const scrutinyOverrides = input.scrutinyOverrides
+      ?? (job.id === "weekly-harsh-review" ? HARSH_REVIEW_SCRUTINY_OVERRIDES : null);
     const result = await this.agentHost.handleMessage({
       channel: "autopilot",
       from: "autopilot",
       agentId: input.agentId ?? "main",
       sessionId,
       text: prompt,
+      scrutinyOverrides,
       metadata: {
         scheduledJobId: job.id,
         scheduledJobName: job.name,

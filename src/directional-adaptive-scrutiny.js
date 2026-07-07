@@ -20,7 +20,7 @@ export class DirectionalAdaptiveScrutiny {
     };
   }
 
-  evaluate({ signal, workflow, memories = [], context = {} }) {
+  evaluate({ signal, workflow, memories = [], context = {}, overrides = {} }) {
     const environmentScore = this.environmentPressure(signal, context);
     const companyScore = this.companyScrutiny(signal, workflow, context);
     const evidenceScore = this.evidenceQuality(signal);
@@ -39,7 +39,11 @@ export class DirectionalAdaptiveScrutiny {
     );
 
     const propagationPressure = clamp(Math.max(repetition, risk * novelty, signal.requiresSpecialist ? 0.9 : 0));
-    const action = this.selectAction({ score, risk, novelty, propagationPressure, memories, signal });
+    // Per-signal threshold override (B3 harsh review): overrides.act raises
+    // the act bar for this evaluation only. Weights and the stored
+    // thresholds are untouched.
+    const actThresholdOverride = typeof overrides.act === "number" ? overrides.act : null;
+    const action = this.selectAction({ score, risk, novelty, propagationPressure, memories, signal, actThresholdOverride });
 
     return {
       action,
@@ -101,12 +105,18 @@ export class DirectionalAdaptiveScrutiny {
     return clamp(lowEvidence * 0.45 + lowMemory * 0.25 + ambiguity * 0.3);
   }
 
-  selectAction({ score, risk, novelty, propagationPressure, memories, signal }) {
+  selectAction({ score, risk, novelty, propagationPressure, memories, signal, actThresholdOverride = null }) {
+    const actThreshold = actThresholdOverride ?? this.thresholds.act;
     if (propagationPressure >= this.thresholds.propagate && score >= this.thresholds.ask) return "propagate";
-    if (score >= this.thresholds.act && risk < 0.8) return "act";
+    if (score >= actThreshold && risk < 0.8) return "act";
     if (risk >= 0.8 && memories.length === 0) return "ask";
     if (novelty >= 0.75 && score >= this.thresholds.ask) return "ask";
     if (score >= this.thresholds.ask) {
+      // An explicit raised act bar (weekly harsh review) means "do not press
+      // ahead below the bar": the style fallbacks that return 'act' are
+      // skipped so the override cannot be bypassed by an aggressive style
+      // or a signal-supplied defaultAction.
+      if (actThresholdOverride !== null) return "ask";
       // Style-differentiated fallback when score is between ask and act:
       // cautious hedges ('ask'), aggressive presses ahead ('act'), pragmatic uses signal default.
       if (this.style === "cautious") return "ask";
