@@ -54,3 +54,34 @@ test("search snippets are capped at 160 chars", async () => {
   assert.ok(hits.length >= 1, "expected a hit");
   assert.ok(hits[0].snippet.length <= 160, `snippet must be capped at 160 chars, got ${hits[0].snippet.length}`);
 });
+
+test("rebuildFromTranscripts backfills a fresh index from seeded transcripts", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-rebuild-"));
+  const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
+  store.appendMessage("local:user:main", {
+    role: "user",
+    content: "let's standardize on the kumquat naming convention",
+    agentId: "main",
+    channel: "local",
+    from: "user",
+    createdAt: "2026-06-03T08:00:00.000Z"
+  });
+  store.appendMessage("telegram:42:main", {
+    role: "assistant",
+    content: "Reminder: kumquat convention applies to new modules only.",
+    agentId: "main",
+    channel: "telegram",
+    from: "openagi",
+    createdAt: "2026-06-04T08:00:00.000Z"
+  });
+
+  const index = new SessionIndex({ dir: path.join(dir, "agent-host") });
+  assert.equal(index.wasMissing, true, "fresh dir means the DB is reported missing");
+  const result = await index.rebuildFromTranscripts(store);
+  assert.equal(result.sessions, 2);
+  assert.equal(result.indexed, 2);
+  const hits = await index.search("kumquat", { limit: 5 });
+  assert.equal(hits.length, 2);
+  assert.ok(hits.some((h) => h.sessionId === "telegram:42:main"));
+  assert.ok(hits.some((h) => h.sessionId === "local:user:main"));
+});

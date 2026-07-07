@@ -133,6 +133,28 @@ export class SessionIndex {
     return rows.map((r) => ({ sessionId: r.session_id, ts: r.ts, role: r.role, snippet: capSnippet(r.snippet) }));
   }
 
+  // First-boot / backfill: walk every session transcript in the agent store
+  // and index each message. createDefaultRuntime invokes this at boot when
+  // the index is empty (covers both a missing DB and one created empty).
+  // indexMessage dedupes by message id, so re-running or overlapping with
+  // live appends is safe. Reads only local transcript files the store owns.
+  async rebuildFromTranscripts(agentStore) {
+    await this.ready;
+    if (!agentStore?.listSessions) return { sessions: 0, indexed: 0 };
+    let sessions = 0;
+    let indexed = 0;
+    for (const meta of agentStore.listSessions()) {
+      const session = agentStore.getSession(meta.id);
+      if (!session?.messages?.length) continue;
+      sessions += 1;
+      for (const msg of session.messages) {
+        const result = await this.indexMessage(session.id, msg.agentId ?? "main", msg);
+        indexed += result.indexed ?? 0;
+      }
+    }
+    return { sessions, indexed };
+  }
+
   async stats() {
     await this.ready;
     if (this.fallback) {
