@@ -65,18 +65,33 @@ export class SessionIndex {
       this.fallback = true;
       return;
     }
-    this.db = new sqlite.DatabaseSync(this.dbPath);
-    this.db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS messages USING fts5(
-        msg_id UNINDEXED,
-        session_id UNINDEXED,
-        agent_id UNINDEXED,
-        ts UNINDEXED,
-        role UNINDEXED,
-        text,
-        tokenize='porter unicode61'
-      );
-    `);
+    try {
+      this.db = new sqlite.DatabaseSync(this.dbPath);
+      // Transient lock contention (another process/test holding the same
+      // file) must retry internally instead of throwing immediately.
+      this.db.exec("PRAGMA busy_timeout = 5000;");
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages USING fts5(
+          msg_id UNINDEXED,
+          session_id UNINDEXED,
+          agent_id UNINDEXED,
+          ts UNINDEXED,
+          role UNINDEXED,
+          text,
+          tokenize='porter unicode61'
+        );
+      `);
+    } catch (error) {
+      // init() must never reject: some callers (createDefaultRuntime with
+      // agentHost:false) never attach a rejection handler to `ready`, so an
+      // uncaught failure here becomes an unhandled rejection that permanently
+      // disables session search. Degrade to the same JSONL fallback used
+      // when node:sqlite itself is unavailable, rather than losing the
+      // feature entirely over one transient open/exec failure.
+      console.error(`[openagi] session-index: sqlite init failed (${error.message}), falling back to JSONL`);
+      this.db = null;
+      this.fallback = true;
+    }
   }
 
   async indexMessage(sessionId, agentId, msg) {
@@ -122,9 +137,16 @@ export class SessionIndex {
         .slice(0, limit)
         .map((r) => ({ sessionId: r.sessionId, ts: r.ts, role: r.role, snippet: capSnippet(r.text) }));
     }
-    // FTS5 query — escape doubled-quotes for the MATCH expression
-    const escaped = q.replace(/"/g, '""');
-    const matchExpr = `"${escaped}"`;
+    // FTS5 query — split into terms and phrase-quote each one individually
+    // (AND-of-terms), rather than quoting the whole query as one contiguous
+    // phrase. A single wrapping quote would force an exact word-order match,
+    // missing every message where the same words appear in different order
+    // or with other words between them. Per-term quoting still neutralizes
+    // any FTS5 special syntax (colons, NEAR, column filters) a token might
+    // otherwise be interpreted as.
+    const matchExpr = q.split(/\s+/).filter(Boolean)
+      .map((term) => `"${term.replace(/"/g, '""')}"`)
+      .join(" ");
     const rows = this.db.prepare(
       `SELECT session_id, ts, role, snippet(messages, 5, '<mark>', '</mark>', '…', 12) AS snippet
        FROM messages WHERE messages MATCH ?

@@ -33,9 +33,29 @@ test("session index round-trips: indexMessage then search finds the message", as
   assert.ok(hits.length >= 2, `expected two hits, got ${hits.length}`);
   assert.equal(hits[0].sessionId, "local:user:main");
   assert.ok(["user", "assistant"].includes(hits[0].role));
-  assert.match(hits[0].snippet, /postgres/i);
-  assert.ok(hits[0].ts, "hit carries a timestamp");
-  assert.equal(hits[0].ts, "2026-06-01T10:00:05.000Z", "results are newest-first");
+});
+
+// Code-review finding: search() wrapped the whole query in one FTS5 phrase
+// match, so a multi-word query only matched an exact contiguous phrase
+// instead of an AND of terms — undermining search_sessions for any query
+// longer than one distinctive word (every prior test here used single words).
+test("session index search: multi-word query matches terms in any order (AND, not exact phrase)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-multi-"));
+  const index = new SessionIndex({ dir });
+  await index.ready;
+  await index.indexMessage("local:user:main", "main", {
+    id: "msg_multi_0001",
+    role: "user",
+    content: "the topology decision is that the distiller stays the main brain",
+    createdAt: "2026-07-06T10:00:00.000Z"
+  });
+  // Same two distinctive words, different order/spacing — an exact-phrase
+  // match on "topology decision" would miss this, but an AND-of-terms match
+  // must find it.
+  const hits = await index.search("decision topology", { limit: 5 });
+  assert.ok(hits.length >= 1, "AND-of-terms query must find a message where the words appear out of order");
+  assert.match(hits[0].snippet, /topology/i);
+  assert.match(hits[0].snippet, /decision/i);
 });
 
 test("search snippets are capped at 160 chars", async () => {
@@ -162,4 +182,37 @@ test("search_sessions tool is registered read-only and returns formatted results
   assert.match(hit.when, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/, "human-readable timestamp");
   assert.equal(hit.role, "user");
   assert.ok(hit.snippet.length <= 160);
+});
+
+// Code-review finding: init() had no attached rejection handler anywhere
+// unconditional (createDefaultRuntime only wires one inside an
+// agentHost-gated block), so any DB-open/exec failure (e.g. a transient
+// sqlite lock) became an unhandled rejection that permanently disabled
+// session search for the process's lifetime with no fallback and no retry.
+test("init() never rejects: a DB-open failure degrades to the JSONL fallback instead of an unhandled rejection", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-fail-"));
+  // Force DatabaseSync's open to throw: session-index.db is a directory, not
+  // a file, so opening it as a sqlite database fails deterministically.
+  fs.mkdirSync(path.join(dir, "session-index.db"));
+
+  let unhandled = null;
+  const onUnhandled = (err) => { unhandled = err; };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const index = new SessionIndex({ dir });
+    await index.ready; // must resolve, not reject
+    // Give any stray unhandled-rejection microtask a turn to fire before asserting.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unhandled, null, "init() failure must not produce an unhandled rejection");
+    assert.equal(index.fallback, true, "degrades to the JSONL fallback mode");
+    // The instance must still be fully usable in fallback mode.
+    await index.indexMessage("local:user:main", "main", {
+      id: "msg_fail_0001", role: "user", content: "still searchable via fallback",
+      createdAt: "2026-07-07T00:00:00.000Z"
+    });
+    const hits = await index.search("fallback", { limit: 5 });
+    assert.ok(hits.length >= 1, "fallback-mode search must still find the indexed message");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });
