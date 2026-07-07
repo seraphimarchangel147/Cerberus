@@ -165,14 +165,27 @@ export class SessionIndex {
     if (!agentStore?.listSessions) return { sessions: 0, indexed: 0 };
     let sessions = 0;
     let indexed = 0;
-    for (const meta of agentStore.listSessions()) {
-      const session = agentStore.getSession(meta.id);
-      if (!session?.messages?.length) continue;
-      sessions += 1;
-      for (const msg of session.messages) {
-        const result = await this.indexMessage(session.id, msg.agentId ?? "main", msg);
-        indexed += result.indexed ?? 0;
+    // Wrap the whole backfill in one transaction: indexMessage's per-message
+    // INSERT auto-commits (fsyncs) individually otherwise, and a production
+    // install with a large transcript history (tens of thousands of
+    // messages) turned a first-boot backfill into one fsync per message —
+    // minutes of downtime on slow storage instead of a couple of seconds.
+    const inTransaction = !this.fallback && this.db;
+    if (inTransaction) this.db.exec("BEGIN;");
+    try {
+      for (const meta of agentStore.listSessions()) {
+        const session = agentStore.getSession(meta.id);
+        if (!session?.messages?.length) continue;
+        sessions += 1;
+        for (const msg of session.messages) {
+          const result = await this.indexMessage(session.id, msg.agentId ?? "main", msg);
+          indexed += result.indexed ?? 0;
+        }
       }
+      if (inTransaction) this.db.exec("COMMIT;");
+    } catch (error) {
+      if (inTransaction) this.db.exec("ROLLBACK;");
+      throw error;
     }
     return { sessions, indexed };
   }

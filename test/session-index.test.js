@@ -106,6 +106,33 @@ test("rebuildFromTranscripts backfills a fresh index from seeded transcripts", a
   assert.ok(hits.some((h) => h.sessionId === "local:user:main"));
 });
 
+// Discovered live: a production install with 114k+ messages of transcript
+// history turned a first-boot backfill into one fsync-per-message commit on
+// slow storage — minutes of daemon downtime instead of a couple of seconds.
+// rebuildFromTranscripts must wrap the whole backfill in a single
+// transaction, not auto-commit each indexMessage() call individually.
+test("rebuildFromTranscripts wraps the whole backfill in a single transaction, not one per message", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-txn-"));
+  const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
+  for (let i = 0; i < 5; i++) {
+    store.appendMessage(`local:user:main-${i}`, {
+      role: "user", content: `message number ${i} about widgets`, agentId: "main",
+      channel: "local", from: "user", createdAt: `2026-06-0${(i % 9) + 1}T08:00:00.000Z`
+    });
+  }
+  const index = new SessionIndex({ dir: path.join(dir, "agent-host") });
+  await index.ready;
+  const execCalls = [];
+  const originalExec = index.db.exec.bind(index.db);
+  index.db.exec = (sql) => { execCalls.push(sql); return originalExec(sql); };
+  const result = await index.rebuildFromTranscripts(store);
+  assert.equal(result.indexed, 5);
+  const beginCount = execCalls.filter((sql) => sql.trim().toUpperCase().startsWith("BEGIN")).length;
+  const commitCount = execCalls.filter((sql) => sql.trim().toUpperCase().startsWith("COMMIT")).length;
+  assert.equal(beginCount, 1, "exactly one BEGIN for the whole backfill, not one per message");
+  assert.equal(commitCount, 1, "exactly one COMMIT for the whole backfill, not one per message");
+});
+
 test("agent host indexes persisted chat turns; ephemeral turns are excluded", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-host-"));
   const runtime = createDefaultRuntime({
