@@ -442,6 +442,35 @@ export function registerCoreTools(registry, runtime) {
   });
 
   registry.register({
+    name: "search_sessions",
+    sideEffects: false,
+    description: "Full-text search your own past conversations (chat transcripts across all sessions and channels). Use when the user asks what was said, decided, or promised earlier — e.g. 'what did we decide about X last week?'. Returns matching messages with session id, timestamp (UTC), role, and a short snippet; use list_sessions for session metadata. The raw transcript is ground truth — prefer this over recall when the user references a specific past exchange.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Free-text search across past conversation messages." },
+        limit: { type: "integer", minimum: 1, maximum: 25, description: "Maximum results to return (default 8)." }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      if (!runtime.sessionIndex) return { error: "no session index" };
+      const results = await runtime.sessionIndex.search(String(args.query ?? ""), { limit: args.limit ?? 8 });
+      return {
+        count: results.length,
+        results: results.map((r) => ({
+          sessionId: r.sessionId,
+          at: r.ts,
+          when: String(r.ts ?? "").slice(0, 16).replace("T", " "),
+          role: r.role,
+          snippet: r.snippet
+        }))
+      };
+    }
+  });
+
+  registry.register({
     name: "list_skills",
     sideEffects: false,
     description: "List the skills (named prompts) available to this agent.",

@@ -133,3 +133,33 @@ test("boot backfills an empty index from existing transcripts", async () => {
   assert.equal(hits.length, 1);
   assert.equal(hits[0].sessionId, "local:user:main");
 });
+
+test("search_sessions tool is registered read-only and returns formatted results", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-tool-"));
+  const runtime = createDefaultRuntime({
+    modelProvider: new DeterministicModelProvider(),
+    dataDir: dir,
+    observationOptions: { dir: path.join(dir, "observations") },
+    outcomeOptions: { dir: path.join(dir, "outcomes") }
+  });
+  const tool = runtime.tools.get("search_sessions");
+  assert.ok(tool, "search_sessions tool should be registered");
+  assert.equal(tool.sideEffects, false, "search_sessions must be read-only");
+  assert.equal(tool.needsConfirmation, false);
+
+  await runtime.sessionIndex.indexMessage("local:user:main", "main", {
+    id: "msg_tool_0001",
+    role: "user",
+    content: "the quarterly flamingo report is due friday",
+    createdAt: "2026-06-05T09:30:00.000Z"
+  });
+
+  const result = await runtime.tools.invoke("search_sessions", { query: "flamingo", limit: 5 });
+  assert.equal(result.ok, true);
+  assert.ok(result.result.count >= 1);
+  const hit = result.result.results[0];
+  assert.equal(hit.sessionId, "local:user:main");
+  assert.match(hit.when, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/, "human-readable timestamp");
+  assert.equal(hit.role, "user");
+  assert.ok(hit.snippet.length <= 160);
+});
