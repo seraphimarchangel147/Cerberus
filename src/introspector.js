@@ -1,7 +1,9 @@
-// D5 — Introspector. Periodically (or on-demand) produces a structural
-// audit of the runtime: specialist tree health, memory tier saturation,
-// schedule load, budget burn, channel readiness. Drives the Health
-// dashboard tab and the weekly autopilot review prompt.
+// D5 — Introspector. On-demand structural audit of the runtime: specialist
+// tree health, memory tier saturation, schedule load, budget burn, channel
+// readiness. Surfaced via GET /audit (the Health dashboard tab) and the
+// get_audit agent tool (tool-registry.js). Nothing schedules it: no cron
+// job runs the audit, and the weekly harsh-review prompt does not
+// reference it.
 
 export class Introspector {
   constructor(options = {}) {
