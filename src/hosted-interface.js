@@ -306,6 +306,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           buildBetterWebhookReady: Boolean(base && bbSecret)
         });
       }
+      if (method === "GET" && pathname === "/channels/telegram/pairing-code") {
+        // Auth-gated like every non-public route (isPublicRoute does not list
+        // it, so the global checkAuth gate above already ran). Issues a fresh
+        // one-time code and prints it to the daemon log too, so a headless
+        // install can pair straight from daemon.log/journald.
+        if (!channels?.telegram?.pairing) return sendJson(res, 503, { error: "agent-host-disabled" });
+        const issued = channels.telegram.pairing.generateCode();
+        console.log(`[openagi] telegram pairing code ${issued.code} (valid 10 min, single use) — send "/pair ${issued.code}" to the bot`);
+        return sendJson(res, 200, issued);
+      }
       if (method === "GET" && pathname === "/tools") return sendJson(res, 200, runtime.tools.list());
 
       if (method === "GET" && pathname === "/events") return handleSse(req, res, sseClients);

@@ -2,6 +2,7 @@ import { appendJsonLine, ensureDir, readJsonFile, writeJsonAtomic } from "./file
 import path from "node:path";
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { TelegramPairing } from "./telegram-pairing.js";
 
 export class ChannelManager {
   constructor(options = {}) {
@@ -104,13 +105,17 @@ export class TelegramChannel {
     this.pollTimer = null;
     ensureDir(this.dir);
     this.state = readJsonFile(this.statePath, { offset: 0 });
+    // Pairing security: only chats that completed "/pair <code>" may talk to
+    // the agent or receive outreach. Injectable for tests.
+    this.pairing = options.pairing ?? new TelegramPairing({ dir: this.dir });
   }
 
   status() {
     return {
       configured: Boolean(this.token),
       polling: Boolean(this.pollTimer),
-      offset: this.state.offset ?? 0
+      offset: this.state.offset ?? 0,
+      pairing: this.pairing.status()
     };
   }
 
@@ -120,6 +125,33 @@ export class TelegramChannel {
     const text = message?.text ?? message?.caption;
     const chatId = message?.chat?.id;
     if (!text || !chatId) return { ignored: true };
+
+    // Pairing handshake: "/pair 123456" from any chat. On success the chat id
+    // is persisted to allowlist.json and confirmed; failures are logged but
+    // NEVER replied to, so a probing stranger learns nothing.
+    const pairMatch = /^\/pair\s+(\d{6})\s*$/.exec(text.trim());
+    if (pairMatch) {
+      const outcome = this.pairing.attempt(String(chatId), pairMatch[1]);
+      appendJsonLine(this.eventsPath, {
+        at: nowIso(),
+        op: "pair-attempt",
+        chatId: String(chatId),
+        ok: outcome.ok,
+        reason: outcome.reason ?? null
+      });
+      if (outcome.ok && this.token) {
+        await this.sendMessage(chatId, "Paired. This chat now receives OpenAGI messages.");
+      }
+      return { paired: outcome.ok, reason: outcome.reason ?? null };
+    }
+
+    // Allowlist gate: every non-/pair message from an unpaired chat is
+    // dropped silently — no agent turn, no reply (replying would confirm the
+    // bot is live to whoever found it).
+    if (!this.pairing.isAllowed(String(chatId))) {
+      appendJsonLine(this.eventsPath, { at: nowIso(), op: "ignored-unpaired", chatId: String(chatId) });
+      return { ignored: true, reason: "not-allowlisted" };
+    }
 
     const result = await this.agentHost.handleMessage({
       channel: "telegram",
