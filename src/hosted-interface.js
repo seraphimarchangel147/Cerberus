@@ -528,15 +528,6 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/scrutiny/fit") {
         return sendJson(res, 200, runtime.scrutinyFitter?.fit() ?? { error: "no fitter" });
       }
-      if (method === "POST" && pathname === "/scrutiny/judge") {
-        try {
-          const result = await runtime.scrutinyJudge.judge();
-          return sendJson(res, 200, result);
-        } catch (error) {
-          return sendJson(res, 500, { error: error.message });
-        }
-      }
-
       if (method === "GET" && pathname === "/outcomes") {
         const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
         const kind = url.searchParams.get("kind");
@@ -3551,7 +3542,6 @@ async function renderScrutiny() {
       <h2>Scrutiny <span class="muted" style="font-size:14px;font-weight:400;">· cycle \${fitter.cycles ?? 0} · \${fitter.autoApply ? "auto-apply" : "warmup"}\${fitter.restoredWeightsAt ? \` · calibrated \${escapeHtml(new Date(fitter.restoredWeightsAt).toLocaleDateString())}\` : ""}</span></h2>
       <div class="row" style="gap:8px;margin-bottom:14px;">
         <button id="fitBtn">Run fit now</button>
-        <button class="secondary" id="judgeBtn">Run LLM judge</button>
       </div>
       <pre id="scrOut" class="ok" style="display:none;"></pre>
 
@@ -3601,11 +3591,6 @@ async function renderScrutiny() {
   $("fitBtn").addEventListener("click", async () => {
     showOut("fitting…");
     try { showOut(JSON.stringify(await postJson("/scrutiny/fit", {}), null, 2)); }
-    catch (e) { showOut("[err] " + e.message); }
-  });
-  $("judgeBtn").addEventListener("click", async () => {
-    showOut("running judge…");
-    try { showOut(JSON.stringify(await postJson("/scrutiny/judge", {}), null, 2)); }
     catch (e) { showOut("[err] " + e.message); }
   });
 }

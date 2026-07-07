@@ -36,7 +36,6 @@ export { SkillReplay, parseReplayBlock } from "./skill-replay.js";
 export { TunnelWatcher } from "./tunnel-watcher.js";
 export { Introspector } from "./introspector.js";
 export { ScrutinyFitter } from "./scrutiny-fitter.js";
-export { ScrutinyJudge } from "./scrutiny-judge.js";
 export { ScrutinyPanel } from "./scrutiny-panel.js";
 export { SpecialistRouter } from "./specialist-router.js";
 export { MemorySystem } from "./memory-system.js";

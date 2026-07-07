@@ -40,7 +40,6 @@ import { registerComputerUseTools, isComputerUseEnabled } from "./integrations/c
 import { SuggestionFeedback } from "./suggestion-feedback.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
 import { SkillReplay } from "./skill-replay.js";
-import { ScrutinyJudge } from "./scrutiny-judge.js";
 import { ScrutinyPanel } from "./scrutiny-panel.js";
 import { SpecialistRouter } from "./specialist-router.js";
 import { TunnelWatcher } from "./tunnel-watcher.js";
@@ -179,7 +178,6 @@ export class AbiRuntime {
       dir: options.dataDir ? path.join(options.dataDir, "scrutiny") : undefined,
       ...(options.scrutinyFitterOptions ?? {})
     });
-    this.scrutinyJudge = options.scrutinyJudge ?? new ScrutinyJudge({ runtime: this, ...(options.scrutinyJudgeOptions ?? {}) });
     this.introspector = options.introspector ?? new Introspector({ runtime: this });
     this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher(options.tunnelWatcherOptions ?? {});
     this.patternMiner = options.patternMiner ?? new PatternMiner({ runtime: this, dataDir: options.dataDir, ...(options.patternMinerOptions ?? {}) });
@@ -293,14 +291,6 @@ export class AbiRuntime {
         task: "scrutiny-fit",
         intervalMs: 7 * 24 * 60 * 60 * 1000,
         nextRunAt: nextSundayMorning().toISOString()
-      });
-      this.cron.addJob({
-        id: "weekly-scrutiny-judge",
-        name: "Weekly LLM judge of scrutiny calibration",
-        enabled: true,
-        task: "scrutiny-judge",
-        intervalMs: 7 * 24 * 60 * 60 * 1000,
-        nextRunAt: nextSundayMorning(2).toISOString()
       });
       this.cron.addJob({
         id: "nightly-pattern-mine",
@@ -695,9 +685,6 @@ export class AbiRuntime {
       }
       if (job.task === "scrutiny-fit") {
         return this.scrutinyFitter.fit({ now });
-      }
-      if (job.task === "scrutiny-judge") {
-        return this.scrutinyJudge.judge();
       }
       if (job.task === "pattern-mine") {
         const result = await this.patternMiner.mine({ now });
