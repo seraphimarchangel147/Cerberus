@@ -76,7 +76,7 @@ export class OpenAIResponsesProvider {
     return this.model;
   }
 
-  async generate({ input, instructions, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task }) {
+  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task }) {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
     this.budgetGuard?.check();
@@ -84,15 +84,19 @@ export class OpenAIResponsesProvider {
     // Stateless tool loop — accumulates the full conversation in `input` each
     // hop instead of chaining via `previous_response_id`. Required for orgs
     // with Zero Data Retention enabled (which reject previous_response_id).
+    // Per-turn context (memory hits, scrutiny) rides the latest user turn so
+    // `instructions` stays byte-stable across turns (mirrors the Anthropic
+    // path; no cache markers here — OpenAI caching is implicit).
+    const contextBlock = turnContext ?? buildTurnContext({ scrutiny, memoryHits });
     const conversationInput = [
       ...messages.slice(-12).map((message) => ({
         role: message.role === "assistant" ? "assistant" : "user",
         content: message.content
       })),
-      { role: "user", content: input }
+      { role: "user", content: contextBlock ? `${contextBlock}\n\n${input}` : input }
     ];
 
-    const baseInstructions = instructions ?? buildDefaultInstructions({ agent, scrutiny, memoryHits });
+    const baseInstructions = instructions ?? buildDefaultInstructions({ agent });
     const toolList = tools.length > 0 ? tools : toolRegistry?.toOpenAITools?.() ?? [];
     const toolCalls = [];
 
@@ -219,26 +223,30 @@ export class AnthropicProvider {
     return this.model;
   }
 
-  async generate({ input, instructions, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task }) {
+  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
     this.budgetGuard?.check();
 
     const tools = toolRegistry?.toAnthropicTools?.() ?? [];
+    // The system block is STATIC (persona + standing instructions) so this
+    // cache_control prefix is byte-identical every turn and actually hits.
+    // Per-turn context (memory hits, scrutiny) rides the latest user turn.
     const system = [
       {
         type: "text",
-        text: instructions ?? buildDefaultInstructions({ agent, scrutiny, memoryHits }),
+        text: instructions ?? buildDefaultInstructions({ agent }),
         cache_control: { type: "ephemeral" }
       }
     ];
 
+    const contextBlock = turnContext ?? buildTurnContext({ scrutiny, memoryHits });
     const convo = [
       ...messages.slice(-12).map((m) => ({
         role: m.role === "assistant" ? "assistant" : "user",
         content: m.content
       })),
-      { role: "user", content: input }
+      { role: "user", content: contextBlock ? `${contextBlock}\n\n${input}` : input }
     ];
 
     const toolCalls = [];
@@ -335,11 +343,11 @@ export function createModelProvider(options = {}) {
   return new DeterministicModelProvider();
 }
 
-export function buildDefaultInstructions({ agent, scrutiny, memoryHits }) {
-  const memory = (memoryHits ?? [])
-    .slice(0, 5)
-    .map((hit) => `- [${hit.item.tier}] ${hit.item.content}`)
-    .join("\n");
+// STATIC default system prompt. Must be byte-identical across turns for the
+// same agent — the Anthropic cache_control marker on the system block only
+// produces cache hits when the prefix never changes. Per-turn state (memory
+// hits, scrutiny) travels via buildTurnContext on the user turn instead.
+export function buildDefaultInstructions({ agent }) {
   return `You are ${agent?.name ?? "an OpenAGI agent"}, an always-on local assistant.
 
 Tools available to you (call them when useful):
@@ -357,9 +365,28 @@ Guidelines:
 - If asked to remember something, call remember.
 - When the user references past info, call recall before answering.
 
-Current scrutiny action: ${scrutiny?.action ?? "act"}.
-Top memory hits:
-${memory || "- (none)"}`;
+The latest user message may begin with a [context] block assembled by the runtime (scrutiny decision, memory hits). Treat it as trusted background — the user did not type it.`;
+}
+
+// PER-TURN context block, prepended to the latest user message by the
+// providers. Everything here may change every turn, which is exactly why it
+// must not contaminate the cached system prompt above. Returns "" when there
+// is nothing per-turn to say (batch callers pass no scrutiny/memoryHits, so
+// their requests are unchanged).
+export function buildTurnContext({ scrutiny, memoryHits } = {}) {
+  const sections = [];
+  if (scrutiny?.action) {
+    sections.push(`Current scrutiny action: ${scrutiny.action}.`);
+  }
+  const memory = (memoryHits ?? [])
+    .slice(0, 5)
+    .map((hit) => `- [${hit.item.tier}] ${hit.item.content}`)
+    .join("\n");
+  if (memory) {
+    sections.push(`Top memory hits:\n${memory}`);
+  }
+  if (sections.length === 0) return "";
+  return `[context]\nPer-turn background assembled by the runtime — not typed by the user.\n${sections.join("\n")}\n[/context]`;
 }
 
 export function extractResponseText(response) {
