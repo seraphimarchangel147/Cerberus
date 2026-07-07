@@ -88,8 +88,14 @@ final class CaptureBridge {
   @MainActor
   private func tokenSafe() async -> String? {
     let remoteURL = AppState.shared.captureRemoteURL.trimmingCharacters(in: .whitespaces)
-    if !remoteURL.isEmpty, !AppState.shared.captureRemoteToken.isEmpty {
-      return AppState.shared.captureRemoteToken
+    if !remoteURL.isEmpty {
+      // A remote capture destination is configured: only ever send the token
+      // scoped to that remote (captureRemoteToken). Never fall back to the
+      // LOCAL daemon's own auth token here — that secret authenticates only
+      // to 127.0.0.1 and must not be sent to a different host. Missing remote
+      // token means an unauthenticated request to the remote, not a leaked one.
+      let remoteToken = AppState.shared.captureRemoteToken
+      return remoteToken.isEmpty ? nil : remoteToken
     }
     return AppState.shared.authToken()
   }
