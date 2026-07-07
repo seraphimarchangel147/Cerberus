@@ -9,6 +9,12 @@ export class FileBackedCronScheduler extends CronScheduler {
     super();
     this.storePath = options.storePath ?? path.join(resolveDataDir(), "cron", "jobs.json");
     ensureDir(path.dirname(this.storePath));
+    // { runningJobId, startedAt } while a job handler is executing; persisted
+    // into the store so a mid-run daemon death leaves a visible marker.
+    this.running = null;
+    // Marker found on disk at load time (previous process died mid-job).
+    // Consumed once at boot via consumeInterruption().
+    this._interrupted = null;
     if (options.autoLoad !== false) this.load();
   }
 
@@ -19,6 +25,10 @@ export class FileBackedCronScheduler extends CronScheduler {
       if (!job.id) continue;
       this.jobs.set(job.id, job);
     }
+    // A persisted running marker means the previous process died while this
+    // job's handler was executing. Stash it for consumeInterruption().
+    this._interrupted = store.running ?? null;
+    this.running = null;
     return this.listJobs();
   }
 
@@ -53,11 +63,36 @@ export class FileBackedCronScheduler extends CronScheduler {
     return results;
   }
 
+  // runDue() hooks (see CronScheduler.runDue): persist the mid-run marker
+  // while a handler executes so a daemon death mid-job is visible next boot.
+  noteJobStart(job) {
+    this.running = { runningJobId: job.id, startedAt: nowIso() };
+    this.save();
+  }
+
+  noteJobEnd() {
+    this.running = null;
+    this.save();
+  }
+
+  // Boot note: return the marker left by a process that died mid-job (or
+  // null after a clean shutdown), clearing it from memory and disk. The
+  // hosted interface calls this once at boot and emits "cron-interrupted".
+  consumeInterruption() {
+    const marker = this._interrupted;
+    this._interrupted = null;
+    if (!marker) return null;
+    this.save();
+    const job = marker.runningJobId ? this.jobs.get(marker.runningJobId) : null;
+    return { ...marker, jobName: job?.name ?? (marker.runningJobId ?? "unknown") };
+  }
+
   save() {
     writeJsonAtomic(this.storePath, {
       version: 1,
       updatedAt: nowIso(),
-      jobs: this.listJobs()
+      jobs: this.listJobs(),
+      ...(this.running ? { running: this.running } : {})
     });
   }
 }

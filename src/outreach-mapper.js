@@ -49,6 +49,17 @@ const MAP = {
     needsDecision: false,
     actions: ["accept", "dismiss"],
     dedupeOpen: true
+  }),
+  // A cron job was mid-run when the daemon died (mid-run boot marker).
+  // Durable so Spencer SEES the silent death even if no client was
+  // connected at boot; type "suggestion" puts it in the digest rollup.
+  "cron-interrupted": (d) => ({
+    type: "suggestion",
+    sourceRef: { kind: "cron-job", id: d.jobId ?? "unknown" },
+    title: `Scheduled job interrupted mid-run: ${d.jobName ?? (d.jobId ?? "unknown")}`,
+    summary: `The daemon died while this job was running${d.startedAt ? ` (started ${d.startedAt})` : ""}. It will fire again on its normal schedule.`,
+    needsDecision: false,
+    actions: ["dismiss"]
   })
 };
 

@@ -58,6 +58,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("miner-result", (data) => broadcast("miner-result", data));
   events.on("cron-catchup", (data) => broadcast("cron-catchup", data));
   events.on("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
+  events.on("cron-interrupted", (data) => broadcast("cron-interrupted", data));
   events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
   events.on("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
   events.on("task-updated", (data) => broadcast("task-updated", data));
@@ -87,6 +88,21 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   // Proactive outreach mapper subscribes here: it was constructed before the
   // bus existed, so we late-bind the same bus now (mirrors bindEvents above).
   if (runtime.bindOutreachEvents) runtime.bindOutreachEvents(runtime.events);
+
+  // Mid-run boot note: if the previous process died while a cron job handler
+  // was executing, the file-backed scheduler kept a { runningJobId, startedAt }
+  // marker. Emit it now (the outreach mapper above is already attached, so it
+  // lands as a durable feed item) and clear it. Optional-chained because the
+  // in-memory CronScheduler has no marker support.
+  const interruptedJob = runtime.cron?.consumeInterruption?.();
+  if (interruptedJob) {
+    events.emit("cron-interrupted", {
+      at: new Date().toISOString(),
+      jobId: interruptedJob.runningJobId,
+      jobName: interruptedJob.jobName,
+      startedAt: interruptedJob.startedAt
+    });
+  }
 
   if (runtime.tunnelWatcher) {
     runtime.tunnelWatcher.on("tunnel-url", (data) => events.emit("tunnel", { op: "url", ...data }));
