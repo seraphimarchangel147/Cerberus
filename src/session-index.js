@@ -18,6 +18,17 @@ import { ensureDir } from "./file-utils.js";
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 
+// Cap snippets returned by search() so a single hit can't dump a long
+// personal transcript passage into a tool result — transcripts are the most
+// sensitive store the agent can read. Full text stays in the DB. Same intent
+// as TRANSCRIPT_SEARCH_TEXT_CAP in observation-store.js, tighter bound.
+const SNIPPET_CAP = 160;
+
+function capSnippet(text) {
+  const s = String(text ?? "");
+  return s.length > SNIPPET_CAP ? s.slice(0, SNIPPET_CAP - 1) + "…" : s;
+}
+
 let sqlite3Module = null;
 async function loadSqlite() {
   if (sqlite3Module) return sqlite3Module;
@@ -109,7 +120,7 @@ export class SessionIndex {
         .filter((r) => (r.text || "").toLowerCase().includes(needle))
         .sort((a, b) => (b.ts ?? "").localeCompare(a.ts ?? ""))
         .slice(0, limit)
-        .map((r) => ({ sessionId: r.sessionId, ts: r.ts, role: r.role, snippet: r.text }));
+        .map((r) => ({ sessionId: r.sessionId, ts: r.ts, role: r.role, snippet: capSnippet(r.text) }));
     }
     // FTS5 query — escape doubled-quotes for the MATCH expression
     const escaped = q.replace(/"/g, '""');
@@ -119,7 +130,7 @@ export class SessionIndex {
        FROM messages WHERE messages MATCH ?
        ORDER BY ts DESC LIMIT ?`
     ).all(matchExpr, limit);
-    return rows.map((r) => ({ sessionId: r.session_id, ts: r.ts, role: r.role, snippet: r.snippet }));
+    return rows.map((r) => ({ sessionId: r.session_id, ts: r.ts, role: r.role, snippet: capSnippet(r.snippet) }));
   }
 
   async stats() {
