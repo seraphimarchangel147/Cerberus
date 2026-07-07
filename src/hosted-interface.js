@@ -10,7 +10,6 @@ import {
   checkOrigin,
   isPublicRoute,
   verifyTelegramSecret,
-  verifyTwilioSignature,
   verifyBuildBetterWebhook
 } from "./auth.js";
 import { ChannelManager } from "./channels.js";
@@ -23,7 +22,6 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   // Read these dynamically so the setup wizard can update them mid-flight.
   const getAuthToken = () => options.authToken ?? process.env.OPENAGI_AUTH_TOKEN ?? null;
   const getPublicUrl = () => options.publicUrl ?? process.env.OPENAGI_PUBLIC_URL ?? null;
-  const getTwilioAuthToken = () => options.twilioAuthToken ?? process.env.TWILIO_AUTH_TOKEN ?? null;
   const getTelegramSecret = () => options.telegramSecret ?? process.env.TELEGRAM_WEBHOOK_SECRET ?? null;
   let channels =
     options.channels ??
@@ -32,10 +30,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           agentHost: runtime.agentHost,
           runtime,
           dir: options.channelsDir,
-          telegramToken: options.telegramToken,
-          twilioAccountSid: options.twilioAccountSid,
-          twilioAuthToken: options.twilioAuthToken,
-          twilioFromNumber: options.twilioFromNumber
+          telegramToken: options.telegramToken
         })
       : null);
 
@@ -298,7 +293,6 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, {
           ...status,
           publicUrl: pub,
-          twilioWebhook: base ? `${base}/channels/twilio/webhook` : null,
           // The URL to paste into BuildBetter's webhook config. Only useful
           // once a public URL + webhook secret are set; secret goes in the
           // query string so webhook UIs that only take a URL still work.
@@ -386,38 +380,6 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           (err) => runtime.events?.emit?.("integration-sync", { source: "buildbetter", trigger: "webhook", error: err?.message })
         );
         return sendJson(res, 202, { accepted: true });
-      }
-
-      if (method === "POST" && pathname === "/channels/twilio/webhook") {
-        if (!channels) return sendXml(res, 503, twiml("OpenAGI agent host is disabled."));
-        const form = await readForm(req);
-        const fullUrl = (getPublicUrl() ?? `http://${req.headers.host ?? `${host}:${port}`}`).replace(/\/$/, "") + req.url;
-        const tw = verifyTwilioSignature({
-          authToken: getTwilioAuthToken(),
-          fullUrl,
-          params: form,
-          signature: req.headers["x-twilio-signature"]
-        });
-        if (!tw.ok) {
-          return sendXml(res, 403, `<?xml version="1.0" encoding="UTF-8"?><Response><!-- ${tw.reason} --></Response>`);
-        }
-        const result = await channels.handleSmsMessage({
-          from: form.From ?? form.from ?? "sms",
-          text: form.Body ?? form.body ?? "",
-          metadata: { messageSid: form.MessageSid, accountSid: form.AccountSid }
-        });
-        return sendXml(res, 200, twiml(result.reply));
-      }
-
-      if (method === "POST" && pathname === "/channels/sms/send") {
-        if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
-        const body = await readJson(req);
-        try {
-          const result = await channels.sms.sendSms(body.to, body.text);
-          return sendJson(res, 200, { ok: true, result });
-        } catch (error) {
-          return sendJson(res, 400, { ok: false, error: error.message });
-        }
       }
 
       if (method === "GET" && pathname === "/budget") return sendJson(res, 200, runtime.budget?.status?.() ?? { error: "no-budget" });
@@ -973,20 +935,6 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             ]
           },
           {
-            id: "twilio",
-            name: "Twilio SMS",
-            kind: "channel",
-            description: "Two-way SMS — text the agent, get texts back. Outbound for proactive sends.",
-            paths: [
-              {
-                kind: "api",
-                label: "API credentials",
-                configured: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
-                envKeys: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"]
-              }
-            ]
-          },
-          {
             id: "telegram",
             name: "Telegram",
             kind: "channel",
@@ -1108,7 +1056,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname.match(/^\/drafts\/[^/]+\/send$/)) {
         // Explicit user-initiated send: route the draft body through a REAL
-        // outbound transport (sms / telegram). This is the only path that
+        // outbound transport (telegram). This is the only path that
         // transmits externally; it's a deliberate dashboard action, not the
         // agent. We only mark the draft "sent" if delivery actually confirms.
         if (!runtime.drafts?.get) return sendJson(res, 503, { error: "no draft store" });
@@ -1121,8 +1069,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const body = await readJson(req).catch(() => ({}));
         const channel = body.channel;
         const target = body.target ?? draft.recipient;
-        if (!["sms", "telegram"].includes(channel)) {
-          return sendJson(res, 400, { error: "send requires channel 'sms' or 'telegram' (email has no native transport — copy the approved draft into your mail client)" });
+        if (channel !== "telegram") {
+          return sendJson(res, 400, { error: "send requires channel 'telegram' (email has no native transport — copy the approved draft into your mail client)" });
         }
         if (!target) return sendJson(res, 400, { error: "no target/recipient for this send" });
         let result;
@@ -1601,11 +1549,6 @@ async function applyOutreachFeedback(runtime, item, verdict, note = null) {
   return resolved;
 }
 
-function sendXml(res, status, value) {
-  res.writeHead(status, { "content-type": "text/xml; charset=utf-8", "content-length": Buffer.byteLength(value) });
-  res.end(value);
-}
-
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -1630,19 +1573,6 @@ function readForm(req) {
     });
     req.on("error", reject);
   });
-}
-
-function twiml(message) {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(String(message ?? "").slice(0, 1400))}</Message></Response>`;
-}
-
-function escapeXml(value) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
 }
 
 function renderApp() {
@@ -2058,7 +1988,7 @@ function renderApp() {
       <button data-tab="tasks" title="My tasks + agent tasks. The agent's own queue gets drained every 30 min by the autopilot pulse.">Tasks</button>
       <button data-tab="suggestions" title="Things the proactive observer noticed + agent actions awaiting your approval.">Suggestions</button>
       <button data-tab="memory" title="Short, medium, and long-term memory. Promotion happens automatically.">Memory</button>
-      <button data-tab="integrations" title="Connect MCPs (Linear, GitHub, Stripe, …), sources (BuildBetter, Rize, inbox folder), and channels (SMS, Telegram).">Integrations</button>
+      <button data-tab="integrations" title="Connect MCPs (Linear, GitHub, Stripe, …), sources (BuildBetter, Rize, inbox folder), and channels (Telegram).">Integrations</button>
       <div class="nav-more" id="navMore">
         <button id="navMoreBtn" class="nav-more-btn" type="button" title="Build + diagnostic tabs">More ▾</button>
         <div class="nav-more-panel" id="navMorePanel" hidden>
@@ -2067,7 +1997,7 @@ function renderApp() {
             <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones.">MCP</button>
             <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored.">Skills</button>
             <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs.">Cron</button>
-            <button data-tab="channels" title="SMS / Telegram / webhook channels the agent can deliver through.">Channels</button>
+            <button data-tab="channels" title="Telegram / webhook channels the agent can deliver through.">Channels</button>
             <button data-tab="agents" title="Specialists the propagation controller has spawned for repeated tasks.">Agents</button>
           </div>
           <div class="nav-more-section">
@@ -2778,9 +2708,9 @@ function openCronComposer() {
         </div>
         <div class="ui-row" style="gap: var(--space-2); margin-bottom: var(--space-4);">
           <div class="ui-grow"><label>Channel</label>
-            <select class="ui-select" name="channel"><option value="local">local</option><option value="sms">sms</option><option value="telegram">telegram</option></select>
+            <select class="ui-select" name="channel"><option value="local">local</option><option value="telegram">telegram</option></select>
           </div>
-          <div class="ui-grow"><label>Target (phone/chatId)</label><input class="ui-input" name="target" placeholder="+15555550123"></div>
+          <div class="ui-grow"><label>Target (chatId)</label><input class="ui-input" name="target" placeholder="123456789"></div>
         </div>
         <button class="ui-btn" type="submit">Schedule</button>
       </form>
@@ -3352,7 +3282,7 @@ async function renderChannels() {
     ? \`<div class="desc" style="margin-top:6px;">BuildBetter webhook: <code>\${escapeHtml(ch.buildBetterWebhook)}</code> <span class="sub">— paste into BuildBetter to sync calls instantly</span></div>\`
     : (ch.publicUrl ? \`<div class="desc" style="margin-top:6px;" class="sub">BuildBetter webhook: set <code>BUILDBETTER_WEBHOOK_SECRET</code> to enable instant call sync.</div>\` : "");
   const tunnelBlock = ch.publicUrl
-    ? \`<div class="card"><div class="name">Public URL</div><div class="desc"><code>\${escapeHtml(ch.publicUrl)}</code></div><div class="desc" style="margin-top:6px;">Twilio webhook: <code>\${escapeHtml(ch.twilioWebhook)}</code></div>\${bbWebhookLine}</div>\`
+    ? \`<div class="card"><div class="name">Public URL</div><div class="desc"><code>\${escapeHtml(ch.publicUrl)}</code></div>\${bbWebhookLine}</div>\`
     : \`<div class="card"><div class="name warn">No public URL</div><div class="desc">Run <code>npm run tunnel</code>, then set <code>OPENAGI_PUBLIC_URL</code> in .openagi/.env and restart.</div></div>\`;
   main.innerHTML = \`
     <div class="pane">
@@ -3360,31 +3290,10 @@ async function renderChannels() {
       \${tunnelBlock}
       <div class="grid two" style="margin-top:12px;">
         <div class="card"><div class="name">Local · \${ch.local?.mode ?? ""}</div><div class="desc">Browser HTTP + SSE.</div></div>
-        <div class="card"><div class="name">SMS / Twilio</div><div class="desc">\${ch.sms?.outboundConfigured ? '<span class="ok">outbound ready</span>' : '<span class="warn">outbound disabled — set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER</span>'} · from \${escapeHtml(ch.sms?.fromNumber ?? "—")}</div></div>
         <div class="card"><div class="name">Telegram</div><div class="desc">\${ch.telegram?.configured ? "configured" : "no token"} · polling: \${ch.telegram?.polling ? "on" : "off"}</div></div>
       </div>
-      <h3>Send SMS test</h3>
-      <form class="form" id="smsForm">
-        <div class="row" style="gap: 8px;">
-          <div class="grow"><label>To</label><input name="to" placeholder="+15555550123" required></div>
-          <div class="grow"><label>Body</label><input name="text" placeholder="Hello from OpenAGI" required></div>
-          <div><button type="submit">Send</button></div>
-        </div>
-      </form>
-      <pre id="smsOut" class="ok"></pre>
     </div>
   \`;
-  $("smsForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const obj = Object.fromEntries(fd.entries());
-    try {
-      const res = await postJson("/channels/sms/send", obj);
-      $("smsOut").textContent = JSON.stringify(res, null, 2);
-    } catch (err) {
-      $("smsOut").textContent = "[error] " + err.message;
-    }
-  });
 }
 
 async function renderBudget() {
@@ -4219,7 +4128,6 @@ async function renderToday() {
   // Which real outbound transports exist? Only offer "Send" for these;
   // email has no native channel (the user copies it into their mail client).
   const sendChannels = [];
-  if (chStatus?.sms?.outboundConfigured) sendChannels.push("sms");
   if (chStatus?.telegram?.configured) sendChannels.push("telegram");
   if (!data) {
     main.innerHTML = '<div class="pane"><h2>Today</h2><div class="ui-empty">Couldn\\'t load today\\'s recap.</div></div>';

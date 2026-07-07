@@ -310,7 +310,7 @@ export function registerCoreTools(registry, runtime) {
         delaySeconds: { type: "integer", minimum: 30, description: "One-shot: fire this many seconds from now." },
         intervalSeconds: { type: "integer", minimum: 30, description: "Recurring: fire every N seconds." },
         dailyAt: { type: "string", description: "Recurring HH:MM (24h) daily fire time, e.g. '09:00'." },
-        channel: { type: "string", description: "Channel to deliver to: local, sms, telegram. Defaults to the originating channel." },
+        channel: { type: "string", description: "Channel to deliver to: local, telegram. Defaults to the originating channel." },
         target: { type: "string", description: "Channel target (phone number, chat id, etc). Defaults to the originating sender." },
         name: { type: "string", description: "Optional human-readable name." }
       },
@@ -351,12 +351,12 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "send_message",
-    description: "Proactively send a message to a user via a channel (sms, telegram, or local). Use during autopilot pulses or when you decide to reach out unprompted. Returns delivery status.",
+    description: "Proactively send a message to a user via a channel (telegram or local). Use during autopilot pulses or when you decide to reach out unprompted. Returns delivery status.",
     parameters: {
       type: "object",
       properties: {
-        channel: { type: "string", enum: ["sms", "telegram", "local"], description: "Channel to deliver via." },
-        target: { type: "string", description: "Channel target — phone number for SMS, chat id for Telegram." },
+        channel: { type: "string", enum: ["telegram", "local"], description: "Channel to deliver via." },
+        target: { type: "string", description: "Channel target — chat id for Telegram." },
         text: { type: "string", description: "Message body. Keep it short and useful." }
       },
       required: ["channel", "target", "text"],

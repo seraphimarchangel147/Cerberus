@@ -41,7 +41,6 @@ export function isPublicRoute(pathname) {
   return (
     pathname === "/health" ||
     pathname === "/sign-in" ||
-    pathname === "/channels/twilio/webhook" ||
     pathname === "/channels/telegram/webhook" ||
     pathname === "/webhooks/buildbetter"
   );
@@ -69,15 +68,6 @@ export function checkOrigin(req) {
     return { ok: false, reason: `cross-origin POST blocked (Origin ${originHost} ≠ Host ${host})` };
   }
   return { ok: true };
-}
-
-export function verifyTwilioSignature({ authToken, fullUrl, params, signature }) {
-  if (!authToken) return { ok: true, reason: "no twilio auth token configured" };
-  if (!signature) return { ok: false, reason: "missing X-Twilio-Signature" };
-  const sortedKeys = Object.keys(params).sort();
-  const data = fullUrl + sortedKeys.map((k) => k + params[k]).join("");
-  const expected = crypto.createHmac("sha1", authToken).update(data).digest("base64");
-  return safeEqual(expected, signature) ? { ok: true } : { ok: false, reason: "twilio signature mismatch" };
 }
 
 export function verifyTelegramSecret({ headerValue, expected }) {

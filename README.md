@@ -211,14 +211,13 @@ For Docker, run [Watchtower](https://containrrr.dev/watchtower/) alongside the O
 | **Auto-skill mining** | Pattern-miner runs nightly, detects repeating activity sequences, LLM proposes a skill, lands in `.openagi/skills-suggested/` for one-click accept. Session-miner does the same on chat history. |
 | **Skill replay** | Action vocabulary (`open_app`, `keyboard_shortcut`, `applescript`, `shortcut`, `type`, `wait`, `say`, `browser`, ...) — Mac executor confirms first run with a modal, persists trust. |
 | **MCP execution** | Register stdio or HTTP+OAuth MCP servers in `.openagi/mcp.json` (or via the UI). On connect, every tool the server advertises becomes a callable agent tool (`mcp_<server>_<tool>`). |
-| **Cron prompts** | The agent can call `schedule_message({prompt, delaySeconds | intervalSeconds | dailyAt, channel, target})`. When the job fires, the daemon runs the prompt and routes the reply to the originating channel (SMS, Telegram, local). |
-| **SMS bidirectional** | Twilio inbound webhook → agent reply via TwiML. Twilio outbound REST for proactive sends and scheduled fires. |
+| **Cron prompts** | The agent can call `schedule_message({prompt, delaySeconds | intervalSeconds | dailyAt, channel, target})`. When the job fires, the daemon runs the prompt and routes the reply to the originating channel (Telegram, local). |
 | **Telegram** | Webhook (`/channels/telegram/webhook`) or long polling (`TELEGRAM_POLLING=1`). |
 | **Persistent state** | All under `.openagi/`: memory (JSONL audit + atomic snapshot), cron jobs, agent/session store, specialist workspaces, MCP logs. |
 
 ### Credits
 
-The **Credits** dashboard tab shows today's LLM spend vs the daily cap (`OPENAGI_DAILY_USD_LIMIT`), totals broken down **by activity** (chat / autopilot / cron / overlay / sms) and **by model**, a **30-day spend chart**, and a per-call **audit log** — each row records time, model, activity type, agent, cost, and tools called, so you can see exactly what cost credits and why.
+The **Credits** dashboard tab shows today's LLM spend vs the daily cap (`OPENAGI_DAILY_USD_LIMIT`), totals broken down **by activity** (chat / autopilot / cron / overlay) and **by model**, a **30-day spend chart**, and a per-call **audit log** — each row records time, model, activity type, agent, cost, and tools called, so you can see exactly what cost credits and why.
 
 Ask the agent in chat via the **`recall_spend`** tool ("why did I spend $4 today?") — it reads the same ledger.
 
@@ -226,9 +225,9 @@ Data is a local rolling 30-day ledger at `~/.openagi/budget/ledger.jsonl`. It st
 
 ---
 
-## Remote access (SMS, Telegram, tunneling)
+## Remote access (Telegram, tunneling)
 
-Once the daemon is running locally, you can reach it from anywhere via SMS or Telegram by pairing it with a public tunnel.
+Once the daemon is running locally, you can reach it from anywhere via Telegram by pairing it with a public tunnel.
 
 > Full step-by-step including tunnel + auth + Telegram + launchd: [`docs/setup/remote-channels.md`](docs/setup/remote-channels.md). Quick version below.
 
@@ -237,28 +236,6 @@ Once the daemon is running locally, you can reach it from anywhere via SMS or Te
 ```bash
 npm run tunnel    # cloudflared (preferred) or ngrok, auto-detected
 ```
-
-### Twilio bidirectional SMS
-
-1. Drop credentials into `~/.openagi/.env`:
-    ```bash
-    TWILIO_ACCOUNT_SID=AC...
-    TWILIO_AUTH_TOKEN=...
-    TWILIO_FROM_NUMBER=+15551234567
-    ```
-2. Tunnel a public URL: `ngrok http 43210` → copy `https://abcd1234.ngrok-free.app`.
-3. In the Twilio console for your number, set the **A MESSAGE COMES IN** webhook to:
-    ```
-    https://abcd1234.ngrok-free.app/channels/twilio/webhook
-    ```
-4. Text your number. The reply comes back as TwiML.
-5. Schedule an SMS ping:
-    ```bash
-    curl -s http://127.0.0.1:43210/cron \
-      -H "authorization: Bearer $OPENAGI_AUTH_TOKEN" \
-      -H 'content-type: application/json' \
-      -d '{"name":"morning-nudge","prompt":"One-line motivational sentence.","dailyAt":"08:00","channel":"sms","target":"+15555550123"}'
-    ```
 
 ### Telegram
 

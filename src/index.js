@@ -6,8 +6,7 @@ export {
   checkAuth,
   generateToken,
   isPublicRoute,
-  verifyTelegramSecret,
-  verifyTwilioSignature
+  verifyTelegramSecret
 } from "./auth.js";
 export { cosine, createEmbedder, HashBagEmbedder, OpenAIEmbedder } from "./embeddings.js";
 export { VectorStore } from "./vector-store.js";

@@ -24,8 +24,7 @@ import {
   PropagationController,
   ToolRegistry,
   generateToken,
-  registerCoreTools,
-  verifyTwilioSignature
+  registerCoreTools
 } from "../src/index.js";
 
 test("runtime processes ABI signal through memory and propagation", () => {
@@ -127,17 +126,6 @@ test("hosted interface exposes runtime health", async () => {
     const messageBody = await messageResponse.json();
     assert.match(messageBody.reply, /[Ss]aved to memory/);
     assert.equal(messageBody.session.messageCount, 2);
-
-    const smsResponse = await fetch(`${address.url}/channels/twilio/webhook`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        From: "+15555550123",
-        Body: "Schedule a repeated risky task as a specialist."
-      })
-    });
-    assert.equal(smsResponse.status, 200);
-    assert.match(await smsResponse.text(), /<Response><Message>/);
   } finally {
     await app.close();
   }
@@ -373,22 +361,6 @@ test("auth accepts header bearer, query token, and cookie", () => {
   // wrong
   const d = checkAuth({ headers: { authorization: "Bearer wrong" } }, new URL("http://x/"), token);
   assert.equal(d.ok, false);
-});
-
-test("twilio signature passes for valid HMAC and fails for tampered body", async () => {
-  const crypto = await import("node:crypto");
-  const authToken = "twilio_test_secret";
-  const fullUrl = "https://example.com/channels/twilio/webhook";
-  const params = { From: "+15555550123", Body: "hi", MessageSid: "SM1" };
-  const sortedKeys = Object.keys(params).sort();
-  const data = fullUrl + sortedKeys.map((k) => k + params[k]).join("");
-  const sig = crypto.createHmac("sha1", authToken).update(data).digest("base64");
-
-  const ok = verifyTwilioSignature({ authToken, fullUrl, params, signature: sig });
-  assert.equal(ok.ok, true);
-
-  const bad = verifyTwilioSignature({ authToken, fullUrl, params: { ...params, Body: "tampered" }, signature: sig });
-  assert.equal(bad.ok, false);
 });
 
 test("outcome store records, resolves, aggregates, and reloads", () => {
@@ -3249,7 +3221,7 @@ test("drafts: send endpoint routes through a real channel and marks sent only on
 
   // Real channel delivers + marks sent.
   resp = await fetch(`${address.url}/drafts/${d.id}/send`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "sms", target: "+15550000" })
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "telegram", target: "+15550000" })
   });
   assert.equal(resp.status, 200);
   assert.equal(delivered.length, 1);

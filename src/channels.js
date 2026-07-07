@@ -16,13 +16,6 @@ export class ChannelManager {
       dir: path.join(this.dir, "telegram"),
       token: options.telegramToken ?? process.env.TELEGRAM_BOT_TOKEN
     });
-    this.sms = new SmsChannel({
-      agentHost: this.agentHost,
-      dir: path.join(this.dir, "sms"),
-      accountSid: options.twilioAccountSid ?? process.env.TWILIO_ACCOUNT_SID,
-      authToken: options.twilioAuthToken ?? process.env.TWILIO_AUTH_TOKEN,
-      fromNumber: options.twilioFromNumber ?? process.env.TWILIO_FROM_NUMBER
-    });
     if (this.runtime) this.runtime.channels = this;
   }
 
@@ -44,23 +37,11 @@ export class ChannelManager {
     return this.telegram.handleUpdate(update);
   }
 
-  async handleSmsMessage(body) {
-    return this.agentHost.handleMessage({
-      channel: body.channel ?? "sms",
-      from: body.from,
-      agentId: body.agentId ?? "main",
-      sessionId: body.sessionId,
-      text: body.text,
-      metadata: body.metadata ?? {}
-    });
-  }
-
   async deliver({ channel, target, text, sessionId = null, refId = null }) {
     if (!channel || !text) throw new Error("deliver requires channel and text");
     appendJsonLine(this.eventsPath, { at: nowIso(), op: "deliver", channel, target, text: String(text).slice(0, 400) });
     let result;
     if (channel === "telegram") result = await this.telegram.sendMessage(target, text);
-    else if (channel === "sms") result = await this.sms.sendSms(target, text);
     else if (channel === "local" || channel === "cron") {
       result = { delivered: false, reason: `channel ${channel} has no outbound transport (read from /sessions or stream /events)` };
     } else {
@@ -89,7 +70,6 @@ export class ChannelManager {
   status() {
     return {
       local: { enabled: true, mode: "http+sse" },
-      sms: this.sms.status(),
       telegram: this.telegram.status()
     };
   }
@@ -227,53 +207,5 @@ export class TelegramChannel {
     }
 
     return { updates: body.result?.length ?? 0 };
-  }
-}
-
-export class SmsChannel {
-  constructor(options = {}) {
-    this.agentHost = options.agentHost;
-    this.accountSid = options.accountSid;
-    this.authToken = options.authToken;
-    this.fromNumber = options.fromNumber;
-    this.dir = options.dir ?? path.join(resolveDataDir(), "channels", "sms");
-    this.eventsPath = path.join(this.dir, "events.jsonl");
-    ensureDir(this.dir);
-  }
-
-  status() {
-    return {
-      enabled: true,
-      mode: "twilio-webhook",
-      outboundConfigured: Boolean(this.accountSid && this.authToken && this.fromNumber),
-      fromNumber: this.fromNumber ?? null
-    };
-  }
-
-  async sendSms(to, body) {
-    if (!this.accountSid || !this.authToken || !this.fromNumber) {
-      throw new Error("Twilio outbound is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER.");
-    }
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/Messages.json`;
-    const auth = Buffer.from(`${this.accountSid}:${this.authToken}`).toString("base64");
-    const form = new URLSearchParams({
-      To: to,
-      From: this.fromNumber,
-      Body: String(body).slice(0, 1500)
-    });
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        authorization: `Basic ${auth}`,
-        "content-type": "application/x-www-form-urlencoded"
-      },
-      body: form.toString()
-    });
-    const json = await response.json().catch(() => ({}));
-    appendJsonLine(this.eventsPath, { at: nowIso(), op: "sendSms", to, ok: response.ok, sid: json.sid, error: json.message });
-    if (!response.ok) {
-      throw new Error(json.message ?? `Twilio send failed with ${response.status}`);
-    }
-    return { sid: json.sid, status: json.status, to: json.to, from: json.from };
   }
 }

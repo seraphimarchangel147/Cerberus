@@ -49,7 +49,6 @@ export class Introspector {
     if (lowQuality.length > 0) findings.push({ severity: "warn", area: "specialists", note: `${lowQuality.length} specialist(s) under-performing (<0.4 mean quality).` });
     if (budget && budget.spentUsd / Math.max(budget.dailyUsdLimit, 0.0001) > 0.7) findings.push({ severity: "warn", area: "budget", note: `today's spend > 70% of daily cap.` });
     if (outcomeAgg7 && outcomeAgg7.avgQuality !== null && outcomeAgg7.avgQuality < 0.45) findings.push({ severity: "warn", area: "outcomes", note: `7-day avg outcome quality is ${outcomeAgg7.avgQuality}.` });
-    if (channels && channels.sms?.outboundConfigured === false) findings.push({ severity: "info", area: "channels", note: "Twilio outbound not configured." });
 
     // Stale today-bucket tasks. If a task has been in 'today' >3 days
     // pending, it almost certainly belongs in this_week or someday now.
