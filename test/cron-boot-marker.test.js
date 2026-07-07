@@ -134,3 +134,28 @@ test("boot emits cron-interrupted and the outreach feed shows the interrupted jo
     await app.close();
   }
 });
+
+// Code-review finding: noteJobStart/noteJobEnd each called the full save()
+// (a synchronous rewrite of the whole job list) on every due-job invocation,
+// so a 3-job tick did 7 full writes instead of 1 — directly working against
+// D1's own goal of making the cron spine cheap to run continuously.
+// noteJobEnd's write is redundant: the next job's noteJobStart (or the
+// tick's own closing save when it's the last job) always overwrites it
+// before a crash could observe the gap, so removing it doesn't weaken the
+// crash-visibility guarantee proven by the tests above.
+test("a multi-job tick writes to disk N+1 times, not 2N+1 (noteJobEnd doesn't add a redundant write)", async () => {
+  const storePath = tempStorePath("cron-write-count-");
+  const cron = new FileBackedCronScheduler({ storePath });
+  cron.addJob({ id: "a", name: "A", enabled: true, task: "t", intervalMs: 60_000, nextRunAt: "2026-01-01T00:00:00.000Z" });
+  cron.addJob({ id: "b", name: "B", enabled: true, task: "t", intervalMs: 60_000, nextRunAt: "2026-01-01T00:00:00.100Z" });
+  cron.addJob({ id: "c", name: "C", enabled: true, task: "t", intervalMs: 60_000, nextRunAt: "2026-01-01T00:00:00.200Z" });
+  let writeCount = 0;
+  const originalSave = cron.save.bind(cron);
+  cron.save = () => { writeCount += 1; return originalSave(); };
+  await cron.runDue(async () => ({ ok: true }), new Date("2026-01-01T00:00:01.000Z"));
+  // N job-start writes (one per job) + 1 tick-closing write from runDue's own
+  // "if (results.length > 0) this.save()" — no per-job end write.
+  assert.equal(writeCount, 4, `expected 3 job-start writes + 1 tick-closing write, got ${writeCount}`);
+  const onDisk = JSON.parse(fs.readFileSync(storePath, "utf8"));
+  assert.equal(onDisk.running ?? null, null, "marker still correctly cleared on disk after the tick");
+});

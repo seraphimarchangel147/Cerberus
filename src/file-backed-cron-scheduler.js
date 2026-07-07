@@ -70,9 +70,12 @@ export class FileBackedCronScheduler extends CronScheduler {
     this.save();
   }
 
+  // No disk write here (was a full-file rewrite on every job, tripling I/O
+  // per tick): the in-memory clear is always flushed by whichever comes
+  // next — the following job's noteJobStart(), or runDue's own tick-closing
+  // save() if this was the last job — before a crash could observe the gap.
   noteJobEnd() {
     this.running = null;
-    this.save();
   }
 
   // Boot note: return the marker left by a process that died mid-job (or
