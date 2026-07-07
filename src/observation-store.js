@@ -179,9 +179,17 @@ export class ObservationStore {
       // FTS5 query — escape doubled-quotes for the MATCH expression
       const escaped = String(query).replace(/"/g, '""');
       const matchExpr = `"${escaped}"`;
+      // Activity refs before this store's machine-attribution migration were
+      // a stable "App:Window" composite key; rows inserted since are the
+      // numeric activity rowid. Match either format so a machine filter
+      // doesn't silently lose pre-migration capture history.
       const machineClause = machine
         ? `AND ((kind = 'frame' AND ref IN (SELECT frame_uid FROM frames WHERE source_machine_id = ?))
-            OR (kind = 'activity' AND ref IN (SELECT CAST(id AS TEXT) FROM activity WHERE source_machine_id = ?)))`
+            OR (kind = 'activity' AND ref IN (
+              SELECT CAST(id AS TEXT) FROM activity WHERE source_machine_id = ?
+              UNION
+              SELECT app || ':' || window FROM activity WHERE source_machine_id = ?
+            )))`
         : "";
       const rows = this.db.prepare(
         `SELECT kind, ref, at, app, window, snippet(texts, 5, '<mark>', '</mark>', '…', 16) AS snippet, text
@@ -196,7 +204,7 @@ export class ObservationStore {
       if (app) params.push(app);
       if (since) params.push(since);
       if (until) params.push(until);
-      if (machine) { params.push(machine); params.push(machine); }
+      if (machine) { params.push(machine); params.push(machine); params.push(machine); }
       params.push(limit);
       return rows.all(...params).map(capTranscriptText);
     }
