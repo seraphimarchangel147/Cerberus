@@ -850,20 +850,6 @@ test("propagation enforces max depth and breadth for sub-specialists", () => {
   assert.match(depthBlocked.blockedBy, /max-depth/);
 });
 
-test("vocabulary curator detects merge candidates and applies them", () => {
-  const runtime = createDefaultRuntime();
-  for (let i = 0; i < 6; i += 1) {
-    runtime.memory.remember({ content: `note ${i}`, tags: ["calendar"], risk: 0.3 }, { tier: "short" });
-  }
-  for (let i = 0; i < 6; i += 1) {
-    runtime.memory.remember({ content: `note ${i}`, tags: ["calendars"], risk: 0.3 }, { tier: "short" });
-  }
-  const merges = runtime.vocabulary.proposeMerges();
-  assert.ok(merges.length >= 1, "expected at least one near-synonym merge proposal");
-  const applied = runtime.vocabulary.applyMerges(merges);
-  assert.ok(applied[0].touched > 0);
-});
-
 test("introspector audit returns structural findings", () => {
   const runtime = createDefaultRuntime();
   const audit = runtime.introspector.audit();

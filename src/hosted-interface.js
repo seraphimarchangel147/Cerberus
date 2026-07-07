@@ -504,18 +504,6 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         });
       }
       if (method === "GET" && pathname === "/audit") return sendJson(res, 200, runtime.introspector?.audit?.() ?? null);
-      if (method === "GET" && pathname === "/vocabulary") {
-        return sendJson(res, 200, {
-          snapshot: runtime.vocabulary.snapshot(),
-          proposedMerges: runtime.vocabulary.proposeMerges(),
-          proposedDeprecations: runtime.vocabulary.proposeDeprecations()
-        });
-      }
-      if (method === "POST" && pathname === "/vocabulary/apply-merges") {
-        const body = await readJson(req);
-        const merges = body.merges ?? runtime.vocabulary.proposeMerges();
-        return sendJson(res, 200, runtime.vocabulary.applyMerges(merges));
-      }
 
       if (method === "GET" && pathname === "/scrutiny/weights") {
         const weights = {};
@@ -2100,7 +2088,6 @@ function renderApp() {
             <button data-tab="outcomes" title="Quality scores for completed agent work, 7d + 30d rolling.">Outcomes</button>
             <button data-tab="health" title="Memory saturation, specialist health, MCP status, upcoming cron.">Health</button>
             <button data-tab="scrutiny" title="Directional Adaptive Scrutiny — the 7-axis scorer's calibration + recent verdicts.">Scrutiny</button>
-            <button data-tab="vocab" title="Vocabulary curator — how the agent thinks about your domain.">Vocab</button>
           </div>
         </div>
       </div>
@@ -2408,9 +2395,6 @@ async function switchTab(tab) {
   } else if (tab === "scrutiny") {
     showSidebar(false);
     await renderScrutiny();
-  } else if (tab === "vocab") {
-    showSidebar(false);
-    await renderVocab();
   } else if (tab === "health") {
     showSidebar(false);
     await renderHealth();
@@ -3623,49 +3607,6 @@ async function renderScrutiny() {
     showOut("running judge…");
     try { showOut(JSON.stringify(await postJson("/scrutiny/judge", {}), null, 2)); }
     catch (e) { showOut("[err] " + e.message); }
-  });
-}
-
-async function renderVocab() {
-  const data = await fetchJson("/vocabulary");
-  const merges = data.proposedMerges ?? [];
-  const top = (data.snapshot?.tags ?? []).slice(0, 60);
-  const dormant = (data.proposedDeprecations ?? []).slice(0, 30);
-  const mergeCards = merges.length === 0
-    ? '<div class="empty">No near-synonym candidates right now.</div>'
-    : merges.map((m) =>
-      \`<div class="card"><div class="row between"><span class="name">\${escapeHtml(m.winner)}</span><span class="badge">sim \${m.similarity}</span></div><div class="desc">absorbs <code>\${escapeHtml(m.loser)}</code> · \${m.winnerCount} use\${m.winnerCount===1?"":"s"}</div></div>\`
-    ).join("");
-  const tagChips = top.length === 0
-    ? '<div class="empty">No tags yet.</div>'
-    : \`<div class="mem-tags">\${top.map((t) => \`<span class="chip">\${escapeHtml(t.tag)} · \${t.count}</span>\`).join("")}</div>\`;
-  const dormantList = dormant.length === 0
-    ? '<div class="empty">Nothing dormant.</div>'
-    : \`<div class="mem-tags">\${dormant.map((t) => \`<span class="chip">\${escapeHtml(t.tag)}</span>\`).join("")}</div>\`;
-  main.innerHTML = \`
-    <div class="pane">
-      <h2>Vocabulary</h2>
-      <div class="grid stats">
-        <div class="card"><span class="desc">Total tags</span><div class="stat-value">\${data.snapshot?.total ?? 0}</div></div>
-        <div class="card"><span class="desc">Proposed merges</span><div class="stat-value">\${merges.length}</div></div>
-        <div class="card"><span class="desc">Dormant tags</span><div class="stat-value">\${dormant.length}</div></div>
-      </div>
-      \${merges.length ? '<div class="row" style="margin:12px 0;"><button id="applyMergesBtn">Apply all merges</button></div>' : ""}
-      <div id="vocabOut" class="muted" style="font-size:12px;"></div>
-      <h3>Merge proposals</h3>
-      <div class="grid">\${mergeCards}</div>
-      <h3>Most-used tags</h3>
-      \${tagChips}
-      <h3>Dormant (last seen > 60d)</h3>
-      \${dormantList}
-    </div>
-  \`;
-  const btn = $("applyMergesBtn");
-  if (btn) btn.addEventListener("click", async () => {
-    try {
-      $("vocabOut").textContent = JSON.stringify(await postJson("/vocabulary/apply-merges", {}), null, 2);
-      setTimeout(renderVocab, 1000);
-    } catch (e) { $("vocabOut").textContent = "[err] " + e.message; }
   });
 }
 
@@ -5017,7 +4958,7 @@ refreshAmbientBadge();
 
 // Honor ?tab=X in URL on first load — notifications + Mac tray menu deep-link
 // to specific tabs and we need to land on them. Defaults to chat.
-const VALID_TABS = new Set(["chat","tasks","memory","cron","skills","mcp","integrations","agents","channels","budget","outcomes","scrutiny","vocab","health","activity","suggestions","computer-use","today"]);
+const VALID_TABS = new Set(["chat","tasks","memory","cron","skills","mcp","integrations","agents","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
 const initialTab = (() => {
   try {
     const t = new URLSearchParams(window.location.search).get("tab");

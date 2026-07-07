@@ -50,7 +50,6 @@ import { OutreachMapper } from "./outreach-mapper.js";
 import { loadOutreachConfig } from "./outreach-config.js";
 import { surfaceStalledTasks } from "./outreach-stalled.js";
 import { composeDigest, deliverDigest } from "./outreach-digest.js";
-import { VocabularyCurator } from "./vocabulary-curator.js";
 import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
@@ -181,7 +180,6 @@ export class AbiRuntime {
       ...(options.scrutinyFitterOptions ?? {})
     });
     this.scrutinyJudge = options.scrutinyJudge ?? new ScrutinyJudge({ runtime: this, ...(options.scrutinyJudgeOptions ?? {}) });
-    this.vocabulary = options.vocabulary ?? new VocabularyCurator({ runtime: this, ...(options.vocabularyOptions ?? {}) });
     this.introspector = options.introspector ?? new Introspector({ runtime: this });
     this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher(options.tunnelWatcherOptions ?? {});
     this.patternMiner = options.patternMiner ?? new PatternMiner({ runtime: this, dataDir: options.dataDir, ...(options.patternMinerOptions ?? {}) });
