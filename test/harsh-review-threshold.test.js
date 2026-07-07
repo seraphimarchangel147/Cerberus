@@ -18,6 +18,24 @@ test("selectAction: actThresholdOverride flips an act verdict to ask at 0.75", (
   assert.equal(scrutiny.selectAction({ ...base, actThresholdOverride: 0.85 }), "ask");
 });
 
+// Code-review finding: the propagate branch ran before actThresholdOverride
+// was applied, so a high propagationPressure (e.g. the harsh-review prompt's
+// own wording tripping requiresSpecialist) bypassed the raised act bar
+// entirely — agent-host.js grants "propagate" the identical full-tool-access
+// policy as "act", so this silently defeated the whole point of the override.
+test("selectAction: actThresholdOverride also gates the propagate branch, not just act", () => {
+  const scrutiny = new DirectionalAdaptiveScrutiny();
+  const base = { score: 0.5, risk: 0.2, novelty: 0.3, propagationPressure: 0.9, memories: [{ score: 0.8 }], signal: {} };
+  // Without an override, high propagationPressure legitimately fires propagate
+  // even though score (0.5) sits below the normal act bar (0.68) — this is
+  // existing, intentional behavior and must not change.
+  assert.equal(scrutiny.selectAction(base), "propagate");
+  // With the harsh-review override, a score below the RAISED bar (0.85) must
+  // not reach propagate either — it should fall through to "ask", same as
+  // the act branch does today.
+  assert.equal(scrutiny.selectAction({ ...base, actThresholdOverride: 0.85 }), "ask");
+});
+
 test("evaluate: overrides.act raises the bar for the whole verdict", () => {
   const scrutiny = new DirectionalAdaptiveScrutiny();
   // Crafted so the composite score lands between 0.68 and 0.85 (~0.812).

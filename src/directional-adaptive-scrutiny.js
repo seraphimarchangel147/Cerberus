@@ -107,7 +107,14 @@ export class DirectionalAdaptiveScrutiny {
 
   selectAction({ score, risk, novelty, propagationPressure, memories, signal, actThresholdOverride = null }) {
     const actThreshold = actThresholdOverride ?? this.thresholds.act;
-    if (propagationPressure >= this.thresholds.propagate && score >= this.thresholds.ask) return "propagate";
+    // An overridden act bar (weekly harsh review) must also gate propagate:
+    // agent-host.js grants "propagate" the same full-tool-access policy as
+    // "act", so letting propagationPressure clear the (unmodified) ask-level
+    // gate would bypass the raised bar entirely. Without an override this
+    // keeps the original, lower bar (ask, not act) so ordinary propagation
+    // behavior is unchanged.
+    const propagateScoreGate = actThresholdOverride !== null ? actThreshold : this.thresholds.ask;
+    if (propagationPressure >= this.thresholds.propagate && score >= propagateScoreGate) return "propagate";
     if (score >= actThreshold && risk < 0.8) return "act";
     if (risk >= 0.8 && memories.length === 0) return "ask";
     if (novelty >= 0.75 && score >= this.thresholds.ask) return "ask";
