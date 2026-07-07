@@ -172,6 +172,9 @@ test("handleMessage injects live principles but never quarantined ones", async (
       model: "stub",
       generate: async (args) => {
         captured.instructions = args.instructions;
+        // D2 moved per-turn state (intuitions included) out of the static
+        // system prompt into the turn-context block.
+        captured.turnContext = args.turnContext;
         return { text: "ok", provider: "stub", model: "stub", id: "r1", toolCalls: [] };
       }
     }
@@ -179,6 +182,7 @@ test("handleMessage injects live principles but never quarantined ones", async (
 
   await host.handleMessage({ text: "when do standup meetings run?", channel: "local", from: "u" });
 
-  assert.match(captured.instructions, /block prep time before standup meetings/, "live principle injected as intuition");
-  assert.doesNotMatch(captured.instructions, /Quarantined hunch/, "quarantined principle NOT injected");
+  assert.match(captured.turnContext, /block prep time before standup meetings/, "live principle injected as intuition");
+  assert.doesNotMatch(captured.turnContext, /Quarantined hunch/, "quarantined principle NOT injected");
+  assert.doesNotMatch(captured.instructions, /block prep time/, "static instructions stay principle-free (byte-stable for the prompt cache)");
 });

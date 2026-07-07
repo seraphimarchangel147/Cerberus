@@ -105,6 +105,7 @@ function makeHost(verdict) {
         captured.tools = args.tools;
         captured.context = args.context;
         captured.instructions = args.instructions;
+        captured.turnContext = args.turnContext;
         return { text: "ok", provider: "stub", model: "stub", id: "r1", toolCalls: [] };
       }
     }
@@ -126,7 +127,8 @@ test("agent turn under each verdict gets the right tools + enforcement context",
     assert.deepEqual((captured.tools ?? []).map((t) => t.name).sort(), toolNames.sort(), `${verdict}: tool list`);
     assert.equal(captured.context.__scrutinyPolicy, policy, `${verdict}: enforcement policy`);
     if (verdict !== "act" && verdict !== "propagate" && verdict !== "ignore") {
-      assert.match(captured.instructions, /This turn:/, `${verdict}: instructions explain the gate`);
+      assert.match(captured.turnContext, /This turn:/, `${verdict}: the per-turn context explains the gate`);
+      assert.doesNotMatch(captured.instructions, /This turn:/, `${verdict}: static instructions stay verdict-free`);
     }
   }
 });

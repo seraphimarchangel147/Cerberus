@@ -109,3 +109,29 @@ test("OpenAI path: instructions stay byte-stable and context rides the user turn
   assert.ok(lastUser.content.includes("- [short] Spencer prefers espresso"));
   assert.ok(lastUser.content.endsWith("first question"));
 });
+
+test("agent-host: instructionsForAgent is static and turnContextForAgent carries the per-turn state", async () => {
+  const { AgentHost } = await import("../src/agent-host.js");
+  const host = new AgentHost({
+    runtime: { processSignal: () => ({}) },
+    modelProvider: { isConfigured: () => true, generate: async () => ({ text: "ok", provider: "stub", model: "stub", toolCalls: [] }) }
+  });
+  const agentObj = { id: "main", name: "Peri", role: "main", systemPrompt: "Be direct, no fluff." };
+
+  const staticPrompt = host.instructionsForAgent(agentObj);
+  assert.equal(staticPrompt, host.instructionsForAgent(agentObj), "static prompt must be byte-identical across calls");
+  assert.match(staticPrompt, /Be direct, no fluff\./);
+  assert.match(staticPrompt, /You are Peri/);
+  assert.doesNotMatch(staticPrompt, /Current decision/);
+  assert.doesNotMatch(staticPrompt, /Top memory hits/);
+
+  const output = { scrutiny: { action: "watch", score: 0.4, reasons: ["stub reason"], dimensions: {} } };
+  const intuitions = [{ score: 0.5, text: "prefer smaller diffs" }];
+  const ctx = host.turnContextForAgent(output, hitsA, intuitions, null, null);
+  assert.match(ctx, /^\[context\]\n/);
+  assert.match(ctx, /Current decision: watch/);
+  assert.match(ctx, /This turn: observation mode/);
+  assert.ok(ctx.includes("- [short] Spencer prefers espresso"), "memory hits must appear verbatim in the turn context");
+  assert.match(ctx, /prefer smaller diffs/);
+  assert.match(ctx, /\[\/context\]$/);
+});

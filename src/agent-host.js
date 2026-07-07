@@ -136,6 +136,15 @@ export class AgentHost {
       } catch { /* swallow */ }
     }
 
+    const memoryHitsForModel = output.customContext.map((entry) => ({
+      score: entry.score,
+      item: {
+        id: entry.id,
+        tier: entry.tier,
+        content: entry.content
+      }
+    }));
+
     const modelResult = await this.modelProvider.generate({
       input: text,
       agent,
@@ -144,16 +153,10 @@ export class AgentHost {
       // user-facing chat. Both default to the base model until tiers/pins are set.
       task: (channel === "autopilot" || channel === "cron") ? "autopilot" : "chat",
       scrutiny: output.scrutiny,
-      memoryHits: output.customContext.map((entry) => ({
-        score: entry.score,
-        item: {
-          id: entry.id,
-          tier: entry.tier,
-          content: entry.content
-        }
-      })),
+      memoryHits: memoryHitsForModel,
       messages: sessionBefore.messages,
-      instructions: this.instructionsForAgent(agent, output, intuitions, ambientContext, input.metadata?.screenContext ?? null),
+      instructions: this.instructionsForAgent(agent),
+      turnContext: this.turnContextForAgent(output, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null),
       tools,
       toolRegistry,
       context: {
@@ -329,14 +332,47 @@ export class AgentHost {
     return signal;
   }
 
-  instructionsForAgent(agent, output, intuitions = [], ambientContext = null, screenContext = null) {
-    const intuitionBlock = intuitions.length > 0
-      ? `\nIntuitions (distilled long-term principles, may apply):\n${intuitions.map((i) => `- (${i.score.toFixed(2)}) ${i.text}`).join("\n")}\n`
-      : "";
+  // STATIC persona + standing instructions only — byte-identical for the same
+  // agent on every turn, so the provider's cache_control prefix actually hits.
+  // Everything per-turn (verdict, reasons, memory, intuitions, ambient/screen
+  // context) travels in turnContextForAgent() below. Extra positional args
+  // from pre-split callers are deliberately ignored.
+  instructionsForAgent(agent) {
+    return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
-    let ambientBlock = "";
+Your job is to help through the ABI loop:
+1. Apply directional adaptive scrutiny.
+2. Use memory deliberately. When the user CORRECTS something you previously stored or said (a time, a name, a decision, a preference), call correct_memory with the corrected fact — never just remember a second conflicting version.
+3. Propagate bounded specialists only when repeated or novel high-risk work justifies it.
+
+Answer the user plainly. If a specialist was created, mention its name and scope.`;
+  }
+
+  // Per-turn [context] block prepended to the latest user message (see
+  // buildTurnContext in model-provider.js for the provider-side fallback).
+  // Carries everything that used to make the system prompt churn per turn.
+  turnContextForAgent(output, memoryHits = [], intuitions = [], ambientContext = null, screenContext = null) {
+    const sections = [];
+
+    sections.push(`Current decision: ${output.scrutiny.action}`);
+    const guidance = verdictGuidance(output.scrutiny.action);
+    if (guidance) sections.push(guidance.trimEnd());
+    if (output.scrutiny.reasons?.length) {
+      sections.push(`Reasons:\n${output.scrutiny.reasons.map((reason) => `- ${reason}`).join("\n")}`);
+    }
+
+    const memory = (memoryHits ?? [])
+      .slice(0, 5)
+      .map((hit) => `- [${hit.item.tier}] ${hit.item.content}`)
+      .join("\n");
+    if (memory) sections.push(`Top memory hits:\n${memory}`);
+
+    if (intuitions.length > 0) {
+      sections.push(`Intuitions (distilled long-term principles, may apply):\n${intuitions.map((i) => `- (${i.score.toFixed(2)}) ${i.text}`).join("\n")}`);
+    }
+
     if (ambientContext && (ambientContext.apps?.length || ambientContext.snippets?.length)) {
-      const lines = ["", "Recent on-screen activity (last ~10 minutes — opt-in screen capture, on-device OCR):"];
+      const lines = ["Recent on-screen activity (last ~10 minutes — opt-in screen capture, on-device OCR):"];
       if (ambientContext.apps?.length) {
         lines.push(`Active apps: ${ambientContext.apps.map((a) => `${a.app} (${a.n})`).join(", ")}`);
       }
@@ -349,23 +385,13 @@ export class AgentHost {
         }
       }
       lines.push("Use this to ground your reply in what the user is actually doing. Don't quote the snippets back verbatim — refer to them naturally if relevant.");
-      ambientBlock = lines.join("\n") + "\n";
+      sections.push(lines.join("\n"));
     }
 
     const screenBlock = formatScreenContextBlock(screenContext);
+    if (screenBlock) sections.push(screenBlock.trim());
 
-    return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
-
-Your job is to help through the ABI loop:
-1. Apply directional adaptive scrutiny.
-2. Use memory deliberately. When the user CORRECTS something you previously stored or said (a time, a name, a decision, a preference), call correct_memory with the corrected fact — never just remember a second conflicting version.
-3. Propagate bounded specialists only when repeated or novel high-risk work justifies it.
-
-Current decision: ${output.scrutiny.action}
-${verdictGuidance(output.scrutiny.action)}Reasons:
-${output.scrutiny.reasons.map((reason) => `- ${reason}`).join("\n")}
-${intuitionBlock}${ambientBlock}${screenBlock}
-Answer the user plainly. If a specialist was created, mention its name and scope.`;
+    return `[context]\nPer-turn background assembled by the runtime — not typed by the user.\n${sections.join("\n")}\n[/context]`;
   }
 
   ensureSpecialistAgent(specialist, parentId) {
