@@ -63,6 +63,30 @@ test("POST /outreach/:id/act approves a draft via delegation and is idempotent",
   await app.close?.();
 });
 
+// Code-review finding: an unhandled sourceRef.kind (or a typo'd action)
+// silently fell through applyOutreachAction's switch default and was
+// recorded as a successful "acted" item instead of erroring — indistinguishable
+// from a real successful action in the outreach history.
+test("POST /outreach/:id/act errors on an unhandled item kind instead of silently succeeding", async () => {
+  const { runtime, app, base } = await bootApp();
+  // cron-interrupted items declare only "dismiss" and have no case in the
+  // switch — posting anything else must error, not silently "succeed".
+  const item = runtime.outreach.append({
+    type: "suggestion", sourceRef: { kind: "cron-job", id: "weekly-harsh-review" },
+    title: "Scheduled job interrupted mid-run: Weekly harsh review",
+    needsDecision: false, actions: ["dismiss"]
+  });
+  const res = await fetch(`${base}/outreach/${item.id}/act`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "approve" })
+  });
+  assert.equal(res.status, 400);
+  const json = await res.json();
+  assert.match(json.error, /cron-job/);
+  assert.equal(runtime.outreach.get(item.id).status, "error");
+  await app.close?.();
+});
+
 test("POST /outreach/:id/act on unknown id returns 404", async () => {
   const { app, base } = await bootApp();
   const res = await fetch(`${base}/outreach/nope/act`, {

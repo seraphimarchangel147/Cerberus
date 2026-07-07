@@ -1524,7 +1524,10 @@ async function applyOutreachAction(runtime, item, action, note) {
       return;
     }
     default:
-      return;
+      // No handler for this item kind — do NOT silently succeed. A silent
+      // return here is indistinguishable from a real successful action in
+      // the outreach history (the caller marks the item "acted" either way).
+      throw new Error(`no handler for outreach item kind "${ref.kind}" with action "${action}"`);
   }
 }
 
@@ -4202,7 +4205,7 @@ async function renderToday() {
               \${sendChannels.length === 0 ? "" : \`
                 <span class="ui-meta" style="margin-left:auto;">Send via</span>
                 <input class="ui-input" data-draft-target="\${escapeHtml(d.id)}" placeholder="\${d.recipient ? escapeHtml(d.recipient) : "recipient"}" style="width:auto; min-width:120px;">
-                \${sendChannels.map((ch) => \`<button class="ui-btn" data-draft-send="\${escapeHtml(ch)}" data-id="\${escapeHtml(d.id)}">\${ch === "sms" ? "📱 SMS" : "✈️ Telegram"}</button>\`).join("")}
+                \${sendChannels.map((ch) => \`<button class="ui-btn" data-draft-send="\${escapeHtml(ch)}" data-id="\${escapeHtml(d.id)}">✈️ Telegram</button>\`).join("")}
               \`}
             </div>
           </li>
