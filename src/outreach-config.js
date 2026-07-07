@@ -28,6 +28,12 @@ export function normalizeOutreachConfig(fileCfg = {}, env = process.env) {
   const stalled = Number(env.OPENAGI_OUTREACH_STALLED_DAYS);
   if (Number.isFinite(stalled) && stalled > 0) merged.stalledDays = stalled;
   if (env.OPENAGI_OUTREACH_DISABLED === "1") merged.enabled = false;
+  // Digest destination: where the outreach digest is delivered. "mac" keeps
+  // the status quo (store + Mac app SSE); "telegram" also pushes to every
+  // paired chat; "both" does both. Anything else falls back to "mac".
+  const dest = env.OPENAGI_OUTREACH_DESTINATION;
+  if (dest === "mac" || dest === "telegram" || dest === "both") merged.destination = dest;
+  if (!["mac", "telegram", "both"].includes(merged.destination)) merged.destination = "mac";
 
   merged.inQuietHours = (date = new Date()) => {
     const now = date.getHours() * 60 + date.getMinutes();

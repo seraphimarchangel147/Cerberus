@@ -35,3 +35,13 @@ test("non-numeric cadence/stalled env values are ignored (no NaN)", () => {
   assert.equal(c.cadenceHours, 3);   // default kept, not NaN
   assert.equal(c.stalledDays, 3);
 });
+
+test("destination: file sets it, env overrides, invalid values fall back to mac", () => {
+  assert.equal(normalizeOutreachConfig({ destination: "telegram" }, {}).destination, "telegram");
+  assert.equal(
+    normalizeOutreachConfig({ destination: "telegram" }, { OPENAGI_OUTREACH_DESTINATION: "both" }).destination,
+    "both"
+  );
+  assert.equal(normalizeOutreachConfig({ destination: "carrier-pigeon" }, {}).destination, "mac");
+  assert.equal(normalizeOutreachConfig({}, { OPENAGI_OUTREACH_DESTINATION: "nope" }).destination, "mac");
+});

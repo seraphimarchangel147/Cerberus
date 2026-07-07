@@ -698,7 +698,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/outreach/config") {
         const c = runtime.outreachConfig;
         return sendJson(res, 200, c
-          ? { enabled: c.enabled, cadenceHours: c.cadenceHours, quietHours: c.quietHours, stalledDays: c.stalledDays }
+          ? { enabled: c.enabled, destination: c.destination, cadenceHours: c.cadenceHours, quietHours: c.quietHours, stalledDays: c.stalledDays }
           : { enabled: false });
       }
       if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/act")) {

@@ -49,7 +49,7 @@ import { OutreachStore } from "./outreach-store.js";
 import { OutreachMapper } from "./outreach-mapper.js";
 import { loadOutreachConfig } from "./outreach-config.js";
 import { surfaceStalledTasks } from "./outreach-stalled.js";
-import { composeDigest } from "./outreach-digest.js";
+import { composeDigest, deliverDigest } from "./outreach-digest.js";
 import { VocabularyCurator } from "./vocabulary-curator.js";
 import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
@@ -804,10 +804,21 @@ export class AbiRuntime {
     this.outreachMapper.attach();
   }
 
-  runOutreachDigest({ now = new Date() } = {}) {
+  async runOutreachDigest({ now = new Date() } = {}) {
     if (!this.outreachConfig?.enabled) return { skipped: true, reason: "outreach disabled" };
     const item = composeDigest(this.outreach, this.outreachConfig, { now });
-    return item ? { ok: true, digestId: item.id, title: item.title } : { ok: true, empty: true };
+    if (!item) return { ok: true, empty: true };
+    // Destination routing: "mac" keeps the status quo (the item is already in
+    // the outreach store, which the Mac app consumes); "telegram"/"both" also
+    // push the digest text to every allowlisted chat, falling back to
+    // mac-only with a logged warning when telegram isn't ready. this.channels
+    // is assigned by ChannelManager's constructor (src/channels.js) when the
+    // hosted interface builds it.
+    const delivery = await deliverDigest(item, {
+      destination: this.outreachConfig.destination,
+      telegram: this.channels?.telegram ?? null
+    });
+    return { ok: true, digestId: item.id, title: item.title, delivery };
   }
 
   // G1 fix: the core severed hop. Roll the last hour of ambient observations

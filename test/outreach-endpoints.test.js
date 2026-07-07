@@ -116,3 +116,12 @@ test("POST /outreach/:id/act on a clarification answers it and resolves the task
   assert.equal(runtime.clarifications.get(clar.id).status, "answered");
   await app.close?.();
 });
+
+test("GET /outreach/config includes the destination", async () => {
+  const { app, base } = await bootApp();
+  const res = await fetch(`${base}/outreach/config`);
+  const json = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(json.destination, "mac");
+  await app.close?.();
+});
