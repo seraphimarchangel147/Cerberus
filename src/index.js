@@ -29,6 +29,7 @@ export { McpOAuthClient } from "./mcp-oauth.js";
 export { MemoryCondenser } from "./memory-condenser.js";
 export { OutcomeStore, scoreFromToolCalls } from "./outcome-store.js";
 export { ObservationStore } from "./observation-store.js";
+export { SessionIndex } from "./session-index.js";
 export { buildAmbientDigest } from "./ambient-digest.js";
 export { PatternMiner } from "./pattern-miner.js";
 export { SkillReplay, parseReplayBlock } from "./skill-replay.js";
