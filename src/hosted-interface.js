@@ -2113,6 +2113,7 @@ function renderApp() {
             <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs.">Cron</button>
             <button data-tab="channels" title="Telegram / webhook channels the agent can deliver through.">Channels</button>
             <button data-tab="agents" title="Specialists the propagation controller has spawned for repeated tasks.">Agents</button>
+            <button data-tab="nodes" title="Which machines are paired, which one is main, and who's online right now.">Nodes</button>
           </div>
           <div class="nav-more-section">
             <div class="nav-more-label">Diagnostics</div>
@@ -2418,6 +2419,9 @@ async function switchTab(tab) {
   } else if (tab === "memory") {
     showSidebar(false);
     await renderMemory();
+  } else if (tab === "nodes") {
+    showSidebar(false);
+    await renderNodes();
   } else if (tab === "channels") {
     showSidebar(false);
     await renderChannels();
@@ -3404,6 +3408,42 @@ function timeAgo(iso) {
   if (ms < 3600000) return Math.floor(ms / 60000) + "m ago";
   if (ms < 86400000) return Math.floor(ms / 3600000) + "h ago";
   return Math.floor(ms / 86400000) + "d ago";
+}
+
+async function renderNodes() {
+  const data = await fetchJson("/nodes");
+  const roleLabel = data.self.role === "main" ? "Main" : "Node";
+  const pairedLine = data.self.role === "node"
+    ? \`<div class="desc">Paired to: <code>\${escapeHtml(data.self.pairedTo)}</code></div>\`
+    : \`<div class="desc">This machine is a main — other nodes heartbeat to it.</div>\`;
+  const staleBanner = data.stale
+    ? \`<div class="card" style="border-color:var(--warn,#c8963e);"><div class="name warn">Showing cached topology\${data.cachedAt ? \` as of \${escapeHtml(new Date(data.cachedAt).toLocaleTimeString())}\` : ""}</div><div class="desc">Could not reach the main just now — this is the last known roster.</div></div>\`
+    : "";
+  const rows = data.nodes.length > 0
+    ? data.nodes.map((n) => \`
+        <tr>
+          <td>\${escapeHtml(n.name)}</td>
+          <td>\${escapeHtml(n.role)}</td>
+          <td><span class="\${n.status === "online" ? "name" : "name warn"}">\${n.status}</span></td>
+          <td>\${escapeHtml(new Date(n.lastSeenAt).toLocaleString())}</td>
+          <td>\${escapeHtml(n.version ?? "")}</td>
+        </tr>\`).join("")
+    : \`<tr><td colspan="5" class="desc">No other nodes have checked in yet.</td></tr>\`;
+  main.innerHTML = \`
+    <div class="pane">
+      <h2>Nodes</h2>
+      <div class="card">
+        <div class="name">\${escapeHtml(data.self.name)} (this machine) — \${roleLabel}</div>
+        \${pairedLine}
+        <div class="desc">Version: \${escapeHtml(data.self.version ?? "unknown")}</div>
+      </div>
+      \${staleBanner}
+      <table class="grid" style="margin-top:12px; width:100%;">
+        <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Last seen</th><th>Version</th></tr></thead>
+        <tbody>\${rows}</tbody>
+      </table>
+    </div>
+  \`;
 }
 
 async function renderChannels() {
@@ -4981,7 +5021,7 @@ refreshAmbientBadge();
 
 // Honor ?tab=X in URL on first load — notifications + Mac tray menu deep-link
 // to specific tabs and we need to land on them. Defaults to chat.
-const VALID_TABS = new Set(["chat","tasks","memory","cron","skills","mcp","integrations","agents","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
+const VALID_TABS = new Set(["chat","tasks","memory","cron","skills","mcp","integrations","agents","nodes","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
 const initialTab = (() => {
   try {
     const t = new URLSearchParams(window.location.search).get("tab");
