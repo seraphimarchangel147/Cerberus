@@ -146,6 +146,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   }
 
   let tickerHandle = null;
+  let heartbeatHandle = null;
   const tickerMs = options.tickerMs ?? Number.parseInt(process.env.OPENAGI_TICKER_MS ?? "10000", 10);
 
   const server = http.createServer(async (req, res) => {
@@ -1452,6 +1453,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
     // handlers close over the `channels` variable, so reassigning it here
     // takes effect immediately.
     __setChannels(c) { channels = c; },
+    get __heartbeatHandle() { return heartbeatHandle ?? undefined; },
     listen() {
       return new Promise((resolve) => {
         server.listen(port, host, () => {
@@ -1464,6 +1466,44 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
               } catch { /* swallow */ }
             }, tickerMs);
           }
+          const pairing = readNodeConfig(dataDir);
+          if (pairing?.remote) {
+            const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30_000;
+            let heartbeatFailStreak = 0;
+            const sendHeartbeat = async () => {
+              try {
+                const identity = readOrCreateIdentity(dataDir);
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), 5000);
+                try {
+                  const res = await fetch(`${pairing.remote}/nodes/heartbeat`, {
+                    method: "POST",
+                    headers: {
+                      "content-type": "application/json",
+                      ...(pairing.token ? { authorization: `Bearer ${pairing.token}` } : {})
+                    },
+                    body: JSON.stringify({
+                      nodeId: identity.nodeId, name: identity.name, role: "node",
+                      url: options.publicUrl ?? process.env.OPENAGI_PUBLIC_URL ?? null,
+                      version: PACKAGE_VERSION
+                    }),
+                    signal: ctrl.signal
+                  });
+                  if (!res.ok) throw new Error(`heartbeat rejected: ${res.status}`);
+                } finally { clearTimeout(timer); }
+                if (heartbeatFailStreak > 0) {
+                  console.warn("[openagi] heartbeat to main recovered");
+                }
+                heartbeatFailStreak = 0;
+              } catch (error) {
+                heartbeatFailStreak += 1;
+                if (heartbeatFailStreak === 1) {
+                  console.warn(`[openagi] heartbeat to main failing (${error.message}) - will keep retrying`);
+                }
+              }
+            };
+            heartbeatHandle = setInterval(() => { sendHeartbeat().catch(() => {}); }, heartbeatIntervalMs);
+          }
           const address = server.address();
           const actualPort = typeof address === "object" && address ? address.port : port;
           resolve({ host, port: actualPort, url: `http://${host}:${actualPort}` });
@@ -1473,6 +1513,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
     close() {
       return new Promise((resolve, reject) => {
         if (tickerHandle) clearInterval(tickerHandle);
+        if (heartbeatHandle) clearInterval(heartbeatHandle);
         for (const client of sseClients) try { client.end(); } catch { /* ignore */ }
         sseClients.clear();
         channels?.stop?.();
