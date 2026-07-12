@@ -4,6 +4,10 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { createDefaultRuntime } from "./abi-runtime.js";
 import { resolveDataDir } from "./data-dir.js";
+import { readJsonFile, writeJsonAtomic } from "./file-utils.js";
+import { createRequire } from "node:module";
+
+const PACKAGE_VERSION = createRequire(import.meta.url)("../package.json").version;
 import {
   buildSetCookie,
   checkAuth,
@@ -15,6 +19,8 @@ import {
 import { ChannelManager } from "./channels.js";
 import { inferToneScore } from "./outcome-store.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
+import { NodeRegistry, readOrCreateIdentity } from "./node-registry.js";
+import { readNodeConfig } from "./cli-client.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -33,6 +39,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           telegramToken: options.telegramToken
         })
       : null);
+
+  // dataDir is resolved ONCE here and threaded explicitly into both
+  // NodeRegistry's dir and the cache path below — NodeRegistry must NOT be
+  // allowed to fall back to its own default (which calls resolveDataDir()
+  // independently), because resolveDataDir() memoizes its first result for
+  // the whole process; two hosted-interface instances in the same test
+  // process (a main + a node) would otherwise silently collide on the same
+  // directory the first one resolved.
+  const dataDir = options.dataDir ?? resolveDataDir();
+  const nodeRegistry = options.nodeRegistry ?? new NodeRegistry({ dir: options.nodesDir ?? path.join(dataDir, "nodes") });
+  const nodesCachePath = path.join(dataDir, "nodes", "cache.json");
 
   const events = new EventEmitter();
   events.setMaxListeners(50);
@@ -285,6 +302,58 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, runtime.agentHost?.store.getSession(id) ?? { error: "agent-host-disabled" });
       }
       if (method === "GET" && pathname === "/agent-host") return sendJson(res, 200, runtime.agentHost?.status() ?? { enabled: false });
+      if (method === "POST" && pathname === "/nodes/heartbeat") {
+        const body = await readJson(req).catch(() => ({}));
+        if (!body.nodeId || !body.name || !body.role) {
+          return sendJson(res, 400, { error: "nodeId, name, and role are required" });
+        }
+        nodeRegistry.upsert({
+          nodeId: body.nodeId, name: body.name, role: body.role,
+          url: body.url ?? null, version: body.version ?? null
+        });
+        return sendJson(res, 200, { ok: true });
+      }
+      if (method === "GET" && pathname === "/nodes") {
+        const identity = readOrCreateIdentity(dataDir);
+        const pairing = readNodeConfig(dataDir);
+        if (!pairing?.remote) {
+          return sendJson(res, 200, {
+            self: { nodeId: identity.nodeId, name: identity.name, role: "main", version: PACKAGE_VERSION, pairedTo: null },
+            nodes: nodeRegistry.list(),
+            stale: false,
+            cachedAt: null
+          });
+        }
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 5000);
+          let upstream;
+          try {
+            upstream = await fetch(`${pairing.remote}/nodes`, {
+              headers: pairing.token ? { authorization: `Bearer ${pairing.token}` } : {},
+              signal: ctrl.signal
+            });
+          } finally { clearTimeout(timer); }
+          if (!upstream.ok) throw new Error(`upstream ${upstream.status}`);
+          const upstreamJson = await upstream.json();
+          const cached = { ...upstreamJson, cachedAt: new Date().toISOString() };
+          writeJsonAtomic(nodesCachePath, cached);
+          return sendJson(res, 200, {
+            self: { nodeId: identity.nodeId, name: identity.name, role: "node", version: PACKAGE_VERSION, pairedTo: pairing.remote },
+            nodes: cached.nodes ?? [],
+            stale: false,
+            cachedAt: cached.cachedAt
+          });
+        } catch {
+          const cached = readJsonFile(nodesCachePath, null);
+          return sendJson(res, 200, {
+            self: { nodeId: identity.nodeId, name: identity.name, role: "node", version: PACKAGE_VERSION, pairedTo: pairing.remote },
+            nodes: cached?.nodes ?? [],
+            stale: true,
+            cachedAt: cached?.cachedAt ?? null
+          });
+        }
+      }
       if (method === "GET" && pathname === "/channels") {
         const status = channels?.status() ?? { enabled: false };
         const pub = getPublicUrl();
@@ -1161,6 +1230,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
               skillSlug: result.slug,
               skillPath: result.path,
               scheduleHint: result.scheduleHint ?? null,
+              triggerHint: result.triggerHint ?? null,
               // When the candidate had a scheduleHint, the dashboard
               // asks the user whether to also create a cron job.
               requiresScheduleConfirm: Boolean(result.scheduleHint)
@@ -2758,7 +2828,10 @@ async function refreshSkills(reload = false) {
     for (const s of pendingSuggested) {
       const li = document.createElement("li");
       li.style.borderLeft = "2px solid var(--accent)";
-      li.innerHTML = \`<div class="title">\${escapeHtml(s.proposal.name)}</div><div class="preview">\${escapeHtml(s.proposal.description ?? s.sequence.apps.join(" → "))}</div>\`;
+      const sequenceLabels = Array.isArray(s.sequence?.actions)
+        ? s.sequence.actions.map((a) => typeof a === "string" ? a : (a.label ?? a.action ?? a.key))
+        : (s.sequence?.apps ?? []);
+      li.innerHTML = \`<div class="title">\${escapeHtml(s.proposal.name)}</div><div class="preview">\${escapeHtml(s.proposal.description ?? sequenceLabels.join(" → "))}</div>\`;
       li.addEventListener("click", () => renderSuggestedDetail(s));
       sidebarList.appendChild(li);
     }
@@ -2781,29 +2854,42 @@ async function refreshSkills(reload = false) {
 
   if (pendingSuggested.length > 0) renderSuggestedDetail(pendingSuggested[0]);
   else if (skills.length > 0) renderSkillDetail(skills[0]);
-  else main.innerHTML = '<div class="pane"><div class="empty">No skills loaded yet. Drop a SKILL.md into <code>.openagi/skills/&lt;name&gt;/</code>, or wait for the nightly pattern miner to surface routines.</div></div>';
+  else main.innerHTML = '<div class="pane"><div class="empty">No skills loaded yet. Drop a SKILL.md into <code>.openagi/skills/&lt;name&gt;/</code>, or let the hourly workflow miner surface a repeated routine.</div></div>';
 }
 
 function renderSuggestedDetail(candidate) {
-  const seq = candidate.sequence;
+  const seq = candidate.sequence ?? {
+    count: candidate.cluster?.count ?? 0,
+    actions: candidate.cluster?.keywords ?? [],
+    apps: []
+  };
+  const detectedSteps = Array.isArray(seq.actions) && seq.actions.length > 0
+    ? seq.actions.map((a) => ({
+        label: typeof a === "string" ? a : (a.label ?? a.action ?? a.key),
+        apps: typeof a === "string" ? [] : (a.apps ?? [])
+      }))
+    : (seq.apps ?? []).map((app) => ({ label: app, apps: [] }));
+  const horizons = Array.isArray(seq.horizons) ? seq.horizons : [];
   main.innerHTML = \`
     <div class="pane">
       <div class="row" style="gap:6px;margin-bottom:6px;">
         <span class="badge ok">✨ suggested</span>
         <span class="badge">confidence \${(seq.confidence ?? 0).toFixed(2)}</span>
-        <span class="badge">\${seq.count}× in last 14d</span>
+        <span class="badge">\${seq.count}× in last 28d</span>
         <span class="badge">~\${String(seq.startHour ?? 0).padStart(2, "0")}:00</span>
+        \${horizons.map((h) => \`<span class="badge">\${escapeHtml(h)}</span>\`).join("")}
       </div>
       <h2>\${escapeHtml(candidate.proposal.name)}</h2>
       <p class="muted">\${escapeHtml(candidate.proposal.description ?? "")}</p>
 
-      <h3>Detected sequence</h3>
-      <div class="row" style="gap:8px;flex-wrap:wrap;">\${seq.apps.map((a) => \`<span class="chip" style="font-size:13px;padding:6px 12px;">\${escapeHtml(a)}</span>\`).join('<span class="muted" style="align-self:center;">→</span>')}</div>
+      <h3>Detected action workflow</h3>
+      <div class="row" style="gap:8px;flex-wrap:wrap;">\${detectedSteps.map((step) => \`<span class="chip" style="font-size:13px;padding:6px 12px;">\${escapeHtml(step.label)}\${step.apps.length ? \` <span class="muted">(\${escapeHtml(step.apps.join(" / "))})</span>\` : ""}</span>\`).join('<span class="muted" style="align-self:center;">→</span>')}</div>
 
       <h3>Proposed skill body</h3>
       <pre style="white-space:pre-wrap;">\${escapeHtml(candidate.proposal.body ?? "")}</pre>
 
       \${candidate.proposal.scheduleHint ? \`<h3>Suggested schedule</h3><p>\${escapeHtml(candidate.proposal.scheduleHint)}</p>\` : ""}
+      \${candidate.proposal.triggerHint ? \`<h3>Suggested interaction trigger</h3><p>\${escapeHtml(typeof candidate.proposal.triggerHint === "string" ? candidate.proposal.triggerHint : JSON.stringify(candidate.proposal.triggerHint))}</p>\` : ""}
 
       <div class="row" style="gap:8px;margin-top:14px;">
         <button id="acceptSug">✓ Accept — write SKILL.md</button>
