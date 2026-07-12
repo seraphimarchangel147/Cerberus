@@ -32,8 +32,11 @@ export class NodeRegistry {
   }
 
   upsert({ nodeId, name, role, url, version }, { now = Date.now() } = {}) {
-    this.prune({ now });
+    // Prune against the SAME in-memory store we're about to update, rather
+    // than pruning (its own read+maybe-write) and then re-reading the file
+    // again from disk for the upsert — one read, one write, per call.
     const store = this._read();
+    this._pruneStore(store, now);
     const existing = store.entries[nodeId];
     store.entries[nodeId] = {
       nodeId,
@@ -59,6 +62,15 @@ export class NodeRegistry {
 
   prune({ now = Date.now() } = {}) {
     const store = this._read();
+    const removed = this._pruneStore(store, now);
+    if (removed > 0) writeJsonAtomic(this.storePath, store);
+    return removed;
+  }
+
+  // Mutates `store.entries` in place, deleting anything stale; returns the
+  // count removed. Shared by prune() (which persists unconditionally when
+  // something changed) and upsert() (which persists anyway right after).
+  _pruneStore(store, now) {
     let removed = 0;
     for (const [nodeId, entry] of Object.entries(store.entries)) {
       if ((now - new Date(entry.lastSeenAt).getTime()) > PRUNE_AFTER_MS) {
@@ -66,7 +78,6 @@ export class NodeRegistry {
         removed += 1;
       }
     }
-    if (removed > 0) writeJsonAtomic(this.storePath, store);
     return removed;
   }
 

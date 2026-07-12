@@ -305,8 +305,23 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/agent-host") return sendJson(res, 200, runtime.agentHost?.status() ?? { enabled: false });
       if (method === "POST" && pathname === "/nodes/heartbeat") {
         const body = await readJson(req).catch(() => ({}));
-        if (!body.nodeId || !body.name || !body.role) {
-          return sendJson(res, 400, { error: "nodeId, name, and role are required" });
+        // Type-checked, not just truthy: a non-string name/nodeId previously
+        // persisted and crashed NodeRegistry.list()'s name.localeCompare sort
+        // with a TypeError, taking down GET /nodes with a 500 until the
+        // poisoned entry aged out. role is restricted to exactly "node" —
+        // only this instance's own self-entry may ever claim role "main";
+        // nothing arriving over the wire should be able to.
+        if (typeof body.nodeId !== "string" || !body.nodeId || typeof body.name !== "string" || !body.name) {
+          return sendJson(res, 400, { error: "nodeId and name are required and must be non-empty strings" });
+        }
+        if (body.role !== "node") {
+          return sendJson(res, 400, { error: 'role must be "node"' });
+        }
+        if (body.url !== undefined && body.url !== null && typeof body.url !== "string") {
+          return sendJson(res, 400, { error: "url must be a string or null" });
+        }
+        if (body.version !== undefined && body.version !== null && typeof body.version !== "string") {
+          return sendJson(res, 400, { error: "version must be a string or null" });
         }
         nodeRegistry.upsert({
           nodeId: body.nodeId, name: body.name, role: body.role,
@@ -338,7 +353,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           if (!upstream.ok) throw new Error(`upstream ${upstream.status}`);
           const upstreamJson = await upstream.json();
           const cached = { ...upstreamJson, cachedAt: new Date().toISOString() };
-          writeJsonAtomic(nodesCachePath, cached);
+          // Best-effort only: a fresh roster we already have in hand must
+          // still be returned even if persisting it to disk fails (e.g. a
+          // full disk, or a stale nodes/cache.json path that isn't a
+          // directory) — caching is an optimization for the next request,
+          // not a precondition for answering this one.
+          try { writeJsonAtomic(nodesCachePath, cached); } catch { /* best-effort */ }
           return sendJson(res, 200, {
             self: { nodeId: identity.nodeId, name: identity.name, role: "node", version: PACKAGE_VERSION, pairedTo: pairing.remote },
             nodes: cached.nodes ?? [],
