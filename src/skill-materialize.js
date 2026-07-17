@@ -129,15 +129,20 @@ export function pickUserSkillsDir(runtime) {
 // Conservative slug: lowercase, alnum + hyphen, collapsed, trimmed.
 // Cap at 48 chars so directory names stay readable on macOS Finder.
 export function slugify(text) {
-  return String(text ?? "")
+  const slug = String(text ?? "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 48) || "untitled-skill";
+    .slice(0, 48)
+    .replace(/-+$/g, "");
+  return slug || "untitled-skill";
 }
 
 // If `<userDir>/<slug>/` exists, try `<slug>-2`, `<slug>-3`, … until free.
 export function dedupeSlug(userDir, slug) {
+  if (typeof slug !== "string" || slug.length > 48 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+    throw new Error("invalid skill slug: expected lowercase kebab-case using only a-z, 0-9, and hyphens");
+  }
   let candidate = slug;
   let n = 2;
   while (fs.existsSync(path.join(userDir, candidate))) {

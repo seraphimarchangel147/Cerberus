@@ -5007,7 +5007,7 @@ async function postJson(path, body) {
   }
   return r.json();
 }
-function escapeHtml(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]); }
+function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]); }
 
 // Inline help marker — renders a (?) chip with a hover tooltip. Use it for
 // obscure terms in dense panes so users don't have to leave the page to
