@@ -246,7 +246,16 @@ export class DiscordChannel {
     }
 
     // Serialize turns so parallel pings don't interleave sessions.
-    this.busy = this.busy.then(() => this.runTurn(message, cleaned)).catch(() => {});
+    // NOTE: runTurn has its own try/catch, so a rejection here means the
+    // error path itself failed. Log it and surface it — never end in silence.
+    this.busy = this.busy.then(() => this.runTurn(message, cleaned)).catch((err) => {
+      this.log({ op: "turn-rejected", error: err?.message ?? String(err) });
+      this.sendMessage(
+        message.channel_id,
+        `⚠ Turn failed hard: ${(err?.message ?? String(err)).slice(0, 400)}`,
+        message.id
+      ).catch((sendErr) => this.log({ op: "turn-rejected-notify-failed", error: sendErr?.message ?? String(sendErr) }));
+    });
     await this.busy;
   }
 
