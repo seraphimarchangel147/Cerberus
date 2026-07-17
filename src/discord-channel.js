@@ -443,7 +443,27 @@ export class DiscordChannel {
       post(`💡 **Observer suggestion** _(scrutiny-gated, nothing fired)_\n**${d.title ?? "(untitled)"}** · category: \`${d.category ?? "?"}\`\n${(d.rationale ?? "").slice(0, 400)}`);
     });
     events.on("pending-action", (d) => {
-      post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\nApprove with \`!approve ${d.id}\` · deny with \`!deny ${d.id}\``);
+      // With auto-approve ON the action runs immediately after this event —
+      // label it accordingly instead of asking the Creator to approve.
+      import("./tool-registry.js").then(({ autoApproveEnabled }) => {
+        if (autoApproveEnabled()) {
+          post(`⚡ **Gated action (auto-approve ON)** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\n_Running automatically; result will follow._`);
+        } else {
+          post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\nApprove with \`!approve ${d.id}\` · deny with \`!deny ${d.id}\``);
+        }
+      }).catch(() => {
+        post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}`);
+      });
+    });
+    events.on("pending-action-decided", (d) => {
+      const emoji = d.status === "approved" ? (d.decidedBy === "auto-approve" ? "🤖✅" : "✅") : "⛔";
+      const who = d.decidedBy === "auto-approve" ? "auto-approved" : `${d.status} by ${d.decidedBy}`;
+      post(`${emoji} **Action ${who}** — \`${d.id}\` · **${d.toolName}**${d.error ? `\n⚠ error: ${String(d.error).slice(0, 300)}` : ""}`);
+    });
+    events.on("auto-approve", (d) => {
+      post(d.enabled
+        ? "🟢 **Auto-approve enabled** — gated actions now run without manual approval."
+        : "🔴 **Auto-approve disabled** — gated actions will queue for manual approval.");
     });
     events.on("skill-candidate", (d) => {
       post(`🧪 **Skill candidate mined** — ${d.title ?? d.name ?? "(unnamed)"}\n${(d.rationale ?? d.description ?? "").slice(0, 300)}`);

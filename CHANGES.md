@@ -72,3 +72,13 @@ QA PHASE COMPLETE
 - `src/setup-wizard.js`: `OPENAGI_AUTO_APPROVE` allowlisted in WIZARD_FIELDS.
 - `test/auto-approve.test.js`: 3 tests (default-on semantics, run+audit path, off→queue path).
   `npm test` pins `OPENAGI_AUTO_APPROVE=0` so legacy queue-semantics tests stay valid.
+
+## 2026-07-17 — Activity-feed notifications rerouted + decision events (by Seraphim)
+
+- `.env`: `DISCORD_ACTIVITY_CHANNEL` → 1477780117496271030 (Azazel's working channel).
+- `src/pending-actions.js`: `decide()` now emits `pending-action-decided` on the bus.
+- `src/discord-channel.js` activity feed: (a) gated-action posts are auto-approve-aware
+  (⚡ "running automatically" vs ⏸️ "awaiting approval"); (b) posts decisions
+  (🤖✅ auto-approved / ✅ approved by user / ⛔ denied, with error if any);
+  (c) announces auto-approve toggles (🟢/🔴).
+- `src/discord-commands.js`: `/autoapprove` toggle also broadcasts on the bus.

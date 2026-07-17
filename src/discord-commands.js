@@ -285,6 +285,9 @@ export class DiscordCommands {
       saveEnv({ values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" } });
     } catch { /* runtime-only if .env write fails */ }
     process.env.OPENAGI_AUTO_APPROVE = enable ? "1" : "0";
+    // Mirror the HTTP toggle: broadcast on the runtime bus so the activity
+    // feed announces the state change in the home channel too.
+    this.runtime?.pendingActions?.events?.emit?.("auto-approve", { enabled: enable });
     return this.respond(interaction, {
       content: enable
         ? "🟢 Auto-approve **enabled** — gated agent actions now run without manual approval (audit trail preserved in the Approvals history)."

@@ -78,6 +78,16 @@ export class PendingActionStore {
     if (error !== undefined) action.error = error;
     this.actions.set(id, action);
     this._appendJournal({ op: "decide", id, status: action.status, decidedAt: action.decidedAt, decidedBy: action.decidedBy, result, error });
+    // Broadcast the decision so the Discord activity feed (and SSE dashboard)
+    // can show approvals/denials/auto-approvals — not just enqueues.
+    this.events?.emit?.("pending-action-decided", {
+      id: action.id,
+      toolName: action.toolName,
+      summary: action.summary,
+      status: action.status,
+      decidedBy: action.decidedBy,
+      error: action.error ?? null
+    });
     return action;
   }
 
