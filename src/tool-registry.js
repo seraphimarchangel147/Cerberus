@@ -180,6 +180,29 @@ export class ToolRegistry {
     const scrutinyConfirm = context?.__scrutinyPolicy === "confirm" && tool.sideEffects;
     if ((tool.needsConfirmation || scrutinyConfirm) && !context?.__confirmed && this.pendingActions) {
       const summary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
+      // Auto-approve mode (Story: hands-free operation). When enabled the
+      // gate still records the action for the audit trail, but runs the
+      // handler immediately instead of parking it in the queue. Toggle via
+      // POST /auto-approve, /autoapprove Discord command, or
+      // OPENAGI_AUTO_APPROVE in .env. Default is ON — only an explicit
+      // "0"/"false" disables it.
+      if (autoApproveEnabled()) {
+        const action = this.pendingActions.enqueue({
+          toolName: name,
+          args,
+          context,
+          summary,
+          reason: context.__reason ?? null
+        });
+        const invokeResult = await this.invoke(name, args, { ...(context ?? {}), __confirmed: true });
+        this.pendingActions.decide?.(action.id, {
+          decision: "approve",
+          decidedBy: "auto-approve",
+          result: invokeResult.ok ? invokeResult.result : null,
+          error: invokeResult.ok ? null : invokeResult.error
+        });
+        return invokeResult;
+      }
       const action = this.pendingActions.enqueue({
         toolName: name,
         args,
@@ -208,6 +231,14 @@ export class ToolRegistry {
 
 function safeSummarize(fn, args) {
   try { return String(fn(args ?? {})).slice(0, 240); } catch { return null; }
+}
+
+// Auto-approve gate check. Reads process.env each call (not cached) so the
+// /auto-approve toggle endpoint can flip it live without a restart.
+// DEFAULT ON: anything except an explicit "0"/"false"/"off" means enabled.
+export function autoApproveEnabled() {
+  const v = String(process.env.OPENAGI_AUTO_APPROVE ?? "1").trim().toLowerCase();
+  return !(v === "0" || v === "false" || v === "off");
 }
 
 export function registerCoreTools(registry, runtime) {

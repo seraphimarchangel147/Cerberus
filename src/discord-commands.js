@@ -36,6 +36,14 @@ export const COMMAND_DEFS = [
   },
   { name: "pending", description: "Actions awaiting approval (approve/deny buttons)" },
   {
+    name: "autoapprove",
+    description: "Show or toggle auto-approval of gated agent actions",
+    options: [{
+      type: 3, name: "mode", description: "on / off — omit to show current state", required: false,
+      choices: [{ name: "on", value: "on" }, { name: "off", value: "off" }]
+    }]
+  },
+  {
     name: "tasks",
     description: "List tasks",
     options: [{
@@ -131,6 +139,7 @@ export class DiscordCommands {
       case "provider": return this.cmdProvider(interaction);
       case "model": return this.cmdModel(interaction, opts);
       case "pending": return this.cmdPending(interaction);
+      case "autoapprove": return this.cmdAutoApprove(interaction, opts);
       case "tasks": return this.cmdTasks(interaction, opts);
       case "memory": return this.cmdMemory(interaction, opts);
       case "suggestions": return this.cmdSuggestions(interaction);
@@ -254,6 +263,33 @@ export class DiscordCommands {
       saveEnv({ values: { [envKey]: model } });
     } catch { /* runtime-only */ }
     return this.respond(interaction, { content: `✅ Model set to \`${model}\` (persisted as ${envKey})` });
+  }
+
+  async cmdAutoApprove(interaction, opts) {
+    // Show or flip the auto-approve gate. Mirrors the /auto-approve HTTP
+    // endpoint: persists to .env via saveEnv (allowlisted key) and mutates
+    // process.env so the live tool-registry check sees it immediately.
+    const { autoApproveEnabled } = await import("./tool-registry.js");
+    const mode = String(opts?.mode ?? "").toLowerCase();
+    if (mode !== "on" && mode !== "off") {
+      const on = autoApproveEnabled();
+      return this.respond(interaction, {
+        content: on
+          ? "🟢 Auto-approve is **ON** — gated actions run immediately (still logged to the approval history). `/autoapprove mode:off` to require manual approval."
+          : "🔴 Auto-approve is **OFF** — gated actions wait in the approval queue. `/autoapprove mode:on` to run them automatically."
+      });
+    }
+    const enable = mode === "on";
+    try {
+      const { saveEnv } = await import("./setup-wizard.js");
+      saveEnv({ values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" } });
+    } catch { /* runtime-only if .env write fails */ }
+    process.env.OPENAGI_AUTO_APPROVE = enable ? "1" : "0";
+    return this.respond(interaction, {
+      content: enable
+        ? "🟢 Auto-approve **enabled** — gated agent actions now run without manual approval (audit trail preserved in the Approvals history)."
+        : "🔴 Auto-approve **disabled** — gated agent actions will queue for manual approval again."
+    });
   }
 
   async cmdPending(interaction) {

@@ -59,3 +59,16 @@ QA: `node --check` clean both files, 488/488 tests pass, homoglyph/zero-width by
 - Enforced strict slug boundaries, capped linked files at 1 MiB and skill bodies at 256 KiB, made telemetry reads line-tolerant, and hardened frontmatter and trash handling without changing the fixed-cost tool contracts.
 - Escaped all stored skill metadata and edit-history text rendered by the Skills dashboard. Validation: `node --test` — 508/508 pass.
 QA PHASE COMPLETE
+
+## 2026-07-17 — Auto-approve mode for gated actions (by Seraphim)
+
+- `src/tool-registry.js`: `autoApproveEnabled()` (env `OPENAGI_AUTO_APPROVE`, DEFAULT ON —
+  only explicit `0`/`false`/`off` disables). When on, gated tools (needsConfirmation /
+  scrutiny-confirm) run immediately; the action is still enqueued + resolved with
+  `decidedBy:"auto-approve"` so the Approvals audit trail is preserved.
+- `src/hosted-interface.js`: `GET /auto-approve` (state) and `POST /auto-approve {enable}` —
+  live toggle, persists to `.env`, no restart needed.
+- `src/discord-commands.js`: `/autoapprove [mode:on|off]` slash command (show/toggle).
+- `src/setup-wizard.js`: `OPENAGI_AUTO_APPROVE` allowlisted in WIZARD_FIELDS.
+- `test/auto-approve.test.js`: 3 tests (default-on semantics, run+audit path, off→queue path).
+  `npm test` pins `OPENAGI_AUTO_APPROVE=0` so legacy queue-semantics tests stay valid.

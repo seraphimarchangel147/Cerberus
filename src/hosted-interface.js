@@ -892,6 +892,23 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         });
         return sendJson(res, 200, { id, status: "denied" });
       }
+      if (method === "GET" && pathname === "/auto-approve") {
+        // Report current auto-approve state (live env, not cached).
+        const { autoApproveEnabled } = await import("./tool-registry.js");
+        return sendJson(res, 200, { enabled: autoApproveEnabled() });
+      }
+      if (method === "POST" && pathname === "/auto-approve") {
+        // Flip auto-approve on/off without a daemon restart. Persists to
+        // .openagi/.env (allowlisted in WIZARD_FIELDS) and mutates
+        // process.env so autoApproveEnabled() sees it immediately.
+        const body = await readJson(req).catch(() => ({}));
+        const enable = Boolean(body.enable);
+        const { saveEnv } = await import("./setup-wizard.js");
+        saveEnv({ dataDir: resolveDataDir(), values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" } });
+        process.env.OPENAGI_AUTO_APPROVE = enable ? "1" : "0";
+        events.emit("auto-approve", { enabled: enable });
+        return sendJson(res, 200, { enabled: enable });
+      }
       if (method === "GET" && pathname === "/computer-use/log") {
         if (!runtime.computerUseLog) return sendJson(res, 503, { error: "no computer-use log" });
         const limit = Number(url.searchParams.get("limit") ?? 100);
