@@ -53,6 +53,7 @@ import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
 import { registerCoreTools, ToolRegistry } from "./tool-registry.js";
+import { registerCodeTools } from "./code-tools.js";
 import { registerDefaultWorkflows, WorkflowRegistry } from "./workflow-registry.js";
 import { applyPersona } from "./persona.js";
 import { createId, nowIso } from "./utils.js";
@@ -445,7 +446,18 @@ export class AbiRuntime {
         task: "ambient-digest",
         intervalMs: 60 * 60 * 1000
       });
+      // Nightly self-QA: lint + tests, report-on-failure-only (watchdog).
+      this.cron.addJob({
+        id: "self-qa",
+        name: "Nightly self-QA (lint + tests, silent when green)",
+        enabled: true,
+        task: "self-qa",
+        dailyAt: "04:30"
+      });
       registerCoreTools(this.tools, this);
+      // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
+      // tests, gated shell, sub-agent delegation. See src/code-tools.js.
+      registerCodeTools(this.tools, this);
       // Computer-use tools register only when explicitly opted-in via env
       // (OPENAGI_COMPUTER_USE=1). Default install doesn't expose them so
       // an LLM can't accidentally try to drive the user's screen. The
@@ -654,6 +666,9 @@ export class AbiRuntime {
       }
       if (job.task === "prompt") {
         return this.runScheduledPrompt(job);
+      }
+      if (job.task === "self-qa") {
+        return this.runSelfQa(job);
       }
       if (job.task === "autopilot") {
         return this.runAutopilot(job);
@@ -1102,6 +1117,36 @@ export class AbiRuntime {
     });
     result.autopilot = true;
     return result;
+  }
+
+  // Nightly self-QA watchdog: node --check over src/ + the test suite.
+  // SILENT when green — posts to the activity channel only on failure
+  // (the watchdog pattern: no news is good news).
+  async runSelfQa() {
+    const { registerCodeTools } = await import("./code-tools.js"); // ensures module loads
+    void registerCodeTools;
+    const lint = await this.tools.invoke("code_lint", { path: "src" }, { channel: "cron", __confirmed: true });
+    const test = await this.tools.invoke("code_test", {}, { channel: "cron", __confirmed: true });
+    const lintOk = lint.ok && lint.result?.ok;
+    const testOk = test.ok && test.result?.ok;
+    const summary = {
+      lint: lintOk ? "ok" : (lint.result?.failures ?? lint.error ?? "failed"),
+      tests: testOk ? `ok (${test.result?.pass ?? "?"} passed)` : `FAIL (${test.result?.fail ?? "?"} failed)`,
+      healthy: lintOk && testOk
+    };
+    if (!summary.healthy) {
+      const discord = this.channels?.discord;
+      const chan = discord?.activityChannel;
+      if (discord && chan) {
+        const lines = [
+          "🚨 **Nightly self-QA FAILED**",
+          !lintOk ? `Lint: ${JSON.stringify(lint.result?.failures ?? lint.error).slice(0, 600)}` : "Lint: ok",
+          !testOk ? `Tests: ${test.result?.fail ?? "?"} failing\n\`\`\`\n${String(test.result?.tail ?? "").slice(-800)}\n\`\`\`` : "Tests: ok"
+        ];
+        discord.sendMessage(chan, lines.join("\n")).catch(() => {});
+      }
+    }
+    return summary;
   }
 
   async runScheduledPrompt(job) {

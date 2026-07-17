@@ -20,6 +20,9 @@ const T = {
   UPDATE_MESSAGE: 7
 };
 
+import { bar, COLORS, embed } from "./discord-embeds.js";
+import { renderChart } from "./discord-chart.js";
+
 const EPHEMERAL = 64;
 
 // ── Command definitions (registered against the guild at READY) ──────
@@ -52,6 +55,19 @@ export const COMMAND_DEFS = [
   { name: "plan", description: "Daily plan (what should happen today)" },
   { name: "observe", description: "Force a proactive-observer pulse now" },
   { name: "sessions", description: "Recent conversation sessions" },
+  {
+    name: "schedule",
+    description: "Schedule a prompt: one-shot delay, recurring interval, or daily time",
+    options: [
+      { type: 3, name: "prompt", description: "What the agent should run when it fires", required: true },
+      { type: 3, name: "when", description: "e.g. '20m' (one-shot), 'every 2h' (recurring), 'daily 09:00'", required: true },
+      { type: 3, name: "name", description: "Optional job name", required: false }
+    ]
+  },
+  {
+    name: "jobs",
+    description: "List scheduled cron jobs (with cancel buttons)"
+  },
   { name: "help", description: "List available commands" }
 ];
 
@@ -124,6 +140,8 @@ export class DiscordCommands {
       case "plan": return this.cmdPlan(interaction);
       case "observe": return this.cmdObserve(interaction);
       case "sessions": return this.cmdSessions(interaction);
+      case "schedule": return this.cmdSchedule(interaction, opts);
+      case "jobs": return this.cmdJobs(interaction);
       case "help": return this.cmdHelp(interaction);
       default: return this.respond(interaction, { content: `Unknown command: ${name}`, flags: EPHEMERAL });
     }
@@ -141,6 +159,11 @@ export class DiscordCommands {
       const outcome = await this.decidePendingAction(actionId, verb === "pa-approve" ? "approve" : "deny", userId);
       return this.respond(interaction, { content: outcome, components: [] }, T.UPDATE_MESSAGE);
     }
+    if (id.startsWith("job-cancel:")) {
+      const jobId = id.slice("job-cancel:".length);
+      const removed = this.runtime?.cron?.removeJob?.(jobId);
+      return this.respond(interaction, { content: removed ? `🗑️ Cancelled job \`${jobId}\`` : `⚠ No job \`${jobId}\``, components: [] }, T.UPDATE_MESSAGE);
+    }
     return this.respond(interaction, { content: `Unknown component: ${id}`, flags: EPHEMERAL });
   }
 
@@ -151,17 +174,25 @@ export class DiscordCommands {
     const provider = host?.modelProvider;
     const channels = this.runtime?.channels?.status?.() ?? null;
     const memStats = this.runtime?.memory?.snapshot?.();
-    const memCount = memStats ? (memStats.short?.length ?? 0) + (memStats.medium?.length ?? 0) + (memStats.long?.length ?? 0) : "?";
+    const s = memStats?.short?.length ?? 0, m = memStats?.medium?.length ?? 0, l = memStats?.long?.length ?? 0;
     const pending = this.runtime?.pendingActions?.list?.({ status: "pending" })?.length ?? 0;
-    const lines = [
-      "**Azazel — openAGI status**",
-      `Provider: **${provider?.constructor?.name?.replace(/Provider$/, "") ?? "?"}** · model: \`${provider?.model ?? "?"}\` · configured: ${provider?.isConfigured?.() ? "✅" : "❌"}`,
-      `Preference: \`${process.env.OPENAGI_PROVIDER ?? "auto"}\``,
-      `Discord: ${channels?.discord?.connected ? "🟢 connected" : "🔴 down"} as ${channels?.discord?.user ?? "?"}`,
-      `Memory items: ${memCount} (S/M/L ${memStats?.short?.length ?? 0}/${memStats?.medium?.length ?? 0}/${memStats?.long?.length ?? 0}) · pending approvals: ${pending}`,
-      `Uptime: ${formatUptime(process.uptime())}`
-    ];
-    return this.respond(interaction, { content: lines.join("\n") });
+    const configured = provider?.isConfigured?.();
+    const color = !configured ? COLORS.err : pending > 0 ? COLORS.warn : COLORS.ok;
+    return this.respond(interaction, {
+      embeds: [embed({
+        title: "🐺 Azazel — openAGI status",
+        color,
+        fields: [
+          { name: "Provider", value: `**${provider?.constructor?.name?.replace(/Provider$/, "") ?? "?"}** ${configured ? "✅" : "❌ not configured"}`, inline: true },
+          { name: "Model", value: `\`${provider?.model ?? "?"}\``, inline: true },
+          { name: "Preference", value: `\`${process.env.OPENAGI_PROVIDER ?? "auto"}\``, inline: true },
+          { name: "Discord", value: channels?.discord?.connected ? `🟢 ${channels.discord.user ?? "connected"}` : "🔴 down", inline: true },
+          { name: "Memory S/M/L", value: `${s} / ${m} / ${l} (${s + m + l})`, inline: true },
+          { name: "Pending approvals", value: pending > 0 ? `⏸️ **${pending}**` : "0", inline: true }
+        ],
+        footer: `uptime ${formatUptime(process.uptime())}`
+      })]
+    });
   }
 
   async cmdProvider(interaction) {
@@ -286,7 +317,28 @@ export class DiscordCommands {
   async cmdBudget(interaction) {
     const status = this.runtime?.budget?.status?.() ?? null;
     if (!status) return this.respond(interaction, { content: "💰 No budget guard configured." });
-    return this.respond(interaction, { content: `💰 **Budget**\n\`\`\`json\n${JSON.stringify(status, null, 2).slice(0, 1800)}\n\`\`\`` });
+    await this.defer(interaction);
+    const frac = status.dailyUsdLimit > 0 ? status.spentUsd / status.dailyUsdLimit : 0;
+    const color = frac >= 0.9 ? COLORS.err : frac >= 0.6 ? COLORS.warn : COLORS.ok;
+    const budgetEmbed = embed({
+      title: "💰 Budget",
+      color,
+      fields: [
+        { name: "Today", value: `$${status.spentUsd} / $${status.dailyUsdLimit}\n${bar(frac)} ${(frac * 100).toFixed(0)}%` },
+        { name: "Calls", value: String(status.calls), inline: true },
+        { name: "Tokens in/out", value: `${status.tokens?.input ?? 0} / ${status.tokens?.output ?? 0}`, inline: true },
+        { name: "Remaining", value: `$${status.remainingUsd}`, inline: true }
+      ],
+      footer: "spend per day, last 14 days →"
+    });
+    // Chart: daily spend history (oldest → newest).
+    try {
+      const history = [...(status.history ?? [])].reverse();
+      const png = renderChart({ series: [{ points: history.map((h) => h.usd), kind: "bar" }] });
+      return await this.followUpFile(interaction, png, "budget.png", { embeds: [budgetEmbed] });
+    } catch {
+      return this.followUp(interaction, { embeds: [budgetEmbed] });
+    }
   }
 
   async cmdSkills(interaction) {
@@ -302,7 +354,9 @@ export class DiscordCommands {
       const { computeDailyRecap, renderDailyRecapMarkdown } = await import("./daily-recap.js");
       const recap = await computeDailyRecap(this.runtime, {});
       const md = renderDailyRecapMarkdown(recap);
-      return this.followUp(interaction, { content: `🌙 **Daily recap**\n${String(md).slice(0, 1800)}` });
+      return this.followUp(interaction, {
+        embeds: [embed({ title: "🌙 Daily recap", description: String(md).slice(0, 3900), color: COLORS.think })]
+      });
     } catch (error) {
       return this.followUp(interaction, { content: `⚠ recap failed: ${error.message}` });
     }
@@ -314,7 +368,9 @@ export class DiscordCommands {
       const { computeDailyPlan, renderDailyPlanMarkdown } = await import("./daily-planner.js");
       const plan = await computeDailyPlan(this.runtime, {});
       const md = renderDailyPlanMarkdown(plan);
-      return this.followUp(interaction, { content: `📋 **Daily plan**\n${String(md).slice(0, 1800)}` });
+      return this.followUp(interaction, {
+        embeds: [embed({ title: "📋 Daily plan", description: String(md).slice(0, 3900), color: COLORS.info })]
+      });
     } catch (error) {
       return this.followUp(interaction, { content: `⚠ plan failed: ${error.message}` });
     }
@@ -342,6 +398,91 @@ export class DiscordCommands {
     return this.respond(interaction, { content: lines.join("\n").slice(0, 1900) });
   }
 
+  // ── Cron lane: /schedule + /jobs ────────────────────────────────────
+
+  // "20m" → one-shot; "every 2h" → recurring; "daily 09:00" → daily.
+  parseWhen(when) {
+    const s = String(when ?? "").trim().toLowerCase();
+    const daily = /^daily\s+(\d{1,2}:\d{2})$/.exec(s);
+    if (daily) return { dailyAt: daily[1] };
+    const unit = { s: 1, m: 60, h: 3600, d: 86400 };
+    const every = /^every\s+(\d+)\s*([smhd])$/.exec(s);
+    if (every) return { intervalSeconds: Number(every[1]) * unit[every[2]] };
+    const once = /^(\d+)\s*([smhd])$/.exec(s);
+    if (once) return { delaySeconds: Number(once[1]) * unit[once[2]] };
+    return null;
+  }
+
+  async cmdSchedule(interaction, opts) {
+    const cron = this.runtime?.cron;
+    if (!cron) return this.respond(interaction, { content: "⚠ cron scheduler unavailable", flags: EPHEMERAL });
+    const parsed = this.parseWhen(opts.when);
+    if (!parsed) {
+      return this.respond(interaction, { content: "⚠ Couldn't parse `when`. Use `20m` (one-shot), `every 2h` (recurring), or `daily 09:00`.", flags: EPHEMERAL });
+    }
+    if ((parsed.delaySeconds ?? parsed.intervalSeconds ?? 30) < 30) {
+      return this.respond(interaction, { content: "⚠ Minimum delay/interval is 30s.", flags: EPHEMERAL });
+    }
+    const job = {
+      id: `job-${Date.now().toString(36)}`,
+      name: opts.name ?? `discord-${(opts.prompt ?? "").slice(0, 30)}`,
+      enabled: true,
+      task: "prompt",
+      replace: true,
+      input: {
+        prompt: String(opts.prompt ?? "").trim(),
+        channel: "discord",
+        target: interaction.channel_id,
+        agentId: "main",
+        sessionId: `discord:${interaction.guild_id ?? "dm"}:${interaction.channel_id}`,
+        oneShot: Boolean(parsed.delaySeconds)
+      }
+    };
+    if (parsed.delaySeconds) {
+      job.intervalMs = parsed.delaySeconds * 1000;
+      job.nextRunAt = new Date(Date.now() + parsed.delaySeconds * 1000).toISOString();
+    } else if (parsed.intervalSeconds) {
+      job.intervalMs = parsed.intervalSeconds * 1000;
+    } else {
+      job.dailyAt = parsed.dailyAt;
+    }
+    const created = cron.addJob(job);
+    const kind = parsed.delaySeconds ? "one-shot" : parsed.intervalSeconds ? "recurring" : `daily at ${parsed.dailyAt}`;
+    return this.respond(interaction, {
+      embeds: [embed({
+        title: "⏰ Scheduled",
+        color: COLORS.ok,
+        fields: [
+          { name: "Job", value: `\`${created.id}\` · ${created.name}`, inline: false },
+          { name: "Kind", value: kind, inline: true },
+          { name: "Next fire", value: created.nextRunAt ? `<t:${Math.floor(new Date(created.nextRunAt).getTime() / 1000)}:R>` : "?", inline: true }
+        ],
+        footer: "results deliver back to this channel · /jobs to manage"
+      })]
+    });
+  }
+
+  async cmdJobs(interaction) {
+    const jobs = this.runtime?.cron?.listJobs?.() ?? [];
+    if (jobs.length === 0) return this.respond(interaction, { content: "⏰ No scheduled jobs." });
+    const rows = jobs.slice(0, 12).map((j) => {
+      const next = j.nextRunAt ? `<t:${Math.floor(new Date(j.nextRunAt).getTime() / 1000)}:R>` : "—";
+      return `${j.enabled ? "🟢" : "⚪"} \`${j.id}\` **${j.name}** · ${j.task} · next ${next}`;
+    });
+    // Cancel buttons for the first few user-created prompt jobs (5-row cap).
+    const cancellable = jobs.filter((j) => j.task === "prompt").slice(0, 5);
+    const components = cancellable.length > 0 ? [{
+      type: 1,
+      components: cancellable.map((j) => ({
+        type: 2, style: 4, label: `✕ ${String(j.id).slice(-8)}`, custom_id: `job-cancel:${j.id}`
+      }))
+    }] : [];
+    return this.respond(interaction, {
+      embeds: [embed({ title: "⏰ Scheduled jobs", description: rows.join("\n").slice(0, 3900), color: COLORS.info })],
+      components
+    });
+  }
+
   async cmdHelp(interaction) {
     const lines = ["**Commands:**", ...COMMAND_DEFS.map((c) => `- \`/${c.name}\` — ${c.description}`),
       "", "Text fallbacks: `!pending`, `!approve <id>`, `!deny <id>`"];
@@ -367,6 +508,25 @@ export class DiscordCommands {
       method: "PATCH",
       body: data
     });
+  }
+
+  // Deferred follow-up with a file attachment (charts).
+  async followUpFile(interaction, buffer, filename, { content = "", embeds = null } = {}) {
+    const appId = interaction.application_id;
+    const payload = { content, attachments: [{ id: 0, filename }] };
+    if (embeds) payload.embeds = embeds;
+    const form = new FormData();
+    form.append("payload_json", JSON.stringify(payload));
+    form.append("files[0]", new Blob([buffer]), filename);
+    const response = await fetch(`https://discord.com/api/v10/webhooks/${appId}/${interaction.token}/messages/@original`, {
+      method: "PATCH",
+      body: form
+    });
+    if (!response.ok) {
+      const json = await response.json().catch(() => ({}));
+      throw new Error(json?.message ?? `Discord webhook upload failed with ${response.status}`);
+    }
+    return response.json();
   }
 }
 

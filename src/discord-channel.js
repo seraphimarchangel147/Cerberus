@@ -16,6 +16,7 @@ import { appendJsonLine, ensureDir, readJsonFile, writeJsonAtomic } from "./file
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { DiscordCommands } from "./discord-commands.js";
+import { ANSI, COLORS, embed } from "./discord-embeds.js";
 
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
@@ -56,6 +57,10 @@ export class DiscordChannel {
     // approve/deny buttons). Registered at READY.
     this.applicationId = null;
     this.commands = new DiscordCommands(this);
+    // Presence: live activity in the member list ("Watching N pending
+    // approvals" / "Playing kimi-k3"). DISCORD_PRESENCE=0 disables.
+    this.presence = (options.presence ?? process.env.DISCORD_PRESENCE ?? "1") !== "0";
+    this.presenceTimer = null;
   }
 
   status() {
@@ -82,6 +87,8 @@ export class DiscordChannel {
     this.stopped = true;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+    if (this.presenceTimer) clearInterval(this.presenceTimer);
+    this.presenceTimer = null;
     try { this.ws?.close(1000); } catch { /* ignore */ }
     this.ws = null;
   }
@@ -160,6 +167,10 @@ export class DiscordChannel {
       this.log({ op: "ready", user: d.user?.username, id: d.user?.id });
       // Register slash commands (guild-scoped → instant). Fire-and-forget.
       this.commands.register(this.applicationId).catch(() => {});
+      // Ambient presence dashboard, refreshed every 60s.
+      this.refreshIdlePresence();
+      if (this.presenceTimer) clearInterval(this.presenceTimer);
+      this.presenceTimer = setInterval(() => this.refreshIdlePresence(), 60000);
       return;
     }
     if (t === "RESUMED") { this.log({ op: "resumed" }); return; }
@@ -289,7 +300,7 @@ export class DiscordChannel {
       typingTimer = setInterval(() => {
         this.rest(`/channels/${message.channel_id}/typing`, { method: "POST" }).catch(() => {});
       }, 8000);
-      await status.begin(message.id);
+      await status.begin(message.id, text.slice(0, 60));
       const authorName = message.member?.nick ?? message.author?.global_name ?? message.author?.username ?? "user";
       const result = await this.agentHost.handleMessage({
         channel: "discord",
@@ -316,15 +327,72 @@ export class DiscordChannel {
     }
   }
 
-  async sendMessage(channelId, text, replyToId = null) {
-    const chunks = chunkText(String(text), 1990);
+  async sendMessage(channelId, text, replyToId = null, extra = null) {
+    const chunks = chunkText(String(text ?? ""), 1990);
     let last = null;
     for (let i = 0; i < chunks.length; i += 1) {
       const body = { content: chunks[i] };
       if (i === 0 && replyToId) body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
+      if (i === chunks.length - 1 && extra?.embeds) body.embeds = extra.embeds;
+      if (i === chunks.length - 1 && extra?.components) body.components = extra.components;
       last = await this.rest(`/channels/${channelId}/messages`, { method: "POST", body });
     }
     return last;
+  }
+
+  // Embed-first send: no plain content, just a rich embed (+ optional reply).
+  async sendEmbed(channelId, embedObj, replyToId = null) {
+    const body = { embeds: [embedObj] };
+    if (replyToId) body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
+    return this.rest(`/channels/${channelId}/messages`, { method: "POST", body });
+  }
+
+  // Attachment upload (charts). Node 22 fetch speaks multipart via FormData.
+  async sendFile(channelId, buffer, filename, { content = "", embeds = null } = {}) {
+    const payload = { content, attachments: [{ id: 0, filename }] };
+    if (embeds) payload.embeds = embeds;
+    const form = new FormData();
+    form.append("payload_json", JSON.stringify(payload));
+    form.append("files[0]", new Blob([buffer]), filename);
+    const response = await fetch(`${API}/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: { authorization: `Bot ${this.token}` },
+      body: form
+    });
+    if (!response.ok) {
+      const json = await response.json().catch(() => ({}));
+      throw new Error(json?.message ?? `Discord upload failed with ${response.status}`);
+    }
+    return response.json();
+  }
+
+  // Spawn a public thread off a message (thread-per-task live traces).
+  async createThread(channelId, messageId, name) {
+    return this.rest(`/channels/${channelId}/messages/${messageId}/threads`, {
+      method: "POST",
+      body: { name: String(name).slice(0, 100), auto_archive_duration: 60 }
+    });
+  }
+
+  // ── Presence: ambient dashboard in the member list ─────────────────
+  // "Watching 2 pending approvals" / "Playing kimi-k3" — free observability.
+  setPresence(text, type = 3) { // 0=Playing 3=Watching 4=Custom
+    if (!this.presence) return;
+    this.send(3, {
+      since: null,
+      activities: text ? [{ name: String(text).slice(0, 100), type }] : [],
+      status: "online",
+      afk: false
+    });
+  }
+
+  refreshIdlePresence() {
+    if (!this.presence) return;
+    try {
+      const pending = this.agentHost?.runtime?.pendingActions?.list?.({ status: "pending" })?.length ?? 0;
+      if (pending > 0) this.setPresence(`${pending} pending approval${pending === 1 ? "" : "s"}`, 3);
+      else this.setPresence(this.agentHost?.modelProvider?.model ?? "the desert", 0);
+    } catch { /* advisory */ }
   }
 
   async editMessage(channelId, messageId, text) {
@@ -423,7 +491,11 @@ function chunkText(text, size) {
 // the final state (✅ done + tool trace) is left in place as a compact
 // audit line above the actual reply.
 const VERDICT_EMOJI = { act: "⚡", ask: "❓", watch: "👁️", ignore: "💤", propagate: "🧬" };
+const VERDICT_COLOR = { act: COLORS.ok, ask: COLORS.warn, watch: COLORS.info, ignore: 0x95a5a6, propagate: COLORS.think };
 const STATUS_EDIT_MIN_MS = 1500;
+// Heavy turns (≥ this many tool calls) spawn a thread and stream the trace
+// there so the channel stays clean. Env: DISCORD_THREAD_TASKS=0 disables.
+const THREAD_AFTER_STEPS = 6;
 
 class LiveStatus {
   constructor(channel, channelId, enabled) {
@@ -437,14 +509,23 @@ class LiveStatus {
     this.lastEditAt = 0;
     this.editTimer = null;
     this.done = false;
+    this.threadId = null;   // spawned for heavy turns
+    this.threadTried = false;
+    this.taskLabel = null;
   }
 
-  async begin(replyToId) {
+  async begin(replyToId, taskLabel = null) {
     if (!this.enabled) return;
+    this.taskLabel = taskLabel;
     try {
-      const msg = await this.channel.sendMessage(this.channelId, "🧠 *thinking…*", replyToId);
+      const msg = await this.channel.sendEmbed(this.channelId, embed({
+        description: "🧠 *thinking…*",
+        color: COLORS.think,
+        timestamp: false
+      }), replyToId);
       this.messageId = msg?.id ?? null;
     } catch { this.messageId = null; }
+    this.channel.setPresence?.("the problem", 3);
   }
 
   onEvent(ev) {
@@ -452,12 +533,14 @@ class LiveStatus {
     if (ev.phase === "verdict") {
       this.verdict = ev;
     } else if (ev.phase === "start") {
-      this.steps.push({ name: ev.name, state: "run", args: summarizeArgs(ev.args) });
+      this.steps.push({ name: ev.name, state: "run", args: summarizeArgs(ev.args), t: Date.now() });
+      this.maybeSpawnThread();
     } else if (ev.phase === "end") {
       // Mark the most recent running step with this name.
       for (let i = this.steps.length - 1; i >= 0; i -= 1) {
         if (this.steps[i].name === ev.name && this.steps[i].state === "run") {
           this.steps[i].state = ev.pending ? "pend" : ev.ok ? "ok" : "err";
+          this.steps[i].ms = Date.now() - this.steps[i].t;
           if (!ev.ok && ev.error) this.steps[i].error = String(ev.error).slice(0, 120);
           break;
         }
@@ -466,19 +549,63 @@ class LiveStatus {
     this.scheduleEdit();
   }
 
-  render(suffix = null) {
-    const lines = [];
+  // Heavy turn → spawn a thread off the status message; the trace continues
+  // there and the channel keeps a single compact card.
+  maybeSpawnThread() {
+    if (this.threadTried || this.threadId || this.steps.length < THREAD_AFTER_STEPS) return;
+    if ((process.env.DISCORD_THREAD_TASKS ?? "1") === "0") return;
+    this.threadTried = true;
+    const name = `⚙️ ${this.taskLabel ?? "task"} · ${new Date().toISOString().slice(11, 16)}`;
+    this.channel.createThread(this.channelId, this.messageId, name)
+      .then((thread) => { this.threadId = thread?.id ?? null; })
+      .catch(() => {});
+  }
+
+  // ANSI step ladder rendered inside the embed description — Discord shows
+  // real terminal colors in ```ansi blocks.
+  renderAnsi(limit = 8) {
+    const rows = [];
+    for (const s of this.steps.slice(-limit)) {
+      const icon = s.state === "run" ? `${ANSI.yellow}⋯` : s.state === "ok" ? `${ANSI.green}✔` : s.state === "pend" ? `${ANSI.magenta}⏸` : `${ANSI.red}✘`;
+      const dur = s.ms != null ? ` ${ANSI.gray}${(s.ms / 1000).toFixed(1)}s` : "";
+      const args = s.args ? ` ${ANSI.cyan}${s.args.replace(/_/g, "")}` : "";
+      const err = s.error ? ` ${ANSI.red}${s.error}` : "";
+      rows.push(`${icon} ${ANSI.bold}${ANSI.white}${s.name}${ANSI.reset}${args}${dur}${err}${ANSI.reset}`);
+    }
+    return "```ansi\n" + rows.join("\n").slice(0, 3500) + "\n```";
+  }
+
+  renderEmbed(suffix = null) {
     const v = this.verdict;
     const head = v
       ? `${VERDICT_EMOJI[v.action] ?? "🧠"} scrutiny: **${v.action}** (${(v.score ?? 0).toFixed(2)})`
       : "🧠 *thinking…*";
-    lines.push(head);
-    for (const s of this.steps.slice(-8)) {
-      const icon = s.state === "run" ? "🔄" : s.state === "ok" ? "✅" : s.state === "pend" ? "⏸️" : "❌";
-      lines.push(`${icon} \`${s.name}\`${s.args ? ` ${s.args}` : ""}${s.error ? ` — ${s.error}` : ""}`);
+    const doneCount = this.steps.filter((s) => s.state !== "run").length;
+    const total = this.steps.length;
+    const progress = total > 0 ? `\n${"▰".repeat(Math.round((doneCount / total) * 10))}${"▱".repeat(10 - Math.round((doneCount / total) * 10))} ${doneCount}/${total}` : "";
+    const parts = [head + progress];
+    if (total > 0) parts.push(this.renderAnsi());
+    if (this.threadId) parts.push(`🧵 full trace: <#${this.threadId}>`);
+    if (suffix) parts.push(suffix);
+    return embed({
+      description: parts.join("\n").slice(0, 4000),
+      color: this.done ? (this.steps.some((s) => s.state === "err") ? COLORS.err : COLORS.ok) : (VERDICT_COLOR[v?.action] ?? COLORS.think),
+      timestamp: false
+    });
+  }
+
+  async pushEdit(suffix = null) {
+    const body = { content: "", embeds: [this.renderEmbed(suffix)] };
+    await this.channel.rest(`/channels/${this.channelId}/messages/${this.messageId}`, { method: "PATCH", body });
+    // Mirror the latest trace into the task thread, if one exists.
+    if (this.threadId && this.steps.length > 0) {
+      const last = this.steps[this.steps.length - 1];
+      if (last && last !== this._lastThreadStep && last.state !== "run") {
+        this._lastThreadStep = last;
+        const icon = last.state === "ok" ? "✅" : last.state === "pend" ? "⏸️" : "❌";
+        this.channel.sendMessage(this.threadId, `${icon} \`${last.name}\`${last.args ? ` ${last.args}` : ""}${last.ms != null ? ` · ${(last.ms / 1000).toFixed(1)}s` : ""}${last.error ? `\n> ${last.error}` : ""}`).catch(() => {});
+      }
     }
-    if (suffix) lines.push(suffix);
-    return lines.join("\n").slice(0, 1900);
   }
 
   scheduleEdit() {
@@ -488,13 +615,14 @@ class LiveStatus {
       this.editTimer = null;
       if (this.done || !this.messageId) return;
       this.lastEditAt = Date.now();
-      this.channel.editMessage(this.channelId, this.messageId, this.render()).catch(() => {});
+      this.pushEdit().catch(() => {});
     }, wait);
   }
 
   async finish(result) {
     this.done = true;
     if (this.editTimer) { clearTimeout(this.editTimer); this.editTimer = null; }
+    this.channel.refreshIdlePresence?.();
     if (!this.enabled || !this.messageId) return;
     const secs = ((Date.now() - this.startedAt) / 1000).toFixed(1);
     // No verdict + no tools = trivial turn; delete the status to keep the
@@ -504,17 +632,18 @@ class LiveStatus {
       return;
     }
     const toolCount = this.steps.length;
-    await this.channel.editMessage(
-      this.channelId, this.messageId,
-      this.render(`— done in ${secs}s · ${toolCount} tool call${toolCount === 1 ? "" : "s"}${result?.model?.model ? ` · ${result.model.model}` : ""}`)
-    ).catch(() => {});
+    await this.pushEdit(`— done in **${secs}s** · ${toolCount} tool call${toolCount === 1 ? "" : "s"}${result?.model?.model ? ` · \`${result.model.model}\`` : ""}`).catch(() => {});
+    if (this.threadId) {
+      this.channel.sendMessage(this.threadId, `🏁 done in ${secs}s · ${toolCount} tool calls`).catch(() => {});
+    }
   }
 
   async fail(error) {
     this.done = true;
     if (this.editTimer) { clearTimeout(this.editTimer); this.editTimer = null; }
+    this.channel.refreshIdlePresence?.();
     if (!this.enabled || !this.messageId) return;
-    await this.channel.editMessage(this.channelId, this.messageId, this.render(`❌ turn failed: ${String(error?.message ?? error).slice(0, 200)}`)).catch(() => {});
+    await this.pushEdit(`❌ **turn failed:** ${String(error?.message ?? error).slice(0, 200)}`).catch(() => {});
   }
 }
 
