@@ -106,6 +106,11 @@ export class AgentHost {
     //               human message is never silently dropped
     //   propagate → full access (the specialist spawn already happened above)
     const verdict = output.scrutiny.action;
+    // Tell the live-progress observer (Discord status line) what the
+    // scrutiny gate decided before any model/tool work starts.
+    if (typeof input.onToolEvent === "function") {
+      try { input.onToolEvent({ phase: "verdict", action: verdict, score: output.scrutiny.score }); } catch { /* advisory */ }
+    }
     const toolPolicy = verdict === "watch" ? "read-only" : verdict === "ask" ? "confirm" : verdict === "ignore" ? "none" : "full";
     const toolRegistry = this.runtime.tools;
     let tools = toolPolicy === "none"
@@ -182,7 +187,10 @@ export class AgentHost {
         // what actually holds.
         __scrutinyPolicy: toolPolicy === "none" ? "none" : toolPolicy === "read-only" ? "read-only" : toolPolicy === "confirm" ? "confirm" : null,
         __reason: toolPolicy === "confirm" ? `scrutiny verdict 'ask' (score ${output.scrutiny.score.toFixed(2)})` : null,
-        __allowedTools: allowedToolNames
+        __allowedTools: allowedToolNames,
+        // Live-progress observer: channels (Discord) pass a callback so the
+        // user can watch tool activity in real time. Best-effort, advisory.
+        __onToolEvent: typeof input.onToolEvent === "function" ? input.onToolEvent : null
       }
     });
 

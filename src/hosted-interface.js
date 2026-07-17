@@ -100,6 +100,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   // Proactive outreach mapper subscribes here: it was constructed before the
   // bus existed, so we late-bind the same bus now (mirrors bindEvents above).
   if (runtime.bindOutreachEvents) runtime.bindOutreachEvents(runtime.events);
+  // Discord activity feed: mirror observer suggestions / approvals / miner
+  // results into the configured home channel (DISCORD_ACTIVITY_CHANNEL).
+  if (channels?.discord?.bindActivityFeed) channels.discord.bindActivityFeed(events);
 
   // Mid-run boot note: if the previous process died while a cron job handler
   // was executing, the file-backed scheduler kept a { runningJobId, startedAt }

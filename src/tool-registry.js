@@ -115,7 +115,31 @@ export class ToolRegistry {
     }));
   }
 
+  // Public entry: wraps the gated invocation with per-tool lifecycle
+  // notifications so channels (Discord live status) can render what the
+  // agent is doing in real time. context.__onToolEvent is advisory and
+  // best-effort — a throwing observer must never break a tool call.
   async invoke(name, args, context = {}) {
+    const notify = typeof context?.__onToolEvent === "function" ? context.__onToolEvent : null;
+    if (notify) {
+      try { notify({ phase: "start", name, args }); } catch { /* observer must not break tools */ }
+    }
+    const outcome = await this._invokeGated(name, args, context);
+    if (notify) {
+      try {
+        notify({
+          phase: "end",
+          name,
+          ok: outcome.ok,
+          error: outcome.ok ? null : (outcome.error ?? null),
+          pending: Boolean(outcome.ok && outcome.result?.status === "awaiting_confirmation")
+        });
+      } catch { /* observer must not break tools */ }
+    }
+    return outcome;
+  }
+
+  async _invokeGated(name, args, context = {}) {
     const tool = this.tools.get(name);
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };

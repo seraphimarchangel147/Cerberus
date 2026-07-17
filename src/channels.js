@@ -3,6 +3,7 @@ import path from "node:path";
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { TelegramPairing } from "./telegram-pairing.js";
+import { DiscordChannel } from "./discord-channel.js";
 
 export class ChannelManager {
   constructor(options = {}) {
@@ -15,6 +16,11 @@ export class ChannelManager {
       agentHost: this.agentHost,
       dir: path.join(this.dir, "telegram"),
       token: options.telegramToken ?? process.env.TELEGRAM_BOT_TOKEN
+    });
+    this.discord = new DiscordChannel({
+      agentHost: this.agentHost,
+      dir: path.join(this.dir, "discord"),
+      token: options.discordToken ?? process.env.DISCORD_BOT_TOKEN
     });
     if (this.runtime) this.runtime.channels = this;
   }
@@ -42,6 +48,7 @@ export class ChannelManager {
     appendJsonLine(this.eventsPath, { at: nowIso(), op: "deliver", channel, target, text: String(text).slice(0, 400) });
     let result;
     if (channel === "telegram") result = await this.telegram.sendMessage(target, text);
+    else if (channel === "discord") result = await this.discord.sendMessage(target, text);
     else if (channel === "local" || channel === "cron") {
       result = { delivered: false, reason: `channel ${channel} has no outbound transport (read from /sessions or stream /events)` };
     } else {
@@ -61,16 +68,19 @@ export class ChannelManager {
     if (process.env.TELEGRAM_POLLING === "1") {
       this.telegram.startPolling();
     }
+    this.discord.start();
   }
 
   stop() {
     this.telegram.stopPolling();
+    this.discord.stop();
   }
 
   status() {
     return {
       local: { enabled: true, mode: "http+sse" },
-      telegram: this.telegram.status()
+      telegram: this.telegram.status(),
+      discord: this.discord.status()
     };
   }
 }
