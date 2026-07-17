@@ -52,3 +52,10 @@ QA: `node --check` clean both files, 488/488 tests pass, homoglyph/zero-width by
 ## 2026-07-17 (Seraphim)
 - `discord-channel.js:249` — serialized turn rejection no longer swallowed: logs `turn-rejected` + posts "⚠ Turn failed hard" to the channel (Azazel audit finding #1).
 - Live-status embed disabled via `DISCORD_LIVE_STATUS=0` in openagi-azazel.service (Creator request: no visual tool-call replies).
+
+## 2026-07-17 — Skills subsystem QA + hardening (Codex)
+
+- Added adversarial coverage for traversal and symlink escapes, strict-name handling, size limits, patch ambiguity, pinned/bundled deletion, trash collisions, corrupt and concurrent JSONL, empty skills, and missing `use_skill` targets.
+- Enforced strict slug boundaries, capped linked files at 1 MiB and skill bodies at 256 KiB, made telemetry reads line-tolerant, and hardened frontmatter and trash handling without changing the fixed-cost tool contracts.
+- Escaped all stored skill metadata and edit-history text rendered by the Skills dashboard. Validation: `node --test` — 508/508 pass.
+QA PHASE COMPLETE
