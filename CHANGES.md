@@ -2,6 +2,18 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-17 — Skill system Hermes-grade upgrade (Seraphim)
+
+- **`src/skills.js` (rewritten around the original core):**
+  - `use_skill` — loads a skill's full instructions INTO the calling model's context (Hermes-style in-context execution; keeps conversation awareness) vs. `run_skill` (the original isolated sub-generation, still available and still outcome-graded).
+  - **Fixed-cost tool surface**: `list_skills / use_skill / run_skill / create_skill / edit_skill / delete_skill / pin_skill` replace the per-skill `skill_*` tools (which ate the model tool budget linearly — the reason OPENAGI_MAX_MODEL_TOOLS exists). Legacy behavior returns with `OPENAGI_SKILLS_AS_TOOLS=1`.
+  - **Linked files**: `references/ templates/ scripts/ assets/` subdirs inside a skill dir are scanned and readable via `use_skill(name, file)` — deep playbooks without bloating the body. Path-escape guarded.
+  - **Curation**: `createSkill` (frontmatter + lineage), `patchSkill` (unique-match find/replace), `editSkill` (field edits, lineage preserved), `setPinned` (pinned skills refuse deletion but stay editable), `deleteSkill` (soft — moves to `.trash/`, refuses pinned + bundled).
+  - **Telemetry**: every view/run appends to `skill-usage.jsonl`; every mutation appends to `skill-edits.jsonl`; `statsFor()` rolls up runs/views/avg quality/last-used from the outcome store's graded skill-runs.
+- **`src/hosted-interface.js`:** new endpoints `GET /skills/:name/view` (`?file=`, `?count=0`), `GET /skills/history`, `POST /skills/create|:name/edit|:name/pin|:name/delete`. Skills tab rebuilt: sidebar ranked by usage with quality badges + 📌; detail pane shows stats row (runs/loads/avg/last/last-used), score **sparkline** of recent graded runs, lineage line (createdBy/date/source suggestion), linked-file chips (click to view), **edit-history timeline** (🌱 created / 🔧 patched / ✏️ edited / 📌 pinned), and an inline body **editor** with Save/Pin/Delete.
+- **Tests:** `test/skill-registry-upgrade.test.js` (10 cases) + updated tool-surface expectation in `abi-runtime.test.js`. Full suite: 498 pass.
+- Seeded + pinned `self-improve-skills` (meta) so the agent knows the maintenance loop.
+
 ## 2026-07-17 — Seraphim
 - **Discord gateway adapter** (`src/discord-channel.js`, migration day): native-WS gateway, mention/role-ping gating, DM allowlist, chunking, typing.
 - **Live status trace**: `LiveStatus` class — post + throttled-edit of a per-turn status message (scrutiny verdict, per-tool 🔄→✅/❌/⏸️ trace, duration/model footer). Trivial turns auto-delete their status.
