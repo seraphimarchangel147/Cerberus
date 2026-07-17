@@ -266,13 +266,17 @@ test("scheduled prompt fires through agent host and produces a reply", async () 
   assert.ok(fired.result.reply, "scheduled prompt should have a reply");
 });
 
-test("skills loader exposes bundled skills as tools", () => {
+test("skills loader exposes bundled skills via fixed-cost tools", () => {
   const runtime = createDefaultRuntime();
   assert.ok(runtime.skills, "runtime.skills should exist");
   const names = runtime.skills.list().map((s) => s.name);
   assert.ok(names.includes("recap"), "expected 'recap' skill bundled");
   const toolNames = runtime.tools.list().map((t) => t.name);
-  assert.ok(toolNames.some((n) => n.startsWith("skill_")), "expected at least one skill_* tool");
+  // Hermes-style tool economy: constant surface instead of one tool per skill.
+  for (const t of ["list_skills", "use_skill", "run_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill"]) {
+    assert.ok(toolNames.includes(t), `expected ${t} tool`);
+  }
+  assert.ok(!toolNames.some((n) => n.startsWith("skill_")), "per-skill skill_* tools should be off by default (OPENAGI_SKILLS_AS_TOOLS=1 re-enables)");
 });
 
 test("budget guard records anthropic usage and computes USD", () => {

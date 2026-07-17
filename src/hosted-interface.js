@@ -643,6 +643,76 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "GET" && pathname === "/skills") return sendJson(res, 200, runtime.skills?.list() ?? []);
       if (method === "GET" && pathname === "/skills/suggested") return sendJson(res, 200, runtime.patternMiner?.list() ?? []);
+      // Edit history across all skills (or one, via ?skill=). Feeds the
+      // dashboard's "how he improves them" timeline.
+      if (method === "GET" && pathname === "/skills/history") {
+        const skill = url.searchParams.get("skill");
+        return sendJson(res, 200, runtime.skills?.history(skill || null, Number(url.searchParams.get("limit") ?? 50)) ?? { edits: [] });
+      }
+      // Full skill view: body + linked files + stats. ?file= reads one
+      // linked file. Marked view=0 to skip usage bump for dashboard reads.
+      if (method === "GET" && pathname.match(/^\/skills\/[^/]+\/view$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        try {
+          const file = url.searchParams.get("file");
+          if (!file && url.searchParams.get("count") === "0") {
+            // dashboard read — don't inflate usage stats
+            const skill = runtime.skills.mustGet(name);
+            return sendJson(res, 200, {
+              name: skill.name, description: skill.description, category: skill.category,
+              pinned: skill.pinned, bundled: skill.bundled ?? false, createdBy: skill.createdBy,
+              createdAt: skill.createdAt, sourceSuggestionId: skill.sourceSuggestionId,
+              body: skill.body, linkedFiles: skill.linkedFiles ?? [], path: skill.path,
+              stats: runtime.skills.statsFor(name)
+            });
+          }
+          return sendJson(res, 200, runtime.skills.view(name, file || null));
+        } catch (error) {
+          return sendJson(res, 404, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname === "/skills/create") {
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          const result = runtime.skills.createSkill({ ...body, createdBy: body.createdBy ?? "dashboard" });
+          events.emit("skills", { op: "created", skill: result.slug });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/edit$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          const result = body.old_string !== undefined
+            ? runtime.skills.patchSkill(name, body.old_string, body.new_string ?? "", body.by ?? "dashboard")
+            : runtime.skills.editSkill(name, body, body.by ?? "dashboard");
+          events.emit("skills", { op: "edited", skill: name });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/pin$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          return sendJson(res, 200, runtime.skills.setPinned(name, body.pinned !== false, body.by ?? "dashboard"));
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/delete$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        try {
+          const result = runtime.skills.deleteSkill(name, "dashboard");
+          events.emit("skills", { op: "deleted", skill: name });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
       if (method === "POST" && pathname.match(/^\/skills\/replay\/[^/]+$/)) {
         const skill = decodeURIComponent(pathname.split("/")[3]);
         const body = await readJson(req).catch(() => ({}));
@@ -2913,15 +2983,24 @@ async function refreshSkills(reload = false) {
   if (skills.length === 0 && pendingSuggested.length === 0) {
     sidebarList.innerHTML = '<li class="empty">No skills loaded</li>';
   }
-  for (const s of skills) {
+  // Sort: most-used first, then alphabetical — the sidebar doubles as a
+  // "what does he actually reach for" ranking.
+  const sorted = [...skills].sort((a, b) => ((b.stats?.runs ?? 0) + (b.stats?.views ?? 0)) - ((a.stats?.runs ?? 0) + (a.stats?.views ?? 0)) || a.name.localeCompare(b.name));
+  for (const s of sorted) {
     const li = document.createElement("li");
-    li.innerHTML = \`<div class="title">\${escapeHtml(s.name)}</div><div class="preview">\${escapeHtml(s.description ?? "")}</div>\`;
+    const st = s.stats ?? {};
+    const used = (st.runs ?? 0) + (st.views ?? 0);
+    const scoreBadge = typeof st.avgScore === "number"
+      ? \`<span class="badge \${st.avgScore >= 0.6 ? "ok" : st.avgScore >= 0.4 ? "" : "err"}" style="font-size:10px;">\${(st.avgScore * 100).toFixed(0)}%</span>\`
+      : "";
+    li.innerHTML = \`<div class="title">\${s.pinned ? "📌 " : ""}\${escapeHtml(s.name)} \${scoreBadge}</div>
+      <div class="preview">\${s.category ? \`<span style="color:var(--accent);">[\${escapeHtml(s.category)}]</span> \` : ""}\${used > 0 ? \`\${used} use\${used > 1 ? "s" : ""} · \` : ""}\${escapeHtml(s.description ?? "")}</div>\`;
     li.addEventListener("click", () => renderSkillDetail(s));
     sidebarList.appendChild(li);
   }
 
   if (pendingSuggested.length > 0) renderSuggestedDetail(pendingSuggested[0]);
-  else if (skills.length > 0) renderSkillDetail(skills[0]);
+  else if (sorted.length > 0) renderSkillDetail(sorted[0]);
   else main.innerHTML = '<div class="pane"><div class="empty">No skills loaded yet. Drop a SKILL.md into <code>.openagi/skills/&lt;name&gt;/</code>, or let the hourly workflow miner surface a repeated routine.</div></div>';
 }
 
@@ -2986,11 +3065,99 @@ function renderSuggestedDetail(candidate) {
   });
 }
 
-function renderSkillDetail(skill) {
+async function renderSkillDetail(skill) {
+  // Pull the full view (body + linked files + stats) and edit history in
+  // parallel. count=0 keeps dashboard reads out of the usage stats.
+  let full = skill;
+  let history = { edits: [] };
+  try {
+    [full, history] = await Promise.all([
+      fetchJson(\`/skills/\${encodeURIComponent(skill.name)}/view?count=0\`),
+      fetchJson(\`/skills/history?skill=\${encodeURIComponent(skill.name)}&limit=20\`).catch(() => ({ edits: [] }))
+    ]);
+  } catch { /* fall back to the list-shape skill */ }
+  const st = full.stats ?? skill.stats ?? {};
+  const recent = st.recentRuns ?? [];
+
+  // Score sparkline: one bar per recent graded run, colored by band.
+  const spark = recent.length
+    ? \`<div class="row" style="gap:2px;align-items:flex-end;height:34px;margin:4px 0 2px;">\${recent.map((r) => {
+        const h = Math.max(4, Math.round(r.score * 32));
+        const c = r.score >= 0.6 ? "var(--ok, #4caf82)" : r.score >= 0.4 ? "var(--warn, #d9a441)" : "var(--err, #d96b6b)";
+        return \`<div title="\${(r.score * 100).toFixed(0)}% · \${escapeHtml(r.at ?? "")}" style="width:10px;height:\${h}px;background:\${c};border-radius:2px 2px 0 0;"></div>\`;
+      }).join("")}</div><div class="ui-muted" style="font-size:10px;">last \${recent.length} graded runs →</div>\`
+    : '<p class="ui-muted" style="font-size:12px;">No graded runs yet — run it once to start the quality track record.</p>';
+
+  const lineage = [];
+  if (full.createdBy) lineage.push(\`created by <strong>\${escapeHtml(full.createdBy)}</strong>\`);
+  if (full.createdAt) lineage.push(\`on \${escapeHtml(String(full.createdAt).slice(0, 10))}\`);
+  if (full.sourceSuggestionId) lineage.push(\`from suggestion <code>\${escapeHtml(full.sourceSuggestionId)}</code>\`);
+  if (full.bundled) lineage.push('<span class="badge">bundled · read-only</span>');
+
+  const linked = (full.linkedFiles ?? []);
+  const linkedHtml = linked.length
+    ? \`<div class="row" style="gap:6px;flex-wrap:wrap;">\${linked.map((f) => \`<span class="chip linked-file" data-file="\${escapeHtml(f)}" style="cursor:pointer;font-size:12px;" title="Click to view">📄 \${escapeHtml(f)}</span>\`).join("")}</div>\`
+    : '<p class="ui-muted" style="font-size:12px;">None — add references/, scripts/, or templates/ inside the skill dir for deep material.</p>';
+
+  const editIcons = { created: "🌱", patched: "🔧", edited: "✏️", pinned: "📌", unpinned: "📍", deleted: "🗑" };
+  const historyHtml = (history.edits ?? []).length
+    ? \`<div style="border-left:2px solid var(--line);padding-left:12px;">\${history.edits.map((e) => \`
+        <div style="margin-bottom:8px;">
+          <div style="font-size:12px;">\${editIcons[e.action] ?? "•"} <strong>\${escapeHtml(e.action)}</strong> <span class="ui-muted">by \${escapeHtml(e.by ?? "?")} · \${escapeHtml(String(e.at ?? "").replace("T", " ").slice(0, 16))}</span></div>
+          \${e.summary ? \`<div class="ui-muted" style="font-size:11px;white-space:pre-wrap;">\${escapeHtml(e.summary)}</div>\` : ""}
+        </div>\`).join("")}</div>\`
+    : '<p class="ui-muted" style="font-size:12px;">No recorded edits yet — history starts with the first patch/edit through the new tools.</p>';
+
+  const fmt = (n) => (n === null || n === undefined) ? "—" : (typeof n === "number" && n <= 1 ? (n * 100).toFixed(0) + "%" : String(n));
+
   main.innerHTML = \`
     <div class="pane">
-      <h2 style="margin-bottom: var(--space-2);">\${escapeHtml(skill.name)}</h2>
-      <p class="ui-muted" style="margin-bottom: var(--space-4);">\${escapeHtml(skill.description ?? "")}</p>
+      <div class="row" style="gap:6px;align-items:center;margin-bottom:2px;">
+        <h2 style="margin:0;">\${full.pinned ? "📌 " : ""}\${escapeHtml(full.name)}</h2>
+        \${full.category ? \`<span class="badge">\${escapeHtml(full.category)}</span>\` : ""}
+      </div>
+      <p class="ui-muted" style="margin-bottom: var(--space-2);">\${escapeHtml(full.description ?? "")}</p>
+      \${lineage.length ? \`<p class="ui-muted" style="font-size:11px;margin-bottom:var(--space-3);">\${lineage.join(" · ")}</p>\` : ""}
+
+      <div class="row" style="gap:14px;flex-wrap:wrap;margin-bottom:var(--space-3);">
+        <div><div style="font-size:20px;font-weight:600;">\${st.runs ?? 0}</div><div class="ui-muted" style="font-size:11px;">runs</div></div>
+        <div><div style="font-size:20px;font-weight:600;">\${st.views ?? 0}</div><div class="ui-muted" style="font-size:11px;">loads</div></div>
+        <div><div style="font-size:20px;font-weight:600;">\${fmt(st.avgScore)}</div><div class="ui-muted" style="font-size:11px;">avg quality</div></div>
+        <div><div style="font-size:20px;font-weight:600;">\${fmt(st.lastScore)}</div><div class="ui-muted" style="font-size:11px;">last score</div></div>
+        <div><div style="font-size:14px;font-weight:600;padding-top:4px;">\${st.lastUsedAt ? escapeHtml(String(st.lastUsedAt).replace("T", " ").slice(0, 16)) : "never"}</div><div class="ui-muted" style="font-size:11px;">last used</div></div>
+      </div>
+      \${spark}
+
+      <div class="ui-section" style="margin-top:var(--space-3);">
+        <div class="ui-section-header row" style="justify-content:space-between;align-items:center;">
+          <h3>Instructions (SKILL.md)</h3>
+          <div class="row" style="gap:6px;">
+            \${full.bundled ? "" : \`<button class="ui-btn secondary" id="skillEditBtn" style="font-size:12px;">✏️ Edit</button>
+            <button class="ui-btn secondary" id="skillPinBtn" style="font-size:12px;">\${full.pinned ? "📍 Unpin" : "📌 Pin"}</button>
+            <button class="ui-btn secondary" id="skillDelBtn" style="font-size:12px;color:var(--err,#d96b6b);">🗑 Delete</button>\`}
+          </div>
+        </div>
+        <pre id="skillBody" style="white-space:pre-wrap;max-height:340px;overflow:auto;">\${escapeHtml(full.body ?? "(body not loaded)")}</pre>
+        <div id="skillEditor" style="display:none;">
+          <textarea class="ui-textarea" id="skillEditorText" rows="14" style="width:100%;font-family:monospace;font-size:12px;"></textarea>
+          <div class="row" style="gap:8px;margin-top:8px;">
+            <button class="ui-btn" id="skillSaveBtn">💾 Save body</button>
+            <button class="ui-btn secondary" id="skillCancelBtn">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ui-section">
+        <div class="ui-section-header"><h3>Linked files</h3></div>
+        \${linkedHtml}
+        <pre id="linkedOut" style="display:none;white-space:pre-wrap;max-height:260px;overflow:auto;margin-top:8px;"></pre>
+      </div>
+
+      <div class="ui-section">
+        <div class="ui-section-header"><h3>Edit history</h3></div>
+        \${historyHtml}
+      </div>
+
       <div class="ui-section">
         <div class="ui-section-header"><h3>Run</h3></div>
         <form class="form" id="skillForm">
@@ -3000,24 +3167,66 @@ function renderSkillDetail(skill) {
           </div>
           <button class="ui-btn" type="submit">Run skill</button>
         </form>
-      </div>
-      <div class="ui-section">
-        <div class="ui-section-header"><h3>Output</h3></div>
-        <pre id="skillOut" class="ok"></pre>
+        <pre id="skillOut" class="ok" style="margin-top:8px;"></pre>
       </div>
     </div>
   \`;
+
   $("skillForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = e.target.input.value;
     const out = $("skillOut");
     out.textContent = "running…";
     try {
-      const res = await postJson(\`/skills/\${encodeURIComponent(skill.name)}/run\`, { input });
+      const res = await postJson(\`/skills/\${encodeURIComponent(full.name)}/run\`, { input });
       out.textContent = res.output ?? JSON.stringify(res, null, 2);
+      setTimeout(() => renderSkillDetail(full), 1200); // refresh stats + sparkline
     } catch (err) {
       out.textContent = "[error] " + err.message;
     }
+  });
+
+  document.querySelectorAll(".linked-file").forEach((chip) => {
+    chip.addEventListener("click", async () => {
+      const out = $("linkedOut");
+      out.style.display = "block";
+      out.textContent = "loading…";
+      try {
+        const res = await fetchJson(\`/skills/\${encodeURIComponent(full.name)}/view?file=\${encodeURIComponent(chip.dataset.file)}\`);
+        out.textContent = res.content ?? "(empty)";
+      } catch (err) { out.textContent = "[error] " + err.message; }
+    });
+  });
+
+  $("skillEditBtn")?.addEventListener("click", () => {
+    $("skillBody").style.display = "none";
+    $("skillEditor").style.display = "block";
+    $("skillEditorText").value = full.body ?? "";
+  });
+  $("skillCancelBtn")?.addEventListener("click", () => {
+    $("skillEditor").style.display = "none";
+    $("skillBody").style.display = "block";
+  });
+  $("skillSaveBtn")?.addEventListener("click", async () => {
+    try {
+      await postJson(\`/skills/\${encodeURIComponent(full.name)}/edit\`, { body: $("skillEditorText").value, by: "dashboard" });
+      showToast("Skill body saved", true);
+      refreshSkills(true);
+    } catch (err) { showToast("Save failed: " + err.message, false); }
+  });
+  $("skillPinBtn")?.addEventListener("click", async () => {
+    try {
+      await postJson(\`/skills/\${encodeURIComponent(full.name)}/pin\`, { pinned: !full.pinned, by: "dashboard" });
+      refreshSkills(true);
+    } catch (err) { showToast("Pin failed: " + err.message, false); }
+  });
+  $("skillDelBtn")?.addEventListener("click", async () => {
+    if (!confirm(\`Delete skill '\${full.name}'? It moves to .trash (recoverable).\`)) return;
+    try {
+      await postJson(\`/skills/\${encodeURIComponent(full.name)}/delete\`, {});
+      showToast("Skill moved to .trash", true);
+      refreshSkills(true);
+    } catch (err) { showToast("Delete failed: " + err.message, false); }
   });
 }
 
