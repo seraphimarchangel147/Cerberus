@@ -279,6 +279,7 @@ export class AgentHost {
         messageCount: sessionAfter.messages.length
       },
       reply: modelResult.text,
+      toolCalls: (modelResult.toolCalls ?? []).map((c) => ({ name: c.name, ok: c.result?.ok ?? false })),
       model: {
         provider: modelResult.provider,
         model: modelResult.model,

@@ -322,7 +322,7 @@ export class DiscordChannel {
         await this.sendMessage(message.channel_id, replyText, message.id);
       } else {
         // Never end a pinged turn in silence — surface what happened instead.
-        const toolCount = result?.output?.toolCalls?.length ?? 0;
+        const toolCount = result?.toolCalls?.length ?? result?.output?.toolCalls?.length ?? 0;
         await this.sendMessage(
           message.channel_id,
           `⚠ Turn completed without a text reply (${toolCount} tool call${toolCount === 1 ? "" : "s"} ran — likely hit the tool-hop budget). Ask me to continue.`,

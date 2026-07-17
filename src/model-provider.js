@@ -219,7 +219,7 @@ export class AnthropicProvider {
     this.model = options.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
     this.baseUrl = options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com/v1";
     this.version = options.version ?? "2023-06-01";
-    this.maxTokens = options.maxTokens ?? 4096;
+    this.maxTokens = options.maxTokens ?? (Number(process.env.OPENAGI_MAX_TOKENS) || 8192);
     this.timeoutMs = options.timeoutMs ?? 120000;
     this.maxToolHops = options.maxToolHops ?? (Number(process.env.OPENAGI_MAX_TOOL_HOPS) || 6);
     this.budgetGuard = options.budgetGuard ?? null;
@@ -302,7 +302,7 @@ export class AnthropicProvider {
       if (last?.role === "user" && Array.isArray(last.content)) {
         last.content.push({
           type: "text",
-          text: "[system] Tool budget for this turn is exhausted. Do not call more tools. Reply in plain text now: summarize what you accomplished, what remains, and any findings so far."
+          text: "[system] Tool budget for this turn is exhausted. Do not call more tools. Reply in plain text now, in under 300 words: summarize what you accomplished, what remains, and any findings so far. Skip extended reasoning — answer directly."
         });
       }
       response = await this.postMessages({
@@ -319,11 +319,23 @@ export class AnthropicProvider {
       .join("\n")
       .trim();
 
+    // Last-resort salvage: a reasoning model that hit max_tokens mid-think
+    // returns only `thinking` blocks. Surface a trimmed slice of the trace
+    // rather than the "(no text)" placeholder.
+    const salvage = !text
+      ? (response?.content ?? [])
+          .filter((c) => c.type === "thinking" && typeof c.thinking === "string")
+          .map((c) => c.thinking)
+          .join("\n")
+          .trim()
+          .slice(0, 1500)
+      : "";
+
     return {
       provider: "anthropic",
       model,
       id: response?.id,
-      text: text || "(no text)",
+      text: text || (salvage ? `⚠ Reply truncated mid-reasoning (max_tokens). Reasoning trace excerpt:\n${salvage}` : "(no text)"),
       toolCalls
     };
   }
