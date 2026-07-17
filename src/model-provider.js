@@ -160,6 +160,20 @@ export class OpenAIResponsesProvider {
       }
     }
 
+    // Hop budget exhausted mid-work: force one final no-tools wrap-up so the
+    // turn never ends in silence.
+    if (extractFunctionCalls(response).length > 0) {
+      conversationInput.push({
+        role: "user",
+        content: [{ type: "input_text", text: "[system] Tool budget for this turn is exhausted. Do not call more tools. Reply in plain text now: summarize what you accomplished, what remains, and any findings so far." }]
+      });
+      response = await this.postResponses({
+        model,
+        instructions: baseInstructions,
+        input: conversationInput
+      }, context);
+    }
+
     return {
       provider: "openai",
       model,
@@ -278,6 +292,25 @@ export class AnthropicProvider {
         });
       }
       convo.push({ role: "user", content: toolResults });
+    }
+
+    // Hop budget exhausted mid-work: the last response still wanted tools, so
+    // it carries no text. Force one final plain-text wrap-up (no tools offered)
+    // instead of returning silence to the user.
+    if ((response?.content ?? []).some((c) => c.type === "tool_use")) {
+      const last = convo[convo.length - 1];
+      if (last?.role === "user" && Array.isArray(last.content)) {
+        last.content.push({
+          type: "text",
+          text: "[system] Tool budget for this turn is exhausted. Do not call more tools. Reply in plain text now: summarize what you accomplished, what remains, and any findings so far."
+        });
+      }
+      response = await this.postMessages({
+        model,
+        max_tokens: this.maxTokens,
+        system,
+        messages: convo
+      }, context);
     }
 
     const text = (response?.content ?? [])

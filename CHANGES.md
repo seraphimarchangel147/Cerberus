@@ -22,3 +22,17 @@ Every Legion agent modifying this harness: append an entry here.
 - **Inline IDE lane** (`src/code-tools.js`, new — hashline-lite, inspired by oh-my-pi + zerohermes code_intel): `code_read`/`code_search` mint 4-hex content-hash tags; `code_edit` applies line-anchored edits ONLY against a fresh tag (stale anchors rejected — no string-match loops); `code_write`; `code_lint` (node --check); `code_test` (node --test); `code_shell` (approval-gated); `delegate_subtask` (isolated sub-agent turn, no nesting). Homoglyph/zero-width guard on all writes; writes fenced to repo/data/tmp roots; repo edits auto-append this changelog.
 - **Nightly self-QA watchdog** (`abi-runtime.js`, cron `self-qa` @ 04:30): lint + full test suite, posts to the activity channel ONLY on failure.
 - QA: node --check clean on all 6 touched files, homoglyph byte-scan clean, 488/488 tests pass, anchored-edit roundtrip + stale-tag + ghost-rejection + approval-gating smoke-verified.
+
+## 2026-07-17 — Silent-turn fix (Seraphim)
+
+**Bug (found live in #azazel-chat):** Azazel's QA turn ran 7 tool calls and ended in *total silence* — two empty-content messages, no findings. Root cause chain:
+1. `model-provider.js` tool loop (`maxToolHops`, default **6**): when the budget exhausts while the model still wants tools, the final response contains only `tool_use` blocks → `text` = `"(no text)"`.
+2. `agent-host.js` passes that through as `result.reply`.
+3. `discord-channel.js` happily sent `"(no text)"`-adjacent emptiness; the truthy check let placeholder text through and empty replies vanish silently.
+
+**Fixes:**
+- `model-provider.js` (both Anthropic + OpenAI paths): on hop-budget exhaustion, append a `[system]` wrap-up instruction and make **one final no-tools call** so the model summarizes progress instead of going silent.
+- `discord-channel.js`: reply send now rejects empty/`"(no text)"` replies and posts an explicit `⚠ Turn completed without a text reply (N tool calls ran…)` notice — a pinged turn can never end in silence.
+- `openagi-azazel.service`: `OPENAGI_MAX_TOOL_HOPS=16` (6 was far too tight for multi-step QA/coding briefs).
+
+QA: `node --check` clean both files, 488/488 tests pass, homoglyph/zero-width byte-scan clean, service restarted with env verified (`systemctl --user show -p Environment`).

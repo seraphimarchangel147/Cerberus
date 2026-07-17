@@ -317,7 +317,18 @@ export class DiscordChannel {
         }
       });
       await status.finish(result);
-      if (result?.reply) await this.sendMessage(message.channel_id, result.reply, message.id);
+      const replyText = String(result?.reply ?? "").trim();
+      if (replyText && replyText !== "(no text)") {
+        await this.sendMessage(message.channel_id, replyText, message.id);
+      } else {
+        // Never end a pinged turn in silence — surface what happened instead.
+        const toolCount = result?.output?.toolCalls?.length ?? 0;
+        await this.sendMessage(
+          message.channel_id,
+          `⚠ Turn completed without a text reply (${toolCount} tool call${toolCount === 1 ? "" : "s"} ran — likely hit the tool-hop budget). Ask me to continue.`,
+          message.id
+        );
+      }
     } catch (error) {
       this.log({ op: "turn-error", error: error.message });
       await status.fail(error).catch(() => {});
