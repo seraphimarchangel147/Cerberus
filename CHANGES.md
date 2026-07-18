@@ -182,3 +182,9 @@ QA PHASE COMPLETE
 - Added an in-process promise-chain mutex keyed by session id around file-backed transcript read-modify-write operations, preserving enqueue order without blocking writes to unrelated sessions.
 - Await file-backed appends at the AgentHost boundary and added a delayed-write concurrency regression proving that two same-session messages both survive on disk and completed lock entries are released.
 TIER2 HARDENING COMPLETE
+
+## 2026-07-18 - Pattern-miner midnight flake fix (Seraphim)
+
+- Root-caused the "pre-existing 557/558 flaky failure": sequence scoring used a naive mean/variance over getHours(), so routines straddling local midnight (hours 23 and 0) scored variance ~132 -> timeStability 0 -> candidate silently dropped. The pattern-miner test only failed when the suite ran near local midnight.
+- Replaced with a circular (vector) mean and wrapped hour deviations in mineSequences; startHour now wraps mod 24. Mid-day scoring is numerically unchanged.
+- Added test/pattern-miner-midnight.test.js: pre-fix repro (0 candidates at 00:5x local) plus a mid-day invariance guard. Both lanes: 560/560.
