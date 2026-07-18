@@ -157,3 +157,10 @@ QA PHASE COMPLETE
 - Added the deliberately small catastrophic shell classifier for protected-root deletes, host/WSL shutdown, agent-service/process kills, disk surgery, primary-branch force pushes, credential writes, and fork bombs.
 - Wired catastrophic calls ahead of auto-approve, persisted their severity and reason, and required an explicit human confirmation path before execution.
 - Added classifier, false-positive, both-policy-lane non-bypass, and hosted approval endpoint regressions.
+
+## 2026-07-18 - Tier 2b Hermes-style Discord approvals (Codex)
+
+- Added catastrophic approval cards with Approve Once, Allow for session, and Deny buttons over the raw Discord gateway/REST surface.
+- Mirrored Hermes's first-click-wins state, per-click owner/allowlist authorization, same-message recolor/footer edits, disabled controls before execution, 10-minute pending-preserving expiry, and in-channel result follow-ups.
+- Added an in-memory tool+session allowance and attached the exact Hermes approval note plus `approvedVia: "discord-button"` and decider metadata to approved results/actions.
+- Hermes's resolved-before-execution ordering is stronger than a store-status-only check, so this implementation follows it to prevent double execution while a long action is still running.

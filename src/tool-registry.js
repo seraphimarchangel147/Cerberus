@@ -5,6 +5,9 @@ import { isCatastrophicToolCall } from "./catastrophic-policy.js";
 export class ToolRegistry {
   constructor() {
     this.tools = new Map();
+    // Hermes's "always" choice is intentionally bounded to one live session.
+    // Keeping it in memory guarantees a daemon restart clears every allowance.
+    this.sessionAllows = new Set();
   }
 
   register(tool) {
@@ -38,6 +41,16 @@ export class ToolRegistry {
 
   bindPendingActions(pendingActions) {
     this.pendingActions = pendingActions;
+  }
+
+  allowForSession(sessionId, toolName) {
+    if (!sessionId || !toolName) return false;
+    this.sessionAllows.add(sessionAllowKey(sessionId, toolName));
+    return true;
+  }
+
+  isAllowedForSession(sessionId, toolName) {
+    return Boolean(sessionId && toolName && this.sessionAllows.has(sessionAllowKey(sessionId, toolName)));
   }
 
   unregister(name) {
@@ -177,8 +190,9 @@ export class ToolRegistry {
     // Catastrophic calls are the deliberately tiny exception to hands-free
     // mode. They must reach a human even when auto-approve is enabled; an
     // explicit __confirmed flag from an approval path is the only bypass.
+    const sessionAllowed = this.isAllowedForSession(context?.sessionId, name);
     const catastrophic = isCatastrophicToolCall({ toolName: name, args });
-    if (catastrophic.catastrophic && !context?.__confirmed) {
+    if (catastrophic.catastrophic && !context?.__confirmed && !sessionAllowed) {
       if (!this.pendingActions) {
         return { ok: false, error: `Catastrophic tool call requires human approval: ${catastrophic.reason}` };
       }
@@ -207,7 +221,7 @@ export class ToolRegistry {
     // sets after a human OKs the action). Scrutiny 'ask' turns extend this
     // to EVERY side-effecting tool, not just the always-gated ones.
     const scrutinyConfirm = context?.__scrutinyPolicy === "confirm" && tool.sideEffects;
-    if ((tool.needsConfirmation || scrutinyConfirm) && !context?.__confirmed && this.pendingActions) {
+    if ((tool.needsConfirmation || scrutinyConfirm) && !context?.__confirmed && !sessionAllowed && this.pendingActions) {
       const summary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
       // Auto-approve mode (Story: hands-free operation). When enabled the
       // gate still records the action for the audit trail, but runs the
@@ -251,7 +265,7 @@ export class ToolRegistry {
     }
     try {
       const result = await tool.handler(args ?? {}, context);
-      return { ok: true, result };
+      return { ok: true, result: appendApprovalNote(result, context?.__approval) };
     } catch (error) {
       return { ok: false, error: error.message ?? String(error) };
     }
@@ -260,6 +274,20 @@ export class ToolRegistry {
 
 function safeSummarize(fn, args) {
   try { return String(fn(args ?? {})).slice(0, 240); } catch { return null; }
+}
+
+function sessionAllowKey(sessionId, toolName) {
+  return `${String(sessionId)}\u0000${String(toolName)}`;
+}
+
+function appendApprovalNote(result, approval) {
+  if (!approval) return result;
+  const description = approval.description ?? "flagged as dangerous";
+  const approvalNote = `Command required approval (${description}) and was approved by the user.`;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    return { ...result, approvalNote };
+  }
+  return { value: result ?? null, approvalNote };
 }
 
 // Auto-approve gate check. Reads process.env each call (not cached) so the

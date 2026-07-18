@@ -53,6 +53,9 @@ export class PendingActionStore {
       createdAt: nowIso(),
       decidedAt: null,
       decidedBy: null,
+      approvedVia: null,
+      decider: null,
+      deciderDisplayName: null,
       result: null,
       error: null
     };
@@ -64,6 +67,7 @@ export class PendingActionStore {
       summary: action.summary,
       reason: action.reason,
       severity: action.severity,
+      args: action.args,
       createdAt: action.createdAt,
       // Session the triggering turn ran in (e.g. "discord:<guild>:<channel>")
       // so the activity feed can post into the channel the agent is actually
@@ -73,17 +77,31 @@ export class PendingActionStore {
     return action;
   }
 
-  decide(id, { decision, decidedBy, result, error }) {
+  decide(id, { decision, decidedBy, approvedVia, decider, deciderDisplayName, result, error }) {
     const action = this.actions.get(id);
     if (!action) return null;
     if (action.status !== "pending") return action;
     action.status = decision === "approve" ? "approved" : "denied";
     action.decidedAt = nowIso();
     action.decidedBy = decidedBy ?? "user";
+    if (approvedVia !== undefined) action.approvedVia = approvedVia;
+    if (decider !== undefined) action.decider = decider;
+    if (deciderDisplayName !== undefined) action.deciderDisplayName = deciderDisplayName;
     if (result !== undefined) action.result = result;
     if (error !== undefined) action.error = error;
     this.actions.set(id, action);
-    this._appendJournal({ op: "decide", id, status: action.status, decidedAt: action.decidedAt, decidedBy: action.decidedBy, result, error });
+    this._appendJournal({
+      op: "decide",
+      id,
+      status: action.status,
+      decidedAt: action.decidedAt,
+      decidedBy: action.decidedBy,
+      approvedVia: action.approvedVia,
+      decider: action.decider,
+      deciderDisplayName: action.deciderDisplayName,
+      result,
+      error
+    });
     // Broadcast the decision so the Discord activity feed (and SSE dashboard)
     // can show approvals/denials/auto-approvals — not just enqueues.
     this.events?.emit?.("pending-action-decided", {
@@ -92,6 +110,7 @@ export class PendingActionStore {
       summary: action.summary,
       status: action.status,
       decidedBy: action.decidedBy,
+      approvedVia: action.approvedVia,
       error: action.error ?? null,
       sessionId: action.context?.sessionId ?? null
     });
@@ -144,6 +163,9 @@ export class PendingActionStore {
           a.status = event.status;
           a.decidedAt = event.decidedAt;
           a.decidedBy = event.decidedBy;
+          if (event.approvedVia !== undefined) a.approvedVia = event.approvedVia;
+          if (event.decider !== undefined) a.decider = event.decider;
+          if (event.deciderDisplayName !== undefined) a.deciderDisplayName = event.deciderDisplayName;
           if (event.result !== undefined) a.result = event.result;
           if (event.error !== undefined) a.error = event.error;
         }

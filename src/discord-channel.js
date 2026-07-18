@@ -22,6 +22,9 @@ import { ANSI, COLORS, embed } from "./discord-embeds.js";
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
+const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+const EPHEMERAL = 64;
+const EXPIRED_COLOR = 0x95a5a6;
 
 // Reply quoting is deliberately opt-in and checked at send time. Operators
 // can flip DISCORD_REPLY live without rebuilding the channel or changing the
@@ -82,6 +85,9 @@ export class DiscordChannel {
     // approve/deny buttons). Registered at READY.
     this.applicationId = null;
     this.commands = new DiscordCommands(this);
+    // One state object per catastrophic prompt mirrors Hermes's View.resolved
+    // flag. Store status alone is too late because approval execution is async.
+    this.approvalPrompts = new Map();
     // Presence: live activity in the member list ("Watching N pending
     // approvals" / "Playing kimi-k3"). DISCORD_PRESENCE=0 disables.
     this.presence = (options.presence ?? process.env.DISCORD_PRESENCE ?? "1") !== "0";
@@ -114,6 +120,8 @@ export class DiscordChannel {
     this.heartbeatTimer = null;
     if (this.presenceTimer) clearInterval(this.presenceTimer);
     this.presenceTimer = null;
+    for (const state of this.approvalPrompts.values()) clearTimeout(state.timer);
+    this.approvalPrompts.clear();
     try { this.ws?.close(1000); } catch { /* ignore */ }
     this.ws = null;
   }
@@ -199,7 +207,11 @@ export class DiscordChannel {
       return;
     }
     if (t === "RESUMED") { this.log({ op: "resumed" }); return; }
-    if (t === "INTERACTION_CREATE") { await this.commands.handle(d); return; }
+    if (t === "INTERACTION_CREATE") {
+      if (isPendingApprovalInteraction(d)) await this.handlePendingApprovalInteraction(d);
+      else await this.commands.handle(d);
+      return;
+    }
     if (t === "MESSAGE_CREATE") await this.handleMessage(d);
   }
 
@@ -454,6 +466,163 @@ export class DiscordChannel {
     return this.rest(`/channels/${channelId}/messages/${messageId}`, { method: "DELETE" });
   }
 
+  async postCatastrophicApproval(actionLike) {
+    const runtime = this.agentHost?.runtime;
+    const action = runtime?.pendingActions?.get?.(actionLike?.id) ?? actionLike;
+    const channelId = this.activityChannelFor(action?.context?.sessionId ?? actionLike?.sessionId);
+    if (!action?.id || !channelId || this.approvalPrompts.has(action.id)) return null;
+
+    const card = catastrophicApprovalEmbed(action);
+    const components = approvalComponents(action.id);
+    const message = await this.rest(`/channels/${channelId}/messages`, {
+      method: "POST",
+      body: { embeds: [card], components }
+    });
+    const state = {
+      actionId: action.id,
+      channelId,
+      messageId: message?.id ?? null,
+      embed: card,
+      components,
+      resolved: false,
+      timer: null
+    };
+    state.timer = setTimeout(() => {
+      this.expireApprovalPrompt(action.id).catch((error) => {
+        this.log({ op: "approval-expire-error", actionId: action.id, error: error.message });
+      });
+    }, APPROVAL_TIMEOUT_MS);
+    state.timer.unref?.();
+    this.approvalPrompts.set(action.id, state);
+    return message;
+  }
+
+  async handlePendingApprovalInteraction(interaction) {
+    const match = /^pa:(approve|deny|session):(.+)$/.exec(String(interaction?.data?.custom_id ?? ""));
+    if (!match) return;
+    const [, choice, actionId] = match;
+    const runtime = this.agentHost?.runtime;
+    const store = runtime?.pendingActions;
+    const action = store?.get?.(actionId);
+    const state = this.approvalPrompts.get(actionId) ?? promptStateFromInteraction(actionId, interaction);
+
+    // Hermes checks resolved before auth, so stale double-clicks always get
+    // the same answer and can never leak into a second execution path.
+    if (!action || action.status !== "pending" || state.resolved) {
+      return this.replyToInteraction(interaction, "This prompt has already been resolved~");
+    }
+
+    const userId = interaction.member?.user?.id ?? interaction.user?.id ?? null;
+    if (!this.isAuthorizedApprovalUser(userId)) {
+      return this.replyToInteraction(interaction, "You're not authorized to answer this prompt~");
+    }
+    if (choice === "session" && !action.context?.sessionId) {
+      return this.replyToInteraction(interaction, "This action has no session to allow.");
+    }
+
+    const displayName = approvalDisplayName(interaction);
+    const label = choice === "deny" ? "Denied" : choice === "session" ? "Allowed for session" : "Approved once";
+    const color = choice === "deny" ? COLORS.err : COLORS.ok;
+    state.resolved = true;
+    clearTimeout(state.timer);
+    state.embed = resolvedApprovalEmbed(interaction.message?.embeds?.[0] ?? state.embed, color, `${label} by ${displayName}`);
+    state.components = disableComponents(interaction.message?.components ?? state.components);
+    this.approvalPrompts.set(actionId, state);
+
+    // Type 6 acknowledges immediately without replacing the card. The webhook
+    // edit that follows disables every button before any tool code can run.
+    await this.rest(`/interactions/${interaction.id}/${interaction.token}/callback`, {
+      method: "POST",
+      body: { type: 6 }
+    });
+    await this.editApprovalInteraction(interaction, state);
+
+    if (choice === "deny") {
+      store.decide(actionId, {
+        decision: "deny",
+        decidedBy: `discord:${userId}`,
+        decider: userId,
+        deciderDisplayName: displayName,
+        error: "denied by user"
+      });
+      await this.sendMessage(state.channelId, `Denied \`${actionId}\` (**${action.toolName}**) by ${displayName}.`);
+      return;
+    }
+
+    if (choice === "session") runtime.tools.allowForSession(action.context.sessionId, action.toolName);
+    let invokeResult;
+    try {
+      invokeResult = await runtime.tools.invoke(action.toolName, action.args, {
+        ...(action.context ?? {}),
+        __confirmed: true,
+        __approval: {
+          description: action.reason ?? "flagged as dangerous",
+          via: "discord-button",
+          decider: userId
+        }
+      });
+    } catch (error) {
+      invokeResult = { ok: false, error: error.message ?? String(error) };
+    }
+    store.decide(actionId, {
+      decision: "approve",
+      decidedBy: `discord:${userId}`,
+      approvedVia: "discord-button",
+      decider: userId,
+      deciderDisplayName: displayName,
+      result: invokeResult.ok ? invokeResult.result : null,
+      error: invokeResult.ok ? null : invokeResult.error
+    });
+
+    const resultText = approvalResultText(action, invokeResult);
+    state.embed = resolvedApprovalEmbed(state.embed, color, `${label} by ${displayName}`, resultText);
+    await this.editApprovalInteraction(interaction, state);
+    await this.sendMessage(state.channelId, resultText);
+  }
+
+  async expireApprovalPrompt(actionId) {
+    const state = this.approvalPrompts.get(actionId);
+    if (!state || state.resolved) return false;
+    state.resolved = true;
+    clearTimeout(state.timer);
+    state.embed = resolvedApprovalEmbed(state.embed, EXPIRED_COLOR, "\u23f1 Prompt expired \u2014 no action taken");
+    state.components = disableComponents(state.components);
+    if (state.channelId && state.messageId) {
+      await this.rest(`/channels/${state.channelId}/messages/${state.messageId}`, {
+        method: "PATCH",
+        body: { embeds: [state.embed], components: state.components }
+      });
+    }
+    return true;
+  }
+
+  isAuthorizedApprovalUser(userId) {
+    if (!userId) return false;
+    // Re-read the owner env on every click. This is an authorization decision,
+    // not a convenience cache, and must reflect a live operator correction.
+    const allowed = new Set([...this.allowFrom, ...splitIds(process.env.DISCORD_OWNER_ID)]);
+    return allowed.has(String(userId));
+  }
+
+  activityChannelFor(sessionId) {
+    const match = /^discord:[^:]+:(\d+)$/.exec(String(sessionId ?? ""));
+    return match?.[1] ?? this.lastActiveChannel ?? this.activityChannel ?? null;
+  }
+
+  async replyToInteraction(interaction, content) {
+    return this.rest(`/interactions/${interaction.id}/${interaction.token}/callback`, {
+      method: "POST",
+      body: { type: 4, data: { content, flags: EPHEMERAL } }
+    });
+  }
+
+  async editApprovalInteraction(interaction, state) {
+    return this.rest(`/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, {
+      method: "PATCH",
+      body: { embeds: [state.embed], components: state.components }
+    });
+  }
+
   // ── Activity feed: runtime bus → Discord home channel ─────────────
   // Mirrors Hermes's observability: proactive-observer suggestions, actions
   // awaiting approval, mined skill candidates, and self-updates land in the
@@ -467,12 +636,8 @@ export class DiscordChannel {
     // sessionId "discord:<guild>:<channel>" when a Discord turn triggered
     // them), then the channel of the most recent inbound message, then the
     // configured home channel as the static fallback.
-    const channelFromSession = (sessionId) => {
-      const m = /^discord:[^:]+:(\d+)$/.exec(String(sessionId ?? ""));
-      return m ? m[1] : null;
-    };
     const post = (text, d = null) => {
-      const chan = channelFromSession(d?.sessionId) ?? this.lastActiveChannel ?? this.activityChannel;
+      const chan = this.activityChannelFor(d?.sessionId);
       if (!chan) return;
       // Fire-and-forget: the feed must never break the runtime.
       this.sendMessage(chan, text).catch((error) => this.log({ op: "feed-error", error: error.message }));
@@ -481,6 +646,12 @@ export class DiscordChannel {
       post(`💡 **Observer suggestion** _(scrutiny-gated, nothing fired)_\n**${d.title ?? "(untitled)"}** · category: \`${d.category ?? "?"}\`\n${(d.rationale ?? "").slice(0, 400)}`);
     });
     events.on("pending-action", (d) => {
+      if (d.severity === "catastrophic") {
+        this.postCatastrophicApproval(d).catch((error) => {
+          this.log({ op: "approval-card-error", actionId: d.id, error: error.message });
+        });
+        return;
+      }
       // With auto-approve ON the action runs immediately after this event —
       // label it accordingly instead of asking the Creator to approve.
       import("./tool-registry.js").then(({ autoApproveEnabled }) => {
@@ -494,6 +665,8 @@ export class DiscordChannel {
       });
     });
     events.on("pending-action-decided", (d) => {
+      // The button flow owns its result follow-up and same-message update.
+      if (d.approvedVia === "discord-button") return;
       const emoji = d.status === "approved" ? (d.decidedBy === "auto-approve" ? "🤖✅" : "✅") : "⛔";
       const who = d.decidedBy === "auto-approve" ? "auto-approved" : `${d.status} by ${d.decidedBy}`;
       post(`${emoji} **Action ${who}** — \`${d.id}\` · **${d.toolName}**${d.error ? `\n⚠ error: ${String(d.error).slice(0, 300)}` : ""}`, d);
@@ -546,6 +719,78 @@ export class DiscordChannel {
 function splitIds(value) {
   if (Array.isArray(value)) return value.map(String);
   return String(value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function isPendingApprovalInteraction(interaction) {
+  return interaction?.type === 3 && /^pa:(?:approve|deny|session):/.test(String(interaction?.data?.custom_id ?? ""));
+}
+
+function approvalComponents(actionId) {
+  return [{
+    type: 1,
+    components: [
+      { type: 2, style: 3, label: "Approve Once", custom_id: `pa:approve:${actionId}` },
+      { type: 2, style: 2, label: "Allow for session", custom_id: `pa:session:${actionId}` },
+      { type: 2, style: 4, label: "Deny", custom_id: `pa:deny:${actionId}` }
+    ]
+  }];
+}
+
+function disableComponents(rows = []) {
+  return rows.map((row) => ({
+    ...row,
+    components: (row.components ?? []).map((button) => ({ ...button, disabled: true }))
+  }));
+}
+
+function catastrophicApprovalEmbed(action) {
+  const args = JSON.stringify(action.args ?? {}, null, 2);
+  return embed({
+    title: "Catastrophic action requires approval",
+    color: COLORS.warn,
+    fields: [
+      { name: "Tool", value: `\`${action.toolName}\``, inline: true },
+      { name: "Action", value: action.summary ?? `Run ${action.toolName}` },
+      { name: "Why this is gated", value: action.reason ?? "Catastrophic policy match" },
+      { name: "Arguments", value: `\`\`\`json\n${args.slice(0, 990)}\n\`\`\`` }
+    ],
+    footer: "Only an authorized user can decide - expires in 10 minutes"
+  });
+}
+
+function promptStateFromInteraction(actionId, interaction) {
+  return {
+    actionId,
+    channelId: interaction.channel_id ?? interaction.message?.channel_id ?? null,
+    messageId: interaction.message?.id ?? null,
+    embed: interaction.message?.embeds?.[0] ?? {},
+    components: interaction.message?.components ?? [],
+    resolved: false,
+    timer: null
+  };
+}
+
+function resolvedApprovalEmbed(source = {}, color, footer, resultText = null) {
+  const fields = [...(source.fields ?? [])].filter((field) => field.name !== "Result");
+  if (resultText) fields.push({ name: "Result", value: String(resultText).slice(0, 1024), inline: false });
+  return { ...source, color, footer: { text: footer }, fields };
+}
+
+function approvalDisplayName(interaction) {
+  const user = interaction.member?.user ?? interaction.user ?? {};
+  return String(interaction.member?.nick ?? user.global_name ?? user.username ?? user.id ?? "user").slice(0, 100);
+}
+
+function approvalResultText(action, result) {
+  if (!result?.ok) return `Action \`${action.id}\` (**${action.toolName}**) failed: ${result?.error ?? "unknown error"}`;
+  const value = result.result ?? {};
+  const exitCode = value.exitCode ?? value.exit_code;
+  const stdout = String(value.stdout ?? value.output ?? "").slice(-1200).trim();
+  const lines = [`Action \`${action.id}\` (**${action.toolName}**) completed.`];
+  if (exitCode != null) lines.push(`exitCode: ${exitCode}`);
+  if (stdout) lines.push(`stdout tail:\n\`\`\`\n${stdout.replace(/\`\`\`/g, "'''" )}\n\`\`\``);
+  if (exitCode == null && !stdout) lines.push(String(JSON.stringify(value)).slice(0, 1200));
+  return lines.join("\n").slice(0, 1900);
 }
 
 function chunkText(text, size) {
