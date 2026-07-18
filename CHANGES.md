@@ -137,3 +137,17 @@ QA PHASE COMPLETE
 - Verified live: `POST /mcp/call {server:"cua", tool:"get_screen_size"}` → 3840x2160@2x.
 - Note: the legacy `src/integrations/computer-use.js` stub (OPENAGI_COMPUTER_USE flag,
   mac-node design, input synthesis refused) remains OFF; the MCP path supersedes it.
+
+## 2026-07-17 — Tier-1 hardening (Seraphim)
+- code-tools: `mustResolve()` gate now enforced on code_read/search/lint/test/shell
+  (was silently dropped); `resolveSafe()` does realpath containment so symlinks
+  inside allowed roots can't escape them.
+- `/health` public response is now `{ok, firstRun}` only; full runtime.status()
+  requires auth.
+- boot: binding 0.0.0.0/:: without OPENAGI_AUTH_TOKEN now REFUSES to start
+  (override: OPENAGI_UNSAFE_BIND=1).
+- Telegram webhook fails CLOSED when TELEGRAM_WEBHOOK_SECRET unset.
+- HTTP bodies capped at 5MB (readJson/readForm).
+- New test lane `npm run test:prod-policy` (OPENAGI_AUTO_APPROVE=1) — caught 4
+  tests that assumed queue semantics; those now pin auto-approve off locally.
+- New test/tier1-hardening.test.js. Both lanes 537/537 green.

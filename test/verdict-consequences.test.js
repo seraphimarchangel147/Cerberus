@@ -6,6 +6,10 @@ import test from "node:test";
 import { ToolRegistry, createDefaultRuntime } from "../src/index.js";
 import { AgentHost } from "../src/agent-host.js";
 
+// Asserts approval-queue diversion under the "ask" verdict — pin auto-approve
+// off so the assertions hold in the prod-policy lane (OPENAGI_AUTO_APPROVE=1).
+process.env.OPENAGI_AUTO_APPROVE = "0";
+
 function makeRegistry() {
   const calls = [];
   const registry = new ToolRegistry();

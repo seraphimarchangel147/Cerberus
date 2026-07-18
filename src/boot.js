@@ -77,11 +77,21 @@ export async function startServer({ host, port } = {}) {
   const resolvedPort = Number.parseInt(String(port ?? process.env.PORT ?? "43210"), 10);
 
   if ((resolvedHost === "0.0.0.0" || resolvedHost === "::") && !process.env.OPENAGI_AUTH_TOKEN) {
-    console.warn(
-      "⚠ Binding to " + resolvedHost + " with NO OPENAGI_AUTH_TOKEN set — the dashboard and API would be\n" +
-      "  reachable UNAUTHENTICATED on your network. Run `openagi setup` (or set OPENAGI_AUTH_TOKEN)\n" +
-      "  before exposing OpenAGI to other devices."
-    );
+    // Fail closed (Tier-1 hardening, 2026-07): an unauthenticated daemon on
+    // all interfaces is full remote control of the machine. Explicit escape
+    // hatch for people who really mean it: OPENAGI_UNSAFE_BIND=1.
+    if (process.env.OPENAGI_UNSAFE_BIND === "1") {
+      console.warn(
+        "⚠ OPENAGI_UNSAFE_BIND=1 — binding to " + resolvedHost + " with NO OPENAGI_AUTH_TOKEN.\n" +
+        "  The dashboard and API are reachable UNAUTHENTICATED on your network."
+      );
+    } else {
+      throw new Error(
+        `Refusing to bind ${resolvedHost} without OPENAGI_AUTH_TOKEN — the dashboard and API would be ` +
+        `reachable unauthenticated on your network. Run \`openagi setup\` (or set OPENAGI_AUTH_TOKEN), ` +
+        `or set OPENAGI_UNSAFE_BIND=1 to override deliberately.`
+      );
+    }
   }
 
   const runtime = createDurableRuntime({ dataDir });

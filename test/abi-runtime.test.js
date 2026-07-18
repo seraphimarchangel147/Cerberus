@@ -1382,6 +1382,11 @@ test("McpRegistry allowEnvKey extends the in-memory permitted set", async () => 
 test("ToolRegistry: needsConfirmation gate queues action instead of running", async () => {
   const { ToolRegistry } = await import("../src/tool-registry.js");
   const { PendingActionStore } = await import("../src/pending-actions.js");
+  // This test asserts QUEUE semantics, so pin auto-approve off locally —
+  // it must pass in both the default and the prod-policy (auto-approve=1) lane.
+  const savedAA = process.env.OPENAGI_AUTO_APPROVE;
+  process.env.OPENAGI_AUTO_APPROVE = "0";
+  try {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pending-"));
   const pending = new PendingActionStore({ dir });
   const tools = new ToolRegistry();
@@ -1415,6 +1420,10 @@ test("ToolRegistry: needsConfirmation gate queues action instead of running", as
   assert.deepEqual(ok.result, { didIt: 99 });
 
   fs.rmSync(dir, { recursive: true });
+  } finally {
+    if (savedAA === undefined) delete process.env.OPENAGI_AUTO_APPROVE;
+    else process.env.OPENAGI_AUTO_APPROVE = savedAA;
+  }
 });
 
 test("PendingActionStore: enqueue + decide + replay across instances", async () => {
@@ -2253,6 +2262,11 @@ test("ToolRegistry.invoke: gated tool's summary persists through to pending acti
   const { PendingActionStore } = await import("../src/pending-actions.js");
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-summary-"));
+  // Queue-semantics test — pin auto-approve off so it holds in the
+  // prod-policy lane (OPENAGI_AUTO_APPROVE=1) too.
+  const savedAA = process.env.OPENAGI_AUTO_APPROVE;
+  process.env.OPENAGI_AUTO_APPROVE = "0";
+  try {
   const pending = new PendingActionStore({ dir: tmp });
   const registry = new ToolRegistry();
   registry.bindPendingActions(pending);
@@ -2274,6 +2288,10 @@ test("ToolRegistry.invoke: gated tool's summary persists through to pending acti
   assert.match(queued.summary, /docker/, "queued summary exposes command");
   assert.match(queued.summary, /-v/, "queued summary exposes mount arg");
   fs.rmSync(tmp, { recursive: true });
+  } finally {
+    if (savedAA === undefined) delete process.env.OPENAGI_AUTO_APPROVE;
+    else process.env.OPENAGI_AUTO_APPROVE = savedAA;
+  }
 });
 
 test("approval cards: args render with <details open> by default (C4 regression)", async () => {

@@ -39,8 +39,35 @@ export function allowedRoots() {
 
 export function resolveSafe(p) {
   const abs = path.resolve(String(p ?? ""));
-  const ok = allowedRoots().some((root) => abs === root || abs.startsWith(root + path.sep));
-  return { abs, ok };
+  // Lexical containment first (cheap), then REAL containment: resolve
+  // symlinks on the nearest existing ancestor so a link inside an allowed
+  // root can't smuggle reads/writes outside it (Tier-1 hardening, 2026-07).
+  const roots = allowedRoots();
+  const inRoots = (candidate) => roots.some((root) => candidate === root || candidate.startsWith(root + path.sep));
+  if (!inRoots(abs)) return { abs, ok: false };
+  let probe = abs;
+  while (!fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break; // filesystem root
+    probe = parent;
+  }
+  let real;
+  try { real = fs.realpathSync(probe); } catch { return { abs, ok: false }; }
+  // Re-attach the not-yet-existing tail (for creates) onto the resolved base.
+  const tail = abs.slice(probe.length);
+  const realAbs = real + tail;
+  const realRoots = roots.map((r) => { try { return fs.realpathSync(r); } catch { return r; } });
+  const okReal = realRoots.some((root) => realAbs === root || realAbs.startsWith(root + path.sep));
+  return { abs, ok: okReal };
+}
+
+// Uniform gate — every code_* handler goes through this instead of
+// destructuring { abs } and silently dropping `ok` (the old bug: code_read /
+// code_search / code_lint / code_test skipped the check that edit/write did).
+export function mustResolve(p) {
+  const { abs, ok } = resolveSafe(p);
+  if (!ok) throw new Error(`Path outside allowed roots: ${abs}`);
+  return abs;
 }
 
 // ── homoglyph / ghost-byte guard ─────────────────────────────────────
@@ -117,7 +144,7 @@ export function registerCodeTools(registry, runtime) {
       additionalProperties: false
     },
     handler: async (args) => {
-      const { abs } = resolveSafe(path.isAbsolute(args.path) ? args.path : path.join(REPO_ROOT, args.path));
+      const abs = mustResolve(path.isAbsolute(args.path) ? args.path : path.join(REPO_ROOT, args.path));
       const content = fs.readFileSync(abs, "utf8");
       const tag = mintTag(content);
       const lines = content.split("\n");
@@ -150,7 +177,7 @@ export function registerCodeTools(registry, runtime) {
       additionalProperties: false
     },
     handler: async (args) => {
-      const dir = args.dir ? resolveSafe(path.isAbsolute(args.dir) ? args.dir : path.join(REPO_ROOT, args.dir)).abs : REPO_ROOT;
+      const dir = args.dir ? mustResolve(path.isAbsolute(args.dir) ? args.dir : path.join(REPO_ROOT, args.dir)) : REPO_ROOT;
       const re = new RegExp(args.pattern, args.ignoreCase ? "i" : undefined);
       const files = [];
       walk(dir, files);
@@ -287,7 +314,7 @@ export function registerCodeTools(registry, runtime) {
       additionalProperties: false
     },
     handler: async (args) => {
-      const target = resolveSafe(path.isAbsolute(args.path ?? "") ? args.path : path.join(REPO_ROOT, args.path ?? "src")).abs;
+      const target = mustResolve(path.isAbsolute(args.path ?? "") ? args.path : path.join(REPO_ROOT, args.path ?? "src"));
       const files = [];
       if (fs.statSync(target).isDirectory()) walk(target, files);
       else files.push(target);
@@ -312,7 +339,7 @@ export function registerCodeTools(registry, runtime) {
     },
     handler: async (args) => {
       const testArgs = ["--test"];
-      if (args.file) testArgs.push(resolveSafe(path.isAbsolute(args.file) ? args.file : path.join(REPO_ROOT, args.file)).abs);
+      if (args.file) testArgs.push(mustResolve(path.isAbsolute(args.file) ? args.file : path.join(REPO_ROOT, args.file)));
       const r = await run(process.execPath, testArgs, { cwd: REPO_ROOT, timeoutMs: 300000 });
       const out = (r.stdout + "\n" + r.stderr);
       const pass = /# pass (\d+)/.exec(out)?.[1] ?? null;
@@ -337,7 +364,7 @@ export function registerCodeTools(registry, runtime) {
     },
     summarize: (args) => `shell: ${String(args.command).slice(0, 120)}`,
     handler: async (args) => {
-      const cwd = args.cwd ? resolveSafe(args.cwd).abs : REPO_ROOT;
+      const cwd = args.cwd ? mustResolve(args.cwd) : REPO_ROOT;
       const r = await run("bash", ["-lc", args.command], { cwd, timeoutMs: (args.timeoutSeconds ?? 120) * 1000 });
       return { exitCode: r.code, stdout: r.stdout.slice(-6000), stderr: r.stderr.slice(-4000) };
     }

@@ -264,7 +264,15 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/") return sendHtml(res, 200, renderApp(), extraCookies);
       // firstRun lets clients (Mac app) know setup has never completed, so
       // they can take the user to the wizard instead of sitting silent.
-      if (method === "GET" && pathname === "/health") return sendJson(res, 200, { ok: true, firstRun: isFirstRun(), status: runtime.status() });
+      if (method === "GET" && pathname === "/health") {
+        // Public liveness only — {ok, firstRun}. The full runtime status
+        // (cron records + inputs, channel state, etc.) used to be public
+        // here; it now requires auth (Tier-1 hardening, 2026-07).
+        const authed = checkAuth(req, url, getAuthToken()).ok;
+        return sendJson(res, 200, authed
+          ? { ok: true, firstRun: isFirstRun(), status: runtime.status() }
+          : { ok: true, firstRun: isFirstRun() });
+      }
       if (method === "GET" && pathname === "/memory") return sendJson(res, 200, runtime.memory.snapshot());
       if (method === "POST" && pathname === "/memory/remember") {
         // Direct memory import (auth-gated) — for migrations from another
@@ -1773,10 +1781,23 @@ async function applyOutreachFeedback(runtime, item, verdict, note = null) {
   return resolved;
 }
 
+// Cap request bodies so an exposed/tunneled daemon can't be OOM'd by an
+// unbounded POST (Tier-1 hardening). 5 MB is far above any legit payload.
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       if (chunks.length === 0) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
@@ -1789,7 +1810,16 @@ function readJson(req) {
 function readForm(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       const text = Buffer.concat(chunks).toString("utf8");
       const params = new URLSearchParams(text);

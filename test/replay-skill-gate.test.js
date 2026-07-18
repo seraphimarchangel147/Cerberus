@@ -9,6 +9,11 @@ import path from "node:path";
 import fs from "node:fs";
 import { createDurableRuntime, createHostedInterface } from "../src/index.js";
 
+// This file asserts QUEUE semantics (divert -> approve -> run). Pin
+// auto-approve off so the suite also passes in the prod-policy lane
+// (npm run test:prod-policy, OPENAGI_AUTO_APPROVE=1).
+process.env.OPENAGI_AUTO_APPROVE = "0";
+
 function makeRuntime() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "replay-gate-"));
   process.env.OPENAGI_AUTH_TOKEN = ""; // local, no auth for the test
