@@ -14,7 +14,8 @@ const agent = { id: "main", name: "Main Agent" };
 const ITERATION_ENV = [
   "OPENAGI_MAX_ITERATIONS",
   "OPENAGI_MAX_TOOL_HOPS",
-  "OPENAGI_MAX_TURN_SECONDS"
+  "OPENAGI_MAX_TURN_SECONDS",
+  "OPENAGI_MAX_TURN_USD"
 ];
 
 function isolateIterationEnv(t) {
@@ -50,6 +51,7 @@ test("providers default to 25 iterations and a 900-second turn guard", (t) => {
   ]) {
     assert.equal(provider.maxIterations, 25);
     assert.equal(provider.maxTurnSeconds, 900);
+    assert.equal(provider.maxTurnUsd, null);
   }
 });
 
@@ -73,6 +75,13 @@ test("OPENAGI_MAX_TOOL_HOPS remains a fallback when iterations is unset or blank
   process.env.OPENAGI_MAX_TOOL_HOPS = "4";
   assert.equal(new OpenAIResponsesProvider({ apiKey: "test-key" }).maxIterations, 4);
   assert.equal(new AnthropicProvider({ apiKey: "test-key" }).maxIterations, 4);
+});
+
+test("OPENAGI_MAX_TURN_USD is optional and parsed for both paid providers", (t) => {
+  isolateIterationEnv(t);
+  process.env.OPENAGI_MAX_TURN_USD = "0.75";
+  assert.equal(new OpenAIResponsesProvider({ apiKey: "test-key" }).maxTurnUsd, 0.75);
+  assert.equal(new AnthropicProvider({ apiKey: "test-key" }).maxTurnUsd, 0.75);
 });
 
 test("the default engine executes at most 25 tool iterations", async (t) => {
@@ -238,6 +247,132 @@ test("Anthropic resumes a max_tokens response with its partial text intact", asy
 for (const spec of [
   {
     name: "OpenAI",
+    make: (budgetGuard) => new OpenAIResponsesProvider({
+      apiKey: "test-key",
+      maxIterations: 6,
+      budgetGuard
+    }),
+    stub(provider, onRequest) {
+      provider.postResponses = async () => {
+        const n = onRequest();
+        return {
+          id: `resp_${n}`,
+          output: [{ type: "function_call", call_id: `call_${n}`, name: "step", arguments: "{}" }]
+        };
+      };
+    },
+    registry: openAIToolRegistry
+  },
+  {
+    name: "Anthropic",
+    make: (budgetGuard) => new AnthropicProvider({
+      apiKey: "test-key",
+      maxIterations: 6,
+      budgetGuard
+    }),
+    stub(provider, onRequest) {
+      provider.postMessages = async () => {
+        const n = onRequest();
+        return {
+          id: `msg_${n}`,
+          stop_reason: "tool_use",
+          content: [{ type: "tool_use", id: `tool_${n}`, name: "step", input: {} }]
+        };
+      };
+    },
+    registry: anthropicToolRegistry
+  }
+]) {
+  test(`${spec.name} re-checks the budget before every iteration and stops locally`, async () => {
+    let checks = 0;
+    let requests = 0;
+    const budgetGuard = {
+      check() {
+        checks += 1;
+        if (checks === 3) {
+          const error = new Error("test budget reached");
+          error.code = "BUDGET_EXCEEDED";
+          throw error;
+        }
+      }
+    };
+    const provider = spec.make(budgetGuard);
+    spec.stub(provider, () => ++requests);
+    const events = [];
+
+    const result = await provider.generate({
+      input: "keep spending until stopped",
+      agent,
+      toolRegistry: spec.registry(),
+      context: { __onToolEvent: (event) => events.push(event) }
+    });
+
+    assert.equal(result.stopReason, "budget-cap");
+    assert.equal(result.iterations, 2);
+    assert.equal(result.toolCalls.length, 2);
+    assert.equal(requests, 2, "the request whose preflight check failed never reaches the provider");
+    assert.equal(checks, 3);
+    assert.match(result.text, /OPENAGI_MAX_TURN_USD|budget cap/i);
+    assert.deepEqual(events, [
+      { phase: "iteration", n: 1, max: 6 },
+      { phase: "iteration", n: 2, max: 6 }
+    ]);
+  });
+}
+
+for (const spec of [
+  {
+    name: "OpenAI",
+    make: (budgetGuard) => new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 4, budgetGuard }),
+    response: {
+      id: "openai_spend",
+      usage: { input_tokens: 1, output_tokens: 1 },
+      output: [{ type: "function_call", call_id: "call_1", name: "step", arguments: "{}" }]
+    },
+    registry: openAIToolRegistry
+  },
+  {
+    name: "Anthropic",
+    make: (budgetGuard) => new AnthropicProvider({ apiKey: "test-key", maxIterations: 4, budgetGuard }),
+    response: {
+      id: "anthropic_spend",
+      usage: { input_tokens: 1, output_tokens: 1 },
+      stop_reason: "tool_use",
+      content: [{ type: "tool_use", id: "tool_1", name: "step", input: {} }]
+    },
+    registry: anthropicToolRegistry
+  }
+]) {
+  test(`${spec.name} enforces OPENAGI_MAX_TURN_USD using recorded request cost`, async (t) => {
+    isolateIterationEnv(t);
+    process.env.OPENAGI_MAX_TURN_USD = "0.50";
+    let requests = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      requests += 1;
+      return { ok: true, json: async () => structuredClone(spec.response) };
+    };
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const budgetGuard = {
+      check() {},
+      record() { return { added: 0.60 }; }
+    };
+
+    const result = await spec.make(budgetGuard).generate({
+      input: "bounded paid task",
+      agent,
+      toolRegistry: spec.registry()
+    });
+
+    assert.equal(result.stopReason, "budget-cap");
+    assert.equal(result.iterations, 1);
+    assert.equal(requests, 1, "recorded spend blocks the next paid request");
+  });
+}
+
+for (const spec of [
+  {
+    name: "OpenAI",
     make: () => new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 5, maxTurnSeconds: 0.01 }),
     stub(provider) {
       provider.postResponses = async () => new Promise((resolve) => {
@@ -313,6 +448,30 @@ test("Discord live status renders iteration progress and the true-cap fallback i
   assert.match(fallback, /25 iterations/i);
   assert.match(fallback, /OPENAGI_MAX_ITERATIONS/);
   assert.doesNotMatch(fallback, /ask me to continue/i);
+});
+
+test("Discord live status preserves and labels a budget-capped turn", async () => {
+  const edits = [];
+  let deletes = 0;
+  const channel = {
+    rest: async (_path, options) => { edits.push(options.body); },
+    deleteMessage: async () => { deletes += 1; },
+    refreshIdlePresence() {}
+  };
+  const status = new LiveStatus(channel, "channel", true);
+  status.messageId = "status";
+  status.onEvent({ phase: "iteration", n: 2, max: 25 });
+  if (status.editTimer) clearTimeout(status.editTimer);
+  status.editTimer = null;
+
+  await status.finish({ model: { stopReason: "budget-cap", iterations: 2 } });
+
+  assert.equal(deletes, 0, "a capped no-tool turn keeps its status instead of disappearing");
+  assert.match(edits.at(-1).embeds[0].description, /budget-cap/);
+  const fallback = formatEmptyTurnFallback({
+    model: { stopReason: "budget-cap", iterations: 2 }
+  });
+  assert.match(fallback, /OPENAGI_MAX_TURN_USD/);
 });
 
 test("the deterministic provider remains compatible with iteration-aware callers", async () => {

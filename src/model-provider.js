@@ -26,6 +26,12 @@ function positiveNumber(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function optionalPositiveNumber(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 function resolveMaxIterations(options) {
   if (options.maxIterations !== undefined) {
     return positiveInteger(options.maxIterations, DEFAULT_MAX_ITERATIONS);
@@ -53,6 +59,9 @@ function applyIterationSettings(provider, options) {
   provider.maxTurnSeconds = positiveNumber(
     options.maxTurnSeconds ?? process.env.OPENAGI_MAX_TURN_SECONDS,
     DEFAULT_MAX_TURN_SECONDS
+  );
+  provider.maxTurnUsd = optionalPositiveNumber(
+    options.maxTurnUsd ?? process.env.OPENAGI_MAX_TURN_USD
   );
   provider.now = options.now ?? Date.now;
   // Keep this readable for integrations that inspect the old property. The
@@ -87,6 +96,27 @@ async function withinTurn(provider, deadline, task) {
 
 function deadlineExpired(provider, deadline, error) {
   return error instanceof TurnDeadlineError || provider.now() >= deadline;
+}
+
+function budgetExceeded(error) {
+  return error?.code === "BUDGET_EXCEEDED";
+}
+
+function checkRequestBudget(provider, turnBudget) {
+  provider.budgetGuard?.check();
+  if (turnBudget.limitUsd !== null && turnBudget.spentUsd >= turnBudget.limitUsd) {
+    const error = new Error(
+      `Turn budget reached: $${turnBudget.spentUsd.toFixed(4)} of $${turnBudget.limitUsd.toFixed(4)}. ` +
+      "Raise OPENAGI_MAX_TURN_USD to allow more model requests in one turn."
+    );
+    error.code = "BUDGET_EXCEEDED";
+    throw error;
+  }
+}
+
+function recordTurnSpend(turnBudget, record) {
+  const added = Number(record?.added);
+  if (Number.isFinite(added) && added > 0) turnBudget.spentUsd += added;
 }
 
 function openAIWantsContinuation(response, calls) {
@@ -148,6 +178,9 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
   const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
   if (reason === "turn-timeout") {
     return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached. ${detail} Raise OPENAGI_MAX_TURN_SECONDS if this task needs more time.${prior}`;
+  }
+  if (reason === "budget-cap") {
+    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because a budget cap was reached. ${detail} Raise OPENAGI_MAX_TURN_USD for a larger per-turn budget, or OPENAGI_DAILY_USD_LIMIT for the daily budget.${prior}`;
   }
   return `Turn reached the iteration cap after ${iterations}/${maxIterations} iterations. ${detail} Raise OPENAGI_MAX_ITERATIONS if this task needs more steps.${prior}`;
 }
@@ -231,7 +264,6 @@ export class OpenAIResponsesProvider {
   async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task }) {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
-    this.budgetGuard?.check();
 
     // Stateless tool loop — accumulates the full conversation in `input` each
     // hop instead of chaining via `previous_response_id`. Required for orgs
@@ -253,6 +285,7 @@ export class OpenAIResponsesProvider {
     const toolCalls = [];
 
     const deadline = this.now() + (this.maxTurnSeconds * 1000);
+    const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
     let response;
     let iterations = 0;
     let stopReason = "completed";
@@ -261,6 +294,15 @@ export class OpenAIResponsesProvider {
     iterationLoop: while (iterations < this.maxIterations) {
       if (this.now() >= deadline) {
         stopReason = "turn-timeout";
+        break;
+      }
+      // Iterations can span many paid requests. Re-check immediately before
+      // each one so a cap reached by an earlier hop cannot be bypassed.
+      try {
+        checkRequestBudget(this, turnBudget);
+      } catch (error) {
+        if (!budgetExceeded(error)) throw error;
+        stopReason = "budget-cap";
         break;
       }
       iterations += 1;
@@ -274,7 +316,7 @@ export class OpenAIResponsesProvider {
 
       try {
         response = await withinTurn(this, deadline, (remainingMs) => (
-          this.postResponses(body, context, { timeoutMs: remainingMs })
+          this.postResponses(body, context, { timeoutMs: remainingMs, turnBudget })
         ));
       } catch (error) {
         if (!deadlineExpired(this, deadline, error)) throw error;
@@ -366,19 +408,21 @@ export class OpenAIResponsesProvider {
       appendOpenAIContinue(conversationInput);
       conversationInput.at(-1).content[0].text = `[system] The turn reached its true limit after ${iterations} iterations. Do not call tools. Give a concise partial summary of completed work, findings, and what remains. Mention that OPENAGI_MAX_ITERATIONS can be raised.`;
       try {
+        checkRequestBudget(this, turnBudget);
         response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
           model,
           instructions: baseInstructions,
           input: conversationInput
-        }, context, { timeoutMs: remainingMs }));
+        }, context, { timeoutMs: remainingMs, turnBudget }));
         text = extractResponseText(response);
       } catch (error) {
-        if (!deadlineExpired(this, deadline, error)) throw error;
-        stopReason = "turn-timeout";
+        if (budgetExceeded(error)) stopReason = "budget-cap";
+        else if (deadlineExpired(this, deadline, error)) stopReason = "turn-timeout";
+        else throw error;
       }
     }
 
-    if (stopReason === "turn-timeout") {
+    if (stopReason === "turn-timeout" || stopReason === "budget-cap") {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
@@ -417,13 +461,14 @@ export class OpenAIResponsesProvider {
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(json?.error?.message ?? `OpenAI request failed with ${response.status}`);
       const callTools = (json.output ?? []).filter((item) => item.type === "function_call").map((item) => item.name);
-      this.budgetGuard?.record(json.usage, body.model, {
+      const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
         channel: context.channel,
         agentId: context.agentId,
         sessionId: context.sessionId,
         from: context.from,
         tools: callTools
       });
+      if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
       return json;
     } catch (error) {
       // The outer deadline and fetch abort timers race. Normalize the fetch
@@ -464,7 +509,6 @@ export class AnthropicProvider {
   async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
-    this.budgetGuard?.check();
 
     const tools = toolRegistry?.toAnthropicTools?.() ?? [];
     // The system block is STATIC (persona + standing instructions) so this
@@ -489,6 +533,7 @@ export class AnthropicProvider {
 
     const toolCalls = [];
     const deadline = this.now() + (this.maxTurnSeconds * 1000);
+    const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
     let response;
     let iterations = 0;
     let stopReason = "completed";
@@ -497,6 +542,13 @@ export class AnthropicProvider {
     iterationLoop: while (iterations < this.maxIterations) {
       if (this.now() >= deadline) {
         stopReason = "turn-timeout";
+        break;
+      }
+      try {
+        checkRequestBudget(this, turnBudget);
+      } catch (error) {
+        if (!budgetExceeded(error)) throw error;
+        stopReason = "budget-cap";
         break;
       }
       iterations += 1;
@@ -508,7 +560,7 @@ export class AnthropicProvider {
           system,
           messages: convo,
           ...(tools.length > 0 ? { tools } : {})
-        }, context, { timeoutMs: remainingMs }));
+        }, context, { timeoutMs: remainingMs, turnBudget }));
       } catch (error) {
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
@@ -565,20 +617,22 @@ export class AnthropicProvider {
         `[system] The turn reached its true limit after ${iterations} iterations. Do not call tools. Give a concise partial summary of completed work, findings, and what remains. Mention that OPENAGI_MAX_ITERATIONS can be raised.`
       );
       try {
+        checkRequestBudget(this, turnBudget);
         response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
           model,
           max_tokens: this.maxTokens,
           system,
           messages: convo
-        }, context, { timeoutMs: remainingMs }));
+        }, context, { timeoutMs: remainingMs, turnBudget }));
         text = extractAnthropicText(response);
       } catch (error) {
-        if (!deadlineExpired(this, deadline, error)) throw error;
-        stopReason = "turn-timeout";
+        if (budgetExceeded(error)) stopReason = "budget-cap";
+        else if (deadlineExpired(this, deadline, error)) stopReason = "turn-timeout";
+        else throw error;
       }
     }
 
-    if (stopReason === "turn-timeout") {
+    if (stopReason === "turn-timeout" || stopReason === "budget-cap") {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
@@ -630,13 +684,14 @@ export class AnthropicProvider {
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(json?.error?.message ?? `Anthropic request failed with ${response.status}`);
       const callTools = (json.content ?? []).filter((b) => b.type === "tool_use").map((b) => b.name);
-      this.budgetGuard?.record(json.usage, body.model, {
+      const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
         channel: context.channel,
         agentId: context.agentId,
         sessionId: context.sessionId,
         from: context.from,
         tools: callTools
       });
+      if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
       return json;
     } catch (error) {
       if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();

@@ -169,3 +169,10 @@ QA PHASE COMPLETE
 
 - Added `sanitizeForAudit()` deep-clone redaction for secret-bearing keys plus common OpenAI, Slack, GitHub, AWS, and long Bearer credential shapes.
 - Applied sanitized copies at pending-action journals/snapshots/API responses, persisted assistant tool-call arguments, outcome inputs/snapshots, and expanded MCP status responses while retaining live originals for execution.
+
+## 2026-07-18 - Tier 3b iteration budget enforcement (Codex)
+
+- Re-check the daily budget immediately before every OpenAI and Anthropic provider request, including the iteration-cap summary request, so a long iteration turn cannot outlive its budget gate.
+- Added optional `OPENAGI_MAX_TURN_USD` accounting from recorded request costs; reaching either budget returns a local partial summary with `stopReason: "budget-cap"` and makes no further paid request.
+- Surface budget-capped turns in Discord fallback and live-status output, including no-tool turns that would otherwise discard their status card.
+- Added both-provider regressions for mid-loop daily-budget trips, per-turn spend enforcement, request/event counts, and Discord observability.

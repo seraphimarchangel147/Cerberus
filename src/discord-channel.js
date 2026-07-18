@@ -47,6 +47,9 @@ export function formatEmptyTurnFallback(result = {}) {
   if (stopReason === "turn-timeout") {
     return `⚠ Turn stopped at the wall-clock guard after ${iterations ?? "several"} iterations (${suffix}). Raise OPENAGI_MAX_TURN_SECONDS if this task needs more time.`;
   }
+  if (stopReason === "budget-cap") {
+    return `⚠ Turn stopped at a budget cap after ${iterations ?? "several"} iterations (${suffix}). Raise OPENAGI_MAX_TURN_USD for a larger per-turn budget, or OPENAGI_DAILY_USD_LIMIT for the daily budget.`;
+  }
   return `⚠ Turn completed without a text reply (${suffix}).`;
 }
 
@@ -966,14 +969,18 @@ export class LiveStatus {
     this.channel.refreshIdlePresence?.();
     if (!this.enabled || !this.messageId) return;
     const secs = ((Date.now() - this.startedAt) / 1000).toFixed(1);
+    const stopReason = result?.model?.stopReason;
     // No verdict + no tools = trivial turn; delete the status to keep the
     // channel clean rather than leave a stale "thinking…" line.
-    if (this.steps.length === 0) {
+    if (this.steps.length === 0 && (!stopReason || stopReason === "completed")) {
       await this.channel.deleteMessage(this.channelId, this.messageId).catch(() => {});
       return;
     }
     const toolCount = this.steps.length;
-    await this.pushEdit(`— done in **${secs}s** · ${toolCount} tool call${toolCount === 1 ? "" : "s"}${result?.model?.model ? ` · \`${result.model.model}\`` : ""}`).catch(() => {});
+    const stopped = stopReason && stopReason !== "completed"
+      ? ` · stopped: **${stopReason}**`
+      : "";
+    await this.pushEdit(`— done in **${secs}s** · ${toolCount} tool call${toolCount === 1 ? "" : "s"}${result?.model?.model ? ` · \`${result.model.model}\`` : ""}${stopped}`).catch(() => {});
     if (this.threadId) {
       this.channel.sendMessage(this.threadId, `🏁 done in ${secs}s · ${toolCount} tool calls`).catch(() => {});
     }
