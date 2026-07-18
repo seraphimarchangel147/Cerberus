@@ -62,7 +62,11 @@ export class PendingActionStore {
       toolName: action.toolName,
       summary: action.summary,
       reason: action.reason,
-      createdAt: action.createdAt
+      createdAt: action.createdAt,
+      // Session the triggering turn ran in (e.g. "discord:<guild>:<channel>")
+      // so the activity feed can post into the channel the agent is actually
+      // working in, Hermes-style, instead of only the static home channel.
+      sessionId: action.context?.sessionId ?? null
     });
     return action;
   }
@@ -86,7 +90,8 @@ export class PendingActionStore {
       summary: action.summary,
       status: action.status,
       decidedBy: action.decidedBy,
-      error: action.error ?? null
+      error: action.error ?? null,
+      sessionId: action.context?.sessionId ?? null
     });
     return action;
   }

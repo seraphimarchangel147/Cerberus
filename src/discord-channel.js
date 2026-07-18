@@ -234,6 +234,10 @@ export class DiscordChannel {
       .trim() || text;
 
     this.log({ op: "inbound", from: message.author?.id, channel: message.channel_id, guild: message.guild_id ?? null, len: text.length });
+    // Track where Azazel is actively working so the activity feed can follow
+    // him (Hermes-style): feed posts route to the channel of the current
+    // conversation, not just the static home channel.
+    this.lastActiveChannel = message.channel_id;
 
     // Approvals from Discord: "!approve <id>" / "!deny <id>" from an
     // allowFrom user decides a pending action without opening the dashboard.
@@ -432,10 +436,20 @@ export class DiscordChannel {
   // configured channel so the Creator can SEE what Azazel is thinking of
   // doing — not just what he replies with.
   bindActivityFeed(events) {
-    if (this.feedBound || !events?.on || !this.activityChannel) return;
+    if (this.feedBound || !events?.on) return;
     this.feedBound = true;
-    const chan = this.activityChannel;
-    const post = (text) => {
+    // Route each feed post to the channel the agent is actually WORKING in
+    // (Hermes-style): prefer the event's own session channel (events carry
+    // sessionId "discord:<guild>:<channel>" when a Discord turn triggered
+    // them), then the channel of the most recent inbound message, then the
+    // configured home channel as the static fallback.
+    const channelFromSession = (sessionId) => {
+      const m = /^discord:[^:]+:(\d+)$/.exec(String(sessionId ?? ""));
+      return m ? m[1] : null;
+    };
+    const post = (text, d = null) => {
+      const chan = channelFromSession(d?.sessionId) ?? this.lastActiveChannel ?? this.activityChannel;
+      if (!chan) return;
       // Fire-and-forget: the feed must never break the runtime.
       this.sendMessage(chan, text).catch((error) => this.log({ op: "feed-error", error: error.message }));
     };
@@ -447,18 +461,18 @@ export class DiscordChannel {
       // label it accordingly instead of asking the Creator to approve.
       import("./tool-registry.js").then(({ autoApproveEnabled }) => {
         if (autoApproveEnabled()) {
-          post(`⚡ **Gated action (auto-approve ON)** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\n_Running automatically; result will follow._`);
+          post(`⚡ **Gated action (auto-approve ON)** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\n_Running automatically; result will follow._`, d);
         } else {
-          post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\nApprove with \`!approve ${d.id}\` · deny with \`!deny ${d.id}\``);
+          post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\nApprove with \`!approve ${d.id}\` · deny with \`!deny ${d.id}\``, d);
         }
       }).catch(() => {
-        post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}`);
+        post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}`, d);
       });
     });
     events.on("pending-action-decided", (d) => {
       const emoji = d.status === "approved" ? (d.decidedBy === "auto-approve" ? "🤖✅" : "✅") : "⛔";
       const who = d.decidedBy === "auto-approve" ? "auto-approved" : `${d.status} by ${d.decidedBy}`;
-      post(`${emoji} **Action ${who}** — \`${d.id}\` · **${d.toolName}**${d.error ? `\n⚠ error: ${String(d.error).slice(0, 300)}` : ""}`);
+      post(`${emoji} **Action ${who}** — \`${d.id}\` · **${d.toolName}**${d.error ? `\n⚠ error: ${String(d.error).slice(0, 300)}` : ""}`, d);
     });
     events.on("auto-approve", (d) => {
       post(d.enabled
@@ -480,7 +494,7 @@ export class DiscordChannel {
     events.on("daily-recap", (d) => {
       if (d?.summary) post(`🌙 **Daily recap**\n${String(d.summary).slice(0, 1500)}`);
     });
-    this.log({ op: "activity-feed-bound", channel: chan });
+    this.log({ op: "activity-feed-bound", channel: this.activityChannel ?? "(dynamic)", mode: "follow-session" });
   }
 
   async rest(pathname, { method = "GET", body } = {}) {

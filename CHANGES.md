@@ -82,3 +82,14 @@ QA PHASE COMPLETE
   (🤖✅ auto-approved / ✅ approved by user / ⛔ denied, with error if any);
   (c) announces auto-approve toggles (🟢/🔴).
 - `src/discord-commands.js`: `/autoapprove` toggle also broadcasts on the bus.
+
+## 2026-07-17 — Activity feed follows the working channel (Hermes-style)
+- Feed posts (approval pings, decisions, observer events) now route to the
+  Discord channel Azazel is actively working in, not a static home channel:
+  1. event's own sessionId ("discord:<guild>:<channel>") when the triggering
+     turn came from Discord (pending-action / pending-action-decided events
+     now carry sessionId from the action context),
+  2. else the channel of the most recent inbound message (lastActiveChannel),
+  3. else DISCORD_ACTIVITY_CHANNEL as static fallback.
+- bindActivityFeed no longer requires DISCORD_ACTIVITY_CHANNEL to be set.
+- Full suite: 511/511 pass.
