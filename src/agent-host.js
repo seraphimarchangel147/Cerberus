@@ -3,6 +3,7 @@ import { createModelProvider } from "./model-provider.js";
 import { createId, nowIso } from "./utils.js";
 import { detectTaskInChat } from "./task-store.js";
 import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZE_RE } from "./signal-axes.js";
+import { autoApproveEnabled } from "./tool-registry.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -11,6 +12,43 @@ const SPECIALIST_CORE_TOOLS = [
   "recall", "remember",
   "list_tasks", "agent_pick_next", "complete_task", "move_task", "save_draft"
 ];
+
+// Intentionally narrow, anchored phrases: consent should be explicit, not
+// inferred from a sentence that merely contains "yes" or "continue". The
+// list is exported so additions remain visible and regression-tested.
+export const CONSENT_PHRASE_PATTERNS = Object.freeze([
+  /^(?:yes|yep|yeah|yup|sure|absolutely|affirmative)(?:\s*,?\s*(?:please|go ahead|do it|proceed|continue))?[.!]*$/iu,
+  /^(?:ok|okay)(?:\s*,?\s*(?:go(?:\s+ahead)?|do it|proceed|continue))?[.!]*$/iu,
+  /^(?:please\s+)?(?:go ahead|go for it|do it|proceed|continue|full send|make it so)(?:\s+please)?[.!]*$/iu,
+  /^(?:approved|sounds good|works for me|fine by me|all good|looks good|whatever you (?:want|prefer)|either(?: one| way)?|you (?:choose|pick)(?: one)?|your call|let'?s do it)[.!]*$/iu
+]);
+
+const STOP_OR_DELAY_RE = /\b(?:stop|wait|hold on|pause|cancel|not yet|do not|don't|never mind)\b/iu;
+const CHAT_AUTHOR_PREFIX_RE = /^\[[^\]\r\n]{1,100}\]\s*/u;
+
+function normalizedDirectReply(value) {
+  return String(value ?? "").trim().replace(CHAT_AUTHOR_PREFIX_RE, "").trim();
+}
+
+export function isExplicitConsent(value) {
+  const reply = normalizedDirectReply(value);
+  if (!reply || /[?？]/u.test(reply) || STOP_OR_DELAY_RE.test(reply)) return false;
+  return CONSENT_PHRASE_PATTERNS.some((pattern) => pattern.test(reply));
+}
+
+export function assistantMessageEndsWithQuestion(message) {
+  if (message?.role !== "assistant") return false;
+  const visibleEnd = String(message.content ?? "")
+    .trim()
+    .replace(/[*_`"'”’)\]}]+$/u, "")
+    .trim();
+  return /[?？]$/u.test(visibleEnd);
+}
+
+function isDirectReplyToQuestion(value) {
+  const reply = normalizedDirectReply(value);
+  return Boolean(reply) && !/[?？]/u.test(reply) && !STOP_OR_DELAY_RE.test(reply);
+}
 
 export class AgentHost {
   constructor(options = {}) {
@@ -97,15 +135,51 @@ export class AgentHost {
       this.ensureSpecialistAgent(output.propagation.specialist, agentId);
     }
 
-    // The scrutiny verdict has consequences, not just prompt flavor:
+    // The effective scrutiny verdict has consequences, not just prompt flavor:
     //   act       → full tool access
-    //   ask       → side-effecting tool calls divert to the approval queue
-    //               this turn (the agent is told to clarify first)
+    //   ask       → side-effecting calls pass through the confirmation/audit
+    //               lane (auto-approve may execute them immediately)
     //   watch     → read-only tools only (filtered list + invoke-time gate)
     //   ignore    → no tools; the user still gets a (brief) reply — a direct
     //               human message is never silently dropped
     //   propagate → full access (the specialist spawn already happened above)
-    const verdict = output.scrutiny.action;
+    const rawVerdict = output.scrutiny.action;
+    const interactiveTurn = channel !== "autopilot" && channel !== "cron";
+    const previousAssistantAsked = interactiveTurn
+      && assistantMessageEndsWithQuestion(sessionBefore.messages.at(-2));
+    const consentOverride = Boolean(previousAssistantAsked && isExplicitConsent(text));
+    // WHY: one clarification is enough. If the Creator directly answers it,
+    // another low-evidence `ask` would recreate the live infinite loop even
+    // when the answer is not one of the explicit consent phrases.
+    const askDamped = Boolean(
+      !consentOverride
+      && previousAssistantAsked
+      && rawVerdict === "ask"
+      && isDirectReplyToQuestion(text)
+    );
+    const verdict = consentOverride || askDamped ? "act" : rawVerdict;
+    const verdictOverrideReason = consentOverride
+      ? "explicit consent after an assistant question"
+      : askDamped
+        ? "repeated ask damped after one clarifying question"
+        : null;
+    // Keep output.scrutiny untouched for outcome/audit consumers. Only the
+    // model/tool lane receives the effective verdict selected above.
+    const effectiveScrutiny = verdict === rawVerdict
+      ? output.scrutiny
+      : {
+          ...output.scrutiny,
+          action: verdict,
+          reasons: [
+            ...(output.scrutiny.reasons ?? []),
+            consentOverride
+              ? "Consent lane: the user explicitly authorized the work after the assistant's question; proceed now."
+              : "Anti-loop damping: one clarifying question was already answered; proceed using that answer."
+          ]
+        };
+    const effectiveOutput = verdict === rawVerdict
+      ? output
+      : { ...output, scrutiny: effectiveScrutiny };
     // Tell the live-progress observer (Discord status line) what the
     // scrutiny gate decided before any model/tool work starts.
     if (typeof input.onToolEvent === "function") {
@@ -165,11 +239,11 @@ export class AgentHost {
       // (autopilot/cron) are cheap "anything to do?" work; everything else is
       // user-facing chat. Both default to the base model until tiers/pins are set.
       task: (channel === "autopilot" || channel === "cron") ? "autopilot" : "chat",
-      scrutiny: output.scrutiny,
+      scrutiny: effectiveScrutiny,
       memoryHits: memoryHitsForModel,
       messages: sessionBefore.messages,
       instructions: this.instructionsForAgent(agent),
-      turnContext: this.turnContextForAgent(output, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null),
+      turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null),
       tools,
       toolRegistry,
       context: {
@@ -186,7 +260,7 @@ export class AgentHost {
         // (providers treat an empty list as "use everything"), so the gate is
         // what actually holds.
         __scrutinyPolicy: toolPolicy === "none" ? "none" : toolPolicy === "read-only" ? "read-only" : toolPolicy === "confirm" ? "confirm" : null,
-        __reason: toolPolicy === "confirm" ? `scrutiny verdict 'ask' (score ${output.scrutiny.score.toFixed(2)})` : null,
+        __reason: toolPolicy === "confirm" ? confirmPolicyReason(output.scrutiny.score) : null,
         __allowedTools: allowedToolNames,
         // Live-progress observer: channels (Discord) pass a callback so the
         // user can watch tool activity in real time. Best-effort, advisory.
@@ -208,6 +282,10 @@ export class AgentHost {
         specialistId: agent.role === "specialist" ? agent.id : null,
         signalSummary: signal.summary,
         scrutinyScore: output.scrutiny.score,
+        consentOverride,
+        askDamped,
+        effectiveScrutinyAction: verdict,
+        verdictOverrideReason,
         routing: routing ? {
           mode: routing.mode,
           routed: routing.route,
@@ -472,8 +550,11 @@ export function filterPrincipleHits(hits, memory, { limit = 3, now = Date.now() 
 // What each scrutiny verdict means for THIS turn — matches the enforcement
 // in agent-host.handleMessage / ToolRegistry.invoke, so the model's
 // expectations line up with what will actually happen to its tool calls.
-function verdictGuidance(action) {
+export function verdictGuidance(action) {
   if (action === "ask") {
+    if (autoApproveEnabled()) {
+      return "This turn: proceed with the requested work. Auto-approve is enabled, so side-effecting tools WILL run immediately and will still be logged in the approval audit trail. Do not ask another clarifying question unless a concrete missing fact makes the work unsafe.\n";
+    }
     return "This turn: clarify before acting. Ask ONE focused clarifying question. Any side-effecting tool you call now will be queued for the user's approval instead of executing immediately — prefer to ask first, act next turn.\n";
   }
   if (action === "watch") {
@@ -483,6 +564,15 @@ function verdictGuidance(action) {
     return "This turn: low-signal. No tools are available. Reply briefly and move on.\n";
   }
   return "";
+}
+
+export function confirmPolicyReason(score) {
+  const numericScore = Number(score);
+  const renderedScore = Number.isFinite(numericScore) ? numericScore.toFixed(2) : "unknown";
+  const base = `scrutiny verdict 'ask' (score ${renderedScore})`;
+  return autoApproveEnabled()
+    ? `${base}; auto-approve enabled, so side-effecting tools execute immediately and remain logged for audit`
+    : `${base}; auto-approve disabled, so side-effecting tools are queued for user approval`;
 }
 
 // Format the fresh focused-window context the floating widget attaches to a
