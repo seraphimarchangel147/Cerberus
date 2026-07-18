@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-17 — Consent lane and scrutiny anti-loop (Codex)
+
+- Added an exported, strict consent-phrase lane for affirmative/directive replies following an assistant question, including Discord's author prefix. Explicit consent now drives an effective `act` verdict while preserving the raw scrutiny action and score for audit.
+- Added one-question anti-loop damping: a direct answer to a prior clarifying question demotes a repeated `ask` to `act`, while stops, delays, and genuinely new questions remain excluded.
+- Made `ask` guidance and confirmation reasons truthful about live auto-approve state: enabled tools proceed immediately with audit logging; disabled tools retain the manual clarification/approval path.
+- Added detector, end-to-end AgentHost override/outcome/LiveStatus, damping, and auto-approve guidance regressions. Validation: `node --check` and `node --test` — 531/531 pass.
+CONSENT LANE PHASE COMPLETE
+
 ## 2026-07-17 — Discord reply quoting toggle (Codex)
 
 - Added live `DISCORD_REPLY` handling for Discord posts. Reply quoting is off by default and enabled only by `1`, `true`, or `on`; the environment is checked on every send so no channel restart is required.
