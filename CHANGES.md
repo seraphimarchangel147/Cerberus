@@ -2,6 +2,15 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-17 — Hermes-style turn iterations (Codex)
+
+- Replaced the fixed six-hop provider loops with a 25-iteration whole-turn engine for both OpenAI Responses and Anthropic Messages. `OPENAGI_MAX_ITERATIONS` is the primary cap; `OPENAGI_MAX_TOOL_HOPS` remains a deprecated fallback alias.
+- Added transparent same-turn continuation across request boundaries and incomplete responses while retaining accumulated messages, function/tool calls, results, screenshots, and partial assistant text.
+- Added ordered iteration progress events, AgentHost result/session metadata, and Discord live-status rendering of `iteration n/max`; true-cap notices now report the count and point to `OPENAGI_MAX_ITERATIONS`.
+- Added a 900-second whole-turn wall-clock guard (`OPENAGI_MAX_TURN_SECONDS`) that bounds model and tool waits and returns an honest partial summary on expiry.
+- Added provider/configuration, continuation, incomplete-response, timeout, progress, Discord, and deterministic-compatibility regressions. Validation: `node --check` and `node --test` — 524/524 pass.
+ITERATIONS PHASE COMPLETE
+
 ## 2026-07-17 — Skill system Hermes-grade upgrade (Seraphim)
 
 - **`src/skills.js` (rewritten around the original core):**
