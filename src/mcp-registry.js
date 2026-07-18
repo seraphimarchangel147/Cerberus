@@ -13,7 +13,13 @@ import { assertSafePublicUrl } from "./url-guard.js";
 const ALLOWED_STDIO_COMMANDS = new Set([
   "npx", "node", "bun", "bunx", "deno",
   "python", "python3", "uv", "uvx",
-  "docker"
+  "docker",
+  // trycua computer-use driver. The WSL→Windows bridge wrapper
+  // (~/.hermes/bin/cua-driver) execs the Windows cua-driver.exe through
+  // interop and speaks MCP over stdio — registered as server "cua" so the
+  // agent gets real desktop control (mcp_cua_* tools). The wrapper is a fixed
+  // known script, not an arbitrary shell, so allowlisting the leaf is safe.
+  "cua-driver"
 ]);
 
 // MCP tools are exposed to the model as `mcp_<server>_<tool>`, and that name

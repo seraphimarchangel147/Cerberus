@@ -127,3 +127,13 @@ QA PHASE COMPLETE
   reverting to idle presence after.
 - 4s tick timer keeps spinner/clock alive between tool events; cleared on
   finish/fail.
+
+## 2026-07-17 — trycua computer-use wired in via MCP (Seraphim)
+- `src/mcp-registry.js`: added `cua-driver` to ALLOWED_STDIO_COMMANDS so the
+  trycua driver can be a stdio MCP server.
+- `~/.openagi/mcp.json` (new): registers server "cua" → `/home/usapcool/.hermes/bin/cua-driver mcp`
+  (WSL→Windows interop bridge, Session-1 desktop). Tools surface as `mcp_cua_*`
+  (list_apps, get_window_state, click, type_text, hotkey, scroll, screenshot, etc.).
+- Verified live: `POST /mcp/call {server:"cua", tool:"get_screen_size"}` → 3840x2160@2x.
+- Note: the legacy `src/integrations/computer-use.js` stub (OPENAGI_COMPUTER_USE flag,
+  mac-node design, input synthesis refused) remains OFF; the MCP path supersedes it.
