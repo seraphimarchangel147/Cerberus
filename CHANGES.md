@@ -151,3 +151,9 @@ QA PHASE COMPLETE
 - New test lane `npm run test:prod-policy` (OPENAGI_AUTO_APPROVE=1) — caught 4
   tests that assumed queue semantics; those now pin auto-approve off locally.
 - New test/tier1-hardening.test.js. Both lanes 537/537 green.
+
+## 2026-07-18 - Tier 2a catastrophic policy (Codex)
+
+- Added the deliberately small catastrophic shell classifier for protected-root deletes, host/WSL shutdown, agent-service/process kills, disk surgery, primary-branch force pushes, credential writes, and fork bombs.
+- Wired catastrophic calls ahead of auto-approve, persisted their severity and reason, and required an explicit human confirmation path before execution.
+- Added classifier, false-positive, both-policy-lane non-bypass, and hosted approval endpoint regressions.

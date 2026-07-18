@@ -1,5 +1,6 @@
 import { createId, nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { isCatastrophicToolCall } from "./catastrophic-policy.js";
 
 export class ToolRegistry {
   constructor() {
@@ -171,6 +172,34 @@ export class ToolRegistry {
       return {
         ok: false,
         error: `Tool ${name} is blocked this turn: scrutiny verdict 'watch' permits read-only tools only.`
+      };
+    }
+    // Catastrophic calls are the deliberately tiny exception to hands-free
+    // mode. They must reach a human even when auto-approve is enabled; an
+    // explicit __confirmed flag from an approval path is the only bypass.
+    const catastrophic = isCatastrophicToolCall({ toolName: name, args });
+    if (catastrophic.catastrophic && !context?.__confirmed) {
+      if (!this.pendingActions) {
+        return { ok: false, error: `Catastrophic tool call requires human approval: ${catastrophic.reason}` };
+      }
+      const baseSummary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
+      const summary = `${baseSummary ?? `Run ${name}`} [CATASTROPHIC: ${catastrophic.reason}]`;
+      const action = this.pendingActions.enqueue({
+        toolName: name,
+        args,
+        context,
+        summary,
+        reason: catastrophic.reason,
+        severity: "catastrophic"
+      });
+      return {
+        ok: true,
+        result: {
+          status: "awaiting_confirmation",
+          actionId: action.id,
+          summary: action.summary,
+          message: "Catastrophic action requires explicit human approval; auto-approve cannot run it."
+        }
       };
     }
     // Confirmation gate. When set, divert the call into the pending-action

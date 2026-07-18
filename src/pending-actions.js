@@ -40,7 +40,7 @@ export class PendingActionStore {
     return this.actions.get(id) ?? null;
   }
 
-  enqueue({ toolName, args, context, summary, reason }) {
+  enqueue({ toolName, args, context, summary, reason, severity }) {
     const action = {
       id: createId("act"),
       toolName,
@@ -48,6 +48,7 @@ export class PendingActionStore {
       context: serializableContext(context),
       summary: summary ?? `Run ${toolName}`,
       reason: reason ?? null,
+      severity: severity ?? null,
       status: "pending",
       createdAt: nowIso(),
       decidedAt: null,
@@ -62,6 +63,7 @@ export class PendingActionStore {
       toolName: action.toolName,
       summary: action.summary,
       reason: action.reason,
+      severity: action.severity,
       createdAt: action.createdAt,
       // Session the triggering turn ran in (e.g. "discord:<guild>:<channel>")
       // so the activity feed can post into the channel the agent is actually
