@@ -6,6 +6,7 @@
 //   DISCORD_ALLOW_FROM    — comma-separated user ids allowed to DM the agent
 //   DISCORD_GUILDS        — comma-separated guild ids to serve (empty = all)
 //   DISCORD_REQUIRE_MENTION — "1" (default) only reply in guilds when pinged
+//   DISCORD_REPLY         — "1"/"true"/"on" enables quoted replies (default off)
 //
 // Behavior mirrors the hermesagent wiring this agent migrated from:
 //   * guild messages require a mention (user OR role ping counts)
@@ -21,6 +22,14 @@ import { ANSI, COLORS, embed } from "./discord-embeds.js";
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
+
+// Reply quoting is deliberately opt-in and checked at send time. Operators
+// can flip DISCORD_REPLY live without rebuilding the channel or changing the
+// many call sites that still pass the originating message id.
+export function discordReplyEnabled() {
+  const value = String(process.env.DISCORD_REPLY ?? "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "on";
+}
 
 export function formatEmptyTurnFallback(result = {}) {
   const toolCount = result?.toolCalls?.length ?? result?.output?.toolCalls?.length ?? 0;
@@ -367,7 +376,9 @@ export class DiscordChannel {
     let last = null;
     for (let i = 0; i < chunks.length; i += 1) {
       const body = { content: chunks[i] };
-      if (i === 0 && replyToId) body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
+      if (i === 0 && replyToId && discordReplyEnabled()) {
+        body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
+      }
       if (i === chunks.length - 1 && extra?.embeds) body.embeds = extra.embeds;
       if (i === chunks.length - 1 && extra?.components) body.components = extra.components;
       last = await this.rest(`/channels/${channelId}/messages`, { method: "POST", body });
@@ -378,7 +389,9 @@ export class DiscordChannel {
   // Embed-first send: no plain content, just a rich embed (+ optional reply).
   async sendEmbed(channelId, embedObj, replyToId = null) {
     const body = { embeds: [embedObj] };
-    if (replyToId) body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
+    if (replyToId && discordReplyEnabled()) {
+      body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
+    }
     return this.rest(`/channels/${channelId}/messages`, { method: "POST", body });
   }
 
