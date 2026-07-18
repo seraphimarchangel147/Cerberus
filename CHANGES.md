@@ -2,6 +2,13 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-17 — Discord reply quoting toggle (Codex)
+
+- Added live `DISCORD_REPLY` handling for Discord posts. Reply quoting is off by default and enabled only by `1`, `true`, or `on`; the environment is checked on every send so no channel restart is required.
+- Kept all existing reply ids at their call sites while suppressing `message_reference` centrally in `sendMessage` and `sendEmbed`; status-message thread creation remains independent and unchanged.
+- Added REST-body regressions for the default, opt-in, live-toggle, embed, and thread-anchor paths. Validation: `node --check` and `node --test` — 527/527 pass.
+REPLY TOGGLE PHASE COMPLETE
+
 ## 2026-07-17 — Hermes-style turn iterations (Codex)
 
 - Replaced the fixed six-hop provider loops with a 25-iteration whole-turn engine for both OpenAI Responses and Anthropic Messages. `OPENAGI_MAX_ITERATIONS` is the primary cap; `OPENAGI_MAX_TOOL_HOPS` remains a deprecated fallback alias.
