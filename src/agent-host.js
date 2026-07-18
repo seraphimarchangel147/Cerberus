@@ -103,7 +103,7 @@ export class AgentHost {
 
     const sessionBefore = ephemeral
       ? { id: sessionId, messages: [{ role: "user", content: text }] }
-      : this.store.appendMessage(sessionId, {
+      : await this.store.appendMessage(sessionId, {
           role: "user",
           content: text,
           agentId,
@@ -299,7 +299,7 @@ export class AgentHost {
 
     const sessionAfter = ephemeral
       ? { id: sessionId, messages: [{ role: "user", content: text }, { role: "assistant", content: modelResult.text }] }
-      : this.store.appendMessage(sessionId, {
+      : await this.store.appendMessage(sessionId, {
           role: "assistant",
           content: modelResult.text,
           agentId,

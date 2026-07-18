@@ -87,6 +87,7 @@ export class FileBackedAgentStore extends InMemoryAgentStore {
     this.dir = options.dir ?? path.join(resolveDataDir(), "agent-host");
     this.agentsPath = path.join(this.dir, "agents.json");
     this.sessionsDir = path.join(this.dir, "sessions");
+    this.sessionWriteChains = new Map();
     ensureDir(this.sessionsDir);
     this.load();
     if (options.ensureDefault !== false) this.ensureAgent({ id: "main", name: "Main Agent", role: "root" });
@@ -169,12 +170,26 @@ export class FileBackedAgentStore extends InMemoryAgentStore {
   }
 
   appendMessage(sessionId, message) {
-    const session = this.getSession(sessionId);
-    session.messages.push({
-      ...normalizeMessage(message)
+    // Concurrent turns may read the same transcript before either atomic
+    // replacement lands. A keyed promise chain serializes only this session's
+    // read-modify-write, leaving unrelated sessions free to write in parallel.
+    const previous = this.sessionWriteChains.get(sessionId) ?? Promise.resolve();
+    const write = previous.catch(() => {}).then(async () => {
+      const session = this.getSession(sessionId);
+      session.messages.push({
+        ...normalizeMessage(message)
+      });
+      await this.saveSession(session);
+      return session;
     });
-    this.saveSession(session);
-    return session;
+    this.sessionWriteChains.set(sessionId, write);
+    return write.finally(() => {
+      // A later append may already have extended the chain. Only its final
+      // link may remove the key, or a third writer could slip past the mutex.
+      if (this.sessionWriteChains.get(sessionId) === write) {
+        this.sessionWriteChains.delete(sessionId);
+      }
+    });
   }
 
   listSessions() {

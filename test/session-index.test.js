@@ -78,7 +78,7 @@ test("search snippets are capped at 160 chars", async () => {
 test("rebuildFromTranscripts backfills a fresh index from seeded transcripts", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-rebuild-"));
   const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
-  store.appendMessage("local:user:main", {
+  await store.appendMessage("local:user:main", {
     role: "user",
     content: "let's standardize on the kumquat naming convention",
     agentId: "main",
@@ -86,7 +86,7 @@ test("rebuildFromTranscripts backfills a fresh index from seeded transcripts", a
     from: "user",
     createdAt: "2026-06-03T08:00:00.000Z"
   });
-  store.appendMessage("telegram:42:main", {
+  await store.appendMessage("telegram:42:main", {
     role: "assistant",
     content: "Reminder: kumquat convention applies to new modules only.",
     agentId: "main",
@@ -115,7 +115,7 @@ test("rebuildFromTranscripts wraps the whole backfill in a single transaction, n
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-txn-"));
   const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
   for (let i = 0; i < 5; i++) {
-    store.appendMessage(`local:user:main-${i}`, {
+    await store.appendMessage(`local:user:main-${i}`, {
       role: "user", content: `message number ${i} about widgets`, agentId: "main",
       channel: "local", from: "user", createdAt: `2026-06-0${(i % 9) + 1}T08:00:00.000Z`
     });
@@ -158,7 +158,7 @@ test("agent host indexes persisted chat turns; ephemeral turns are excluded", as
 test("boot backfills an empty index from existing transcripts", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-boot-"));
   const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
-  store.appendMessage("local:user:main", {
+  await store.appendMessage("local:user:main", {
     role: "user",
     content: "archive the pelican dashboard next sprint",
     agentId: "main",
@@ -260,7 +260,7 @@ test("rebuildFromTranscripts completes quickly on a large history (dedup skipped
   const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
   const MESSAGE_COUNT = 3000;
   for (let i = 0; i < MESSAGE_COUNT; i++) {
-    store.appendMessage(`local:user:session-${i % 20}`, {
+    await store.appendMessage(`local:user:session-${i % 20}`, {
       role: i % 2 === 0 ? "user" : "assistant",
       content: `message number ${i} discussing topic ${i % 50} and widgets`,
       agentId: "main", channel: "local", from: "user",
@@ -280,7 +280,7 @@ test("rebuildFromTranscripts completes quickly on a large history (dedup skipped
 test("rebuildFromTranscripts never runs the O(N) dedup lookup; indexMessage still dedupes by default", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-dedupe-"));
   const store = new FileBackedAgentStore({ dir: path.join(dir, "agent-host") });
-  store.appendMessage("local:user:main", {
+  await store.appendMessage("local:user:main", {
     id: "msg_dedupe_check", role: "user", content: "checking dedupe behavior",
     agentId: "main", channel: "local", from: "user", createdAt: "2026-06-01T10:00:00.000Z"
   });

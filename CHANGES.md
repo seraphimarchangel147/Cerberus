@@ -176,3 +176,9 @@ QA PHASE COMPLETE
 - Added optional `OPENAGI_MAX_TURN_USD` accounting from recorded request costs; reaching either budget returns a local partial summary with `stopReason: "budget-cap"` and makes no further paid request.
 - Surface budget-capped turns in Discord fallback and live-status output, including no-tool turns that would otherwise discard their status card.
 - Added both-provider regressions for mid-loop daily-budget trips, per-turn spend enforcement, request/event counts, and Discord observability.
+
+## 2026-07-18 - Tier 3c session append serialization (Codex)
+
+- Added an in-process promise-chain mutex keyed by session id around file-backed transcript read-modify-write operations, preserving enqueue order without blocking writes to unrelated sessions.
+- Await file-backed appends at the AgentHost boundary and added a delayed-write concurrency regression proving that two same-session messages both survive on disk and completed lock entries are released.
+TIER2 HARDENING COMPLETE
