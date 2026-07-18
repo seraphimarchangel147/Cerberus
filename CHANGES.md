@@ -102,3 +102,13 @@ QA PHASE COMPLETE
   3. else DISCORD_ACTIVITY_CHANNEL as static fallback.
 - bindActivityFeed no longer requires DISCORD_ACTIVITY_CHANNEL to be set.
 - Full suite: 511/511 pass.
+
+## 2026-07-17 — Live status visuals upgrade (Hermes-style)
+- DISCORD_LIVE_STATUS enabled (was 0 in the unit file): every turn now posts an
+  animated status card (spinner, elapsed clock, iteration n/max, current-tool
+  spotlight, ANSI step ladder, progress bar) edited live, with heavy turns
+  spawning a trace thread. Typing indicator already fires during turns.
+- Presence now shows the actual task ("Watching ⚙️ <task…>") while working,
+  reverting to idle presence after.
+- 4s tick timer keeps spinner/clock alive between tool events; cleared on
+  finish/fail.

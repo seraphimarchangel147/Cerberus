@@ -591,7 +591,12 @@ export class LiveStatus {
       }), replyToId);
       this.messageId = msg?.id ?? null;
     } catch { this.messageId = null; }
-    this.channel.setPresence?.("the problem", 3);
+    // Presence mirrors the actual task, Hermes-style: "Watching <task…>"
+    // so the member list itself shows what he's working on right now.
+    this.channel.setPresence?.(this.taskLabel ? `⚙️ ${this.taskLabel.slice(0, 100)}` : "the problem", 3);
+    // Keep the animated status card ticking even between tool events so the
+    // spinner + elapsed clock feel alive (Discord-side visual only).
+    this.tickTimer = setInterval(() => { if (!this.done) this.scheduleEdit(); }, 4000);
   }
 
   onEvent(ev) {
@@ -645,14 +650,22 @@ export class LiveStatus {
 
   renderEmbed(suffix = null) {
     const v = this.verdict;
+    const spinner = ["◜", "◠", "◝", "◞", "◡", "◟"][Math.floor(Date.now() / 500) % 6];
+    const elapsed = ((Date.now() - this.startedAt) / 1000);
+    const clock = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${Math.round(elapsed % 60)}s` : `${elapsed.toFixed(0)}s`;
     const head = v
       ? `${VERDICT_EMOJI[v.action] ?? "🧠"} scrutiny: **${v.action}** (${(v.score ?? 0).toFixed(2)})`
-      : "🧠 *thinking…*";
+      : `${this.done ? "🧠" : spinner} *thinking…*`;
     const iteration = this.iteration ? ` · iteration ${this.iteration.n}/${this.iteration.max}` : "";
+    const clockPart = this.done ? "" : ` · ⏱ ${clock}`;
     const doneCount = this.steps.filter((s) => s.state !== "run").length;
     const total = this.steps.length;
     const progress = total > 0 ? `\n${"▰".repeat(Math.round((doneCount / total) * 10))}${"▱".repeat(10 - Math.round((doneCount / total) * 10))} ${doneCount}/${total}` : "";
-    const parts = [head + iteration + progress];
+    // Spotlight: the tool currently executing, bolded above the ladder.
+    const running = this.steps.findLast?.((s) => s.state === "run") ?? [...this.steps].reverse().find((s) => s.state === "run");
+    const spotlight = !this.done && running ? `\n${spinner} **${running.name}**${running.args ? ` · ${running.args}` : ""}` : "";
+    const label = this.taskLabel ? `📌 \`${this.taskLabel.slice(0, 80)}\`\n` : "";
+    const parts = [label + head + iteration + clockPart + spotlight + progress];
     if (total > 0) parts.push(this.renderAnsi());
     if (this.threadId) parts.push(`🧵 full trace: <#${this.threadId}>`);
     if (suffix) parts.push(suffix);
@@ -691,6 +704,7 @@ export class LiveStatus {
   async finish(result) {
     this.done = true;
     if (this.editTimer) { clearTimeout(this.editTimer); this.editTimer = null; }
+    if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
     this.channel.refreshIdlePresence?.();
     if (!this.enabled || !this.messageId) return;
     const secs = ((Date.now() - this.startedAt) / 1000).toFixed(1);
@@ -710,6 +724,7 @@ export class LiveStatus {
   async fail(error) {
     this.done = true;
     if (this.editTimer) { clearTimeout(this.editTimer); this.editTimer = null; }
+    if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
     this.channel.refreshIdlePresence?.();
     if (!this.enabled || !this.messageId) return;
     await this.pushEdit(`❌ **turn failed:** ${String(error?.message ?? error).slice(0, 200)}`).catch(() => {});
