@@ -21,6 +21,7 @@ import { inferToneScore } from "./outcome-store.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
 import { NodeRegistry, readOrCreateIdentity } from "./node-registry.js";
 import { readNodeConfig } from "./cli-client.js";
+import { sanitizeForAudit } from "./redact.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -80,7 +81,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("draft-resolved", (data) => broadcast("draft-resolved", data));
   events.on("task-reminder", (data) => broadcast("task-reminder", data));
   events.on("task-auto-changed", (data) => broadcast("task-auto-changed", data));
-  events.on("pending-action", (data) => broadcast("pending-action", data));
+  events.on("pending-action", (data) => broadcast("pending-action", sanitizeForAudit(data)));
   events.on("daily-recap", (data) => broadcast("daily-recap", data));
   events.on("daily-plan", (data) => broadcast("daily-plan", data));
   events.on("task-unblocked", (data) => broadcast("task-unblocked", data));
@@ -795,7 +796,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/pending-actions") {
         const status = url.searchParams.get("status") || undefined;
         return sendJson(res, 200, {
-          actions: runtime.pendingActions?.list({ status }) ?? []
+          actions: sanitizeForAudit(runtime.pendingActions?.list({ status }) ?? [])
         });
       }
       if (method === "GET" && pathname === "/outreach/feed") {
@@ -1485,7 +1486,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           connecting: runtime.mcp.isConnecting?.(s.name) ?? false,
           pendingAuthUrl: pendingOauth.get(s.name)?.url ?? null
         }));
-        return sendJson(res, 200, servers);
+        return sendJson(res, 200, sanitizeForAudit(servers));
       }
       if (method === "GET" && pathname === "/mcp/tools") return sendJson(res, 200, runtime.mcp.listTools());
       if (method === "POST" && pathname.match(/^\/mcp\/connect\/[^/]+$/)) {

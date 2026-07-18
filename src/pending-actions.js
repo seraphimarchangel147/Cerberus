@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { ensureDir, writeJsonAtomic, readJsonFile, appendJsonLine } from "./file-utils.js";
 import { createId, nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { sanitizeForAudit } from "./redact.js";
 
 // File-backed queue of agent-initiated actions awaiting human approval.
 // When the agent invokes a tool flagged `needsConfirmation: true`, the
@@ -67,7 +68,6 @@ export class PendingActionStore {
       summary: action.summary,
       reason: action.reason,
       severity: action.severity,
-      args: action.args,
       createdAt: action.createdAt,
       // Session the triggering turn ran in (e.g. "discord:<guild>:<channel>")
       // so the activity feed can post into the channel the agent is actually
@@ -123,7 +123,7 @@ export class PendingActionStore {
     writeJsonAtomic(path.join(this.dir, "snapshot.json"), {
       version: 1,
       writtenAt: nowIso(),
-      actions: [...this.actions.values()]
+      actions: sanitizeForAudit([...this.actions.values()])
     });
     // Truncate journal: rename current to .archived-<ts> then start fresh.
     const journalPath = this._journalPath();
@@ -174,7 +174,7 @@ export class PendingActionStore {
   }
 
   _appendJournal(event) {
-    appendJsonLine(this._journalPath(), event);
+    appendJsonLine(this._journalPath(), sanitizeForAudit(event));
   }
 }
 

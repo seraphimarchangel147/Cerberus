@@ -4,6 +4,7 @@ import { createId, nowIso } from "./utils.js";
 import { detectTaskInChat } from "./task-store.js";
 import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZE_RE } from "./signal-axes.js";
 import { autoApproveEnabled } from "./tool-registry.js";
+import { sanitizeForAudit } from "./redact.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -32,7 +33,7 @@ function normalizedDirectReply(value) {
 
 export function isExplicitConsent(value) {
   const reply = normalizedDirectReply(value);
-  if (!reply || /[?？]/u.test(reply) || STOP_OR_DELAY_RE.test(reply)) return false;
+  if (!reply || /[?\uFF1F]/u.test(reply) || STOP_OR_DELAY_RE.test(reply)) return false;
   return CONSENT_PHRASE_PATTERNS.some((pattern) => pattern.test(reply));
 }
 
@@ -42,12 +43,12 @@ export function assistantMessageEndsWithQuestion(message) {
     .trim()
     .replace(/[*_`"'”’)\]}]+$/u, "")
     .trim();
-  return /[?？]$/u.test(visibleEnd);
+  return /[?\uFF1F]$/u.test(visibleEnd);
 }
 
 function isDirectReplyToQuestion(value) {
   const reply = normalizedDirectReply(value);
-  return Boolean(reply) && !/[?？]/u.test(reply) && !STOP_OR_DELAY_RE.test(reply);
+  return Boolean(reply) && !/[?\uFF1F]/u.test(reply) && !STOP_OR_DELAY_RE.test(reply);
 }
 
 export class AgentHost {
@@ -315,7 +316,7 @@ export class AgentHost {
             outcomeId: outcomeRecord?.id ?? null,
             toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
               name: call.name,
-              arguments: call.arguments,
+              arguments: sanitizeForAudit(call.arguments),
               ok: call.result?.ok ?? false
             }))
           }

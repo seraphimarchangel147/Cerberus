@@ -164,3 +164,8 @@ QA PHASE COMPLETE
 - Mirrored Hermes's first-click-wins state, per-click owner/allowlist authorization, same-message recolor/footer edits, disabled controls before execution, 10-minute pending-preserving expiry, and in-channel result follow-ups.
 - Added an in-memory tool+session allowance and attached the exact Hermes approval note plus `approvedVia: "discord-button"` and decider metadata to approved results/actions.
 - Hermes's resolved-before-execution ordering is stronger than a store-status-only check, so this implementation follows it to prevent double execution while a long action is still running.
+
+## 2026-07-18 - Tier 3a audit redaction (Codex)
+
+- Added `sanitizeForAudit()` deep-clone redaction for secret-bearing keys plus common OpenAI, Slack, GitHub, AWS, and long Bearer credential shapes.
+- Applied sanitized copies at pending-action journals/snapshots/API responses, persisted assistant tool-call arguments, outcome inputs/snapshots, and expanded MCP status responses while retaining live originals for execution.
