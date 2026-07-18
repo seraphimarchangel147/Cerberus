@@ -1,5 +1,157 @@
 import { ModelRouter } from "./model-router.js";
 
+const DEFAULT_MAX_ITERATIONS = 25;
+const DEFAULT_MAX_REQUEST_HOPS = 6;
+const DEFAULT_MAX_TURN_SECONDS = 900;
+const SYNTHETIC_CONTINUE = [
+  "[system] Continue the same task now.",
+  "Use the accumulated tool results and conversation above.",
+  "Do not repeat completed work; keep using tools if needed, then give the user a final answer."
+].join(" ");
+
+class TurnDeadlineError extends Error {
+  constructor() {
+    super("The turn wall-clock deadline was reached.");
+    this.name = "TurnDeadlineError";
+  }
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveMaxIterations(options) {
+  if (options.maxIterations !== undefined) {
+    return positiveInteger(options.maxIterations, DEFAULT_MAX_ITERATIONS);
+  }
+  // Preserve programmatic callers that still pass the former option.
+  if (options.maxToolHops !== undefined) {
+    return positiveInteger(options.maxToolHops, DEFAULT_MAX_ITERATIONS);
+  }
+  // The deprecated environment alias is consulted only when the new name is
+  // genuinely unset, so a stale service setting cannot override the new knob.
+  if (process.env.OPENAGI_MAX_ITERATIONS?.trim()) {
+    return positiveInteger(process.env.OPENAGI_MAX_ITERATIONS, DEFAULT_MAX_ITERATIONS);
+  }
+  return positiveInteger(process.env.OPENAGI_MAX_TOOL_HOPS, DEFAULT_MAX_ITERATIONS);
+}
+
+function applyIterationSettings(provider, options) {
+  provider.maxIterations = resolveMaxIterations(options);
+  // Tests and embedders may provide both names while migrating: in that case
+  // maxIterations is the outer cap and the old option remains the inner hop
+  // boundary. With only maxToolHops present it is the deprecated outer alias.
+  const requestHops = options.maxRequestHops
+    ?? (options.maxIterations !== undefined ? options.maxToolHops : undefined);
+  provider.maxRequestHops = positiveInteger(requestHops, DEFAULT_MAX_REQUEST_HOPS);
+  provider.maxTurnSeconds = positiveNumber(
+    options.maxTurnSeconds ?? process.env.OPENAGI_MAX_TURN_SECONDS,
+    DEFAULT_MAX_TURN_SECONDS
+  );
+  provider.now = options.now ?? Date.now;
+  // Keep this readable for integrations that inspect the old property. The
+  // value now represents the whole-turn iteration cap.
+  provider.maxToolHops = provider.maxIterations;
+}
+
+function emitIteration(context, n, max) {
+  try {
+    context?.__onToolEvent?.({ phase: "iteration", n, max });
+  } catch {
+    // Progress observers are advisory and must never break a turn.
+  }
+}
+
+async function withinTurn(provider, deadline, task) {
+  const remainingMs = deadline - provider.now();
+  if (remainingMs <= 0) throw new TurnDeadlineError();
+
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => task(remainingMs)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new TurnDeadlineError()), Math.max(1, Math.ceil(remainingMs)));
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function deadlineExpired(provider, deadline, error) {
+  return error instanceof TurnDeadlineError || provider.now() >= deadline;
+}
+
+function openAIWantsContinuation(response, calls) {
+  return calls.length > 0
+    || response?.status === "incomplete"
+    || response?.status === "in_progress"
+    || Boolean(response?.incomplete_details);
+}
+
+function anthropicWantsContinuation(response, toolUses) {
+  return toolUses.length > 0
+    || ["tool_use", "max_tokens", "pause_turn"].includes(response?.stop_reason);
+}
+
+function extractAnthropicText(response) {
+  return (response?.content ?? [])
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+}
+
+function appendOpenAIAssistantText(conversationInput, response) {
+  const hasMessage = (response?.output ?? []).some((item) => item.type === "message" || item.role === "assistant");
+  if (hasMessage) {
+    for (const item of response.output ?? []) {
+      if (item.type === "message" || item.role === "assistant") conversationInput.push(item);
+    }
+    return;
+  }
+  const text = extractResponseText(response);
+  if (text) conversationInput.push({ role: "assistant", content: text });
+}
+
+function appendOpenAIContinue(conversationInput) {
+  conversationInput.push({
+    role: "user",
+    content: [{ type: "input_text", text: SYNTHETIC_CONTINUE }]
+  });
+}
+
+function appendAnthropicUserText(convo, text) {
+  const last = convo.at(-1);
+  if (last?.role === "user" && Array.isArray(last.content)) {
+    last.content.push({ type: "text", text });
+  } else if (last?.role === "user" && typeof last.content === "string") {
+    last.content = `${last.content}\n\n${text}`;
+  } else {
+    convo.push({ role: "user", content: text });
+  }
+}
+
+function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText }) {
+  const completed = toolCalls.length;
+  const recent = toolCalls.slice(-5).map((call) => call.name).join(", ");
+  const detail = completed > 0
+    ? `${completed} tool call${completed === 1 ? "" : "s"} completed${recent ? ` (most recent: ${recent})` : ""}.`
+    : "No tool calls completed.";
+  const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
+  if (reason === "turn-timeout") {
+    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached. ${detail} Raise OPENAGI_MAX_TURN_SECONDS if this task needs more time.${prior}`;
+  }
+  return `Turn reached the iteration cap after ${iterations}/${maxIterations} iterations. ${detail} Raise OPENAGI_MAX_ITERATIONS if this task needs more steps.${prior}`;
+}
+
 export class DeterministicModelProvider {
   constructor(options = {}) {
     this.name = options.name ?? "deterministic";
@@ -56,7 +208,7 @@ export class OpenAIResponsesProvider {
     this.model = options.model ?? process.env.OPENAI_MODEL ?? "gpt-5";
     this.baseUrl = options.baseUrl ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
     this.timeoutMs = options.timeoutMs ?? 120000;
-    this.maxToolHops = options.maxToolHops ?? (Number(process.env.OPENAGI_MAX_TOOL_HOPS) || 6);
+    applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
     // Per-task model tiering. Defaults to base for everything until tier env
     // vars are set, so this is a no-op until the user opts in.
@@ -100,18 +252,45 @@ export class OpenAIResponsesProvider {
     const toolList = tools.length > 0 ? tools : toolRegistry?.toOpenAITools?.() ?? [];
     const toolCalls = [];
 
+    const deadline = this.now() + (this.maxTurnSeconds * 1000);
     let response;
-    for (let hop = 0; hop < this.maxToolHops; hop += 1) {
+    let iterations = 0;
+    let stopReason = "completed";
+    let lastText = "";
+
+    iterationLoop: while (iterations < this.maxIterations) {
+      if (this.now() >= deadline) {
+        stopReason = "turn-timeout";
+        break;
+      }
+      iterations += 1;
+      emitIteration(context, iterations, this.maxIterations);
       const body = {
         model,
         instructions: baseInstructions,
         input: conversationInput
       };
       if (toolList.length > 0) body.tools = toolList;
-      response = await this.postResponses(body, context);
+
+      try {
+        response = await withinTurn(this, deadline, (remainingMs) => (
+          this.postResponses(body, context, { timeoutMs: remainingMs })
+        ));
+      } catch (error) {
+        if (!deadlineExpired(this, deadline, error)) throw error;
+        stopReason = "turn-timeout";
+        break;
+      }
 
       const calls = extractFunctionCalls(response);
-      if (calls.length === 0) break;
+      const responseText = extractResponseText(response);
+      if (responseText) lastText = responseText;
+      const wantsContinuation = openAIWantsContinuation(response, calls);
+      if (!wantsContinuation) break;
+
+      // Preserve any partial assistant prose before asking the model to resume.
+      // This matters for Responses API `incomplete` results with no tool call.
+      appendOpenAIAssistantText(conversationInput, response);
 
       // Append the assistant's function_call items so the model can see its own
       // last turn on the next hop (replaces what previous_response_id would've done).
@@ -128,7 +307,17 @@ export class OpenAIResponsesProvider {
 
       for (const call of calls) {
         const parsedArgs = safeParseJson(call.arguments) ?? {};
-        const invocation = await (toolRegistry?.invoke?.(call.name, parsedArgs, context) ?? Promise.resolve({ ok: false, error: "no toolRegistry" }));
+        let invocation;
+        try {
+          invocation = await withinTurn(this, deadline, () => (
+            toolRegistry?.invoke?.(call.name, parsedArgs, context)
+              ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
+          ));
+        } catch (error) {
+          if (!deadlineExpired(this, deadline, error)) throw error;
+          stopReason = "turn-timeout";
+          break iterationLoop;
+        }
         toolCalls.push({ name: call.name, arguments: parsedArgs, result: invocation });
         const result = invocation.ok ? invocation.result : { error: invocation.error };
         // A tool that returns a screenshot (computer_screenshot) carries the PNG
@@ -158,34 +347,63 @@ export class OpenAIResponsesProvider {
           });
         }
       }
+
+      if (iterations >= this.maxIterations) {
+        stopReason = "iteration-cap";
+        break;
+      }
+
+      // The old hop ceiling becomes an internal request boundary. A synthetic
+      // user turn gives the model the Hermes-style nudge while retaining every
+      // prior response and tool result in this same outer turn.
+      if (calls.length === 0 || iterations % this.maxRequestHops === 0) {
+        appendOpenAIContinue(conversationInput);
+      }
     }
 
-    // Hop budget exhausted mid-work: force one final no-tools wrap-up so the
-    // turn never ends in silence.
-    if (extractFunctionCalls(response).length > 0) {
-      conversationInput.push({
-        role: "user",
-        content: [{ type: "input_text", text: "[system] Tool budget for this turn is exhausted. Do not call more tools. Reply in plain text now: summarize what you accomplished, what remains, and any findings so far." }]
-      });
-      response = await this.postResponses({
-        model,
-        instructions: baseInstructions,
-        input: conversationInput
-      }, context);
+    let text;
+    if (stopReason === "iteration-cap") {
+      appendOpenAIContinue(conversationInput);
+      conversationInput.at(-1).content[0].text = `[system] The turn reached its true limit after ${iterations} iterations. Do not call tools. Give a concise partial summary of completed work, findings, and what remains. Mention that OPENAGI_MAX_ITERATIONS can be raised.`;
+      try {
+        response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
+          model,
+          instructions: baseInstructions,
+          input: conversationInput
+        }, context, { timeoutMs: remainingMs }));
+        text = extractResponseText(response);
+      } catch (error) {
+        if (!deadlineExpired(this, deadline, error)) throw error;
+        stopReason = "turn-timeout";
+      }
+    }
+
+    if (stopReason === "turn-timeout") {
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+    } else if (stopReason === "iteration-cap" && !text) {
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+    } else if (text === undefined) {
+      text = extractResponseText(response) || "(no text)";
     }
 
     return {
       provider: "openai",
       model,
       id: response?.id,
-      text: extractResponseText(response) || "(no text)",
-      toolCalls
+      text,
+      toolCalls,
+      iterations,
+      maxIterations: this.maxIterations,
+      stopReason
     };
   }
 
-  async postResponses(body, context = {}) {
+  async postResponses(body, context = {}, options = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
+    const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
+    const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${this.baseUrl}/responses`, {
         method: "POST",
@@ -207,6 +425,12 @@ export class OpenAIResponsesProvider {
         tools: callTools
       });
       return json;
+    } catch (error) {
+      // The outer deadline and fetch abort timers race. Normalize the fetch
+      // winner so deadline expiry still returns a partial summary, while a
+      // provider's ordinary shorter request timeout keeps its old error path.
+      if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();
+      throw error;
     } finally {
       clearTimeout(timeout);
     }
@@ -221,7 +445,7 @@ export class AnthropicProvider {
     this.version = options.version ?? "2023-06-01";
     this.maxTokens = options.maxTokens ?? (Number(process.env.OPENAGI_MAX_TOKENS) || 8192);
     this.timeoutMs = options.timeoutMs ?? 120000;
-    this.maxToolHops = options.maxToolHops ?? (Number(process.env.OPENAGI_MAX_TOOL_HOPS) || 6);
+    applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
     this.router = options.router ?? new ModelRouter({ envPrefix: "ANTHROPIC", baseModel: this.model });
   }
@@ -264,25 +488,54 @@ export class AnthropicProvider {
     ];
 
     const toolCalls = [];
+    const deadline = this.now() + (this.maxTurnSeconds * 1000);
     let response;
+    let iterations = 0;
+    let stopReason = "completed";
+    let lastText = "";
 
-    for (let hop = 0; hop < this.maxToolHops; hop += 1) {
-      response = await this.postMessages({
-        model,
-        max_tokens: this.maxTokens,
-        system,
-        messages: convo,
-        ...(tools.length > 0 ? { tools } : {})
-      }, context);
+    iterationLoop: while (iterations < this.maxIterations) {
+      if (this.now() >= deadline) {
+        stopReason = "turn-timeout";
+        break;
+      }
+      iterations += 1;
+      emitIteration(context, iterations, this.maxIterations);
+      try {
+        response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
+          model,
+          max_tokens: this.maxTokens,
+          system,
+          messages: convo,
+          ...(tools.length > 0 ? { tools } : {})
+        }, context, { timeoutMs: remainingMs }));
+      } catch (error) {
+        if (!deadlineExpired(this, deadline, error)) throw error;
+        stopReason = "turn-timeout";
+        break;
+      }
 
-      convo.push({ role: "assistant", content: response.content });
+      convo.push({ role: "assistant", content: response.content ?? [] });
 
       const toolUses = (response.content ?? []).filter((c) => c.type === "tool_use");
-      if (toolUses.length === 0) break;
+      const responseText = extractAnthropicText(response);
+      if (responseText) lastText = responseText;
+      const wantsContinuation = anthropicWantsContinuation(response, toolUses);
+      if (!wantsContinuation) break;
 
       const toolResults = [];
       for (const use of toolUses) {
-        const invocation = await (toolRegistry?.invoke?.(use.name, use.input ?? {}, context) ?? Promise.resolve({ ok: false, error: "no toolRegistry" }));
+        let invocation;
+        try {
+          invocation = await withinTurn(this, deadline, () => (
+            toolRegistry?.invoke?.(use.name, use.input ?? {}, context)
+              ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
+          ));
+        } catch (error) {
+          if (!deadlineExpired(this, deadline, error)) throw error;
+          stopReason = "turn-timeout";
+          break iterationLoop;
+        }
         toolCalls.push({ name: use.name, arguments: use.input, result: invocation });
         toolResults.push({
           type: "tool_result",
@@ -291,33 +544,47 @@ export class AnthropicProvider {
           is_error: !invocation.ok
         });
       }
-      convo.push({ role: "user", content: toolResults });
-    }
+      if (toolResults.length > 0) convo.push({ role: "user", content: toolResults });
 
-    // Hop budget exhausted mid-work: the last response still wanted tools, so
-    // it carries no text. Force one final plain-text wrap-up (no tools offered)
-    // instead of returning silence to the user.
-    if ((response?.content ?? []).some((c) => c.type === "tool_use")) {
-      const last = convo[convo.length - 1];
-      if (last?.role === "user" && Array.isArray(last.content)) {
-        last.content.push({
-          type: "text",
-          text: "[system] Tool budget for this turn is exhausted. Do not call more tools. Reply in plain text now, in under 300 words: summarize what you accomplished, what remains, and any findings so far. Skip extended reasoning — answer directly."
-        });
+      if (iterations >= this.maxIterations) {
+        stopReason = "iteration-cap";
+        break;
       }
-      response = await this.postMessages({
-        model,
-        max_tokens: this.maxTokens,
-        system,
-        messages: convo
-      }, context);
+
+      // A max_tokens/pause response has no tool result to carry the next turn,
+      // while the former hop boundary does. Both receive the same resume nudge.
+      if (toolUses.length === 0 || iterations % this.maxRequestHops === 0) {
+        appendAnthropicUserText(convo, SYNTHETIC_CONTINUE);
+      }
     }
 
-    const text = (response?.content ?? [])
-      .filter((c) => c.type === "text")
-      .map((c) => c.text)
-      .join("\n")
-      .trim();
+    let text;
+    if (stopReason === "iteration-cap") {
+      appendAnthropicUserText(
+        convo,
+        `[system] The turn reached its true limit after ${iterations} iterations. Do not call tools. Give a concise partial summary of completed work, findings, and what remains. Mention that OPENAGI_MAX_ITERATIONS can be raised.`
+      );
+      try {
+        response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
+          model,
+          max_tokens: this.maxTokens,
+          system,
+          messages: convo
+        }, context, { timeoutMs: remainingMs }));
+        text = extractAnthropicText(response);
+      } catch (error) {
+        if (!deadlineExpired(this, deadline, error)) throw error;
+        stopReason = "turn-timeout";
+      }
+    }
+
+    if (stopReason === "turn-timeout") {
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+    } else if (stopReason === "iteration-cap" && !text) {
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+    } else if (text === undefined) {
+      text = extractAnthropicText(response);
+    }
 
     // Last-resort salvage: a reasoning model that hit max_tokens mid-think
     // returns only `thinking` blocks. Surface a trimmed slice of the trace
@@ -336,13 +603,19 @@ export class AnthropicProvider {
       model,
       id: response?.id,
       text: text || (salvage ? `⚠ Reply truncated mid-reasoning (max_tokens). Reasoning trace excerpt:\n${salvage}` : "(no text)"),
-      toolCalls
+      toolCalls,
+      iterations,
+      maxIterations: this.maxIterations,
+      stopReason
     };
   }
 
-  async postMessages(body, context = {}) {
+  async postMessages(body, context = {}, options = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
+    const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
+    const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${this.baseUrl}/messages`, {
         method: "POST",
@@ -365,6 +638,9 @@ export class AnthropicProvider {
         tools: callTools
       });
       return json;
+    } catch (error) {
+      if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();
+      throw error;
     } finally {
       clearTimeout(timeout);
     }

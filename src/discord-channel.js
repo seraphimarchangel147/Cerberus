@@ -22,6 +22,22 @@ const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
 
+export function formatEmptyTurnFallback(result = {}) {
+  const toolCount = result?.toolCalls?.length ?? result?.output?.toolCalls?.length ?? 0;
+  const suffix = `${toolCount} tool call${toolCount === 1 ? "" : "s"} ran`;
+  const iterations = result?.model?.iterations;
+  const stopReason = result?.model?.stopReason;
+
+  if (stopReason === "iteration-cap") {
+    const count = Number.isInteger(iterations) ? iterations : result?.model?.maxIterations;
+    return `⚠ Turn reached the true iteration cap after ${count ?? "the configured number of"} iterations (${suffix}). Raise OPENAGI_MAX_ITERATIONS to allow more work in one turn.`;
+  }
+  if (stopReason === "turn-timeout") {
+    return `⚠ Turn stopped at the wall-clock guard after ${iterations ?? "several"} iterations (${suffix}). Raise OPENAGI_MAX_TURN_SECONDS if this task needs more time.`;
+  }
+  return `⚠ Turn completed without a text reply (${suffix}).`;
+}
+
 export class DiscordChannel {
   constructor(options = {}) {
     this.agentHost = options.agentHost;
@@ -334,13 +350,8 @@ export class DiscordChannel {
       if (replyText && replyText !== "(no text)") {
         await this.sendMessage(message.channel_id, replyText, message.id);
       } else {
-        // Never end a pinged turn in silence — surface what happened instead.
-        const toolCount = result?.toolCalls?.length ?? result?.output?.toolCalls?.length ?? 0;
-        await this.sendMessage(
-          message.channel_id,
-          `⚠ Turn completed without a text reply (${toolCount} tool call${toolCount === 1 ? "" : "s"} ran — likely hit the tool-hop budget). Ask me to continue.`,
-          message.id
-        );
+        // Never end a pinged turn in silence — surface the actual stop reason.
+        await this.sendMessage(message.channel_id, formatEmptyTurnFallback(result), message.id);
       }
     } catch (error) {
       this.log({ op: "turn-error", error: error.message });
@@ -551,13 +562,14 @@ const STATUS_EDIT_MIN_MS = 1500;
 // there so the channel stays clean. Env: DISCORD_THREAD_TASKS=0 disables.
 const THREAD_AFTER_STEPS = 6;
 
-class LiveStatus {
+export class LiveStatus {
   constructor(channel, channelId, enabled) {
     this.channel = channel;
     this.channelId = channelId;
     this.enabled = enabled;
     this.messageId = null;
     this.verdict = null;
+    this.iteration = null;
     this.steps = [];        // { name, state: run|ok|err|pend }
     this.startedAt = Date.now();
     this.lastEditAt = 0;
@@ -584,7 +596,9 @@ class LiveStatus {
 
   onEvent(ev) {
     if (!this.enabled || !this.messageId || this.done) return;
-    if (ev.phase === "verdict") {
+    if (ev.phase === "iteration") {
+      this.iteration = { n: ev.n, max: ev.max };
+    } else if (ev.phase === "verdict") {
       this.verdict = ev;
     } else if (ev.phase === "start") {
       this.steps.push({ name: ev.name, state: "run", args: summarizeArgs(ev.args), t: Date.now() });
@@ -634,10 +648,11 @@ class LiveStatus {
     const head = v
       ? `${VERDICT_EMOJI[v.action] ?? "🧠"} scrutiny: **${v.action}** (${(v.score ?? 0).toFixed(2)})`
       : "🧠 *thinking…*";
+    const iteration = this.iteration ? ` · iteration ${this.iteration.n}/${this.iteration.max}` : "";
     const doneCount = this.steps.filter((s) => s.state !== "run").length;
     const total = this.steps.length;
     const progress = total > 0 ? `\n${"▰".repeat(Math.round((doneCount / total) * 10))}${"▱".repeat(10 - Math.round((doneCount / total) * 10))} ${doneCount}/${total}` : "";
-    const parts = [head + progress];
+    const parts = [head + iteration + progress];
     if (total > 0) parts.push(this.renderAnsi());
     if (this.threadId) parts.push(`🧵 full trace: <#${this.threadId}>`);
     if (suffix) parts.push(suffix);

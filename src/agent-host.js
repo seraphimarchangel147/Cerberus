@@ -230,6 +230,9 @@ export class AgentHost {
             provider: modelResult.provider,
             model: modelResult.model,
             responseId: modelResult.id,
+            iterations: modelResult.iterations ?? null,
+            maxIterations: modelResult.maxIterations ?? null,
+            stopReason: modelResult.stopReason ?? null,
             outputId: output.id,
             outcomeId: outcomeRecord?.id ?? null,
             toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
@@ -283,7 +286,10 @@ export class AgentHost {
       model: {
         provider: modelResult.provider,
         model: modelResult.model,
-        configured: this.modelProvider.isConfigured()
+        configured: this.modelProvider.isConfigured(),
+        iterations: modelResult.iterations ?? null,
+        maxIterations: modelResult.maxIterations ?? null,
+        stopReason: modelResult.stopReason ?? null
       },
       output
     };
