@@ -47,22 +47,50 @@ WITHOUT pinning env (this is the whole point).
 
 ## T2b — Discord approval menu (Hermes-style)
 
-In `src/discord-channel.js`: when a pending action with `severity:"catastrophic"`
-(or any pending action while auto-approve is off) is enqueued for a Discord-origin
-session, post an embed to the session's channel (reuse activity-feed routing:
-sessionId -> lastActiveChannel -> DISCORD_ACTIVITY_CHANNEL) with Discord
-components (buttons):
-- ✅ Approve (style success) — POST-equivalent of /pending-actions/<id>/approve
-- ❌ Deny (style danger)
-- 🕐 Allow for session (style secondary) — approves AND records
-  `sessionAllow:{sessionId, toolName}` so same tool+session skips the gate until
-  daemon restart (in-memory map in tool-registry is fine)
+**REFERENCE IMPLEMENTATION (STUDY FIRST — Creator's standing rule: "always
+reference hermes"):** Hermes's own Discord approval flow lives at
+`~/.hermes/hermes-agent/plugins/platforms/discord/adapter.py` (Windows path
+for Zed: NOT accessible — Seraphim will paste key excerpts below). Mirror its
+UX semantics exactly:
 
-Needs a gateway interaction listener: the bot already has a gateway connection —
-handle `INTERACTION_CREATE` for `custom_id` shapes `pa:approve:<id>`,
-`pa:deny:<id>`, `pa:session:<id>`. Respond with interaction ACK (type 7 update:
-disable buttons, show decided-by + result exitCode). Long-running approvals:
-defer (type 6) then edit.
+- **Buttons: "Approve Once" (green/success), "Always Approve" (blurple ->
+  ours = "Allow for session", secondary), "Cancel"/"Deny" (red/danger).**
+- View object holds `session_key` + `confirm_id`; `resolved` flag makes the
+  first click win — later clicks get an ephemeral "already resolved" reply.
+- Auth check per click (`_check_auth` against allowed user/role ids) — ours:
+  only the Creator's Discord user id (env `DISCORD_OWNER_ID` or the id list
+  the daemon already trusts) may decide; others get an ephemeral refusal.
+- On decision: edit the SAME message — recolor embed (green approved /
+  red denied / grey expired), set footer `"<label> by <display name>"`,
+  disable ALL buttons, THEN run the action and post the result (exitCode,
+  stdout tail) as a follow-up in-channel.
+- On timeout (Hermes uses 300s; use 600s for catastrophic): mark resolved,
+  disable buttons, footer "⏱ Prompt expired — no action taken", and the
+  pending action stays pending (dashboard can still decide it).
+- Hermes appends an approval NOTE to the tool result so the model knows the
+  action was human-gated ("Command required approval (<desc>) and was
+  approved by the user") — replicate: openAGI's approve path should append
+  `approvedVia: "discord-button"` + decider to the action record and surface
+  the same sentence in the tool result the model sees.
+
+openAGI is raw-gateway (no discord.js views) — implement with REST components
+(`components: [{type:1, components:[{type:2, style:3, label:"Approve",
+custom_id:"pa:approve:<id>"}, ...]}]`) and handle `INTERACTION_CREATE`
+(gateway op 0, t=INTERACTION_CREATE) for `custom_id` shapes `pa:approve:<id>`,
+`pa:deny:<id>`, `pa:session:<id>`. ACK with type 6 (deferred update) then
+PATCH the original message via webhook edit; long approvals: edit again with
+the result when done.
+
+Post the card to the session's channel (reuse activity-feed routing:
+sessionId -> lastActiveChannel -> DISCORD_ACTIVITY_CHANNEL). Card = embed
+with tool name, full summary (the dangerous fields — Hermes shows args
+open-by-default; we already pin `<details open>` on the dashboard), reason
+from the catastrophic classifier, and the 3 buttons.
+
+"Allow for session" = approve AND record `sessionAllow:{sessionId, toolName}`
+(in-memory map in tool-registry, cleared on restart) so the same tool+session
+skips the gate — mirrors Hermes's "Always Approve" scope semantics but
+bounded to the session.
 
 Tests: LiveStatus-style class tests with a fake REST poster — enqueue -> embed
 posted with 3 buttons; interaction approve -> store resolved, buttons disabled;
