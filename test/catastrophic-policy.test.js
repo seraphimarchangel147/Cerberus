@@ -85,13 +85,15 @@ test("catastrophic calls divert in both auto-approve lanes without pinning the e
   });
   registry.bindPendingActions(pending);
 
-  const result = await registry.invoke("code_shell", { command: "rm -rf /" }, { sessionId: "s1" });
-  assert.equal(result.result.status, "awaiting_confirmation");
+  const invocation = registry.invoke("code_shell", { command: "rm -rf /" }, { sessionId: "s1" });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(executions, 0, "OPENAGI_AUTO_APPROVE must never bypass this gate");
-  const action = pending.get(result.result.actionId);
+  const action = pending.list({ status: "pending" })[0];
   assert.equal(action.severity, "catastrophic");
   assert.match(action.reason, /delete/i);
   assert.match(action.summary, /CATASTROPHIC/);
+  pending.decide(action.id, { decision: "deny", decidedBy: "test" });
+  assert.equal((await invocation).ok, false);
 });
 
 test("the hosted approval endpoint executes a catastrophic action after a human decision", async () => {
@@ -111,16 +113,19 @@ test("the hosted approval endpoint executes a catastrophic action after a human 
   const base = listened.url ?? `http://127.0.0.1:${listened.port}`;
 
   try {
-    const diverted = await runtime.tools.invoke("code_shell", { command: "wsl --shutdown" }, { sessionId: "s1" });
-    assert.equal(diverted.result.status, "awaiting_confirmation");
+    const invocation = runtime.tools.invoke("code_shell", { command: "wsl --shutdown" }, { sessionId: "s1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const action = runtime.pendingActions.list({ status: "pending" })[0];
     assert.deepEqual(calls, []);
 
-    const response = await fetch(`${base}/pending-actions/${diverted.result.actionId}/approve`, { method: "POST" });
+    const response = await fetch(`${base}/pending-actions/${action.id}/approve`, { method: "POST" });
     const body = await response.json();
+    const resumed = await invocation;
     assert.equal(response.status, 200);
     assert.equal(body.ok, true);
+    assert.equal(resumed.ok, true);
     assert.deepEqual(calls, ["wsl --shutdown"]);
-    assert.equal(runtime.pendingActions.get(diverted.result.actionId).status, "approved");
+    assert.equal(runtime.pendingActions.get(action.id).status, "approved");
   } finally {
     await app.close?.();
   }

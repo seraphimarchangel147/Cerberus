@@ -2,6 +2,15 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — In-channel approval suspension and same-turn resume (Codex)
+
+- Pending actions now carry non-serializable decision/completion promises. A gated invocation parks for up to `OPENAGI_APPROVAL_TIMEOUT_MS` (default 300000), emits `awaiting-approval`, and returns the real approved tool result—or a model-visible denial, cancellation, or timeout error—inside the original turn.
+- Catastrophic approvals and auto-approve-off gates share the same suspension rail; default-on auto-approve remains byte-compatible. Approval metadata still appends the Hermes audit note to the tool result seen by the model.
+- Discord buttons, text/slash approvals, HTTP approvals, and outreach approvals now use one first-click-wins resolver. Live suspended calls resume themselves, restart-era persisted actions execute through the same helper, completion is recorded, and concurrent approvals cannot double-run a side effect.
+- The model stall watchdog needed no production change because it exists only inside the provider HTTP request and is cleared before tool execution. A regression holds an Anthropic tool approval beyond four stall windows and proves the same turn resumes; the overall turn abort signal still cancels a parked approval safely.
+- Validation: `npm test` and `npm run test:prod-policy` both pass 645/645. Live Discord/HTTP probing was skipped under the operator's strict isolation from Azazel's daemon.
+APPROVAL SUSPENSION PHASE COMPLETE
+
 ## 2026-07-21 — Provider retry resilience and tool transcript repair (Codex)
 
 - Added a shared bounded provider-request retry layer for both OpenAI Responses and Anthropic Messages. Network failures and HTTP 429/500/502/503/504/529 use exponential full-jitter backoff, honor bounded `Retry-After`, emit advisory retry progress, and end as a typed `ProviderError`; 400/auth/caller-abort failures are never retried.

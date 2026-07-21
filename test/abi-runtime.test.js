@@ -1379,7 +1379,7 @@ test("McpRegistry allowEnvKey extends the in-memory permitted set", async () => 
   delete process.env.POSTHOG_MCP_API_KEY;
 });
 
-test("ToolRegistry: needsConfirmation gate queues action instead of running", async () => {
+test("ToolRegistry: needsConfirmation gate suspends until a decision", async () => {
   const { ToolRegistry } = await import("../src/tool-registry.js");
   const { PendingActionStore } = await import("../src/pending-actions.js");
   // This test asserts QUEUE semantics, so pin auto-approve off locally —
@@ -1401,18 +1401,19 @@ test("ToolRegistry: needsConfirmation gate queues action instead of running", as
     handler: async (args) => { ran++; return { didIt: args.x }; }
   });
 
-  // Without __confirmed, the call queues instead of running.
-  const queued = await tools.invoke("do_thing", { x: 42 }, { sessionId: "s1" });
+  // Without __confirmed, the call queues and remains suspended.
+  const queued = tools.invoke("do_thing", { x: 42 }, { sessionId: "s1" });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(ran, 0, "handler did not execute");
-  assert.equal(queued.ok, true);
-  assert.equal(queued.result.status, "awaiting_confirmation");
-  assert.equal(queued.result.summary, "Do thing with 42");
 
   const list = pending.list({ status: "pending" });
   assert.equal(list.length, 1);
   assert.equal(list[0].toolName, "do_thing");
   assert.equal(list[0].args.x, 42);
   assert.equal(list[0].context.sessionId, "s1");
+  assert.equal(list[0].summary, "Do thing with 42");
+  pending.decide(list[0].id, { decision: "deny", decidedBy: "test" });
+  assert.equal((await queued).ok, false);
 
   // With __confirmed, it bypasses the queue and runs.
   const ok = await tools.invoke("do_thing", { x: 99 }, { __confirmed: true });
@@ -2276,17 +2277,18 @@ test("ToolRegistry.invoke: gated tool's summary persists through to pending acti
   };
   registerCoreTools(registry, fakeRuntime);
 
-  const result = await registry.invoke("register_mcp_server", {
+  const invocation = registry.invoke("register_mcp_server", {
     name: "innocuous-looking",
     transport: "stdio",
     command: "docker",
     args: ["run", "--rm", "-v", "/:/host", "alpine"]
   }, { sessionId: "test" });
-
-  assert.equal(result.result.status, "awaiting_confirmation");
-  const queued = pending.get(result.result.actionId);
+  await new Promise((resolve) => setImmediate(resolve));
+  const queued = pending.list({ status: "pending" })[0];
   assert.match(queued.summary, /docker/, "queued summary exposes command");
   assert.match(queued.summary, /-v/, "queued summary exposes mount arg");
+  pending.decide(queued.id, { decision: "deny", decidedBy: "test" });
+  await invocation;
   fs.rmSync(tmp, { recursive: true });
   } finally {
     if (savedAA === undefined) delete process.env.OPENAGI_AUTO_APPROVE;

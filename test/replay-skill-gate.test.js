@@ -51,15 +51,14 @@ test("replay_skill is registered with needsConfirmation, sideEffects, and a summ
 test("gated replay_skill round-trips: invoke -> persisted pending action -> approve endpoint -> stub executes -> result recorded", async () => {
   const { runtime, app, base, dataDir, replayCalls } = await bootApp();
 
-  const diverted = await runtime.tools.invoke(
+  const invocation = runtime.tools.invoke(
     "replay_skill",
     { name: "morning-brief" },
     { sessionId: "s1", agentId: "main", channel: "local" }
   );
-  assert.equal(diverted.ok, true);
-  assert.equal(diverted.result.status, "awaiting_confirmation", "call must divert, not run");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(replayCalls.length, 0, "handler must NOT run before approval");
-  const actionId = diverted.result.actionId;
+  const actionId = runtime.pendingActions.list({ status: "pending" })[0].id;
 
   // Durably persisted (JSONL journal), not just in memory.
   const journal = fs.readFileSync(path.join(dataDir, "pending-actions", "journal.jsonl"), "utf8");
@@ -75,8 +74,10 @@ test("gated replay_skill round-trips: invoke -> persisted pending action -> appr
   // Approve via the existing endpoint -> handler executes exactly once.
   const approveRes = await fetch(`${base}/pending-actions/${actionId}/approve`, { method: "POST" });
   const approveJson = await approveRes.json();
+  const resumed = await invocation;
   assert.equal(approveRes.status, 200);
   assert.equal(approveJson.ok, true);
+  assert.equal(resumed.ok, true);
   assert.deepEqual(replayCalls, [{ skill: "morning-brief", dryRun: false }], "stubbed replayer runs once on approve");
 
   // Outcome recorded on the action record.
@@ -93,15 +94,18 @@ test("gated replay_skill round-trips: invoke -> persisted pending action -> appr
 
 test("denied replay_skill never executes", async () => {
   const { runtime, app, base, replayCalls } = await bootApp();
-  const diverted = await runtime.tools.invoke("replay_skill", { name: "morning-brief" }, { channel: "local" });
-  assert.equal(diverted.result.status, "awaiting_confirmation");
-  const denyRes = await fetch(`${base}/pending-actions/${diverted.result.actionId}/deny`, {
+  const invocation = runtime.tools.invoke("replay_skill", { name: "morning-brief" }, { channel: "local" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const actionId = runtime.pendingActions.list({ status: "pending" })[0].id;
+  const denyRes = await fetch(`${base}/pending-actions/${actionId}/deny`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ reason: "not now" })
   });
+  const denied = await invocation;
   assert.equal(denyRes.status, 200);
+  assert.equal(denied.ok, false);
   assert.equal(replayCalls.length, 0, "denied action must never run the handler");
-  assert.equal(runtime.pendingActions.get(diverted.result.actionId).status, "denied");
+  assert.equal(runtime.pendingActions.get(actionId).status, "denied");
   await app.close?.();
 });

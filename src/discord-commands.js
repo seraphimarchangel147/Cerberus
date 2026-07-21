@@ -22,6 +22,7 @@ const T = {
 
 import { bar, COLORS, embed } from "./discord-embeds.js";
 import { renderChart } from "./discord-chart.js";
+import { approvePendingAction } from "./pending-actions.js";
 
 const EPHEMERAL = 64;
 
@@ -322,8 +323,11 @@ export class DiscordCommands {
       store.decide(id, { decision: "deny", decidedBy: `discord:${userId}` });
       return `🚫 Denied \`${id}\` (**${action.toolName}**)`;
     }
-    const r = await this.runtime.tools.invoke(action.toolName, action.args, { ...(action.context ?? {}), __confirmed: true });
-    store.decide(id, { decision: "approve", decidedBy: `discord:${userId}`, result: r.ok ? r.result : null, error: r.ok ? null : r.error });
+    const r = await approvePendingAction(this.runtime, id, {
+      decidedBy: `discord:${userId}`,
+      approvedVia: "discord-command",
+      decider: userId
+    });
     return `👍 Approved \`${id}\` (**${action.toolName}**) — ${r.ok ? "✅ executed" : `❌ ${r.error}`}`;
   }
 

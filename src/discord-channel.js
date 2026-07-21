@@ -19,6 +19,7 @@ import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { DiscordCommands } from "./discord-commands.js";
 import { ANSI, COLORS, embed } from "./discord-embeds.js";
+import { approvePendingAction } from "./pending-actions.js";
 
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
@@ -376,9 +377,13 @@ export class DiscordChannel {
       await this.sendMessage(message.channel_id, `🚫 Denied \`${id}\` (**${action.toolName}**)`, message.id);
       return;
     }
-    // approve → re-invoke the original handler with the confirmation bypass.
-    const r = await runtime.tools.invoke(action.toolName, action.args, { ...(action.context ?? {}), __confirmed: true });
-    store.decide(id, { decision: "approve", decidedBy: `discord:${message.author?.id}`, result: r.ok ? r.result : null, error: r.ok ? null : r.error });
+    // A live suspended turn resumes through decide(); persisted actions with
+    // no waiter still execute exactly once inside this shared helper.
+    const r = await approvePendingAction(runtime, id, {
+      decidedBy: `discord:${message.author?.id}`,
+      approvedVia: "discord-command",
+      decider: message.author?.id
+    });
     const tail = r.ok ? "✅ executed" : `❌ failed: ${r.error}`;
     await this.sendMessage(message.channel_id, `👍 Approved \`${id}\` (**${action.toolName}**) — ${tail}`, message.id);
   }
@@ -607,28 +612,15 @@ export class DiscordChannel {
     if (choice === "session") runtime.tools.allowForSession(action.context.sessionId, action.toolName);
     let invokeResult;
     try {
-      invokeResult = await runtime.tools.invoke(action.toolName, action.args, {
-        ...(action.context ?? {}),
-        __confirmed: true,
-        __approval: {
-          description: action.reason ?? "flagged as dangerous",
-          via: "discord-button",
-          decider: userId
-        }
+      invokeResult = await approvePendingAction(runtime, actionId, {
+        decidedBy: `discord:${userId}`,
+        approvedVia: "discord-button",
+        decider: userId,
+        deciderDisplayName: displayName
       });
     } catch (error) {
       invokeResult = { ok: false, error: error.message ?? String(error) };
     }
-    store.decide(actionId, {
-      decision: "approve",
-      decidedBy: `discord:${userId}`,
-      approvedVia: "discord-button",
-      decider: userId,
-      deciderDisplayName: displayName,
-      result: invokeResult.ok ? invokeResult.result : null,
-      error: invokeResult.ok ? null : invokeResult.error
-    });
-
     const resultText = approvalResultText(action, invokeResult);
     state.embed = resolvedApprovalEmbed(state.embed, color, `${label} by ${displayName}`, resultText);
     await this.editApprovalInteraction(interaction, state);
@@ -1102,6 +1094,14 @@ export class LiveStatus {
     } else if (ev.phase === "start") {
       this.steps.push({ name: ev.name, state: "run", args: summarizeArgs(ev.args), t: Date.now() });
       this.maybeSpawnThread();
+    } else if (ev.phase === "awaiting-approval") {
+      for (let i = this.steps.length - 1; i >= 0; i -= 1) {
+        if (this.steps[i].name === ev.toolName && this.steps[i].state === "run") {
+          this.steps[i].state = "pend";
+          this.steps[i].actionId = ev.actionId;
+          break;
+        }
+      }
     } else if (ev.phase === "end") {
       // Mark the most recent running step with this name.
       for (let i = this.steps.length - 1; i >= 0; i -= 1) {

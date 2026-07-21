@@ -22,6 +22,7 @@ import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
 import { NodeRegistry, readOrCreateIdentity } from "./node-registry.js";
 import { readNodeConfig } from "./cli-client.js";
 import { sanitizeForAudit } from "./redact.js";
+import { approvePendingAction } from "./pending-actions.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -874,17 +875,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const action = runtime.pendingActions?.get(id);
         if (!action) return sendJson(res, 404, { error: "unknown pending action" });
         if (action.status !== "pending") return sendJson(res, 409, { error: `action already ${action.status}` });
-        // Re-invoke the original tool with the bypass flag so the gate
-        // doesn't re-queue the same call. Persist the result on the action.
-        const invokeResult = await runtime.tools.invoke(action.toolName, action.args, {
-          ...action.context,
-          __confirmed: true
-        });
-        runtime.pendingActions.decide(id, {
-          decision: "approve",
+        // Resolve a live suspended turn instead of racing it with a second
+        // invocation. Restart-era actions without a waiter still execute once.
+        const invokeResult = await approvePendingAction(runtime, id, {
           decidedBy: "user",
-          result: invokeResult.ok ? invokeResult.result : null,
-          error: invokeResult.ok ? null : invokeResult.error
+          approvedVia: "http"
         });
         return sendJson(res, invokeResult.ok ? 200 : 400, invokeResult);
       }
@@ -1727,8 +1722,10 @@ async function applyOutreachAction(runtime, item, action, note) {
         const a = runtime.pendingActions?.get(ref.id);
         if (!a) throw new Error("pending action gone");
         if (a.status !== "pending") return; // already decided elsewhere — don't re-run the side-effecting tool
-        const r = await runtime.tools.invoke(a.toolName, a.args, { ...a.context, __confirmed: true });
-        runtime.pendingActions.decide(ref.id, { decision: "approve", decidedBy: "user", result: r.ok ? r.result : null, error: r.ok ? null : r.error });
+        const r = await approvePendingAction(runtime, ref.id, {
+          decidedBy: "user",
+          approvedVia: "outreach"
+        });
         if (!r.ok) throw new Error(r.error ?? "tool failed");
         return;
       }

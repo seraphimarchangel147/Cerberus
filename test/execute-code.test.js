@@ -93,7 +93,7 @@ test("execute_code cannot carry wrapper approval past the catastrophic gate", as
     summarize: ({ command }) => `shell: ${command}`,
     handler: async () => { executions += 1; return { exitCode: 0 }; }
   });
-  const result = await execute(tools, `
+  const execution = execute(tools, `
     const gated = await callTool("code_shell", { command: "rm -rf ~" });
     console.log(JSON.stringify(gated));
   `, {
@@ -102,13 +102,18 @@ test("execute_code cannot carry wrapper approval past the catastrophic gate", as
     // nested shell call. The integration deliberately strips it on re-entry.
     __confirmed: true
   }, 2_000);
+  let action;
+  for (let i = 0; i < 200 && !action; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    action = pendingActions.list({ status: "pending" })[0];
+  }
+  assert.ok(action, "nested catastrophic call reached the approval queue");
+  pendingActions.decide(action.id, { decision: "deny", decidedBy: "test" });
+  const result = await execution;
 
-  const printed = JSON.parse(result.stdout);
-  assert.equal(printed.status, "awaiting_confirmation");
+  assert.match(result.error, /denied by test/i);
   assert.equal(executions, 0, "auto-approve and wrapper approval must not bypass the catastrophic gate");
-  const pending = pendingActions.list({ status: "pending" });
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0].severity, "catastrophic");
+  assert.equal(action.severity, "catastrophic");
 });
 
 test("execute_code caps stdout at 64 KiB and marks truncation", async () => {

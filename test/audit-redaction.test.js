@@ -9,7 +9,7 @@ import { AgentHost } from "../src/agent-host.js";
 import { InMemoryAgentStore } from "../src/agent-store.js";
 import { createHostedInterface } from "../src/hosted-interface.js";
 import { OutcomeStore } from "../src/outcome-store.js";
-import { PendingActionStore } from "../src/pending-actions.js";
+import { PendingActionStore, approvePendingAction } from "../src/pending-actions.js";
 import { sanitizeForAudit } from "../src/redact.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
@@ -61,15 +61,18 @@ test("pending-action persistence is masked while approved execution receives the
   tools.bindPendingActions(pending);
   const args = { command: "wsl --shutdown", authorization: bearer, nested: { apiKey: openAiKey } };
 
-  const gated = await tools.invoke("code_shell", args, { sessionId: "audit-session" });
-  const action = pending.get(gated.result.actionId);
+  const gated = tools.invoke("code_shell", args, { sessionId: "audit-session" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const action = pending.list({ status: "pending" })[0];
   const journal = fs.readFileSync(path.join(dir, "journal.jsonl"), "utf8");
   assert.doesNotMatch(journal, new RegExp("a".repeat(48)));
   assert.doesNotMatch(journal, new RegExp(openAiKey));
   assert.match(journal, /\[REDACTED\]/);
   assert.equal(action.args.authorization, bearer, "the in-memory action keeps executable args");
 
-  const executed = await tools.invoke(action.toolName, action.args, { ...action.context, __confirmed: true });
+  const approval = approvePendingAction({ pendingActions: pending, tools }, action.id, { decidedBy: "test" });
+  const executed = await gated;
+  await approval;
   assert.equal(executed.ok, true);
   assert.equal(seen[0].authorization, bearer);
   assert.equal(seen[0].nested.apiKey, openAiKey);

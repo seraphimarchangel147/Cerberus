@@ -53,6 +53,9 @@ function createHarness(t) {
   channel.bindActivityFeed(events);
 
   t.after(() => {
+    for (const action of pendingActions.list({ status: "pending" })) {
+      pendingActions.decide(action.id, { decision: "deny", decidedBy: "test-cleanup" });
+    }
     channel.stop();
     fs.rmSync(root, { recursive: true, force: true });
   });
@@ -60,14 +63,14 @@ function createHarness(t) {
 }
 
 async function enqueueCatastrophic(harness, sessionId = "discord:guild:10001") {
-  const result = await harness.tools.invoke(
+  const invocation = harness.tools.invoke(
     "code_shell",
     { command: "wsl --shutdown" },
     { sessionId, channel: "discord" }
   );
-  assert.equal(result.result.status, "awaiting_confirmation");
+  await waitFor(() => harness.pendingActions.list({ status: "pending" }).length === 1);
   await waitFor(() => approvalPosts(harness).length === 1);
-  return harness.pendingActions.get(result.result.actionId);
+  return { action: harness.pendingActions.list({ status: "pending" })[0], invocation };
 }
 
 function approvalPosts(harness) {
@@ -104,7 +107,7 @@ async function waitFor(predicate) {
 
 test("catastrophic enqueue posts the exact three-button approval card", async (t) => {
   const harness = createHarness(t);
-  const action = await enqueueCatastrophic(harness);
+  const { action } = await enqueueCatastrophic(harness);
   const card = approvalPosts(harness)[0].body;
 
   assert.equal(harness.executions.length, 0);
@@ -120,8 +123,9 @@ test("catastrophic enqueue posts the exact three-button approval card", async (t
 
 test("approve is first-click-wins, disables before execution, and records the Hermes note", async (t) => {
   const harness = createHarness(t);
-  const action = await enqueueCatastrophic(harness);
+  const { action, invocation } = await enqueueCatastrophic(harness);
   await dispatch(harness.channel, interactionFor(harness, action, "approve"));
+  const resumed = await invocation;
 
   const callback = harness.restCalls.find((call) => call.pathname.includes("/interactions/interaction-1/"));
   assert.equal(callback.body.type, 6, "authorized click is acknowledged as a deferred update");
@@ -131,6 +135,7 @@ test("approve is first-click-wins, disables before execution, and records the He
   assert.equal(edits[0].body.embeds[0].color, 0x2ecc71);
   assert.equal(edits[0].body.embeds[0].footer.text, "Approved once by Creator");
   assert.deepEqual(harness.executions, ["wsl --shutdown"]);
+  assert.equal(resumed.ok, true);
 
   const decided = harness.pendingActions.get(action.id);
   assert.equal(decided.status, "approved");
@@ -154,7 +159,7 @@ test("approve is first-click-wins, disables before execution, and records the He
 
 test("authorization is checked on every click and an unauthorized click does not resolve", async (t) => {
   const harness = createHarness(t);
-  const action = await enqueueCatastrophic(harness);
+  const { action, invocation } = await enqueueCatastrophic(harness);
   await dispatch(harness.channel, interactionFor(harness, action, "deny", "stranger", "bad"));
 
   const refusal = harness.restCalls.find((call) => call.pathname.includes("/interactions/interaction-bad/"));
@@ -164,13 +169,14 @@ test("authorization is checked on every click and an unauthorized click does not
   assert.equal(harness.pendingActions.get(action.id).status, "pending");
 
   await dispatch(harness.channel, interactionFor(harness, action, "deny", "owner-1", "good"));
+  assert.equal((await invocation).ok, false);
   assert.equal(harness.pendingActions.get(action.id).status, "denied");
   assert.equal(harness.pendingActions.get(action.id).decider, "owner-1");
 });
 
 test("timeout disables the card but deliberately leaves the action pending", async (t) => {
   const harness = createHarness(t);
-  const action = await enqueueCatastrophic(harness);
+  const { action } = await enqueueCatastrophic(harness);
   assert.equal(await harness.channel.expireApprovalPrompt(action.id), true);
 
   assert.equal(harness.pendingActions.get(action.id).status, "pending");
@@ -184,8 +190,9 @@ test("timeout disables the card but deliberately leaves the action pending", asy
 
 test("Allow for session executes once and lets the same tool/session skip later cards", async (t) => {
   const harness = createHarness(t);
-  const action = await enqueueCatastrophic(harness);
+  const { action, invocation } = await enqueueCatastrophic(harness);
   await dispatch(harness.channel, interactionFor(harness, action, "session"));
+  assert.equal((await invocation).ok, true);
   assert.deepEqual(harness.executions, ["wsl --shutdown"]);
   assert.equal(harness.tools.isAllowedForSession("discord:guild:10001", "code_shell"), true);
 

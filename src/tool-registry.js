@@ -19,9 +19,8 @@ export class ToolRegistry {
       parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
       source: tool.source ?? "internal",
       handler: tool.handler,
-      // When true, invoke() queues a pending-action and returns
-      // {status:"awaiting_confirmation"} instead of running. The action is
-      // surfaced in the dashboard for the user to approve/deny.
+      // When true, invoke() queues a pending action and suspends until the
+      // user approves, denies, or the bounded approval window expires.
       needsConfirmation: Boolean(tool.needsConfirmation),
       // Short human-readable summary used in the approval UI when the args
       // alone don't describe the action well. Optional fn(args) -> string.
@@ -159,6 +158,92 @@ export class ToolRegistry {
     return outcome;
   }
 
+  async _suspendForApproval(action, name, args, context) {
+    // Lightweight store doubles used by embedders may only implement the old
+    // queue API. Preserve that contract while the real store provides the
+    // Hermes-style suspend/resume rail.
+    if (typeof this.pendingActions?.waitForDecision !== "function") {
+      return {
+        ok: true,
+        result: {
+          status: "awaiting_confirmation",
+          actionId: action.id,
+          summary: action.summary,
+          message: "Queued for human approval."
+        }
+      };
+    }
+
+    try {
+      context?.__onToolEvent?.({
+        phase: "awaiting-approval",
+        actionId: action.id,
+        toolName: name,
+        summary: action.summary
+      });
+    } catch {
+      // Approval progress is advisory; the durable queue is authoritative.
+    }
+
+    const configured = Number(process.env.OPENAGI_APPROVAL_TIMEOUT_MS);
+    const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 300000;
+    const decision = await this.pendingActions.waitForDecision(action.id, {
+      timeoutMs,
+      signal: context?.__abortSignal
+    });
+    if (decision.decision === "approve") {
+      // A legacy approval surface may already have executed before deciding.
+      // Honor its recorded completion rather than replaying the side effect.
+      if (decision.completed) {
+        return decision.error
+          ? { ok: false, error: decision.error }
+          : { ok: true, result: decision.result };
+      }
+      if (context?.__abortSignal?.aborted) {
+        const error = "turn ended before the approved action could resume";
+        this.pendingActions.complete?.(action.id, { result: null, error });
+        return { ok: false, error };
+      }
+      const invokeResult = await this.invoke(name, args, {
+        ...(context ?? {}),
+        __confirmed: true,
+        __approval: {
+          description: action.reason ?? "flagged as dangerous",
+          via: decision.approvedVia ?? "pending-action",
+          decider: decision.decider ?? decision.decidedBy ?? "user"
+        }
+      });
+      this.pendingActions.complete?.(action.id, {
+        result: invokeResult.ok ? invokeResult.result : null,
+        error: invokeResult.ok ? null : invokeResult.error
+      });
+      return invokeResult;
+    }
+    if (decision.decision === "timeout") {
+      this.pendingActions.decide?.(action.id, {
+        decision: "deny",
+        decidedBy: "timeout",
+        error: "approval timed out"
+      });
+      return {
+        ok: false,
+        error: `Action ${action.id} timed out awaiting approval after ${Math.round(timeoutMs / 1000)}s.`
+      };
+    }
+    if (decision.decision === "cancelled") {
+      this.pendingActions.decide?.(action.id, {
+        decision: "deny",
+        decidedBy: "turn-cancelled",
+        error: "turn ended while awaiting approval"
+      });
+      return { ok: false, error: `Action ${action.id} cancelled because the turn ended while awaiting approval.` };
+    }
+    return {
+      ok: false,
+      error: `Action ${action.id} denied by ${decision.decidedBy ?? "human"}${decision.error ? `: ${decision.error}` : "."}`
+    };
+  }
+
   async _invokeGated(name, args, context = {}) {
     const tool = this.tools.get(name);
     if (!tool) {
@@ -212,15 +297,7 @@ export class ToolRegistry {
         reason: catastrophic.reason,
         severity: "catastrophic"
       });
-      return {
-        ok: true,
-        result: {
-          status: "awaiting_confirmation",
-          actionId: action.id,
-          summary: action.summary,
-          message: "Catastrophic action requires explicit human approval; auto-approve cannot run it."
-        }
-      };
+      return this._suspendForApproval(action, name, args, context);
     }
     // Confirmation gate. When set, divert the call into the pending-action
     // queue UNLESS context.__confirmed is true (which the approve endpoint
@@ -259,15 +336,7 @@ export class ToolRegistry {
         summary,
         reason: context.__reason ?? null
       });
-      return {
-        ok: true,
-        result: {
-          status: "awaiting_confirmation",
-          actionId: action.id,
-          summary: action.summary,
-          message: `Queued for human approval. Visit the dashboard's Approvals tab (or run /pending-actions) to approve or deny.`
-        }
-      };
+      return this._suspendForApproval(action, name, args, context);
     }
     try {
       const result = await tool.handler(args ?? {}, context);
