@@ -62,7 +62,10 @@ export function formatEmptyTurnFallback(result = {}) {
 export class DiscordChannel {
   constructor(options = {}) {
     this.agentHost = options.agentHost;
-    this.token = options.token ?? process.env.DISCORD_BOT_TOKEN;
+    // An explicit null is how ChannelManager hard-disables live transports in
+    // OPENAGI_TEST mode. Preserve the historical env fallback for undefined,
+    // but never let nullish coalescing resurrect a deliberately disabled token.
+    this.token = options.token === null ? null : (options.token ?? process.env.DISCORD_BOT_TOKEN);
     this.dir = options.dir ?? path.join(resolveDataDir(), "channels", "discord");
     ensureDir(this.dir);
     this.eventsPath = path.join(this.dir, "events.jsonl");

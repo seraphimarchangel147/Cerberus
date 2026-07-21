@@ -256,3 +256,10 @@ CTX SEARCH PHASE COMPLETE
 - Validation: `npm test` and `npm run test:prod-policy` each pass 609/609.
 VOICE STREAMING PHASE COMPLETE
 ALL PARITY PHASES COMPLETE
+
+## 2026-07-21 - Isolate nightly self-QA from live channels (Codex)
+
+- Run `code_test` with a cloned, scrubbed child environment that removes Discord/Telegram credentials, channel routing, and every `*_WEBHOOK_SECRET`, while setting `OPENAGI_TEST=1`.
+- Make `ChannelManager` bind explicit null Discord and Telegram tokens in test mode, and make an explicitly supplied null Discord token authoritative rather than falling back to the daemon environment.
+- Preserve inherited environments for `code_shell`, `code_lint`, and every other subprocess path.
+- Validation: `node --test` passes 611/611 (0 failed).

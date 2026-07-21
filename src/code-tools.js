@@ -114,9 +114,14 @@ function walk(dir, out, depth = 0) {
   }
 }
 
-function run(cmd, args, { cwd, timeoutMs = 120000 } = {}) {
+function run(cmd, args, { cwd, timeoutMs = 120000, env } = {}) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const execOptions = { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 };
+    // Omit `env` entirely for ordinary code tools so Node preserves its
+    // existing inherit-from-parent behavior. Only code_test opts into a
+    // scrubbed child environment below.
+    if (env !== undefined) execOptions.env = env;
+    execFile(cmd, args, execOptions, (error, stdout, stderr) => {
       resolve({
         ok: !error,
         code: error?.code ?? 0,
@@ -127,8 +132,27 @@ function run(cmd, args, { cwd, timeoutMs = 120000 } = {}) {
   });
 }
 
+export function scrubTestEnvironment(source = process.env) {
+  const env = { ...source };
+  const channelKeys = new Set([
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_ACTIVITY_CHANNEL",
+    "DISCORD_ALLOW_FROM",
+    "DISCORD_GUILDS",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_WEBHOOK_SECRET"
+  ]);
+  for (const key of Object.keys(env)) {
+    if (channelKeys.has(key) || key.endsWith("_WEBHOOK_SECRET")) delete env[key];
+  }
+  // Test-mode channel construction is the second line of defense if a new
+  // credential-bearing variable is added later and omitted from this scrub.
+  env.OPENAGI_TEST = "1";
+  return env;
+}
+
 // ── registration ─────────────────────────────────────────────────────
-export function registerCodeTools(registry, runtime) {
+export function registerCodeTools(registry, runtime, options = {}) {
   registry.register({
     name: "code_read",
     description: "Read a file with line numbers. Returns a 4-hex content tag — REQUIRED by code_edit to prove you saw the current version. Re-read after any edit to get the fresh tag.",
@@ -340,7 +364,12 @@ export function registerCodeTools(registry, runtime) {
     handler: async (args) => {
       const testArgs = ["--test"];
       if (args.file) testArgs.push(mustResolve(path.isAbsolute(args.file) ? args.file : path.join(REPO_ROOT, args.file)));
-      const r = await run(process.execPath, testArgs, { cwd: REPO_ROOT, timeoutMs: 300000 });
+      const runTest = options.runTest ?? run;
+      const r = await runTest(process.execPath, testArgs, {
+        cwd: REPO_ROOT,
+        timeoutMs: 300000,
+        env: scrubTestEnvironment()
+      });
       const out = (r.stdout + "\n" + r.stderr);
       const pass = /# pass (\d+)/.exec(out)?.[1] ?? null;
       const fail = /# fail (\d+)/.exec(out)?.[1] ?? null;
