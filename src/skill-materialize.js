@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, writeTextAtomic } from "./file-utils.js";
+import { appendSkillRevision } from "./skill-revisions.js";
 
 // Turn an accepted "skill" proactive-suggestion into a durable SKILL.md
 // file under the user's skills directory. Pure function from suggestion
@@ -109,11 +110,20 @@ function writeSkillFile({ runtime, title, description, body, lineage = {} }) {
     `description: ${jsonInlineString(desc)}`,
     ...lineageLines,
     `createdAt: ${new Date().toISOString()}`,
-    "---",
-    ""
-  ].filter(Boolean).join("\n");
+    "---"
+  ].join("\n");
 
-  writeTextAtomic(skillPath, frontmatter + bodyText + "\n");
+  // Keep the blank separator explicit. Filtering falsy array entries here
+  // previously collapsed `---\n\n<body>` into an unparsable delimiter/body.
+  const document = `${frontmatter}\n\n${bodyText}\n`;
+  writeTextAtomic(skillPath, document);
+  appendSkillRevision(skillDir, {
+    skill: slug,
+    action: "materialized",
+    by: lineage.createdBy ?? "skill-materialize",
+    after: document,
+    metadata: lineage
+  });
   return { slug, path: skillPath };
 }
 

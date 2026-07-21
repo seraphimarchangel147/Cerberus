@@ -5,6 +5,7 @@ import { scoreFromToolCalls } from "./outcome-store.js";
 import { resolveDataDir } from "./data-dir.js";
 import { nowIso } from "./utils.js";
 import { pickUserSkillsDir, slugify, dedupeSlug } from "./skill-materialize.js";
+import { appendSkillRevision } from "./skill-revisions.js";
 
 // Subdirectories inside a skill dir that count as "linked files" — the
 // Hermes convention: a skill can carry deep reference docs, runnable
@@ -23,6 +24,8 @@ export class SkillRegistry {
     this.runtime = options.runtime;
     this.dirs = options.dirs ?? [];
     this.skills = new Map();
+    this.diagnostics = [];
+    this.warn = options.warn ?? ((message) => console.warn(message));
     this.dataDir = options.dataDir ?? resolveDataDir();
     // Durable telemetry (Hermes-style): every view/run bumps a usage
     // counter, every mutation lands in an append-only edit log. This is
@@ -36,6 +39,7 @@ export class SkillRegistry {
 
   reload() {
     this.skills.clear();
+    this.diagnostics = [];
     for (const dir of this.dirs) this.loadFrom(dir);
     if (this.runtime?.tools) this.exposeAsTools(this.runtime.tools);
     return this.list();
@@ -44,7 +48,8 @@ export class SkillRegistry {
   loadFrom(dir) {
     try {
       ensureDir(dir);
-    } catch {
+    } catch (error) {
+      this.recordDiagnostic(dir, error);
       return;
     }
     for (const entry of safeReadDir(dir)) {
@@ -53,12 +58,32 @@ export class SkillRegistry {
       if (!safeIsDir(skillDir)) continue;
       const skillPath = path.join(skillDir, "SKILL.md");
       if (!fs.existsSync(skillPath)) continue;
-      const skill = parseSkill(skillPath, skillDir);
+      let skill;
+      try {
+        skill = parseSkill(skillPath, skillDir);
+      } catch (error) {
+        this.recordDiagnostic(skillPath, error);
+        continue;
+      }
       if (skill) {
         skill.bundled = dir === this.dirs[0];
         this.skills.set(skill.name, skill);
       }
     }
+  }
+
+  recordDiagnostic(file, error) {
+    const diagnostic = {
+      file,
+      reason: error?.message ?? String(error)
+    };
+    this.diagnostics.push(diagnostic);
+    try { this.warn(`[openagi] skipped invalid skill ${file}: ${diagnostic.reason}`); } catch { /* advisory */ }
+    return diagnostic;
+  }
+
+  getDiagnostics() {
+    return this.diagnostics.map((entry) => ({ ...entry }));
   }
 
   list() {
@@ -164,6 +189,7 @@ export class SkillRegistry {
       createdBy: skill.createdBy,
       createdAt: skill.createdAt,
       sourceSuggestionId: skill.sourceSuggestionId,
+      allowedTools: skill.allowedTools,
       body: skill.body,
       linkedFiles: skill.linkedFiles ?? [],
       path: skill.path,
@@ -198,6 +224,7 @@ export class SkillRegistry {
     assertSkillDocumentSize(document);
     ensureDir(skillDir);
     writeTextAtomic(path.join(skillDir, "SKILL.md"), document);
+    appendSkillRevision(skillDir, { skill: slug, action: "created", by: createdBy, after: document });
     this.logEdit({ skill: slug, action: "created", by: createdBy, summary: String(description).slice(0, 120) });
     this.reload();
     return { slug, path: path.join(skillDir, "SKILL.md") };
@@ -219,6 +246,7 @@ export class SkillRegistry {
     const next = text.replace(oldString, replacement);
     assertSkillDocumentSize(next);
     writeTextAtomic(skill.path, next);
+    appendSkillRevision(skill.dir, { skill: name, action: "patched", by, before: text, after: next });
     this.logEdit({
       skill: name,
       action: "patched",
@@ -244,6 +272,7 @@ export class SkillRegistry {
     const next = updateFrontmatter(text, updates, body);
     assertSkillDocumentSize(next);
     writeTextAtomic(skill.path, next);
+    appendSkillRevision(skill.dir, { skill: name, action: "edited", by, before: text, after: next });
     const touched = [
       description !== undefined ? "description" : null,
       category !== undefined ? "category" : null,
@@ -262,7 +291,9 @@ export class SkillRegistry {
   setPinned(name, pinned = true, by = "agent") {
     const skill = this.mustGet(name);
     const text = fs.readFileSync(skill.path, "utf8");
-    writeTextAtomic(skill.path, updateFrontmatter(text, { pinned: pinned ? true : null }));
+    const next = updateFrontmatter(text, { pinned: pinned ? true : null });
+    writeTextAtomic(skill.path, next);
+    appendSkillRevision(skill.dir, { skill: name, action: pinned ? "pinned" : "unpinned", by, before: text, after: next });
     this.logEdit({ skill: name, action: pinned ? "pinned" : "unpinned", by });
     this.reload();
     return { skill: name, pinned: Boolean(pinned) };
@@ -280,6 +311,14 @@ export class SkillRegistry {
     const trashDir = path.join(parent, ".trash");
     ensureDir(trashDir);
     const dest = availableTrashPath(trashDir, `${name}-${Date.now()}`);
+    appendSkillRevision(skill.dir, {
+      skill: name,
+      action: "deleted",
+      by,
+      before: fs.readFileSync(skill.path, "utf8"),
+      after: null,
+      metadata: { destination: dest }
+    });
     fs.renameSync(skill.dir, dest);
     this.logEdit({ skill: name, action: "deleted", by, summary: `moved to ${dest}` });
     this.reload();
@@ -448,6 +487,19 @@ export class SkillRegistry {
     const agentName = `skill:${skill.name}`;
     const instructions = skill.systemPrompt ||
       `You are executing the "${skill.name}" skill. ${skill.description}\nReturn only the user-visible output. Use tools when helpful.`;
+    const inheritedAllowed = Array.isArray(context?.__allowedTools) ? context.__allowedTools : null;
+    const declaredAllowed = Array.isArray(skill.allowedTools) ? skill.allowedTools : null;
+    const effectiveAllowed = declaredAllowed && inheritedAllowed
+      ? declaredAllowed.filter((toolName) => inheritedAllowed.includes(toolName))
+      : declaredAllowed;
+    if (!declaredAllowed) {
+      try {
+        this.warn(`[openagi] skill '${skill.name}' ran with the full tool registry because it has no allowed_tools frontmatter; prefer use_skill for contextual procedures.`);
+      } catch { /* visibility must not break execution */ }
+    }
+    const advertisedTools = effectiveAllowed
+      ? (this.runtime.tools?.toOpenAITools?.({ only: effectiveAllowed }) ?? [])
+      : (this.runtime.tools?.toOpenAITools?.() ?? []);
     // Story 2: record outcome lineage for the skill run. If the skill
     // was materialized from a proactive-suggestion, the outcome carries
     // that suggestion id forward so /proactive/suggestions/:id/outcome
@@ -473,10 +525,17 @@ export class SkillRegistry {
         agent: { id: agentName, name: agentName, systemPrompt: skill.systemPrompt ?? "" },
         memoryHits: [],
         messages: [],
-        tools: this.runtime.tools?.toOpenAITools?.() ?? [],
+        tools: advertisedTools,
         toolRegistry: this.runtime.tools,
         instructions,
-        context: { ...context, skill: skill.name }
+        context: {
+          ...context,
+          skill: skill.name,
+          ...(effectiveAllowed ? {
+            __advertisedTools: effectiveAllowed,
+            __allowedTools: effectiveAllowed
+          } : {})
+        }
       });
       // Tool-using skill completions are graded by their per-call results.
       // Text-only completions keep the historical 0.7.
@@ -585,17 +644,17 @@ function readUtf8FileCapped(filePath, maxBytes, label) {
 }
 
 function parseSkill(filePath, dir) {
-  let text;
-  try {
-    text = readUtf8FileCapped(filePath, MAX_SKILL_FILE_BYTES, "SKILL.md");
-  } catch {
-    return null;
-  }
-  const match = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/.exec(text);
-  if (!match) return null;
+  const text = readUtf8FileCapped(filePath, MAX_SKILL_FILE_BYTES, "SKILL.md");
+  // Accept the historical one-newline form for existing hand-authored
+  // skills, while every writer in this repo emits the canonical blank line.
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n([\s\S]*)$/.exec(text);
+  if (!match) throw new Error("SKILL.md must contain a complete frontmatter block");
   const meta = parseFrontmatter(match[1]);
   const body = match[2].trim();
-  if (!isValidSkillSlug(meta.name) || Buffer.byteLength(body, "utf8") > MAX_SKILL_BODY_BYTES) return null;
+  if (!isValidSkillSlug(meta.name)) throw new Error("frontmatter name must be a valid lowercase kebab-case skill slug");
+  if (Buffer.byteLength(body, "utf8") > MAX_SKILL_BODY_BYTES) {
+    throw new Error(`skill body exceeds ${MAX_SKILL_BODY_BYTES} bytes`);
+  }
   return {
     name: meta.name,
     description: meta.description ?? "",
@@ -603,6 +662,7 @@ function parseSkill(filePath, dir) {
     parameters: meta.parameters ?? null,
     category: meta.category ?? null,
     pinned: meta.pinned === true || meta.pinned === "true",
+    allowedTools: normalizeAllowedTools(meta.allowed_tools),
     // Story 2: lineage back to the proactive-suggestion that birthed
     // this skill (set by skill-materialize.js when the user accepts
     // a category=skill proposal). null for hand-authored skills.
@@ -711,31 +771,51 @@ export function updateFrontmatter(text, updates = {}, newBody = undefined) {
 
 function parseFrontmatter(text) {
   const out = {};
-  for (const rawLine of text.split(/\r?\n/)) {
+  for (const [lineIndex, rawLine] of text.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const idx = line.indexOf(":");
-    if (idx <= 0) continue;
+    if (idx <= 0) throw new Error(`invalid frontmatter line ${lineIndex + 1}: expected key: value`);
     const key = line.slice(0, idx).trim();
+    if (Object.hasOwn(out, key)) throw new Error(`duplicate frontmatter key: ${key}`);
     let value = line.slice(idx + 1).trim();
-    if (value.startsWith('"') && value.endsWith('"')) {
+    if (value.startsWith('"')) {
+      if (!value.endsWith('"') || value.length === 1) {
+        throw new Error(`unterminated JSON string for frontmatter key ${key}`);
+      }
       try {
         value = JSON.parse(value);
-      } catch {
-        value = value.slice(1, -1);
+      } catch (error) {
+        throw new Error(`invalid JSON string for frontmatter key ${key}: ${error.message}`);
       }
-    } else if (value.startsWith("'") && value.endsWith("'")) {
+    } else if (value.startsWith("'")) {
+      if (!value.endsWith("'") || value.length === 1) {
+        throw new Error(`unterminated quoted string for frontmatter key ${key}`);
+      }
       value = value.slice(1, -1);
     } else if (value.startsWith("{") || value.startsWith("[")) {
       try {
         value = JSON.parse(value);
-      } catch {
-        // leave as raw string
+      } catch (error) {
+        throw new Error(`invalid JSON value for frontmatter key ${key}: ${error.message}`);
       }
     }
     out[key] = value;
   }
   return out;
+}
+
+function normalizeAllowedTools(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (!Array.isArray(value)) throw new Error("allowed_tools must be a JSON array of tool names");
+  const names = [];
+  for (const raw of value) {
+    if (typeof raw !== "string" || !raw.trim() || raw.length > 128 || raw.includes("\0")) {
+      throw new Error("allowed_tools entries must be non-empty tool-name strings up to 128 characters");
+    }
+    names.push(raw.trim());
+  }
+  return [...new Set(names)];
 }
 
 function renderTemplate(template, vars) {

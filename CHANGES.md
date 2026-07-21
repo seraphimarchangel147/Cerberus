@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Skill diagnostics, allowlists, and revisions (Codex)
+
+- Skill reloads now skip malformed files without crashing while retaining structured diagnostics and warning once with the exact file and parse/size reason; malformed structured frontmatter is no longer silently treated as text.
+- Added optional JSON frontmatter `allowed_tools`: isolated `run_skill` generations advertise only that subset on both provider shapes and carry the same invoke-time ceiling. Legacy skills remain compatible, with an explicit full-registry exposure warning that recommends `use_skill`.
+- Added per-skill `revisions.jsonl` records containing complete before/after documents and hashes for creation, materialization, patch, edit, pin, and delete operations so prior content is auditable and reconstructable.
+- Fixed materialized frontmatter to retain the canonical blank line before the body while keeping legacy one-newline skills loadable, and added regressions for diagnostics, restricted/default execution, revision appends, and real materialized-skill loading.
+SKILL PACK PHASE COMPLETE
+
 ## 2026-07-21 — Fence-safe Discord streaming and bounded retries (Codex)
 
 - Replaced fixed Discord slicing with an exported boundary-aware chunker that preserves short messages exactly, prefers paragraph/line/word breaks, and closes/reopens fenced code (including its language hint) across normal sends and streamed rollover.

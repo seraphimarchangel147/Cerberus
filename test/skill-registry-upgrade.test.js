@@ -14,7 +14,8 @@ import {
   SkillRegistry,
   updateFrontmatter
 } from "../src/skills.js";
-import { dedupeSlug } from "../src/skill-materialize.js";
+import { createSkillFromSuggestion, dedupeSlug } from "../src/skill-materialize.js";
+import { SKILL_REVISION_LOG } from "../src/skill-revisions.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,15 +33,15 @@ function writeSkill(dir, name, { description = "test skill", body = "Do the thin
   return skillDir;
 }
 
-function makeRegistry({ withUser = true } = {}) {
+function makeRegistry({ withUser = true, warn = undefined } = {}) {
   const bundled = makeTmp();
   const user = withUser ? makeTmp() : null;
   const dataDir = makeTmp();
   const dirs = withUser ? [bundled, user] : [bundled];
   const runtime = { skills: null, tools: null, outcomes: null };
-  const reg = new SkillRegistry({ runtime, dirs, dataDir, autoLoad: false });
+  const reg = new SkillRegistry({ runtime, dirs, dataDir, autoLoad: false, warn });
   runtime.skills = { dirs }; // pickUserSkillsDir reads runtime.skills.dirs
-  return { reg, bundled, user, dataDir };
+  return { reg, runtime, bundled, user, dataDir };
 }
 
 test("view() returns body + stats and bumps usage telemetry", () => {
@@ -164,6 +165,44 @@ test("fixed-cost tool surface registers; per-skill tools gated by env", () => {
   delete process.env.OPENAGI_SKILLS_AS_TOOLS;
 });
 
+test("run_skill enforces declared tool allowlists and exposes legacy full-registry runs", async () => {
+  const warnings = [];
+  const { reg, runtime, user } = makeRegistry({ warn: (message) => warnings.push(message) });
+  writeSkill(user, "restricted-run", { extraFm: 'allowed_tools: ["read_data", "summarize"]\n' });
+  writeSkill(user, "legacy-run");
+  reg.reload();
+  const definitions = ["read_data", "summarize", "delete_data"].map((name) => ({ name }));
+  const schemaCalls = [];
+  runtime.tools = {
+    toOpenAITools(options) {
+      schemaCalls.push(options);
+      if (!options?.only) return definitions;
+      return definitions.filter((tool) => options.only.includes(tool.name));
+    }
+  };
+  const requests = [];
+  runtime.agentHost = {
+    modelProvider: {
+      async generate(request) {
+        requests.push(request);
+        return { text: "done", toolCalls: [] };
+      }
+    }
+  };
+
+  await reg.run("restricted-run", { input: "go" }, { sessionId: "session" });
+  assert.deepEqual(requests[0].tools.map((tool) => tool.name), ["read_data", "summarize"]);
+  assert.deepEqual(requests[0].context.__advertisedTools, ["read_data", "summarize"]);
+  assert.deepEqual(requests[0].context.__allowedTools, ["read_data", "summarize"], "invoke-time access is bounded too");
+  assert.deepEqual(schemaCalls[0], { only: ["read_data", "summarize"] });
+  assert.equal(warnings.length, 0);
+
+  await reg.run("legacy-run", { input: "go" });
+  assert.deepEqual(requests[1].tools, definitions, "absent allowlist preserves the legacy schema surface");
+  assert.equal(schemaCalls[1], undefined);
+  assert.match(warnings[0], /full tool registry.*no allowed_tools.*prefer use_skill/iu);
+});
+
 test("usage telemetry survives a registry reload (JSONL persistence)", () => {
   const { reg, user, dataDir } = makeRegistry();
   writeSkill(user, "durable");
@@ -281,8 +320,9 @@ test("createSkill dedupes valid titles and rejects path-like names", () => {
   assert.throws(() => dedupeSlug(user, "../escape"), /invalid skill slug/i);
 });
 
-test("empty, malformed, and oversized skills are ignored; mutations enforce the body cap", () => {
-  const { reg, user } = makeRegistry();
+test("empty, malformed, and oversized skills are ignored with visible diagnostics; mutations enforce the body cap", () => {
+  const warnings = [];
+  const { reg, user } = makeRegistry({ warn: (message) => warnings.push(message) });
   fs.mkdirSync(path.join(user, "empty-dir"), { recursive: true });
   const malformedDir = path.join(user, "malformed");
   fs.mkdirSync(malformedDir, { recursive: true });
@@ -294,6 +334,10 @@ test("empty, malformed, and oversized skills are ignored; mutations enforce the 
   assert.equal(reg.has("empty-dir"), false);
   assert.equal(reg.has("malformed"), false);
   assert.equal(reg.has("oversized-on-disk"), false);
+  assert.equal(reg.getDiagnostics().length, 2, "only directories containing invalid SKILL.md files are diagnostic failures");
+  assert.ok(reg.getDiagnostics().some((entry) => entry.file.endsWith("malformed/SKILL.md") && /frontmatter/u.test(entry.reason)));
+  assert.ok(reg.getDiagnostics().some((entry) => entry.file.endsWith("oversized-on-disk/SKILL.md") && /too large|exceeds/u.test(entry.reason)));
+  assert.equal(warnings.length, 2);
   assert.throws(
     () => reg.createSkill({ name: "oversized-create", body: "x".repeat(MAX_SKILL_BODY_BYTES + 1) }),
     /body.*too large|exceeds/i
@@ -307,6 +351,51 @@ test("empty, malformed, and oversized skills are ignored; mutations enforce the 
     /body.*too large|exceeds/i
   );
   assert.equal(reg.mustGet("size-edit").body, "small body");
+});
+
+test("skill updates append revertible per-skill revisions", () => {
+  const { reg, user } = makeRegistry();
+  writeSkill(user, "revisioned", { body: "first body" });
+  reg.reload();
+  reg.patchSkill("revisioned", "first body", "second body", "tester");
+  reg.editSkill("revisioned", { body: "third body" }, "tester");
+
+  const revisionPath = path.join(user, "revisioned", SKILL_REVISION_LOG);
+  const revisions = fs.readFileSync(revisionPath, "utf8").trim().split(/\r?\n/u).map(JSON.parse);
+  assert.equal(revisions.length, 2);
+  assert.equal(revisions[0].action, "patched");
+  assert.match(revisions[0].before, /first body/u);
+  assert.match(revisions[0].after, /second body/u);
+  assert.equal(revisions[1].action, "edited");
+  assert.match(revisions[1].before, /second body/u);
+  assert.match(revisions[1].after, /third body/u);
+  assert.notEqual(revisions[1].beforeHash, revisions[1].afterHash);
+});
+
+test("materialized skills preserve the frontmatter separator and start revision history", () => {
+  const bundled = makeTmp();
+  const user = makeTmp();
+  const runtime = { skills: { dirs: [bundled, user] } };
+  const created = createSkillFromSuggestion({
+    runtime,
+    suggestion: {
+      id: "suggestion-revision",
+      title: "Release Routine",
+      rationale: "Repeatable release workflow",
+      draftBody: "1. Verify canary.\n2. Promote production."
+    }
+  });
+  const document = fs.readFileSync(created.path, "utf8");
+  assert.match(document, /\n---\n\n1\. Verify canary/u, "the body must follow a real blank separator");
+  const revisions = fs.readFileSync(path.join(user, created.slug, SKILL_REVISION_LOG), "utf8").trim().split(/\r?\n/u).map(JSON.parse);
+  assert.equal(revisions.length, 1);
+  assert.equal(revisions[0].action, "materialized");
+  assert.equal(revisions[0].before, null);
+  assert.equal(revisions[0].after, document);
+
+  const registry = new SkillRegistry({ runtime, dirs: runtime.skills.dirs, dataDir: makeTmp(), autoLoad: false });
+  registry.reload();
+  assert.equal(registry.has(created.slug), true, "materialized output must load through the real parser");
 });
 
 test("deleteSkill avoids existing .trash destination names", () => {
