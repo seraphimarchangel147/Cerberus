@@ -14,6 +14,21 @@ const SPECIALIST_CORE_TOOLS = [
   "list_tasks", "agent_pick_next", "complete_task", "move_task", "save_draft"
 ];
 
+export const CHAT_CORE_TOOLS = Object.freeze([
+  "recall",
+  "remember",
+  "list_sessions",
+  "schedule_message",
+  "run_skill",
+  "list_skills"
+]);
+export const DEFAULT_CHAT_MAX_ITERATIONS = 4;
+
+// This intentionally errs toward the full lane. It recognizes concrete work
+// verbs, including polite request wrappers, without trying to infer intent
+// from every ordinary question.
+export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
+
 // Intentionally narrow, anchored phrases: consent should be explicit, not
 // inferred from a sentence that merely contains "yes" or "continue". The
 // list is exported so additions remain visible and regression-tested.
@@ -29,6 +44,25 @@ const CHAT_AUTHOR_PREFIX_RE = /^\[[^\]\r\n]{1,100}\]\s*/u;
 
 function normalizedDirectReply(value) {
   return String(value ?? "").trim().replace(CHAT_AUTHOR_PREFIX_RE, "").trim();
+}
+
+export function hasImperativeToolIntent(value) {
+  return CHAT_TOOL_INTENT_RE.test(normalizedDirectReply(value));
+}
+
+export function resolveChatMaxIterations(env = process.env) {
+  const parsed = Number(env.OPENAGI_CHAT_MAX_ITERATIONS);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_CHAT_MAX_ITERATIONS;
+}
+
+export function isConversationalTurn({ channel, verdict, detectedTask, text }) {
+  const interactive = channel !== "autopilot" && channel !== "cron" && channel !== "subagent";
+  return Boolean(
+    interactive
+    && (verdict === "ignore" || verdict === "watch")
+    && !detectedTask
+    && !hasImperativeToolIntent(text)
+  );
 }
 
 export function isExplicitConsent(value) {
@@ -111,15 +145,16 @@ export class AgentHost {
     const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
     const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
 
+    const detectedTask = detectTaskInChat(text);
+
     // Auto-task detection — if the user said "remind me to X" / "todo: X" /
     // "I need to X", create a task in the user queue without requiring them
     // to invoke add_task. Best-effort; failures don't block the chat reply.
     if (!ephemeral && this.runtime?.tasks?.add && agentId === "main" && channel !== "autopilot" && channel !== "subagent") {
-      const detected = detectTaskInChat(text);
-      if (detected) {
+      if (detectedTask) {
         try {
           this.runtime.tasks.add(
-            { title: detected.title, sourceMeta: { sessionId, snippet: text.slice(0, 200), trigger: detected.trigger } },
+            { title: detectedTask.title, sourceMeta: { sessionId, snippet: text.slice(0, 200), trigger: detectedTask.trigger } },
             { source: "chat", queue: "user" }
           );
         } catch { /* swallow */ }
@@ -224,10 +259,24 @@ export class AgentHost {
     if (typeof input.onToolEvent === "function") {
       try { input.onToolEvent({ phase: "verdict", action: verdict, score: output.scrutiny.score }); } catch { /* advisory */ }
     }
+    const conversational = isConversationalTurn({ channel, verdict, detectedTask, text });
     const toolRegistry = this.runtime.tools;
-    let tools = toolPolicy === "none"
+    // The fast lane trims schemas only. Side-effect and scope enforcement
+    // below remains authoritative even for core tools advertised on a watch
+    // or ignore turn.
+    let tools = toolPolicy === "none" && !conversational
       ? []
-      : (toolRegistry?.toOpenAITools?.({ readOnly: toolPolicy === "read-only" }) ?? []);
+      : (toolRegistry?.toOpenAITools?.(
+          conversational ? { only: CHAT_CORE_TOOLS } : { readOnly: toolPolicy === "read-only" }
+        ) ?? []);
+    // Embedders may supply a custom registry with none of OpenAGI's named
+    // chat-core tools. Preserve their historical watch behavior rather than
+    // silently advertising nothing; the production registry never needs this
+    // fallback because it owns every name in CHAT_CORE_TOOLS.
+    const chatCoreUnavailable = conversational && tools.length === 0 && toolPolicy === "read-only";
+    if (chatCoreUnavailable) {
+      tools = toolRegistry?.toOpenAITools?.({ readOnly: true }) ?? [];
+    }
 
     // Specialist bounds: a bounded specialist sees (and may invoke) only its
     // scoped allowlist + the core set every specialist needs. Without this,
@@ -303,6 +352,9 @@ export class AgentHost {
       __scrutinyPolicy: toolPolicy === "none" ? "none" : toolPolicy === "read-only" ? "read-only" : toolPolicy === "confirm" ? "confirm" : null,
       __reason: toolPolicy === "confirm" ? confirmPolicyReason(output.scrutiny.score) : null,
       __allowedTools: allowedToolNames,
+      // Provider-side schema shaping only; ToolRegistry.invoke deliberately
+      // does not read this field.
+      __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
       __memoryScope: memoryScope,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,
       __abortSignal: turnAbortController.signal,
@@ -331,7 +383,7 @@ export class AgentHost {
         toolRegistry,
         context: modelContext,
         onDelta: typeof input.onDelta === "function" ? input.onDelta : null,
-        maxIterations: input.maxIterations,
+        maxIterations: conversational ? resolveChatMaxIterations() : input.maxIterations,
         maxTurnSeconds: input.maxTurnSeconds
       });
     } catch (error) {
@@ -357,6 +409,7 @@ export class AgentHost {
         scrutinyScore: output.scrutiny.score,
         consentOverride,
         askDamped,
+        conversational,
         scrutinyCeilingApplied,
         effectiveScrutinyAction: verdict,
         verdictOverrideReason,
@@ -443,6 +496,7 @@ export class AgentHost {
         maxIterations: modelResult.maxIterations ?? null,
         stopReason: modelResult.stopReason ?? null
       },
+      conversational,
       output
     };
   }

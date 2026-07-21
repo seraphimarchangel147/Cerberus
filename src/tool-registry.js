@@ -79,7 +79,13 @@ export class ToolRegistry {
   // advertised is STILL invokable via run_mcp_tool + discoverable via
   // list_mcp_tools — no capability is lost, just the direct function affordance.
   _modelToolList(options = {}) {
-    const all = this.list(options);
+    const listed = this.list(options);
+    // `only` narrows what the model sees; it never removes tools from the
+    // registry or changes invoke-time policy. Leaving it unset preserves the
+    // existing hot path byte-for-byte at the API boundary.
+    const all = Array.isArray(options.only)
+      ? listed.filter((tool) => options.only.includes(tool.name))
+      : listed;
     const max = Number(process.env.OPENAGI_MAX_MODEL_TOOLS) || 128;
     if (all.length <= max) return all;
     const core = all.filter((t) => t.source !== "mcp");

@@ -263,3 +263,12 @@ ALL PARITY PHASES COMPLETE
 - Make `ChannelManager` bind explicit null Discord and Telegram tokens in test mode, and make an explicitly supplied null Discord token authoritative rather than falling back to the daemon environment.
 - Preserve inherited environments for `code_shell`, `code_lint`, and every other subprocess path.
 - Validation: `node --test` passes 611/611 (0 failed).
+
+## 2026-07-21 - Add a conversational chat fast lane (Codex)
+
+- Classify only interactive, low-scrutiny, non-task, non-imperative turns as conversational; expose that decision on the returned turn and outcome audit metadata.
+- Advertise only `recall`, `remember`, `list_sessions`, `schedule_message`, `run_skill`, and `list_skills` on those turns in both OpenAI- and Anthropic-shaped requests, without changing scrutiny or invoke-time gates.
+- Cap conversational turns at four iterations by default with a live `OPENAGI_CHAT_MAX_ITERATIONS` override; task, imperative, cron, autopilot, and subagent work retains its configured limit.
+- Preserve legacy watch behavior for custom registries that contain none of the named chat-core tools, while leaving the normal unfiltered schema path unchanged.
+- Validation: `node --test` passes 617/617 (0 failed).
+SELFQA + FASTLANE PHASE COMPLETE

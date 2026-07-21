@@ -426,7 +426,11 @@ export class OpenAIResponsesProvider {
     ];
 
     const baseInstructions = instructions ?? buildDefaultInstructions({ agent });
-    const toolList = tools.length > 0 ? tools : toolRegistry?.toOpenAITools?.() ?? [];
+    const toolList = tools.length > 0
+      ? tools
+      : Array.isArray(context.__advertisedTools)
+        ? []
+        : toolRegistry?.toOpenAITools?.() ?? [];
     const toolCalls = [];
 
     const deadline = this.now() + (maxTurnSeconds * 1000);
@@ -663,9 +667,12 @@ export class AnthropicProvider {
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
 
-    let tools = context.__scrutinyPolicy === "none"
-      ? []
-      : (toolRegistry?.toAnthropicTools?.({ readOnly: context.__scrutinyPolicy === "read-only" }) ?? []);
+    const advertisedTools = Array.isArray(context.__advertisedTools) ? context.__advertisedTools : null;
+    let tools = advertisedTools
+      ? (toolRegistry?.toAnthropicTools?.({ only: advertisedTools }) ?? [])
+      : context.__scrutinyPolicy === "none"
+        ? []
+        : (toolRegistry?.toAnthropicTools?.({ readOnly: context.__scrutinyPolicy === "read-only" }) ?? []);
     if (Array.isArray(context.__allowedTools)) {
       const allowed = new Set(context.__allowedTools);
       tools = tools.filter((tool) => allowed.has(tool.name));
