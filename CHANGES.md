@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Fence-safe Discord streaming and bounded retries (Codex)
+
+- Replaced fixed Discord slicing with an exported boundary-aware chunker that preserves short messages exactly, prefers paragraph/line/word breaks, and closes/reopens fenced code (including its language hint) across normal sends and streamed rollover.
+- Flipped `DISCORD_STREAMING` to default ON now that rollover preserves fenced rendering; operators can still disable it live with `0`, `false`, or `off`.
+- Bounded Discord REST rate-limit recovery to three total attempts, honoring `retry_after` with a capped delay and retrying only explicit 429 responses before a send succeeds.
+- Added isolated regressions for short/plain/fenced chunks, streamed fences, a 429-then-success send, and graceful exhaustion after three 429s.
+STREAMING CHUNKING PHASE COMPLETE
+
 ## 2026-07-21 — Optional post-turn background review (Codex)
 
 - Added a default-off, best-effort review pass that yields the completed reply before asking the provider's nano-tier `review` task for strict structured memory and skill proposals. Reviews are bounded to two iterations and never recurse through AgentHost.

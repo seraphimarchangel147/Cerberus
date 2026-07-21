@@ -7,7 +7,7 @@
 //   DISCORD_GUILDS        — comma-separated guild ids to serve (empty = all)
 //   DISCORD_REQUIRE_MENTION — "1" (default) only reply in guilds when pinged
 //   DISCORD_REPLY         — "1"/"true"/"on" enables quoted replies (default off)
-//   DISCORD_STREAMING     — "1"/"true"/"on" enables live token edits (default off)
+//   DISCORD_STREAMING     — "0"/"false"/"off" disables live token edits (default on)
 //
 // Behavior mirrors the hermesagent wiring this agent migrated from:
 //   * guild messages require a mention (user OR role ping counts)
@@ -27,6 +27,8 @@ const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const EPHEMERAL = 64;
 const EXPIRED_COLOR = 0x95a5a6;
+const DISCORD_REST_MAX_ATTEMPTS = 3;
+const DISCORD_RETRY_MAX_MS = 10_000;
 
 // Reply quoting is deliberately opt-in and checked at send time. Operators
 // can flip DISCORD_REPLY live without rebuilding the channel or changing the
@@ -38,7 +40,7 @@ export function discordReplyEnabled() {
 
 export function discordStreamingEnabled() {
   const value = String(process.env.DISCORD_STREAMING ?? "").trim().toLowerCase();
-  return value === "1" || value === "true" || value === "on";
+  return value !== "0" && value !== "false" && value !== "off";
 }
 
 export function formatEmptyTurnFallback(result = {}) {
@@ -107,6 +109,8 @@ export class DiscordChannel {
     // approvals" / "Playing kimi-k3"). DISCORD_PRESENCE=0 disables.
     this.presence = (options.presence ?? process.env.DISCORD_PRESENCE ?? "1") !== "0";
     this.presenceTimer = null;
+    this.restFetch = options.fetch ?? globalThis.fetch;
+    this.restSleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   status() {
@@ -750,24 +754,34 @@ export class DiscordChannel {
   }
 
   async rest(pathname, { method = "GET", body } = {}) {
-    const response = await fetch(`${API}${pathname}`, {
-      method,
-      headers: {
-        authorization: `Bot ${this.token}`,
-        ...(body ? { "content-type": "application/json" } : {})
-      },
-      ...(body ? { body: JSON.stringify(body) } : {})
-    });
-    if (response.status === 429) {
-      const data = await response.json().catch(() => ({}));
-      const wait = Math.ceil((data.retry_after ?? 1) * 1000);
-      await new Promise((r) => setTimeout(r, wait));
-      return this.rest(pathname, { method, body });
+    for (let attempt = 1; attempt <= DISCORD_REST_MAX_ATTEMPTS; attempt += 1) {
+      const response = await (this.restFetch ?? globalThis.fetch)(`${API}${pathname}`, {
+        method,
+        headers: {
+          authorization: `Bot ${this.token}`,
+          ...(body ? { "content-type": "application/json" } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      });
+      if (response.status === 429) {
+        const data = await response.json().catch(() => ({}));
+        if (attempt >= DISCORD_REST_MAX_ATTEMPTS) {
+          const error = new Error(`Discord ${method} ${pathname} remained rate limited after ${attempt} attempts`);
+          error.status = 429;
+          throw error;
+        }
+        const retryMs = Math.ceil(Math.max(0, Number(data.retry_after) || 1) * 1000);
+        await (this.restSleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(
+          Math.min(DISCORD_RETRY_MAX_MS, retryMs)
+        );
+        continue;
+      }
+      if (response.status === 204) return null;
+      const json = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(json?.message ?? `Discord ${method} ${pathname} failed with ${response.status}`);
+      return json;
     }
-    if (response.status === 204) return null;
-    const json = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(json?.message ?? `Discord ${method} ${pathname} failed with ${response.status}`);
-    return json;
+    return null;
   }
 }
 
@@ -897,28 +911,71 @@ function approvalResultText(action, result) {
   return lines.join("\n").slice(0, 1900);
 }
 
-function chunkText(text, size) {
+export function chunkText(text, size = 1990) {
   if (text.length <= size) return [text];
+  if (!Number.isInteger(size) || size < 16) throw new Error("Discord chunk size must be an integer of at least 16.");
   const chunks = [];
   let rest = text;
+  let carriedFence = null;
   while (rest.length > 0) {
-    let cut = rest.length <= size ? rest.length : rest.lastIndexOf("\n", size);
-    if (cut <= 0) cut = size;
-    chunks.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\n+/, "");
+    const prefix = carriedFence ? `${carriedFence.opener}\n` : "";
+    let limit = Math.max(1, size - prefix.length);
+    let cut = preferredChunkCut(rest, limit);
+    let payload = rest.slice(0, cut);
+    let nextFence = scanFenceState(payload, carriedFence);
+    let suffix = nextFence ? `\n${nextFence.marker}` : "";
+
+    // Closing an open fence consumes part of Discord's limit. Re-select the
+    // natural boundary with that overhead included instead of truncating the
+    // close marker or emitting an oversized chunk.
+    while (prefix.length + payload.length + suffix.length > size) {
+      limit = Math.max(1, size - prefix.length - suffix.length);
+      cut = preferredChunkCut(rest, Math.min(limit, cut - 1));
+      payload = rest.slice(0, cut);
+      nextFence = scanFenceState(payload, carriedFence);
+      suffix = nextFence ? `\n${nextFence.marker}` : "";
+    }
+
+    chunks.push(`${prefix}${payload}${suffix}`);
+    rest = rest.slice(cut);
+    carriedFence = nextFence;
   }
   return chunks;
+}
+
+function preferredChunkCut(text, limit) {
+  if (text.length <= limit) return text.length;
+  const paragraph = text.lastIndexOf("\n\n", limit);
+  if (paragraph >= Math.floor(limit * 0.35)) return paragraph + 2;
+  const line = text.lastIndexOf("\n", limit);
+  if (line >= Math.floor(limit * 0.35)) return line + 1;
+  const whitespace = Math.max(text.lastIndexOf(" ", limit), text.lastIndexOf("\t", limit));
+  if (whitespace >= Math.floor(limit * 0.6)) return whitespace + 1;
+  return limit;
+}
+
+function scanFenceState(text, initialFence = null) {
+  let state = initialFence;
+  const fenceLine = /^(?: {0,3})(`{3,})([^\r\n]*)/gmu;
+  for (const match of text.matchAll(fenceLine)) {
+    const marker = match[1];
+    const info = match[2].trim();
+    if (!state) {
+      // Discord language hints are tiny; bounding a malformed multi-kilobyte
+      // hint guarantees a continuation prefix can never consume a whole part.
+      state = { marker, opener: `${marker}${info.slice(0, 64)}` };
+    } else if (!info && marker.length >= state.marker.length) {
+      state = null;
+    }
+  }
+  return state;
 }
 
 const STREAM_MESSAGE_CHARS = 1990;
 const STREAM_EDIT_MIN_MS = 1200;
 
 function streamChunks(text) {
-  const chunks = [];
-  for (let offset = 0; offset < text.length; offset += STREAM_MESSAGE_CHARS) {
-    chunks.push(text.slice(offset, offset + STREAM_MESSAGE_CHARS));
-  }
-  return chunks;
+  return chunkText(text, STREAM_MESSAGE_CHARS);
 }
 
 // A streaming reply is one append-only text buffer rendered through a small

@@ -215,12 +215,14 @@ test("the SSE parser rejects malformed tool JSON instead of invoking with partia
   );
 });
 
-test("Discord streaming is opt-in and reads the environment live", (t) => {
+test("Discord streaming defaults on and reads explicit disable/enable values live", (t) => {
   isolateStreamingEnv(t);
-  assert.equal(discordStreamingEnabled(), false);
+  assert.equal(discordStreamingEnabled(), true);
   process.env.DISCORD_STREAMING = "on";
   assert.equal(discordStreamingEnabled(), true);
   process.env.DISCORD_STREAMING = "0";
+  assert.equal(discordStreamingEnabled(), false);
+  process.env.DISCORD_STREAMING = "false";
   assert.equal(discordStreamingEnabled(), false);
 });
 
