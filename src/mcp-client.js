@@ -4,7 +4,20 @@ import path from "node:path";
 import { nowIso } from "./utils.js";
 
 const PROTOCOL_VERSION = "2024-11-05";
-const SAFE_ENV_KEYS = ["PATH", "HOME", "USER", "USERPROFILE", "LANG", "LC_ALL", "TZ", "TMPDIR", "NODE_PATH"];
+export const SAFE_ENV_KEYS = Object.freeze(["PATH", "HOME", "USER", "USERPROFILE", "LANG", "LC_ALL", "TZ", "TMPDIR", "NODE_PATH"]);
+
+export function buildSafeEnv(extraEnv = {}) {
+  const out = {};
+  for (const key of SAFE_ENV_KEYS) {
+    if (process.env[key]) out[key] = process.env[key];
+  }
+  for (const [key, value] of Object.entries(extraEnv ?? {})) {
+    if (typeof key !== "string") continue;
+    if (/[^A-Z0-9_]/i.test(key)) continue;
+    out[key] = String(value);
+  }
+  return out;
+}
 
 export class McpStdioClient {
   constructor(options = {}) {
@@ -179,16 +192,7 @@ export class McpStdioClient {
   }
 
   buildEnv() {
-    const out = {};
-    for (const key of SAFE_ENV_KEYS) {
-      if (process.env[key]) out[key] = process.env[key];
-    }
-    for (const [key, value] of Object.entries(this.env ?? {})) {
-      if (typeof key !== "string") continue;
-      if (/[^A-Z0-9_]/i.test(key)) continue;
-      out[key] = String(value);
-    }
-    return out;
+    return buildSafeEnv(this.env);
   }
 
   close() {

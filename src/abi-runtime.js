@@ -17,6 +17,7 @@ import { registerIMessagePoller } from "./integrations/imessage-poller.js";
 import { registerBuildBetterTaskSource } from "./integrations/buildbetter-tasks.js";
 import { registerCalendarIntegration } from "./integrations/calendar.js";
 import { registerWebSearchTools } from "./integrations/web-search.js";
+import { registerExecuteCodeTool } from "./integrations/execute-code.js";
 import { registerImessageSearchTool } from "./integrations/imessage-search-tool.js";
 import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
@@ -458,6 +459,9 @@ export class AbiRuntime {
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
       // tests, gated shell, sub-agent delegation. See src/code-tools.js.
       registerCodeTools(this.tools, this);
+      // A VM script can compact multi-step tool work, but every nested call
+      // re-enters this same registry so scrutiny and catastrophic gates hold.
+      registerExecuteCodeTool(this);
       // Computer-use tools register only when explicitly opted-in via env
       // (OPENAGI_COMPUTER_USE=1). Default install doesn't expose them so
       // an LLM can't accidentally try to drive the user's screen. The

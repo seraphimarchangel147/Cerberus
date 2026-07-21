@@ -211,3 +211,13 @@ TIER2 HARDENING COMPLETE
 - Added transport-stubbed regressions for the builtin declaration, exact echo transcript, multi-hop continuation, citations/prose normalization, timeout behavior, live configuration, external-provider priority, and secret-safe errors. Tests never call the live API.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 569/569; changed filenames/content pass the Cyrillic, Greek, nonstandard-hyphen, and fullwidth scan.
 WEB SEARCH PHASE COMPLETE
+
+## 2026-07-21 - Hermes-style execute_code sandbox (Codex)
+
+- Added `execute_code`, a 50-call orchestration tool for short JavaScript bodies that reduce multi-tool intermediate data to a capped printed summary.
+- Kept every nested `callTool(name, args)` in the parent `ToolRegistry`, inheriting scrutiny and specialist bounds while deliberately dropping wrapper approval so catastrophic child calls still require their own human decision.
+- Isolated the `node:vm` context in a memory-limited worker thread. This remains process-local, but gives the harness a reliable hard kill for infinite loops after `await`; Node 22's experimental in-context microtask timeout path can abort the host process in that case.
+- The VM surface is ECMAScript intrinsics plus frozen `console.log` and `callTool`. It has no process/environment, module loader, dynamic code generation, network, timers, buffers, or filesystem globals; the worker also receives only the existing MCP-safe environment allowlist.
+- Added regressions for three-file reduction, post-tool timeout, the 50-call ceiling, catastrophic passthrough in both policy lanes, 64 KiB stdout truncation, ghost-output rejection, sandbox escape resistance, and scrutiny gating.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 577/577; all changed filenames and contents pass the homoglyph scan.
+EXECUTE CODE PHASE COMPLETE
