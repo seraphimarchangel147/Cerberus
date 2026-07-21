@@ -7,6 +7,7 @@
 //   DISCORD_GUILDS        — comma-separated guild ids to serve (empty = all)
 //   DISCORD_REQUIRE_MENTION — "1" (default) only reply in guilds when pinged
 //   DISCORD_REPLY         — "1"/"true"/"on" enables quoted replies (default off)
+//   DISCORD_STREAMING     — "1"/"true"/"on" enables live token edits (default off)
 //
 // Behavior mirrors the hermesagent wiring this agent migrated from:
 //   * guild messages require a mention (user OR role ping counts)
@@ -31,6 +32,11 @@ const EXPIRED_COLOR = 0x95a5a6;
 // many call sites that still pass the originating message id.
 export function discordReplyEnabled() {
   const value = String(process.env.DISCORD_REPLY ?? "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "on";
+}
+
+export function discordStreamingEnabled() {
+  const value = String(process.env.DISCORD_STREAMING ?? "").trim().toLowerCase();
   return value === "1" || value === "true" || value === "on";
 }
 
@@ -353,6 +359,12 @@ export class DiscordChannel {
   async runTurn(message, text) {
     let typingTimer = null;
     const status = new LiveStatus(this, message.channel_id, this.liveStatus);
+    const replyStream = new DiscordReplyStream(
+      this,
+      message.channel_id,
+      message.id,
+      discordStreamingEnabled()
+    );
     try {
       await this.rest(`/channels/${message.channel_id}/typing`, { method: "POST" }).catch(() => {});
       typingTimer = setInterval(() => {
@@ -371,6 +383,7 @@ export class DiscordChannel {
         text: message.guild_id ? `[${authorName}] ${text}` : text,
         images,
         onToolEvent: (ev) => status.onEvent(ev),
+        onDelta: replyStream.enabled ? (chunk) => replyStream.onDelta(chunk) : null,
         metadata: {
           discordMessageId: message.id,
           channelId: message.channel_id,
@@ -381,13 +394,16 @@ export class DiscordChannel {
       await status.finish(result);
       const replyText = String(result?.reply ?? "").trim();
       if (replyText && replyText !== "(no text)") {
-        await this.sendMessage(message.channel_id, replyText, message.id);
+        const delivered = await replyStream.finish(replyText);
+        if (!delivered) await this.sendMessage(message.channel_id, replyText, message.id);
       } else {
         // Never end a pinged turn in silence — surface the actual stop reason.
+        await replyStream.stop();
         await this.sendMessage(message.channel_id, formatEmptyTurnFallback(result), message.id);
       }
     } catch (error) {
       this.log({ op: "turn-error", error: error.message });
+      await replyStream.stop().catch(() => {});
       await status.fail(error).catch(() => {});
       await this.sendMessage(message.channel_id, `⚠ ${error.message}`.slice(0, 500), message.id).catch(() => {});
     } finally {
@@ -865,6 +881,135 @@ function chunkText(text, size) {
     rest = rest.slice(cut).replace(/^\n+/, "");
   }
   return chunks;
+}
+
+const STREAM_MESSAGE_CHARS = 1990;
+const STREAM_EDIT_MIN_MS = 1200;
+
+function streamChunks(text) {
+  const chunks = [];
+  for (let offset = 0; offset < text.length; offset += STREAM_MESSAGE_CHARS) {
+    chunks.push(text.slice(offset, offset + STREAM_MESSAGE_CHARS));
+  }
+  return chunks;
+}
+
+// A streaming reply is one append-only text buffer rendered through a small
+// REST queue. The queue prevents out-of-order PATCHes, and fixed-size slices
+// make overflow deterministic: once a slice reaches Discord's limit, the next
+// token starts a new message instead of rewriting or losing earlier prose.
+export class DiscordReplyStream {
+  constructor(channel, channelId, replyToId, enabled, options = {}) {
+    this.channel = channel;
+    this.channelId = channelId;
+    this.replyToId = replyToId;
+    this.enabled = Boolean(enabled);
+    this.editMinMs = options.editMinMs ?? STREAM_EDIT_MIN_MS;
+    this.text = "";
+    this.messages = [];
+    this.dirty = false;
+    this.closed = false;
+    this.finishing = false;
+    this.timer = null;
+    this.lastFlushAt = 0;
+    this.flushQueued = false;
+    this.queue = Promise.resolve();
+    this.error = null;
+  }
+
+  onDelta(chunk) {
+    if (!this.enabled || this.closed || this.finishing) return;
+    const text = String(chunk ?? "");
+    if (!text) return;
+    this.text += text;
+    this.dirty = true;
+    this.schedule();
+  }
+
+  schedule() {
+    if (this.timer || this.flushQueued || this.closed || this.finishing) return;
+    const wait = this.messages.length === 0
+      ? 0
+      : Math.max(0, this.editMinMs - (Date.now() - this.lastFlushAt));
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.queueFlush();
+    }, wait);
+  }
+
+  queueFlush() {
+    if (this.flushQueued) return this.queue;
+    this.flushQueued = true;
+    const run = this.queue.then(() => this.flushSnapshot());
+    this.queue = run
+      .catch((error) => {
+        this.error = error;
+        this.channel.log?.({ op: "reply-stream-error", error: error?.message ?? String(error) });
+      })
+      .finally(() => {
+        this.flushQueued = false;
+        if (this.dirty && !this.closed && !this.finishing) this.schedule();
+      });
+    return this.queue;
+  }
+
+  async flushSnapshot() {
+    if (!this.dirty) return;
+    const desired = streamChunks(this.text);
+    this.dirty = false;
+
+    for (let i = 0; i < desired.length; i += 1) {
+      const content = desired[i];
+      const current = this.messages[i];
+      if (!current) {
+        const sent = await this.channel.sendMessage(
+          this.channelId,
+          content,
+          i === 0 ? this.replyToId : null
+        );
+        if (!sent?.id) throw new Error("Discord streaming message did not return an id.");
+        this.messages[i] = { id: sent.id, content };
+      } else if (current.content !== content) {
+        await this.channel.editMessage(this.channelId, current.id, content);
+        current.content = content;
+      }
+    }
+
+    while (this.messages.length > desired.length) {
+      const stale = this.messages.pop();
+      await this.channel.deleteMessage(this.channelId, stale.id).catch(() => {});
+    }
+    this.lastFlushAt = Date.now();
+  }
+
+  async finish(finalText) {
+    if (!this.enabled) return false;
+    this.finishing = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    const final = String(finalText ?? "");
+    if (final && final !== this.text) {
+      this.text = final;
+      this.dirty = true;
+    }
+    await this.queue;
+    if (this.dirty) await this.queueFlush();
+    await this.queue;
+    this.closed = true;
+    return this.messages.length > 0 && !this.error;
+  }
+
+  async stop() {
+    this.finishing = true;
+    this.closed = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    await this.queue;
+  }
 }
 
 // ── Live status message ──────────────────────────────────────────────

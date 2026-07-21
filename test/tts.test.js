@@ -169,8 +169,9 @@ test("speak uploads the cached audio on Discord", async () => {
   assert.match(uploads[0].filename, /^[0-9a-f-]+\.mp3$/);
 });
 
-test("AgentHost carries the Discord destination into tool context", async () => {
+test("AgentHost carries the Discord destination and streaming callback into the provider", async () => {
   let capturedContext = null;
+  let capturedDelta = null;
   const runtime = {
     context: {},
     memory: { retrieve: () => [], remember: () => null },
@@ -194,6 +195,7 @@ test("AgentHost carries the Discord destination into tool context", async () => 
     isConfigured: () => true,
     async generate(options) {
       capturedContext = options.context;
+      capturedDelta = options.onDelta;
       return { text: "done", toolCalls: [], iterations: 1 };
     }
   };
@@ -203,14 +205,17 @@ test("AgentHost carries the Discord destination into tool context", async () => 
     store: new FileBackedAgentStore({ dir: tempDir("tts-agent-host-") })
   });
 
+  const onDelta = () => {};
   await host.handleMessage({
     channel: "discord",
     from: "user-1",
     sessionId: "discord:guild-1:channel-9",
     text: "say hello",
+    onDelta,
     metadata: { channelId: "channel-9" }
   });
   assert.equal(capturedContext.channelId, "channel-9");
+  assert.equal(capturedDelta, onDelta);
 });
 
 test("setup wizard allowlists TTS configuration without exposing live keys", () => {

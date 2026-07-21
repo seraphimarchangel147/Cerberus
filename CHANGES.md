@@ -247,3 +247,12 @@ CTX SEARCH PHASE COMPLETE
 - Added a zero-dependency provider layer for the `edge-tts` CLI plus env-gated OpenAI and ElevenLabs HTTP APIs, with live provider/voice configuration, a 4000-character cap, request timeouts, secret-safe errors, and clear missing-CLI guidance.
 - Kept `speak` inside the normal tool registry so scrutiny, approval, audit, specialist bounds, and the catastrophic gate remain authoritative.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 601/601.
+
+## 2026-07-21 - Kimi SSE and Discord streaming replies (Codex)
+
+- Verified live before implementation: the configured `https://api.kimi.com/coding/v1/messages` endpoint with `kimi-k3` returned HTTP 200 and `text/event-stream;charset=utf-8` for `stream:true`, with ordered Anthropic message/content delta events assembling `STREAM_OK`.
+- Added an Anthropic SSE parser that reconstructs complete messages for the existing iteration/budget/tool loop while forwarding only user-visible text deltas; thinking and tool-input JSON remain internal.
+- Added opt-in, live-read `DISCORD_STREAMING` delivery (default off) with 1.2-second throttled edits, exact final-text reconciliation, and deterministic rollover before Discord's 2000-character limit.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 609/609.
+VOICE STREAMING PHASE COMPLETE
+ALL PARITY PHASES COMPLETE

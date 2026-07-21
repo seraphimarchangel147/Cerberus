@@ -161,6 +161,114 @@ function extractAnthropicText(response) {
     .trim();
 }
 
+// Anthropic's SSE stream is a delta protocol, while the existing iteration
+// engine consumes complete message objects. Reconstructing that same object
+// here keeps tool calls, usage accounting, budgets, and continuation behavior
+// on one path. Only user-visible text deltas leave this parser; thinking and
+// tool-input JSON remain internal to the agent loop.
+export async function readAnthropicEventStream(response, { onDelta } = {}) {
+  if (!response?.body?.getReader) throw new Error("Anthropic streaming response has no readable body.");
+
+  const message = { type: "message", role: "assistant", content: [], usage: {} };
+  const toolJson = new Map();
+
+  const handleEvent = (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.type === "error") {
+      throw new Error(event.error?.message ?? "Anthropic stream returned an error event.");
+    }
+    if (event.type === "message_start") {
+      const started = event.message ?? {};
+      Object.assign(message, started, { content: [] });
+      message.usage = { ...(started.usage ?? {}) };
+      return;
+    }
+    if (event.type === "content_block_start") {
+      const index = Number(event.index);
+      if (!Number.isInteger(index) || index < 0) return;
+      const block = structuredClone(event.content_block ?? {});
+      message.content[index] = block;
+      if (block.type === "tool_use") toolJson.set(index, "");
+      return;
+    }
+    if (event.type === "content_block_delta") {
+      const index = Number(event.index);
+      if (!Number.isInteger(index) || index < 0) return;
+      const delta = event.delta ?? {};
+      const block = message.content[index] ?? (message.content[index] = {});
+      if (delta.type === "text_delta") {
+        block.type = block.type ?? "text";
+        block.text = `${block.text ?? ""}${delta.text ?? ""}`;
+        if (delta.text && typeof onDelta === "function") {
+          try { onDelta(delta.text); } catch { /* presentation callbacks are advisory */ }
+        }
+      } else if (delta.type === "thinking_delta") {
+        block.type = block.type ?? "thinking";
+        block.thinking = `${block.thinking ?? ""}${delta.thinking ?? ""}`;
+      } else if (delta.type === "signature_delta") {
+        block.signature = `${block.signature ?? ""}${delta.signature ?? ""}`;
+      } else if (delta.type === "input_json_delta") {
+        toolJson.set(index, `${toolJson.get(index) ?? ""}${delta.partial_json ?? ""}`);
+      }
+      return;
+    }
+    if (event.type === "content_block_stop") {
+      const index = Number(event.index);
+      const block = message.content[index];
+      if (block?.type === "tool_use" && toolJson.has(index)) {
+        const raw = toolJson.get(index);
+        try {
+          block.input = raw ? JSON.parse(raw) : (block.input ?? {});
+        } catch {
+          throw new Error("Anthropic stream returned malformed tool input JSON.");
+        }
+      }
+      return;
+    }
+    if (event.type === "message_delta") {
+      Object.assign(message, event.delta ?? {});
+      message.usage = { ...(message.usage ?? {}), ...(event.usage ?? {}) };
+    }
+  };
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  const consumeLine = (rawLine) => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith("data:")) return;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") return;
+    handleEvent(JSON.parse(data));
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    pending += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    let newline;
+    while ((newline = pending.indexOf("\n")) >= 0) {
+      consumeLine(pending.slice(0, newline));
+      pending = pending.slice(newline + 1);
+    }
+    if (done) break;
+  }
+  if (pending) consumeLine(pending);
+
+  // A well-formed stream closes every tool block, but finalizing here makes
+  // split/stub transports deterministic without weakening malformed JSON.
+  for (const [index, raw] of toolJson.entries()) {
+    const block = message.content[index];
+    if (block?.type !== "tool_use" || block.input !== undefined) continue;
+    try {
+      block.input = raw ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error("Anthropic stream returned malformed tool input JSON.");
+    }
+  }
+  message.content = message.content.filter(Boolean);
+  return message;
+}
+
 function appendOpenAIAssistantText(conversationInput, response) {
   const hasMessage = (response?.output ?? []).some((item) => item.type === "message" || item.role === "assistant");
   if (hasMessage) {
@@ -549,7 +657,7 @@ export class AnthropicProvider {
     return this.model;
   }
 
-  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
+  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
@@ -619,8 +727,9 @@ export class AnthropicProvider {
           max_tokens: this.maxTokens,
           system,
           messages: convo,
+          ...(typeof onDelta === "function" ? { stream: true } : {}),
           ...(tools.length > 0 ? { tools } : {})
-        }, context, { timeoutMs: remainingMs, turnBudget }), context);
+        }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
       } catch (error) {
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
@@ -682,8 +791,9 @@ export class AnthropicProvider {
           model,
           max_tokens: this.maxTokens,
           system,
-          messages: convo
-        }, context, { timeoutMs: remainingMs, turnBudget }), context);
+          messages: convo,
+          ...(typeof onDelta === "function" ? { stream: true } : {})
+        }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
         text = extractAnthropicText(response);
       } catch (error) {
         if (budgetExceeded(error)) stopReason = "budget-cap";
@@ -745,8 +855,14 @@ export class AnthropicProvider {
         },
         body: JSON.stringify(body)
       });
-      const json = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(json?.error?.message ?? `Anthropic request failed with ${response.status}`);
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({}));
+        throw new Error(errorBody?.error?.message ?? `Anthropic request failed with ${response.status}`);
+      }
+      const contentType = response.headers?.get?.("content-type") ?? "";
+      const json = body.stream === true && /text\/event-stream/i.test(contentType)
+        ? await readAnthropicEventStream(response, { onDelta: options.onDelta })
+        : await response.json().catch(() => ({}));
       const callTools = (json.content ?? []).filter((b) => b.type === "tool_use").map((b) => b.name);
       const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
         channel: context.channel,

@@ -330,6 +330,7 @@ export class AgentHost {
         tools,
         toolRegistry,
         context: modelContext,
+        onDelta: typeof input.onDelta === "function" ? input.onDelta : null,
         maxIterations: input.maxIterations,
         maxTurnSeconds: input.maxTurnSeconds
       });
