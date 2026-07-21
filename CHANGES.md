@@ -202,3 +202,12 @@ TIER2 HARDENING COMPLETE
 - Added test/pattern-miner-midnight.test.js: pre-fix repro (0 candidates at 00:5x local) plus a mid-day invariance guard. Both lanes: 560/560.
 
 - 2026-07-21T02:08:56.868Z · **azazel** · create `ui/azazel-dashboard.html` — Standalone HTML dashboard rendering Azazel's upgrade status table with dark theme + dark red accents
+
+## 2026-07-21 - Native Kimi web search (Codex)
+
+- Added a zero-dependency OpenAI-compatible mini-client for Kimi's server-side `$web_search` builtin on the existing coding `/chat/completions` endpoint, with three tool hops, a 60-second per-request timeout, recency/limit guidance, citation extraction, and prose fallback.
+- Fixed the documented Moonshot continuation shape that previously produced `tokenization failed`: replay the assistant message unchanged, then append `{role:"tool", tool_call_id:<call.id>, name:"$web_search", content:JSON.stringify(JSON.parse(call.function.arguments))}` for every call.
+- Registered live `ANTHROPIC_API_KEY`-gated Kimi search in the provider surface. It is the first native provider and default when no dedicated search key exists; configured external providers and explicit provider selection remain supported.
+- Added transport-stubbed regressions for the builtin declaration, exact echo transcript, multi-hop continuation, citations/prose normalization, timeout behavior, live configuration, external-provider priority, and secret-safe errors. Tests never call the live API.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 569/569; changed filenames/content pass the Cyrillic, Greek, nonstandard-hyphen, and fullwidth scan.
+WEB SEARCH PHASE COMPLETE

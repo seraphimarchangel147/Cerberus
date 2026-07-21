@@ -38,15 +38,30 @@ export function registerWebSearchTools(runtime, opts = {}) {
       } else {
         const envDefault = process.env.WEB_SEARCH_PROVIDER && byName[process.env.WEB_SEARCH_PROVIDER];
         const configured = providers.filter((p) => p.isConfigured());
-        order = envDefault && envDefault.isConfigured() ? [envDefault, ...configured.filter((p) => p !== envDefault)] : configured;
+        // Kimi is the zero-extra-key default. If an operator deliberately
+        // configures a dedicated search provider, preserve that adapter's old
+        // automatic priority and retain Kimi as the final native fallback.
+        const external = configured.filter((p) => p.name !== "kimi");
+        const automatic = external.length > 0
+          ? [...external, ...configured.filter((p) => p.name === "kimi")]
+          : configured;
+        order = envDefault && envDefault.isConfigured()
+          ? [envDefault, ...automatic.filter((p) => p !== envDefault)]
+          : automatic;
       }
-      if (order.length === 0) return { error: "No web search provider configured. Set EXA_API_KEY, TAVILY_API_KEY, BRAVE_API_KEY, SERPAPI_API_KEY, FIRECRAWL_API_KEY, or PERPLEXITY_API_KEY in ~/.openagi/.env." };
+      if (order.length === 0) return { error: "No web search provider configured. Set ANTHROPIC_API_KEY, EXA_API_KEY, TAVILY_API_KEY, BRAVE_API_KEY, SERPAPI_API_KEY, FIRECRAWL_API_KEY, or PERPLEXITY_API_KEY in ~/.openagi/.env." };
 
       const errors = [];
       for (const p of order) {
         try {
-          const results = await p.search(args.query, { numResults, recency: args.recency });
-          return { provider: p.name, count: results.length, results };
+          const response = await p.search(args.query, { numResults, recency: args.recency });
+          if (response?.error) {
+            errors.push(`${p.name}: ${response.error}`);
+            continue;
+          }
+          const results = Array.isArray(response) ? response : response?.results;
+          if (!Array.isArray(results)) throw new Error("provider returned an invalid result shape");
+          return { provider: response?.provider ?? p.name, count: results.length, results };
         } catch (err) {
           errors.push(`${p.name}: ${err.message}`);
         }
