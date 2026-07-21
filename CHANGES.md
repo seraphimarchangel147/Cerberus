@@ -221,3 +221,14 @@ WEB SEARCH PHASE COMPLETE
 - Added regressions for three-file reduction, post-tool timeout, the 50-call ceiling, catastrophic passthrough in both policy lanes, 64 KiB stdout truncation, ghost-output rejection, sandbox escape resistance, and scrutiny gating.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 577/577; all changed filenames and contents pass the homoglyph scan.
 EXECUTE CODE PHASE COMPLETE
+
+## 2026-07-21 - Hermes-style parallel subagents (Codex)
+
+- Added `delegate_task` for one isolated goal or up to three concurrent child goals, using `Promise.allSettled` so one failed child cannot erase successful summaries.
+- Child isolation is explicit: a fresh `subagent:<parent>:<uuid>` transcript, a unique memory scope carried through signal storage and the `remember`/`recall`/`correct_memory` tools, no parent conversation or ambient screen context, no automatic specialist routing/propagation, and only the final reply returned to the parent.
+- Enforced parent-or-stricter scrutiny, parent allowlist intersection, leaf/orchestrator depth ceilings, removal of interactive and legacy delegation tools, and the existing catastrophic gate on every child tool call.
+- Added per-call provider limits so concurrent children share one provider and daily budget without mutating it: 30 iterations and 600 seconds by default. Parent deadlines/cancellation now abort outstanding child requests through both provider paths.
+- Added live Discord `delegating n/total` progress plus environment/wizard settings for child count, spawn depth, iterations, and wall-clock time.
+- Added regressions for summary-only transcript isolation, private core-tool memory, disabled auto-propagation, concurrent partial failure, depth attacks, both-lane watch enforcement, shared budget accounting, per-provider caps, cancellation, live status, validation, and config persistence.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 588/588; all changed filenames and contents pass the homoglyph scan.
+SUBAGENTS PHASE COMPLETE

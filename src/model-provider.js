@@ -77,20 +77,42 @@ function emitIteration(context, n, max) {
   }
 }
 
-async function withinTurn(provider, deadline, task) {
+function abortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error("The turn was cancelled.");
+  error.name = "AbortError";
+  return error;
+}
+
+async function withinTurn(provider, deadline, task, context = {}) {
   const remainingMs = deadline - provider.now();
   if (remainingMs <= 0) throw new TurnDeadlineError();
+  const signal = context?.__abortSignal;
+  if (signal?.aborted) throw abortReason(signal);
 
   let timer;
+  let onAbort;
   try {
-    return await Promise.race([
+    const contenders = [
       Promise.resolve().then(() => task(remainingMs)),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new TurnDeadlineError()), Math.max(1, Math.ceil(remainingMs)));
+        timer = setTimeout(() => {
+          const error = new TurnDeadlineError();
+          context?.__turnAbortController?.abort?.(error);
+          reject(error);
+        }, Math.max(1, Math.ceil(remainingMs)));
       })
-    ]);
+    ];
+    if (signal) {
+      contenders.push(new Promise((_, reject) => {
+        onAbort = () => reject(abortReason(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }));
+    }
+    return await Promise.race(contenders);
   } finally {
     if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -261,9 +283,11 @@ export class OpenAIResponsesProvider {
     return this.model;
   }
 
-  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [] }) {
+  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
+    const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
+    const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
 
     // Stateless tool loop — accumulates the full conversation in `input` each
     // hop instead of chaining via `previous_response_id`. Required for orgs
@@ -297,14 +321,14 @@ export class OpenAIResponsesProvider {
     const toolList = tools.length > 0 ? tools : toolRegistry?.toOpenAITools?.() ?? [];
     const toolCalls = [];
 
-    const deadline = this.now() + (this.maxTurnSeconds * 1000);
+    const deadline = this.now() + (maxTurnSeconds * 1000);
     const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
     let response;
     let iterations = 0;
     let stopReason = "completed";
     let lastText = "";
 
-    iterationLoop: while (iterations < this.maxIterations) {
+    iterationLoop: while (iterations < maxIterations) {
       if (this.now() >= deadline) {
         stopReason = "turn-timeout";
         break;
@@ -319,7 +343,7 @@ export class OpenAIResponsesProvider {
         break;
       }
       iterations += 1;
-      emitIteration(context, iterations, this.maxIterations);
+      emitIteration(context, iterations, maxIterations);
       const body = {
         model,
         instructions: baseInstructions,
@@ -330,7 +354,7 @@ export class OpenAIResponsesProvider {
       try {
         response = await withinTurn(this, deadline, (remainingMs) => (
           this.postResponses(body, context, { timeoutMs: remainingMs, turnBudget })
-        ));
+        ), context);
       } catch (error) {
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
@@ -367,7 +391,7 @@ export class OpenAIResponsesProvider {
           invocation = await withinTurn(this, deadline, () => (
             toolRegistry?.invoke?.(call.name, parsedArgs, context)
               ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
-          ));
+          ), context);
         } catch (error) {
           if (!deadlineExpired(this, deadline, error)) throw error;
           stopReason = "turn-timeout";
@@ -403,7 +427,7 @@ export class OpenAIResponsesProvider {
         }
       }
 
-      if (iterations >= this.maxIterations) {
+      if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
         break;
       }
@@ -426,7 +450,7 @@ export class OpenAIResponsesProvider {
           model,
           instructions: baseInstructions,
           input: conversationInput
-        }, context, { timeoutMs: remainingMs, turnBudget }));
+        }, context, { timeoutMs: remainingMs, turnBudget }), context);
         text = extractResponseText(response);
       } catch (error) {
         if (budgetExceeded(error)) stopReason = "budget-cap";
@@ -436,9 +460,9 @@ export class OpenAIResponsesProvider {
     }
 
     if (stopReason === "turn-timeout" || stopReason === "budget-cap") {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (text === undefined) {
       text = extractResponseText(response) || "(no text)";
     }
@@ -450,13 +474,17 @@ export class OpenAIResponsesProvider {
       text,
       toolCalls,
       iterations,
-      maxIterations: this.maxIterations,
+      maxIterations,
       stopReason
     };
   }
 
   async postResponses(body, context = {}, options = {}) {
     const controller = new AbortController();
+    const externalSignal = context?.__abortSignal;
+    const onExternalAbort = () => controller.abort(externalSignal.reason);
+    if (externalSignal?.aborted) onExternalAbort();
+    else externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
     const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
@@ -484,6 +512,7 @@ export class OpenAIResponsesProvider {
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
       return json;
     } catch (error) {
+      if (externalSignal?.aborted) throw abortReason(externalSignal);
       // The outer deadline and fetch abort timers race. Normalize the fetch
       // winner so deadline expiry still returns a partial summary, while a
       // provider's ordinary shorter request timeout keeps its old error path.
@@ -491,6 +520,7 @@ export class OpenAIResponsesProvider {
       throw error;
     } finally {
       clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }
 }
@@ -519,11 +549,19 @@ export class AnthropicProvider {
     return this.model;
   }
 
-  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [] }) {
+  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
+    const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
+    const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
 
-    const tools = toolRegistry?.toAnthropicTools?.() ?? [];
+    let tools = context.__scrutinyPolicy === "none"
+      ? []
+      : (toolRegistry?.toAnthropicTools?.({ readOnly: context.__scrutinyPolicy === "read-only" }) ?? []);
+    if (Array.isArray(context.__allowedTools)) {
+      const allowed = new Set(context.__allowedTools);
+      tools = tools.filter((tool) => allowed.has(tool.name));
+    }
     // The system block is STATIC (persona + standing instructions) so this
     // cache_control prefix is byte-identical every turn and actually hits.
     // Per-turn context (memory hits, scrutiny) rides the latest user turn.
@@ -554,14 +592,14 @@ export class AnthropicProvider {
     ];
 
     const toolCalls = [];
-    const deadline = this.now() + (this.maxTurnSeconds * 1000);
+    const deadline = this.now() + (maxTurnSeconds * 1000);
     const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
     let response;
     let iterations = 0;
     let stopReason = "completed";
     let lastText = "";
 
-    iterationLoop: while (iterations < this.maxIterations) {
+    iterationLoop: while (iterations < maxIterations) {
       if (this.now() >= deadline) {
         stopReason = "turn-timeout";
         break;
@@ -574,7 +612,7 @@ export class AnthropicProvider {
         break;
       }
       iterations += 1;
-      emitIteration(context, iterations, this.maxIterations);
+      emitIteration(context, iterations, maxIterations);
       try {
         response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
           model,
@@ -582,7 +620,7 @@ export class AnthropicProvider {
           system,
           messages: convo,
           ...(tools.length > 0 ? { tools } : {})
-        }, context, { timeoutMs: remainingMs, turnBudget }));
+        }, context, { timeoutMs: remainingMs, turnBudget }), context);
       } catch (error) {
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
@@ -604,7 +642,7 @@ export class AnthropicProvider {
           invocation = await withinTurn(this, deadline, () => (
             toolRegistry?.invoke?.(use.name, use.input ?? {}, context)
               ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
-          ));
+          ), context);
         } catch (error) {
           if (!deadlineExpired(this, deadline, error)) throw error;
           stopReason = "turn-timeout";
@@ -620,7 +658,7 @@ export class AnthropicProvider {
       }
       if (toolResults.length > 0) convo.push({ role: "user", content: toolResults });
 
-      if (iterations >= this.maxIterations) {
+      if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
         break;
       }
@@ -645,7 +683,7 @@ export class AnthropicProvider {
           max_tokens: this.maxTokens,
           system,
           messages: convo
-        }, context, { timeoutMs: remainingMs, turnBudget }));
+        }, context, { timeoutMs: remainingMs, turnBudget }), context);
         text = extractAnthropicText(response);
       } catch (error) {
         if (budgetExceeded(error)) stopReason = "budget-cap";
@@ -655,9 +693,9 @@ export class AnthropicProvider {
     }
 
     if (stopReason === "turn-timeout" || stopReason === "budget-cap") {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations: this.maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (text === undefined) {
       text = extractAnthropicText(response);
     }
@@ -681,13 +719,17 @@ export class AnthropicProvider {
       text: text || (salvage ? `⚠ Reply truncated mid-reasoning (max_tokens). Reasoning trace excerpt:\n${salvage}` : "(no text)"),
       toolCalls,
       iterations,
-      maxIterations: this.maxIterations,
+      maxIterations,
       stopReason
     };
   }
 
   async postMessages(body, context = {}, options = {}) {
     const controller = new AbortController();
+    const externalSignal = context?.__abortSignal;
+    const onExternalAbort = () => controller.abort(externalSignal.reason);
+    if (externalSignal?.aborted) onExternalAbort();
+    else externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
     const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
@@ -716,10 +758,12 @@ export class AnthropicProvider {
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
       return json;
     } catch (error) {
+      if (externalSignal?.aborted) throw abortReason(externalSignal);
       if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();
       throw error;
     } finally {
       clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }
 }

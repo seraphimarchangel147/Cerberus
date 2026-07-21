@@ -51,6 +51,28 @@ function isDirectReplyToQuestion(value) {
   return Boolean(reply) && !/[?\uFF1F]/u.test(reply) && !STOP_OR_DELAY_RE.test(reply);
 }
 
+const TOOL_POLICY_RANK = Object.freeze({ full: 0, confirm: 1, "read-only": 2, none: 3 });
+
+function policyForVerdict(action) {
+  if (action === "watch") return "read-only";
+  if (action === "ask") return "confirm";
+  if (action === "ignore") return "none";
+  return "full";
+}
+
+function verdictForPolicy(policy) {
+  if (policy === "read-only") return "watch";
+  if (policy === "confirm") return "ask";
+  if (policy === "none") return "ignore";
+  return "act";
+}
+
+export function stricterToolPolicy(localPolicy, ceilingPolicy) {
+  const local = Object.hasOwn(TOOL_POLICY_RANK, localPolicy) ? localPolicy : "full";
+  const ceiling = Object.hasOwn(TOOL_POLICY_RANK, ceilingPolicy) ? ceilingPolicy : "full";
+  return TOOL_POLICY_RANK[local] >= TOOL_POLICY_RANK[ceiling] ? local : ceiling;
+}
+
 export class AgentHost {
   constructor(options = {}) {
     this.runtime = options.runtime;
@@ -84,12 +106,15 @@ export class AgentHost {
     }
 
     const agent = this.store.getAgent(agentId);
+    const isSpecialist = agent.role === "specialist";
+    const requestedMemoryScope = String(input.memoryScope ?? "").trim();
+    const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
     const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
 
     // Auto-task detection — if the user said "remind me to X" / "todo: X" /
     // "I need to X", create a task in the user queue without requiring them
     // to invoke add_task. Best-effort; failures don't block the chat reply.
-    if (!ephemeral && this.runtime?.tasks?.add && agentId === "main" && channel !== "autopilot") {
+    if (!ephemeral && this.runtime?.tasks?.add && agentId === "main" && channel !== "autopilot" && channel !== "subagent") {
       const detected = detectTaskInChat(text);
       if (detected) {
         try {
@@ -120,15 +145,15 @@ export class AgentHost {
       this.runtime.sessionIndex.indexMessage(sessionId, agentId, sessionBefore.messages.at(-1)).catch(() => {});
     }
 
-    if (!ephemeral && channel !== "autopilot" && channel !== "cron") {
+    if (!ephemeral && channel !== "autopilot" && channel !== "cron" && channel !== "subagent") {
       try { this.runtime.outcomes?.resolveByUserFollowup?.(sessionId, text); } catch { /* best effort */ }
     }
 
     const signal = await this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {}, scrutinyOverrides: input.scrutinyOverrides ?? null });
-    const isSpecialist = agent.role === "specialist";
     const output = this.runtime.processSignal(signal, {
-      scope: isSpecialist ? `specialist:${agent.id}` : "main",
+      scope: memoryScope,
       parentSpecialistId: isSpecialist ? agent.id : null,
+      allowPropagation: channel !== "subagent",
       ephemeral
     });
 
@@ -158,27 +183,40 @@ export class AgentHost {
       && rawVerdict === "ask"
       && isDirectReplyToQuestion(text)
     );
-    const verdict = consentOverride || askDamped ? "act" : rawVerdict;
-    const verdictOverrideReason = consentOverride
-      ? "explicit consent after an assistant question"
-      : askDamped
-        ? "repeated ask damped after one clarifying question"
-        : null;
+    const localVerdict = consentOverride || askDamped ? "act" : rawVerdict;
+    const localToolPolicy = policyForVerdict(localVerdict);
+    // Delegated/headless turns receive the parent policy as a ceiling. Taking
+    // the stricter rank lets a child become more cautious, never less cautious.
+    const toolPolicy = stricterToolPolicy(localToolPolicy, input.scrutinyPolicyCeiling);
+    const scrutinyCeilingApplied = toolPolicy !== localToolPolicy;
+    const verdict = scrutinyCeilingApplied ? verdictForPolicy(toolPolicy) : localVerdict;
+    const overrideReasons = [];
+    if (consentOverride) overrideReasons.push("explicit consent after an assistant question");
+    else if (askDamped) overrideReasons.push("repeated ask damped after one clarifying question");
+    if (scrutinyCeilingApplied) overrideReasons.push(`parent scrutiny ceiling enforced as ${toolPolicy}`);
+    const verdictOverrideReason = overrideReasons.length > 0 ? overrideReasons.join("; ") : null;
+    const addedReasons = [];
+    if (consentOverride) {
+      addedReasons.push("Consent lane: the user explicitly authorized the work after the assistant's question; proceed now.");
+    } else if (askDamped) {
+      addedReasons.push("Anti-loop damping: one clarifying question was already answered; proceed using that answer.");
+    }
+    if (scrutinyCeilingApplied) {
+      addedReasons.push(`Delegation ceiling: the parent turn permits ${toolPolicy} access at most; the child cannot escalate it.`);
+    }
     // Keep output.scrutiny untouched for outcome/audit consumers. Only the
     // model/tool lane receives the effective verdict selected above.
-    const effectiveScrutiny = verdict === rawVerdict
+    const effectiveScrutiny = verdict === rawVerdict && addedReasons.length === 0
       ? output.scrutiny
       : {
           ...output.scrutiny,
           action: verdict,
           reasons: [
             ...(output.scrutiny.reasons ?? []),
-            consentOverride
-              ? "Consent lane: the user explicitly authorized the work after the assistant's question; proceed now."
-              : "Anti-loop damping: one clarifying question was already answered; proceed using that answer."
+            ...addedReasons
           ]
         };
-    const effectiveOutput = verdict === rawVerdict
+    const effectiveOutput = effectiveScrutiny === output.scrutiny
       ? output
       : { ...output, scrutiny: effectiveScrutiny };
     // Tell the live-progress observer (Discord status line) what the
@@ -186,7 +224,6 @@ export class AgentHost {
     if (typeof input.onToolEvent === "function") {
       try { input.onToolEvent({ phase: "verdict", action: verdict, score: output.scrutiny.score }); } catch { /* advisory */ }
     }
-    const toolPolicy = verdict === "watch" ? "read-only" : verdict === "ask" ? "confirm" : verdict === "ignore" ? "none" : "full";
     const toolRegistry = this.runtime.tools;
     let tools = toolPolicy === "none"
       ? []
@@ -196,17 +233,25 @@ export class AgentHost {
     // scoped allowlist + the core set every specialist needs. Without this,
     // "bounded" was advisory prompt text and any specialist could call any
     // tool in the system.
-    let allowedToolNames = null;
+    const requestedAllowedToolNames = Array.isArray(input.allowedTools)
+      ? [...new Set(input.allowedTools.filter((name) => typeof name === "string" && name))]
+      : null;
+    let allowedToolNames = requestedAllowedToolNames;
     if (isSpecialist) {
       const scoped = agent.metadata?.specialist?.allowedTools ?? [];
-      allowedToolNames = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
+      const specialistAllowed = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
+      allowedToolNames = requestedAllowedToolNames
+        ? specialistAllowed.filter((name) => requestedAllowedToolNames.includes(name))
+        : specialistAllowed;
+    }
+    if (allowedToolNames) {
       tools = tools.filter((tool) => allowedToolNames.includes(tool.name));
     }
 
     // Lava intuition (C2): top principles from the vector store inserted into
     // the prompt as soft hints — distinct from explicit memoryHits.
     let intuitions = [];
-    if (this.runtime.vectorStore) {
+    if (channel !== "subagent" && this.runtime.vectorStore) {
       try {
         const rawHits = await this.runtime.vectorStore.search("principle", text, { limit: 10, minScore: 0.1 });
         intuitions = filterPrincipleHits(rawHits, this.runtime.memory, { limit: 3 });
@@ -218,7 +263,7 @@ export class AgentHost {
     // user is actually doing, not just what they typed. Best-effort —
     // failures fall through silently so chat keeps working without capture.
     let ambientContext = null;
-    if (channel !== "autopilot" && channel !== "cron" && this.runtime.observations?.getRecentContext) {
+    if (channel !== "autopilot" && channel !== "cron" && channel !== "subagent" && this.runtime.observations?.getRecentContext) {
       try {
         ambientContext = await this.runtime.observations.getRecentContext({ minutes: 10, maxChars: 1500, maxSnippets: 6 });
       } catch { /* swallow */ }
@@ -233,42 +278,64 @@ export class AgentHost {
       }
     }));
 
-    const modelResult = await this.modelProvider.generate({
-      input: text,
-      agent,
-      // Route by what the call IS, so model tiering applies: autonomous pulses
-      // (autopilot/cron) are cheap "anything to do?" work; everything else is
-      // user-facing chat. Both default to the base model until tiers/pins are set.
-      task: (channel === "autopilot" || channel === "cron") ? "autopilot" : "chat",
-      scrutiny: effectiveScrutiny,
-      memoryHits: memoryHitsForModel,
-      messages: sessionBefore.messages,
-      images: Array.isArray(input.images) ? input.images : [],
-      instructions: this.instructionsForAgent(agent),
-      turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null),
-      tools,
-      toolRegistry,
-      context: {
-        channel,
-        from,
-        target: from,
-        agentId,
-        sessionId,
-        runtime: this.runtime,
-        // Enforced in ToolRegistry.invoke — the filtered tool list above is
-        // advisory to the model; this gate is not.
-        // 'none' (ignore) and 'read-only' (watch) are ENFORCED in
-        // ToolRegistry.invoke — the advertised tool list is advisory only
-        // (providers treat an empty list as "use everything"), so the gate is
-        // what actually holds.
-        __scrutinyPolicy: toolPolicy === "none" ? "none" : toolPolicy === "read-only" ? "read-only" : toolPolicy === "confirm" ? "confirm" : null,
-        __reason: toolPolicy === "confirm" ? confirmPolicyReason(output.scrutiny.score) : null,
-        __allowedTools: allowedToolNames,
-        // Live-progress observer: channels (Discord) pass a callback so the
-        // user can watch tool activity in real time. Best-effort, advisory.
-        __onToolEvent: typeof input.onToolEvent === "function" ? input.onToolEvent : null
-      }
-    });
+    const turnAbortController = new AbortController();
+    const inputAbortSignal = input.abortSignal;
+    const onInputAbort = () => turnAbortController.abort(inputAbortSignal.reason);
+    if (inputAbortSignal?.aborted) onInputAbort();
+    else inputAbortSignal?.addEventListener?.("abort", onInputAbort, { once: true });
+    const parsedSpawnDepth = Number(input.spawnDepth);
+    const modelContext = {
+      channel,
+      from,
+      target: from,
+      agentId,
+      sessionId,
+      runtime: this.runtime,
+      // Enforced in ToolRegistry.invoke — the filtered tool list above is
+      // advisory to the model; this gate is not.
+      // 'none' (ignore) and 'read-only' (watch) are ENFORCED in
+      // ToolRegistry.invoke — the advertised tool list is advisory only
+      // (providers treat an empty list as "use everything"), so the gate is
+      // what actually holds.
+      __scrutinyPolicy: toolPolicy === "none" ? "none" : toolPolicy === "read-only" ? "read-only" : toolPolicy === "confirm" ? "confirm" : null,
+      __reason: toolPolicy === "confirm" ? confirmPolicyReason(output.scrutiny.score) : null,
+      __allowedTools: allowedToolNames,
+      __memoryScope: memoryScope,
+      __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,
+      __abortSignal: turnAbortController.signal,
+      __turnAbortController: turnAbortController,
+      // Live-progress observer: channels (Discord) pass a callback so the
+      // user can watch tool activity in real time. Best-effort, advisory.
+      __onToolEvent: typeof input.onToolEvent === "function" ? input.onToolEvent : null
+    };
+
+    let modelResult;
+    try {
+      modelResult = await this.modelProvider.generate({
+        input: text,
+        agent,
+        // Route by what the call IS, so model tiering applies: autonomous pulses
+        // (autopilot/cron) are cheap "anything to do?" work; everything else is
+        // user-facing chat. Both default to the base model until tiers/pins are set.
+        task: (channel === "autopilot" || channel === "cron") ? "autopilot" : "chat",
+        scrutiny: effectiveScrutiny,
+        memoryHits: memoryHitsForModel,
+        messages: sessionBefore.messages,
+        images: Array.isArray(input.images) ? input.images : [],
+        instructions: this.instructionsForAgent(agent),
+        turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null),
+        tools,
+        toolRegistry,
+        context: modelContext,
+        maxIterations: input.maxIterations,
+        maxTurnSeconds: input.maxTurnSeconds
+      });
+    } catch (error) {
+      turnAbortController.abort(error);
+      throw error;
+    } finally {
+      inputAbortSignal?.removeEventListener?.("abort", onInputAbort);
+    }
 
     const outcomeRecord = ephemeral ? null : this.runtime.outcomes?.record({
       kind: input.origin === "autopilot" ? "autopilot-fire" : input.origin === "cron" ? "cron-fire" : "agent-reply",
@@ -286,6 +353,7 @@ export class AgentHost {
         scrutinyScore: output.scrutiny.score,
         consentOverride,
         askDamped,
+        scrutinyCeilingApplied,
         effectiveScrutinyAction: verdict,
         verdictOverrideReason,
         routing: routing ? {
@@ -333,7 +401,7 @@ export class AgentHost {
       this.runtime.memory.remember(
         {
           source: "agent-host",
-          scope: agent.role === "specialist" ? `specialist:${agent.id}` : "main",
+          scope: memoryScope,
           content: `Session ${sessionId} user asked: ${text}\nAgent replied: ${modelResult.text}`,
           tags: ["agent-turn", channel, agentId],
           novelty: output.scrutiny.dimensions.novelty,

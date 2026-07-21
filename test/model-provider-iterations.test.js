@@ -84,6 +84,50 @@ test("OPENAGI_MAX_TURN_USD is optional and parsed for both paid providers", (t) 
   assert.equal(new AnthropicProvider({ apiKey: "test-key" }).maxTurnUsd, 0.75);
 });
 
+test("per-call subagent limits bound both providers without mutating their shared defaults", async () => {
+  const openai = new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 9 });
+  openai.postResponses = async (body) => body.tools
+    ? {
+        id: "openai-step",
+        output: [{ type: "function_call", call_id: "call", name: "step", arguments: "{}" }]
+      }
+    : { id: "openai-summary", output_text: "openai partial", output: [] };
+  const anthropic = new AnthropicProvider({ apiKey: "test-key", maxIterations: 9 });
+  anthropic.postMessages = async (body) => body.tools
+    ? {
+        id: "anthropic-step",
+        stop_reason: "tool_use",
+        content: [{ type: "tool_use", id: "tool", name: "step", input: {} }]
+      }
+    : {
+        id: "anthropic-summary",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "anthropic partial" }]
+      };
+
+  const openaiResult = await openai.generate({
+    input: "bounded child",
+    agent,
+    toolRegistry: openAIToolRegistry(),
+    maxIterations: 2,
+    maxTurnSeconds: 5
+  });
+  const anthropicResult = await anthropic.generate({
+    input: "bounded child",
+    agent,
+    toolRegistry: anthropicToolRegistry(),
+    maxIterations: 2,
+    maxTurnSeconds: 5
+  });
+
+  assert.equal(openaiResult.iterations, 2);
+  assert.equal(openaiResult.maxIterations, 2);
+  assert.equal(anthropicResult.iterations, 2);
+  assert.equal(anthropicResult.maxIterations, 2);
+  assert.equal(openai.maxIterations, 9);
+  assert.equal(anthropic.maxIterations, 9);
+});
+
 test("the default engine executes at most 25 tool iterations", async (t) => {
   isolateIterationEnv(t);
   const provider = new OpenAIResponsesProvider({ apiKey: "test-key" });

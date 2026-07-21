@@ -323,7 +323,9 @@ export function registerCoreTools(registry, runtime) {
     handler: async (args, context) => {
       const importance = args.importance ?? "normal";
       const risk = importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45;
-      const scope = context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
       const item = runtime.memory.remember(
         {
           source: context.channel ?? "tool",
@@ -355,7 +357,9 @@ export function registerCoreTools(registry, runtime) {
       additionalProperties: false
     },
     handler: async (args, context) => {
-      const scope = context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
+      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
       const hits = runtime.memory.retrieve(String(args.query ?? ""), { limit: args.limit ?? 5, scope });
       return {
         count: hits.length,
@@ -392,7 +396,9 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       if (!runtime.memory?.correct) return { error: "memory system does not support corrections" };
-      const scope = context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
       const result = runtime.memory.correct({
         id: args.id ?? null,
         query: args.query ?? null,

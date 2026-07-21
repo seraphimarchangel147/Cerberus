@@ -18,6 +18,7 @@ import { registerBuildBetterTaskSource } from "./integrations/buildbetter-tasks.
 import { registerCalendarIntegration } from "./integrations/calendar.js";
 import { registerWebSearchTools } from "./integrations/web-search.js";
 import { registerExecuteCodeTool } from "./integrations/execute-code.js";
+import { registerDelegateTaskTool } from "./integrations/delegate-task.js";
 import { registerImessageSearchTool } from "./integrations/imessage-search-tool.js";
 import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
@@ -462,6 +463,7 @@ export class AbiRuntime {
       // A VM script can compact multi-step tool work, but every nested call
       // re-enters this same registry so scrutiny and catastrophic gates hold.
       registerExecuteCodeTool(this);
+      registerDelegateTaskTool(this);
       // Computer-use tools register only when explicitly opted-in via env
       // (OPENAGI_COMPUTER_USE=1). Default install doesn't expose them so
       // an LLM can't accidentally try to drive the user's screen. The
@@ -529,7 +531,9 @@ export class AbiRuntime {
     });
 
     const parentSpecialistId = options.parentSpecialistId ?? null;
-    const propagationDecision = this.propagation.shouldPropagate({ signal, scrutiny, memoryHits, parentSpecialistId });
+    const propagationDecision = options.allowPropagation === false
+      ? { decision: false, blockedBy: "disabled-for-turn" }
+      : this.propagation.shouldPropagate({ signal, scrutiny, memoryHits, parentSpecialistId });
     const propagated =
       propagationDecision.decision && scrutiny.action !== "ignore"
         ? this.propagation.propagate({
@@ -563,6 +567,7 @@ export class AbiRuntime {
       memoryItem = this.memory.remember(
         {
           source: signal.source,
+          scope: options.scope ?? "main",
           content: `${signal.summary}\nDecision: ${scrutiny.action}\nReasons: ${scrutiny.reasons.join(" ")}`,
           tags: ["signal", signal.domain, signal.taskType, ...(signal.tags ?? [])],
           novelty: signal.novelty,

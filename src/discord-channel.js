@@ -889,6 +889,7 @@ export class LiveStatus {
     this.messageId = null;
     this.verdict = null;
     this.iteration = null;
+    this.subagent = null;
     this.steps = [];        // { name, state: run|ok|err|pend }
     this.startedAt = Date.now();
     this.lastEditAt = 0;
@@ -922,6 +923,8 @@ export class LiveStatus {
     if (!this.enabled || !this.messageId || this.done) return;
     if (ev.phase === "iteration") {
       this.iteration = { n: ev.n, max: ev.max };
+    } else if (ev.phase === "subagent") {
+      this.subagent = ev;
     } else if (ev.phase === "verdict") {
       this.verdict = ev;
     } else if (ev.phase === "start") {
@@ -976,6 +979,9 @@ export class LiveStatus {
       ? `${VERDICT_EMOJI[v.action] ?? "🧠"} scrutiny: **${v.action}** (${(v.score ?? 0).toFixed(2)})`
       : `${this.done ? "🧠" : spinner} *thinking…*`;
     const iteration = this.iteration ? ` · iteration ${this.iteration.n}/${this.iteration.max}` : "";
+    const delegation = this.subagent
+      ? ` · delegating ${this.subagent.n}/${this.subagent.total}${this.subagent.state === "running" && this.subagent.iteration ? ` (iteration ${this.subagent.iteration}/${this.subagent.maxIterations})` : ""}`
+      : "";
     const clockPart = this.done ? "" : ` · ⏱ ${clock}`;
     const doneCount = this.steps.filter((s) => s.state !== "run").length;
     const total = this.steps.length;
@@ -984,7 +990,7 @@ export class LiveStatus {
     const running = this.steps.findLast?.((s) => s.state === "run") ?? [...this.steps].reverse().find((s) => s.state === "run");
     const spotlight = !this.done && running ? `\n${spinner} **${running.name}**${running.args ? ` · ${running.args}` : ""}` : "";
     const label = this.taskLabel ? `📌 \`${this.taskLabel.slice(0, 80)}\`\n` : "";
-    const parts = [label + head + iteration + clockPart + spotlight + progress];
+    const parts = [label + head + iteration + delegation + clockPart + spotlight + progress];
     if (total > 0) parts.push(this.renderAnsi());
     if (this.threadId) parts.push(`🧵 full trace: <#${this.threadId}>`);
     if (suffix) parts.push(suffix);
