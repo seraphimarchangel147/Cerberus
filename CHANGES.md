@@ -426,3 +426,5 @@ ALL PARITY PHASES COMPLETE
 - Preserve legacy watch behavior for custom registries that contain none of the named chat-core tools, while leaving the normal unfiltered schema path unchanged.
 - Validation: `node --test` passes 617/617 (0 failed).
 SELFQA + FASTLANE PHASE COMPLETE
+
+DISCORD LANE PARITY WAVE 2 COMPLETE
