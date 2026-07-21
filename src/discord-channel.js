@@ -253,7 +253,12 @@ export class DiscordChannel {
     if (!me || message.author?.id === me) return;               // never answer ourselves
     const isDm = !message.guild_id;
     const text = (message.content ?? "").trim();
-    if (!text) return;
+    const hasImages = Array.isArray(message.attachments)
+      && message.attachments.some((a) => {
+        const ct = String(a?.content_type ?? "").split(";")[0].trim().toLowerCase();
+        return SUPPORTED_IMAGE_TYPES.has(ct) || /\.(png|jpe?g|webp|gif)$/i.test(String(a?.filename ?? ""));
+      });
+    if (!text && !hasImages) return;                            // nothing to act on
 
     if (isDm) {
       if (this.allowFrom.length > 0 && !this.allowFrom.includes(message.author?.id)) {
@@ -271,7 +276,7 @@ export class DiscordChannel {
     // Strip our own mention tokens so the model sees clean text.
     const cleaned = text
       .replace(new RegExp(`<@!?${me}>`, "g"), "")
-      .trim() || text;
+      .trim() || (hasImages ? "(image attached — no caption)" : text);
 
     this.log({ op: "inbound", from: message.author?.id, channel: message.channel_id, guild: message.guild_id ?? null, len: text.length });
     // Track where Azazel is actively working so the activity feed can follow
@@ -355,12 +360,16 @@ export class DiscordChannel {
       }, 8000);
       await status.begin(message.id, text.slice(0, 60));
       const authorName = message.member?.nick ?? message.author?.global_name ?? message.author?.username ?? "user";
+      // Download any image attachments so a vision model can see them.
+      const images = await fetchDiscordImages(message, (e) => this.log(e));
+      if (images.length > 0) this.log({ op: "inbound-images", count: images.length, channel: message.channel_id });
       const result = await this.agentHost.handleMessage({
         channel: "discord",
         from: message.author?.id ?? "unknown",
         agentId: "main",
         sessionId: `discord:${message.guild_id ?? "dm"}:${message.channel_id}`,
         text: message.guild_id ? `[${authorName}] ${text}` : text,
+        images,
         onToolEvent: (ev) => status.onEvent(ev),
         metadata: {
           discordMessageId: message.id,
@@ -723,6 +732,47 @@ function splitIds(value) {
   if (Array.isArray(value)) return value.map(String);
   return String(value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
+
+// Vision plumbing: pull image attachments off an inbound Discord message and
+// download them as base64 so a vision-capable model can actually see them.
+// Discord serves attachments from cdn.discordapp.com; we cap size + count to
+// keep the request sane and skip anything that isn't a supported image type.
+const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB per image
+const MAX_IMAGES = 4;
+
+async function fetchDiscordImages(message, log) {
+  const atts = Array.isArray(message?.attachments) ? message.attachments : [];
+  const candidates = atts.filter((a) => {
+    const ct = String(a?.content_type ?? "").split(";")[0].trim().toLowerCase();
+    if (SUPPORTED_IMAGE_TYPES.has(ct)) return true;
+    // Some clients omit content_type — fall back to extension sniffing.
+    return /\.(png|jpe?g|webp|gif)$/i.test(String(a?.filename ?? ""));
+  }).slice(0, MAX_IMAGES);
+  const out = [];
+  for (const a of candidates) {
+    try {
+      if (a.size && a.size > MAX_IMAGE_BYTES) {
+        log?.({ op: "image-skip-large", filename: a.filename, size: a.size });
+        continue;
+      }
+      const res = await fetch(a.url);
+      if (!res.ok) { log?.({ op: "image-fetch-failed", filename: a.filename, status: res.status }); continue; }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > MAX_IMAGE_BYTES) { log?.({ op: "image-skip-large", filename: a.filename, size: buf.length }); continue; }
+      let mediaType = String(a?.content_type ?? "").split(";")[0].trim().toLowerCase();
+      if (!SUPPORTED_IMAGE_TYPES.has(mediaType)) {
+        const ext = (String(a?.filename ?? "").match(/\.([a-z0-9]+)$/i)?.[1] ?? "png").toLowerCase();
+        mediaType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : `image/${ext}`;
+      }
+      out.push({ mediaType, data: buf.toString("base64"), filename: a.filename ?? "image", bytes: buf.length });
+    } catch (err) {
+      log?.({ op: "image-fetch-error", filename: a?.filename, error: err?.message ?? String(err) });
+    }
+  }
+  return out;
+}
+
 
 function isPendingApprovalInteraction(interaction) {
   return interaction?.type === 3 && /^pa:(?:approve|deny|session):/.test(String(interaction?.data?.custom_id ?? ""));

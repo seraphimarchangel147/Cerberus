@@ -2,6 +2,17 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-20 — Discord image attachments → vision (Seraphim)
+
+- **Fixed: Azazel could not see images sent on Discord.** Inbound attachments were never extracted, and image-only messages (no caption) were dropped at `if (!text) return`. Now:
+  - `discord-channel.js`: `fetchDiscordImages()` downloads image attachments (png/jpeg/webp/gif, ≤8 MB, ≤4 per message) from the Discord CDN as base64. `handleMessage` no longer early-returns when a message has images but no text; `runTurn` fetches the images and threads them to the agent host.
+  - `agent-host.js`: passes `input.images` through to `modelProvider.generate()`.
+  - `model-provider.js`: both `AnthropicProvider` and `OpenAIResponsesProvider` `generate()` now accept `images` and attach them to the CURRENT user turn as real vision blocks (Anthropic `{type:image,source:{base64}}` / OpenAI `{type:input_image,image_url:data:}`). Text-only turns keep plain-string content (cache-stable).
+- Verified the live model **kimi-k3** (api.kimi.com) IS vision-capable via direct probe. End-to-end: harness `AnthropicProvider.generate()` with a real green PNG + live config → reply "Green".
+- Slash commands (`/status`, `/model`, `/pending`, etc., 17 total) were already implemented in `discord-commands.js` and confirmed registered on the guild — no change needed there.
+- Tests: 4 new vision-plumbing regressions in `model-provider-iterations.test.js`; full suite **563/563 pass**. Homoglyph byte-scan clean.
+VISION ATTACHMENT PHASE COMPLETE
+
 ## 2026-07-17 — Consent lane and scrutiny anti-loop (Codex)
 
 - Added an exported, strict consent-phrase lane for affirmative/directive replies following an assistant question, including Discord's author prefix. Explicit consent now drives an effective `act` verdict while preserving the raw scrutiny action and score for audit.
@@ -188,3 +199,5 @@ TIER2 HARDENING COMPLETE
 - Root-caused the "pre-existing 557/558 flaky failure": sequence scoring used a naive mean/variance over getHours(), so routines straddling local midnight (hours 23 and 0) scored variance ~132 -> timeStability 0 -> candidate silently dropped. The pattern-miner test only failed when the suite ran near local midnight.
 - Replaced with a circular (vector) mean and wrapped hour deviations in mineSequences; startHour now wraps mod 24. Mid-day scoring is numerically unchanged.
 - Added test/pattern-miner-midnight.test.js: pre-fix repro (0 candidates at 00:5x local) plus a mid-day invariance guard. Both lanes: 560/560.
+
+- 2026-07-21T02:08:56.868Z · **azazel** · create `ui/azazel-dashboard.html` — Standalone HTML dashboard rendering Azazel's upgrade status table with dark theme + dark red accents

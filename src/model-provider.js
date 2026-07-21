@@ -261,7 +261,7 @@ export class OpenAIResponsesProvider {
     return this.model;
   }
 
-  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task }) {
+  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [] }) {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
 
@@ -272,12 +272,25 @@ export class OpenAIResponsesProvider {
     // `instructions` stays byte-stable across turns (mirrors the Anthropic
     // path; no cache markers here — OpenAI caching is implicit).
     const contextBlock = turnContext ?? buildTurnContext({ scrutiny, memoryHits });
+    // Inbound images (e.g. Discord attachments) ride the CURRENT user turn as
+    // real input_image blocks so the model can actually see them. Text-only
+    // turns keep the plain-string content (byte-stable, cache-friendly).
+    const finalText = contextBlock ? `${contextBlock}\n\n${input}` : input;
+    const finalUserTurn = Array.isArray(images) && images.length > 0
+      ? {
+          role: "user",
+          content: [
+            { type: "input_text", text: finalText },
+            ...images.map((im) => ({ type: "input_image", image_url: `data:${im.mediaType};base64,${im.data}` }))
+          ]
+        }
+      : { role: "user", content: finalText };
     const conversationInput = [
       ...messages.slice(-12).map((message) => ({
         role: message.role === "assistant" ? "assistant" : "user",
         content: message.content
       })),
-      { role: "user", content: contextBlock ? `${contextBlock}\n\n${input}` : input }
+      finalUserTurn
     ];
 
     const baseInstructions = instructions ?? buildDefaultInstructions({ agent });
@@ -506,7 +519,7 @@ export class AnthropicProvider {
     return this.model;
   }
 
-  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task }) {
+  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [] }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
 
@@ -523,12 +536,21 @@ export class AnthropicProvider {
     ];
 
     const contextBlock = turnContext ?? buildTurnContext({ scrutiny, memoryHits });
+    // Inbound images (Discord attachments) attach to the CURRENT user turn as
+    // Anthropic image blocks (base64 source) so a vision model can see them.
+    const finalText = contextBlock ? `${contextBlock}\n\n${input}` : input;
+    const finalUserContent = Array.isArray(images) && images.length > 0
+      ? [
+          { type: "text", text: finalText },
+          ...images.map((im) => ({ type: "image", source: { type: "base64", media_type: im.mediaType, data: im.data } }))
+        ]
+      : finalText;
     const convo = [
       ...messages.slice(-12).map((m) => ({
         role: m.role === "assistant" ? "assistant" : "user",
         content: m.content
       })),
-      { role: "user", content: contextBlock ? `${contextBlock}\n\n${input}` : input }
+      { role: "user", content: finalUserContent }
     ];
 
     const toolCalls = [];

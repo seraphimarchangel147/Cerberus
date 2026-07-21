@@ -243,6 +243,7 @@ export class AgentHost {
       scrutiny: effectiveScrutiny,
       memoryHits: memoryHitsForModel,
       messages: sessionBefore.messages,
+      images: Array.isArray(input.images) ? input.images : [],
       instructions: this.instructionsForAgent(agent),
       turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null),
       tools,

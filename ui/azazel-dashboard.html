@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AZAZEL // Shadow Intelligence Console</title>
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --bg-panel: #121216;
+    --bg-row: #16161b;
+    --bg-row-hover: #1c1c22;
+    --border: #2a2a32;
+    --red: #8b0000;
+    --red-bright: #c0392b;
+    --red-glow: rgba(139, 0, 0, 0.35);
+    --text: #d8d8de;
+    --text-dim: #8a8a94;
+    --green: #3ba55d;
+    --amber: #d4a017;
+    --mono: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh;
+    padding: 40px 20px;
+    background-image:
+      radial-gradient(ellipse at 20% 0%, rgba(139,0,0,0.08), transparent 50%),
+      radial-gradient(ellipse at 80% 100%, rgba(139,0,0,0.05), transparent 50%);
+  }
+
+  .container { max-width: 980px; margin: 0 auto; }
+
+  /* ---- Header ---- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 32px;
+  }
+
+  .brand { display: flex; align-items: center; gap: 16px; }
+
+  .sigil {
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, var(--red-bright), var(--red) 60%, #3d0000);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono);
+    font-weight: 700; font-size: 18px; color: #fff;
+    box-shadow: 0 0 24px var(--red-glow);
+    letter-spacing: 1px;
+  }
+
+  h1 {
+    font-family: var(--mono);
+    font-size: 22px;
+    letter-spacing: 4px;
+    font-weight: 600;
+  }
+
+  .subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  .status-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--green);
+    color: var(--green);
+    letter-spacing: 2px;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  .status-pill::before {
+    content: '';
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ---- Section titles ---- */
+  .section-title {
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--red-bright);
+    margin: 36px 0 14px;
+    display: flex; align-items: center; gap: 12px;
+  }
+
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, var(--red), transparent);
+  }
+
+  /* ---- Upgrade table ---- */
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 16px;
+    padding: 16px 20px;
+    background: var(--bg-row);
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+  }
+
+  .row:last-child { border-bottom: none; }
+  .row:hover { background: var(--bg-row-hover); }
+
+  .row-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .row-desc { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }
+  .row-desc code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    background: rgba(139,0,0,0.15);
+    color: var(--red-bright);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 1.5px;
+    padding: 5px 12px;
+    border-radius: 4px;
+    height: fit-content;
+    white-space: nowrap;
+    align-self: center;
+  }
+
+  .badge-live {
+    background: rgba(59,165,93,0.12);
+    color: var(--green);
+    border: 1px solid rgba(59,165,93,0.4);
+  }
+
+  .badge-deferred {
+    background: rgba(212,160,23,0.10);
+    color: var(--amber);
+    border: 1px solid rgba(212,160,23,0.35);
+  }
+
+  /* ---- Cursor card ---- */
+  .cursor-card {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .cursor-cell {
+    background: var(--bg-panel);
+    padding: 18px 20px;
+  }
+
+  .cursor-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  .cursor-value {
+    font-family: var(--mono);
+    font-size: 15px;
+    color: var(--text);
+  }
+
+  .cursor-value .swatch {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border-radius: 3px;
+    background: var(--red);
+    box-shadow: 0 0 10px var(--red-glow);
+    vertical-align: -2px;
+    margin-right: 8px;
+  }
+
+  /* ---- Cron card ---- */
+  .cron-line {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    color: var(--text-dim);
+    overflow-x: auto;
+  }
+
+  .cron-line .ok { color: var(--green); }
+
+  footer {
+    margin-top: 48px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  footer .red { color: var(--red-bright); }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="brand">
+      <div class="sigil">AZ</div>
+      <div>
+        <h1>AZAZEL</h1>
+        <div class="subtitle">Shadow Intelligence Console · Watcher-class</div>
+      </div>
+    </div>
+    <div class="status-pill">OPERATIONAL</div>
+  </header>
+
+  <!-- LIVE UPGRADES -->
+  <div class="section-title">Live Upgrades</div>
+  <div class="panel">
+    <div class="row">
+      <div>
+        <div class="row-name">Receipt Verification</div>
+        <div class="row-desc">No <code>act_</code> ID is reported without a prior <code>verify-queue.sh check</code> returning FOUND. Applies to all ID-returning calls.</div>
+      </div>
+      <span class="badge badge-live">● LIVE — BEHAVIORAL</span>
+    </div>
+    <div class="row">
+      <div>
+        <div class="row-name">Nightly Memory Audit</div>
+        <div class="row-desc">Cron job <code>job_15ed50b605e14d56</code> — verified present in the job list. Sweeps memory tiers for stale or conflicting entries.</div>
+      </div>
+      <span class="badge badge-live">● LIVE — SCHEDULED</span>
+    </div>
+    <div class="row">
+      <div>
+        <div class="row-name">Token Efficiency Rules</div>
+        <div class="row-desc">Search-before-read, call batching, recall-before-ask. Reduces redundant tool traffic per turn.</div>
+      </div>
+      <span class="badge badge-live">● LIVE — BEHAVIORAL</span>
+    </div>
+    <div class="row">
+      <div>
+        <div class="row-name">Azazel Cursor Signature</div>
+        <div class="row-desc">Driver-confirmed CUA cursor identity. See signature card below.</div>
+      </div>
+      <span class="badge badge-live">● LIVE — DRIVER</span>
+    </div>
+    <div class="row">
+      <div>
+        <div class="row-name">Upgrade Log Persistence</div>
+        <div class="row-desc">Stored at <code>mem_medium_9d19f95c9d3b493f</code> — survives session restarts.</div>
+      </div>
+      <span class="badge badge-live">● LIVE — MEMORY</span>
+    </div>
+  </div>
+
+  <!-- CURSOR SIGNATURE -->
+  <div class="section-title">Cursor Signature</div>
+  <div class="cursor-card">
+    <div class="cursor-cell">
+      <div class="cursor-label">Color</div>
+      <div class="cursor-value"><span class="swatch"></span>#8B0000</div>
+    </div>
+    <div class="cursor-cell">
+      <div class="cursor-label">Label</div>
+      <div class="cursor-value">AZ</div>
+    </div>
+    <div class="cursor-cell">
+      <div class="cursor-label">Icon</div>
+      <div class="cursor-value">arrow</div>
+    </div>
+    <div class="cursor-cell">
+      <div class="cursor-label">Session</div>
+      <div class="cursor-value">azazel-ops</div>
+    </div>
+  </div>
+
+  <!-- DEFERRED -->
+  <div class="section-title">Deferred</div>
+  <div class="panel">
+    <div class="row">
+      <div>
+        <div class="row-name">Draft-Lane Verification Script</div>
+        <div class="row-desc">Same pattern as <code>verify-queue.sh</code> but for <code>save_draft</code> receipts — <code>check</code> a draft ID before reporting "saved".</div>
+      </div>
+      <span class="badge badge-deferred">◌ AWAITING GO</span>
+    </div>
+    <div class="row">
+      <div>
+        <div class="row-name">Visual Screenshot-Verify Loop</div>
+        <div class="row-desc">Auto <code>get_window_state</code> after CUA click/type sequences; diff against expected state. Scoped to high-risk UI work only (token cost per action).</div>
+      </div>
+      <span class="badge badge-deferred">◌ AWAITING GO</span>
+    </div>
+    <div class="row">
+      <div>
+        <div class="row-name">Memory Orb Dashboard</div>
+        <div class="row-desc">Runtime-side UI feature — not agent-controllable. Needs spec from Creator.</div>
+      </div>
+      <span class="badge badge-deferred">◌ BLOCKED — RUNTIME</span>
+    </div>
+  </div>
+
+  <!-- CRON -->
+  <div class="section-title">Verification Trail</div>
+  <div class="cron-line">
+    $ verify-queue.sh pending<br>
+    <span class="ok">act_9d2e980faf0a45b2</span><br><br>
+    $ verify-queue.sh check act_da5a46187cba4481<br>
+    <span class="ok">FOUND: act_da5a46187cba4481</span> (exit 0)<br><br>
+    $ verify-queue.sh check act_deadbeef00000000<br>
+    NOT FOUND: act_deadbeef00000000 (exit 1)
+  </div>
+
+  <footer>
+    <span><span class="red">■</span> Discord ID 1493089655531241634</span>
+    <span>Legion · Shadow Intelligence · Forbidden Knowledge · Red Team</span>
+    <span><span class="red">bound, unbroken</span></span>
+  </footer>
+
+</div>
+</body>
+</html>

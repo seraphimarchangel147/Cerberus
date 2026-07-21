@@ -481,3 +481,63 @@ test("the deterministic provider remains compatible with iteration-aware callers
   assert.equal(result.toolCalls.length, 0);
   assert.match(result.text, /Hey/);
 });
+
+// ── Vision plumbing: inbound images attach to the current user turn ──────
+const PX = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+test("Anthropic attaches inbound images as base64 image blocks on the user turn", async () => {
+  const provider = new AnthropicProvider({ apiKey: "test", maxIterations: 2 });
+  let sent = null;
+  provider.postMessages = async (body) => {
+    sent = structuredClone(body);
+    return { id: "m1", role: "assistant", content: [{ type: "text", text: "I see a red pixel." }], stop_reason: "end_turn" };
+  };
+  const result = await provider.generate({
+    input: "what is this?",
+    agent,
+    toolRegistry: anthropicToolRegistry(),
+    images: [{ mediaType: "image/png", data: PX }]
+  });
+  assert.match(result.text, /red pixel/);
+  const userTurn = sent.messages.at(-1);
+  assert.equal(userTurn.role, "user");
+  assert.ok(Array.isArray(userTurn.content), "image turn uses a content block array");
+  const imgBlock = userTurn.content.find((b) => b.type === "image");
+  assert.ok(imgBlock, "an image block is present");
+  assert.equal(imgBlock.source.type, "base64");
+  assert.equal(imgBlock.source.media_type, "image/png");
+  assert.equal(imgBlock.source.data, PX);
+  assert.ok(userTurn.content.some((b) => b.type === "text" && /what is this/.test(b.text)), "the caption text rides along");
+});
+
+test("Anthropic keeps plain-string content when no images are attached", async () => {
+  const provider = new AnthropicProvider({ apiKey: "test", maxIterations: 2 });
+  let sent = null;
+  provider.postMessages = async (body) => {
+    sent = structuredClone(body);
+    return { id: "m1", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" };
+  };
+  await provider.generate({ input: "no image here", agent, toolRegistry: anthropicToolRegistry() });
+  assert.equal(typeof sent.messages.at(-1).content, "string");
+});
+
+test("OpenAI attaches inbound images as input_image blocks on the user turn", async () => {
+  const provider = new OpenAIResponsesProvider({ apiKey: "test", maxIterations: 2 });
+  let sent = null;
+  provider.postResponses = async (body) => {
+    sent = structuredClone(body);
+    return { id: "r1", status: "completed", output_text: "I see it.", output: [] };
+  };
+  await provider.generate({
+    input: "describe",
+    agent,
+    toolRegistry: openAIToolRegistry(),
+    images: [{ mediaType: "image/png", data: PX }]
+  });
+  const userTurn = sent.input.at(-1);
+  assert.equal(userTurn.role, "user");
+  assert.ok(Array.isArray(userTurn.content));
+  const imgBlock = userTurn.content.find((b) => b.type === "input_image");
+  assert.ok(imgBlock, "an input_image block is present");
+  assert.match(imgBlock.image_url, /^data:image\/png;base64,/);
+});
