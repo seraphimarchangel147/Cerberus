@@ -19,6 +19,7 @@ import { registerCalendarIntegration } from "./integrations/calendar.js";
 import { registerWebSearchTools } from "./integrations/web-search.js";
 import { registerExecuteCodeTool } from "./integrations/execute-code.js";
 import { registerDelegateTaskTool } from "./integrations/delegate-task.js";
+import { registerSessionSearchTool } from "./integrations/session-search-tool.js";
 import { registerImessageSearchTool } from "./integrations/imessage-search-tool.js";
 import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
@@ -464,6 +465,7 @@ export class AbiRuntime {
       // re-enters this same registry so scrutiny and catastrophic gates hold.
       registerExecuteCodeTool(this);
       registerDelegateTaskTool(this);
+      registerSessionSearchTool(this);
       // Computer-use tools register only when explicitly opted-in via env
       // (OPENAGI_COMPUTER_USE=1). Default install doesn't expose them so
       // an LLM can't accidentally try to drive the user's screen. The

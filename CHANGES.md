@@ -232,3 +232,11 @@ EXECUTE CODE PHASE COMPLETE
 - Added regressions for summary-only transcript isolation, private core-tool memory, disabled auto-propagation, concurrent partial failure, depth attacks, both-lane watch enforcement, shared budget accounting, per-provider caps, cancellation, live status, validation, and config persistence.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 588/588; all changed filenames and contents pass the homoglyph scan.
 SUBAGENTS PHASE COMPLETE
+
+## 2026-07-21 - Hermes-compatible session context search (Codex)
+
+- Added the intentionally named read-only `searcmcp_sessions` ABI over the existing `SessionIndex`, returning bounded raw `{sessionId, ts, role, snippet}` hits without exposing full transcripts.
+- Clamped result limits to 1..20, handled empty and missing-index cases safely, and preserved the existing `search_sessions` contract for current callers.
+- Added SQLite and forced-JSONL-fallback regressions for result shape, no-hit behavior, limit handling, scrutiny enforcement, and invocation-runtime isolation.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 593/593.
+CTX SEARCH PHASE COMPLETE

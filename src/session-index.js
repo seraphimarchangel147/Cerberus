@@ -1,5 +1,6 @@
 // SQLite FTS5 index over the agent's own chat transcripts so the agent can
-// search its past conversations on demand (the search_sessions tool). Memory
+// search its past conversations on demand (search_sessions and the Hermes
+// parity searcmcp_sessions tool). Memory
 // distillation is lossy by design; the raw transcript is ground truth for
 // "what did we decide about X three weeks ago?".
 //
@@ -53,11 +54,16 @@ export class SessionIndex {
     this.wasMissing = !fs.existsSync(this.dbPath) && !fs.existsSync(path.join(this.dir, "session-index.jsonl"));
     this.db = null;
     this.fallback = null; // JSONL fallback when node:sqlite isn't available
+    this.forceFallback = options.fallback === true;
     this.fallbackPath = path.join(this.dir, "session-index.jsonl");
     this.ready = this.init();
   }
 
   async init() {
+    if (this.forceFallback) {
+      this.fallback = true;
+      return;
+    }
     const sqlite = await loadSqlite();
     if (!sqlite) {
       // node:sqlite is available in Node 22.5+. If it's missing we degrade to
