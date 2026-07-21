@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Bundled work-plan mode v0 (Codex)
+
+- Added a parser-safe bundled `work-plan` skill that directs the model to inspect real paths, write commit-sized numbered steps, state dependencies and risks, and attach focused verification to every step before execution.
+- Kept the existing Discord `/plan` daily-planner command unchanged, avoiding a semantic collision. The v1 turn flag, persisted plan artifact, step-state tracking, and optional approval rail are deferred as the scaffold explicitly permits; they require a product choice for the command/tool surface.
+- Added a real SkillRegistry load/view regression using a fake runtime and the bundled directory.
+- Validation: `npm test` and `npm run test:prod-policy` both pass 656/656.
+PLAN MODE PHASE COMPLETE
+
 ## 2026-07-21 — Memory recall rebalance and condenser hygiene (Codex)
 
 - Replaced conflicting flat tier multipliers with one query-gated scoring model: strength is the base, matching principles/corrections/specific memories earn proportional boosts, and fresh short memory receives only a small overlap-weighted recency nudge. Unrelated principles no longer surface from an unconditional bonus.
