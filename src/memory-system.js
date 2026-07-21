@@ -84,6 +84,8 @@ export class MemorySystem {
     const queryText = typeof query === "string" ? query : this.formatContent(query);
     const queryTags = new Set((options.tags ?? []).map((t) => String(t).toLowerCase()));
     const scope = options.scope ?? null;
+    const now = options.now ?? nowIso();
+    const nowMs = new Date(now).getTime();
 
     const scored = [];
     for (const item of this.items.values()) {
@@ -93,7 +95,6 @@ export class MemorySystem {
       // version (the correction itself carries the fact forward).
       if (item.metadata?.supersededBy) continue;
       const textScore = tokenOverlapScore(queryText, `${item.content} ${item.tags.join(" ")}`);
-      const tierWeight = item.tier === "short" ? 1.15 : item.tier === "medium" ? 1 : 0.85;
       const strengthWeight = 0.4 + item.strength * 0.6;
       // Danger boost: high-specificity high-risk items outrank for tag-matched recalls.
       let dangerBoost = 0;
@@ -101,20 +102,26 @@ export class MemorySystem {
         const hits = item.tags.filter((t) => queryTags.has(String(t).toLowerCase())).length;
         if (hits > 0) dangerBoost = 0.25 * (item.dangerLevel ?? 0);
       }
-      // Principle boost: distilled principles get a small edge in long-tier recall.
-      const principleBoost = item.kind === "principle" ? 0.1 : 0;
+      // Tier and kind are one scoring model: principles/corrections earn an
+      // edge only when they actually match, while fresh short-term context
+      // gets a small recency nudge instead of a blanket 1.15 multiplier.
+      const ageMs = Math.max(0, nowMs - new Date(item.createdAt).getTime());
+      const shortFreshness = item.tier === "short"
+        ? clamp(1 - (ageMs / this.ttlMs.short))
+        : 0;
+      const recencyBoost = textScore * shortFreshness * 0.05;
+      const principleBoost = item.kind === "principle" ? textScore * 0.18 : 0;
       // Corrections outrank whatever they replaced; fidelity finally feeds the
       // ranking ("the hourglass on the spider"): specific-fidelity items edge
       // out generic ones when both match. Gated on a real text match so
       // unrelated corrections/specific items don't surface on every query.
-      const correctionBoost = textScore > 0 && item.kind === "correction" ? 0.3 : 0;
-      const fidelityBoost = textScore > 0 && item.fidelity === "specific" ? 0.05 : 0;
-      const score = textScore * tierWeight * strengthWeight + dangerBoost + principleBoost + correctionBoost + fidelityBoost;
+      const correctionBoost = item.kind === "correction" ? textScore * 0.3 : 0;
+      const fidelityBoost = item.fidelity === "specific" ? textScore * 0.05 : 0;
+      const score = textScore * strengthWeight + recencyBoost + dangerBoost + principleBoost + correctionBoost + fidelityBoost;
       if (score > 0) scored.push({ item, score });
     }
 
     scored.sort((a, b) => b.score - a.score);
-    const now = options.now ?? nowIso();
     for (const entry of scored.slice(0, limit)) {
       entry.item.lastAccessedAt = now;
       entry.item.strength = clamp(entry.item.strength + 0.03);

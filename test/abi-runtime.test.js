@@ -497,7 +497,7 @@ test("high-danger memory items resist compression and rank higher on tag-matched
   assert.match(hits[0].item.content, /hourglass/i);
 });
 
-test("memory condenser groups items by tag overlap and writes a principle to long-tier", async () => {
+test("memory condenser fallback writes a quarantined, decaying principle", async () => {
   const runtime = createDefaultRuntime();
   const tags = ["work", "standup"];
   for (let i = 0; i < 4; i += 1) {
@@ -506,13 +506,11 @@ test("memory condenser groups items by tag overlap and writes a principle to lon
       { tier: "medium" }
     );
   }
-  const before = runtime.memory.byTier("long").length;
   const result = await runtime.condenser.condense();
   assert.ok(result.principles >= 1, `expected at least one principle, got ${result.principles}`);
-  const after = runtime.memory.byTier("long");
-  assert.ok(after.length > before);
-  const principle = after.find((m) => m.kind === "principle");
+  const principle = runtime.memory.byTier("medium").find((m) => m.kind === "principle");
   assert.ok(principle);
+  assert.equal(principle.metadata.confidence, "low");
   assert.ok(principle.metadata.sources.length >= 3);
   assert.ok(principle.metadata.quarantineUntil);
 });
@@ -755,7 +753,7 @@ test("scrutiny fitter judge signal averages with correlation deltas", () => {
   assert.ok(runtime.scrutiny.judges.pragmatic.weights.evidence > before);
 });
 
-test("retiring a specialist with scoped memory creates a legacy principle in main", async () => {
+test("retiring a specialist with scoped memory creates a decaying legacy principle in main", async () => {
   const runtime = createDefaultRuntime();
   const r = runtime.propagation.propagate({
     signal: { domain: "general", taskType: "legacy", summary: "to-retire", repetition: 0.9 },
@@ -778,7 +776,7 @@ test("retiring a specialist with scoped memory creates a legacy principle in mai
     originSpecialistId: sp.id
   });
   assert.ok(result.principles >= 1);
-  const legacy = runtime.memory.byTier("long").find((m) => m.metadata?.originSpecialistId === sp.id);
+  const legacy = runtime.memory.byTier("medium").find((m) => m.metadata?.originSpecialistId === sp.id);
   assert.ok(legacy);
   assert.ok(legacy.tags.includes(`legacy:${sp.id}`));
   assert.equal(legacy.scope, "main");

@@ -1,4 +1,4 @@
-import { createId, nowIso, tokenize } from "./utils.js";
+import { nowIso, tokenize, tokenOverlapScore } from "./utils.js";
 
 // Condenses raw memory items into distilled "principles" stored in long-tier.
 // Sources keep their normal lifecycle and may decay; principles outlive them.
@@ -40,18 +40,34 @@ export class MemoryCondenser {
     }
     const groups = clusterByTagOverlap(candidates, this.minGroupSize).slice(0, this.maxGroupsPerRun);
     const principles = [];
+    let duplicatesSkipped = 0;
 
     for (const group of groups) {
       const principle = await this.distill(group);
       if (!principle) continue;
-      const quarantineUntil = new Date(now.getTime() + this.quarantineDays * 86400 * 1000).toISOString();
       const tags = [...new Set(group.flatMap((m) => m.tags ?? []).concat(["principle"]))];
       if (originSpecialistId) tags.push(`legacy:${originSpecialistId}`);
+      const targetScope = writeScope ?? "main";
+      const duplicate = findNearDuplicatePrinciple(this.runtime.memory, principle.text, targetScope);
+      if (duplicate) {
+        duplicate.metadata = {
+          ...(duplicate.metadata ?? {}),
+          sources: [...new Set([...(duplicate.metadata?.sources ?? []), ...group.map((m) => m.id)])],
+          duplicateMergedAt: nowIso()
+        };
+        duplicate.strength = Math.min(1, (duplicate.strength ?? 0.5) + 0.03);
+        markCondensedSources(this.runtime.memory, group, duplicate.id);
+        duplicatesSkipped += 1;
+        continue;
+      }
+
+      const quarantineUntil = new Date(now.getTime() + this.quarantineDays * 86400 * 1000).toISOString();
+      const profile = confidenceProfile(principle.confidence);
       const item = this.runtime.memory.remember(
         {
           source: originSpecialistId ? "legacy" : "condenser",
           kind: "principle",
-          scope: writeScope ?? "main",
+          scope: targetScope,
           content: principle.text,
           tags,
           risk: median(group.map((m) => m.risk ?? 0)),
@@ -65,7 +81,12 @@ export class MemoryCondenser {
             originSpecialistId: originSpecialistId ?? null
           }
         },
-        { source: originSpecialistId ? "legacy" : "condenser", strength: 0.8, tier: "long", critical: true }
+        {
+          source: originSpecialistId ? "legacy" : "condenser",
+          strength: profile.strength,
+          tier: profile.tier,
+          critical: false
+        }
       );
       // Index for Lava intuition lookups.
       this.runtime.vectorStore?.upsert("principle", item.id, principle.text, {
@@ -73,15 +94,12 @@ export class MemoryCondenser {
         tags: item.tags
       }).catch(() => {});
       // Mark sources so we don't re-condense them.
-      for (const src of group) {
-        const existing = this.runtime.memory.items.get(src.id);
-        if (existing) existing.metadata = { ...(existing.metadata ?? {}), condensedInto: item.id };
-      }
+      markCondensedSources(this.runtime.memory, group, item.id);
       principles.push({ id: item.id, sources: group.map((m) => m.id), text: principle.text, confidence: principle.confidence });
     }
 
     if (typeof this.runtime.memory.persist === "function") this.runtime.memory.persist("condense", { count: principles.length });
-    return { groups: groups.length, principles: principles.length, items: principles };
+    return { groups: groups.length, principles: principles.length, duplicatesSkipped, items: principles };
   }
 
   async distill(items) {
@@ -166,6 +184,29 @@ function extractive(items) {
     text: `Pattern across ${items.length} notes: ${longest.content.slice(0, 320)}`,
     confidence: "low"
   };
+}
+
+function confidenceProfile(confidence) {
+  if (confidence === "high") return { tier: "long", strength: 0.85 };
+  if (confidence === "medium") return { tier: "medium", strength: 0.68 };
+  return { tier: "medium", strength: 0.48 };
+}
+
+function findNearDuplicatePrinciple(memory, text, scope, threshold = 0.72) {
+  for (const existing of memory.items?.values?.() ?? []) {
+    if (existing.kind !== "principle" || (existing.scope ?? "main") !== scope) continue;
+    const forward = tokenOverlapScore(text, existing.content);
+    const reverse = tokenOverlapScore(existing.content, text);
+    if ((forward + reverse) / 2 >= threshold) return existing;
+  }
+  return null;
+}
+
+function markCondensedSources(memory, group, principleId) {
+  for (const src of group) {
+    const existing = memory.items.get(src.id);
+    if (existing) existing.metadata = { ...(existing.metadata ?? {}), condensedInto: principleId };
+  }
 }
 
 function median(values) {

@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Memory recall rebalance and condenser hygiene (Codex)
+
+- Replaced conflicting flat tier multipliers with one query-gated scoring model: strength is the base, matching principles/corrections/specific memories earn proportional boosts, and fresh short memory receives only a small overlap-weighted recency nudge. Unrelated principles no longer surface from an unconditional bonus.
+- Condenser confidence now controls durability: high-confidence output may enter long memory, while medium and low—including deterministic fallback—land in decaying medium memory at calibrated strength with `critical:false`.
+- Near-duplicate principles in the same scope are merged instead of duplicated. Their source ids and strength are combined, and every new source records the existing `condensedInto` id.
+- The optional FTS/vector recall index is deferred; the confirmed ranking and permanent-fallback pollution bugs are fixed without adding a new persistence dependency. Validation: `npm test` and `npm run test:prod-policy` both pass 655/655; live daemon condensation was skipped under the isolation constraint.
+MEMORY HOT PATH PHASE COMPLETE
+
 ## 2026-07-21 — Tool-output caps and context compaction (Codex)
 
 - Both provider loops now cap serialized tool results at `OPENAGI_MAX_TOOL_OUTPUT_CHARS` (default 8000). Oversized values keep head/tail evidence plus an elision marker and are persisted under a strict `out_<hex>` ref; the read-only `read_tool_output` tool retrieves bounded chunks without path traversal.
