@@ -37,6 +37,7 @@ import { TaskSweep } from "./task-sweep.js";
 import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
 import { PendingActionStore } from "./pending-actions.js";
+import { ToolOutputStore } from "./tool-output-store.js";
 import { ComputerUseLog } from "./computer-use-log.js";
 import { ClarificationStore } from "./clarification-store.js";
 import { DraftStore } from "./draft-store.js";
@@ -150,6 +151,9 @@ export class AbiRuntime {
       ...(options.pendingActionStoreOptions ?? {})
     });
     this.tools.bindPendingActions(this.pendingActions);
+    this.toolOutputs = options.toolOutputs ?? new ToolOutputStore({
+      dir: options.dataDir ? path.join(options.dataDir, "tool-outputs") : undefined
+    });
     // Computer-use log is always allocated so the dashboard can render the
     // log surface even when the feature is off (showing zero sessions).
     // The actual tools only register when OPENAGI_COMPUTER_USE=1.

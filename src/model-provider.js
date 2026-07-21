@@ -1,4 +1,6 @@
 import { ModelRouter } from "./model-router.js";
+import { defaultToolOutputStore } from "./tool-output-store.js";
+import { summarizeText } from "./utils.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
@@ -15,6 +17,9 @@ const DEFAULT_FORCE_ANSWER_MS = 60000;
 const DEFAULT_PROVIDER_MAX_RETRIES = 3;
 const DEFAULT_PROVIDER_RETRY_BASE_MS = 500;
 const MAX_PROVIDER_RETRY_DELAY_MS = 8000;
+const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 8000;
+const DEFAULT_CONTEXT_COMPACT_CHARS = 120000;
+const DEFAULT_CONTEXT_KEEP_RECENT_HOPS = 4;
 const SYNTHETIC_CONTINUE = [
   "[system] Continue the same task now.",
   "Use the accumulated tool results and conversation above.",
@@ -220,6 +225,18 @@ function applyIterationSettings(provider, options) {
   );
   provider.retrySleep = options.retrySleep;
   provider.retryRandom = options.retryRandom;
+  provider.maxToolOutputChars = positiveInteger(
+    options.maxToolOutputChars ?? process.env.OPENAGI_MAX_TOOL_OUTPUT_CHARS,
+    DEFAULT_MAX_TOOL_OUTPUT_CHARS
+  );
+  provider.contextCompactChars = positiveInteger(
+    options.contextCompactChars ?? process.env.OPENAGI_CONTEXT_COMPACT_CHARS,
+    DEFAULT_CONTEXT_COMPACT_CHARS
+  );
+  provider.contextKeepRecentHops = positiveInteger(
+    options.contextKeepRecentHops ?? process.env.OPENAGI_CONTEXT_KEEP_RECENT_HOPS,
+    DEFAULT_CONTEXT_KEEP_RECENT_HOPS
+  );
   provider.now = options.now ?? Date.now;
   // Keep this readable for integrations that inspect the old property. The
   // value now represents the whole-turn iteration cap.
@@ -546,6 +563,113 @@ export function reconcileOrphanedToolCalls(conversation, format = "auto") {
   return missing.length;
 }
 
+export function capToolOutput(value, { maxChars = DEFAULT_MAX_TOOL_OUTPUT_CHARS, store } = {}) {
+  const output = JSON.stringify(value);
+  if (typeof output !== "string" || output.length <= maxChars) {
+    return { output, ref: null, truncated: false, originalChars: output?.length ?? 0 };
+  }
+
+  let ref = null;
+  try { ref = (store ?? defaultToolOutputStore()).put(output); } catch { /* preview remains usable */ }
+  const target = Math.max(1, Math.trunc(maxChars));
+  let retained = Math.max(0, target - 100);
+  let marker = "";
+  for (let i = 0; i < 3; i += 1) {
+    const elided = Math.max(0, output.length - retained);
+    marker = `\n[...${elided} chars elided; full output ${ref ? `at ref:${ref}` : "unavailable"}...]\n`;
+    retained = Math.max(0, target - marker.length);
+  }
+  const headChars = Math.ceil(retained / 2);
+  const tailChars = Math.floor(retained / 2);
+  const preview = `${output.slice(0, headChars)}${marker}${tailChars ? output.slice(-tailChars) : ""}`;
+  return {
+    output: preview.slice(0, target),
+    ref,
+    truncated: true,
+    originalChars: output.length
+  };
+}
+
+function transcriptChars(conversation) {
+  try { return JSON.stringify(conversation).length; } catch { return Number.MAX_SAFE_INTEGER; }
+}
+
+function adjustPairBoundary(conversation, format, boundary) {
+  const calls = new Map();
+  const results = new Map();
+  if (format === "anthropic") {
+    conversation.forEach((message, index) => {
+      for (const block of Array.isArray(message?.content) ? message.content : []) {
+        if (block?.type === "tool_use" && block.id) calls.set(block.id, index);
+        if (block?.type === "tool_result" && block.tool_use_id) results.set(block.tool_use_id, index);
+      }
+    });
+  } else {
+    conversation.forEach((item, index) => {
+      if (item?.type === "function_call" && item.call_id) calls.set(item.call_id, index);
+      if (item?.type === "function_call_output" && item.call_id) results.set(item.call_id, index);
+    });
+  }
+  for (const [id, callIndex] of calls) {
+    const resultIndex = results.get(id);
+    if (resultIndex === undefined) continue;
+    if ((callIndex < boundary) !== (resultIndex < boundary)) {
+      boundary = Math.min(boundary, callIndex, resultIndex);
+    }
+  }
+  return boundary;
+}
+
+// Replace only an old, well-formed prefix. Recent hops and the current user
+// turn stay byte-for-byte, and paired tool calls/results cross the boundary
+// together so compaction can never corrupt the provider transcript.
+export function compactConversation(conversation, {
+  format = "openai",
+  budgetChars = DEFAULT_CONTEXT_COMPACT_CHARS,
+  keepRecentHops = DEFAULT_CONTEXT_KEEP_RECENT_HOPS
+} = {}) {
+  const beforeChars = transcriptChars(conversation);
+  if (beforeChars <= budgetChars) return { compacted: false, beforeChars, afterChars: beforeChars };
+
+  reconcileOrphanedToolCalls(conversation, format);
+  const keepItems = (keepRecentHops * 2) + 1;
+  let boundary = conversation.length - keepItems;
+  if (boundary <= 0) return { compacted: false, beforeChars, afterChars: transcriptChars(conversation) };
+  boundary = adjustPairBoundary(conversation, format, boundary);
+  if (boundary <= 0) return { compacted: false, beforeChars, afterChars: transcriptChars(conversation) };
+
+  const compactedPrefix = conversation.slice(0, boundary);
+  const recapLimit = Math.max(500, Math.min(4000, Math.floor(budgetChars * 0.25)));
+  const recapText = `[context recap: ${compactedPrefix.length} older transcript items]\n${summarizeText(JSON.stringify(compactedPrefix), recapLimit)}`;
+  const recap = { role: "user", content: recapText };
+  const candidate = [recap, ...conversation.slice(boundary)];
+  const afterChars = transcriptChars(candidate);
+  if (afterChars >= transcriptChars(conversation)) {
+    return { compacted: false, beforeChars, afterChars: transcriptChars(conversation) };
+  }
+  conversation.splice(0, conversation.length, ...candidate);
+  return { compacted: true, beforeChars, afterChars };
+}
+
+function toolOutputStore(context) {
+  return context?.__toolOutputStore ?? context?.runtime?.toolOutputs;
+}
+
+function modelToolOutput(provider, context, value) {
+  return capToolOutput(value, {
+    maxChars: provider.maxToolOutputChars,
+    store: toolOutputStore(context)
+  }).output;
+}
+
+function compactProviderConversation(provider, conversation, format) {
+  return compactConversation(conversation, {
+    format,
+    budgetChars: provider.contextCompactChars,
+    keepRecentHops: provider.contextKeepRecentHops
+  });
+}
+
 // The system prompt appended to the final "force an answer" call when a turn is
 // cut short. Tells the model to stop, not call tools, and answer from work so
 // far — the reason tunes the guidance so the reply names the right knob.
@@ -711,6 +835,7 @@ export class OpenAIResponsesProvider {
       })),
       finalUserTurn
     ];
+    compactProviderConversation(this, conversationInput, "openai");
 
     const baseInstructions = instructions ?? buildDefaultInstructions({ agent });
     const toolList = tools.length > 0
@@ -811,7 +936,7 @@ export class OpenAIResponsesProvider {
           conversationInput.push({
             type: "function_call_output",
             call_id: call.call_id,
-            output: JSON.stringify({ ...meta, image: "[attached as image below]" })
+            output: modelToolOutput(this, context, { ...meta, image: "[attached as image below]" })
           });
           conversationInput.push({
             role: "user",
@@ -824,10 +949,12 @@ export class OpenAIResponsesProvider {
           conversationInput.push({
             type: "function_call_output",
             call_id: call.call_id,
-            output: JSON.stringify(result)
+            output: modelToolOutput(this, context, result)
           });
         }
       }
+
+      compactProviderConversation(this, conversationInput, "openai");
 
       if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
@@ -1005,6 +1132,7 @@ export class AnthropicProvider {
       })),
       { role: "user", content: finalUserContent }
     ];
+    compactProviderConversation(this, convo, "anthropic");
 
     const toolCalls = [];
     const deadline = this.now() + (maxTurnSeconds * 1000);
@@ -1080,10 +1208,11 @@ export class AnthropicProvider {
         toolResults.push({
           type: "tool_result",
           tool_use_id: use.id,
-          content: JSON.stringify(invocation.ok ? invocation.result : { error: invocation.error }),
+          content: modelToolOutput(this, context, invocation.ok ? invocation.result : { error: invocation.error }),
           is_error: !invocation.ok
         });
       }
+      compactProviderConversation(this, convo, "anthropic");
       if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
         break;

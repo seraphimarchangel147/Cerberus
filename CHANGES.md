@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Tool-output caps and context compaction (Codex)
+
+- Both provider loops now cap serialized tool results at `OPENAGI_MAX_TOOL_OUTPUT_CHARS` (default 8000). Oversized values keep head/tail evidence plus an elision marker and are persisted under a strict `out_<hex>` ref; the read-only `read_tool_output` tool retrieves bounded chunks without path traversal.
+- Added deterministic inherited-history and iteration-boundary compaction via `OPENAGI_CONTEXT_COMPACT_CHARS` (default 120000) and `OPENAGI_CONTEXT_KEEP_RECENT_HOPS` (default 4). Only an old prefix is recapped; the current user turn and recent hops remain verbatim, and pair-boundary adjustment prevents orphaned function/tool calls.
+- Under-cap values and short request bodies remain byte-identical. Tests demonstrate a 220-character model payload retaining a retrievable 1,000-character result and a reduced transcript with intact recent pairs for both provider shapes.
+- Validation: `npm test` and `npm run test:prod-policy` both pass 651/651. Live token-usage comparison was skipped to honor strict isolation from Azazel's daemon.
+CONTEXT COMPRESSION PHASE COMPLETE
+
 ## 2026-07-21 — In-channel approval suspension and same-turn resume (Codex)
 
 - Pending actions now carry non-serializable decision/completion promises. A gated invocation parks for up to `OPENAGI_APPROVAL_TIMEOUT_MS` (default 300000), emits `awaiting-approval`, and returns the real approved tool result—or a model-visible denial, cancellation, or timeout error—inside the original turn.

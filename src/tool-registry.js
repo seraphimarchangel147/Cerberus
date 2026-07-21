@@ -375,6 +375,26 @@ export function autoApproveEnabled() {
 
 export function registerCoreTools(registry, runtime) {
   registry.register({
+    name: "read_tool_output",
+    description: "Read a chunk of a large tool result that was elided from model context. Pass the ref shown in the truncation marker and increase offset to continue.",
+    sideEffects: false,
+    parameters: {
+      type: "object",
+      properties: {
+        ref: { type: "string", pattern: "^out_[a-f0-9]{16}$" },
+        offset: { type: "integer", minimum: 0 },
+        maxChars: { type: "integer", minimum: 1, maximum: 50000 }
+      },
+      required: ["ref"],
+      additionalProperties: false
+    },
+    handler: async ({ ref, offset, maxChars }) => {
+      if (!runtime.toolOutputs) throw new Error("Tool-output store is unavailable.");
+      return runtime.toolOutputs.read(ref, { offset, maxChars });
+    }
+  });
+
+  registry.register({
     name: "remember",
     description: "Save a piece of information to long-lived memory so it can be recalled in future turns. Use when the user says 'remember', 'save', or shares a durable fact.",
     parameters: {
