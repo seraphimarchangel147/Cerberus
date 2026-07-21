@@ -134,7 +134,10 @@ test("the main agent's tools are not filtered", async () => {
       generate: async (args) => { captured.tools = args.tools; captured.context = args.context; return { text: "ok", provider: "stub", model: "stub", id: "r1", toolCalls: [] }; }
     }
   });
-  await host.handleMessage({ text: "hi", channel: "local", from: "u" });
+  // Imperative input keeps the main agent on the full lane (a bare "hi" would
+  // now fast-lane to CHAT_CORE_TOOLS); this test asserts main is not
+  // scope-FILTERED the way a specialist is, so it must use the full-lane path.
+  await host.handleMessage({ text: "please send the message", channel: "local", from: "u" });
   assert.equal(captured.tools.length, 2);
   assert.equal(captured.context.__allowedTools, null);
 });

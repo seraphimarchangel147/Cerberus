@@ -135,7 +135,10 @@ test("agent turn under each verdict gets the right tools + enforcement context",
   ];
   for (const { verdict, toolNames, policy } of expectations) {
     const { host, captured } = makeHost(verdict);
-    const result = await host.handleMessage({ text: "hello there", channel: "local", from: "u" });
+    // Imperative work request (trips CHAT_TOOL_INTENT_RE) so this test exercises
+    // the pure verdict→enforcement-policy mapping, NOT the conversational fast
+    // lane (a plain "hello there" now fast-lanes to CHAT_CORE_TOOLS on `act`).
+    const result = await host.handleMessage({ text: "please look up the thing", channel: "local", from: "u" });
     assert.equal(result.reply, "ok", `${verdict}: user always gets a reply`);
     assert.deepEqual(
       {

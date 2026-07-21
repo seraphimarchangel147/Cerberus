@@ -2,6 +2,16 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Chat fast-lane band-gate fix (Seraphim)
+
+- **Fixed: the conversational fast lane never fired in production (inert feature).** The gate in `isConversationalTurn()` (`src/agent-host.js`) required scrutiny verdict `ignore`/`watch`, but a genuine casual question (`"what is the capital of France?"`) scores `act`@~0.57 on the live 3-judge panel — so the exact turns the fast lane was built to optimize never qualified. Live probe before fix: `conversational:false`, `maxIterations:120`, full ~57-tool catalog still sent.
+- **Root cause:** `watch`/`ignore` are the LOW-signal/noise bands, not "casual chat." `act` on a plain question just means "answer it confidently" — that IS the fast-lane case. The real chat-vs-work separator is the task/imperative filter (`detectTaskInChat` + `hasImperativeToolIntent`), already in the code, not the verdict band.
+- **Fix (small, no regression):** broadened the band gate from `verdict ∈ {ignore, watch}` to `verdict ∉ {ask, propagate}` (i.e. `act` now qualifies), keeping the task/imperative filters + low-risk check as the real guard. Escalation via `run_mcp_tool` unchanged, so no depth loss. Also excluded specialists from the fast lane (a latent bug the change surfaced: a scoped specialist turn would otherwise be trimmed to the generic `CHAT_CORE_TOOLS` allowlist, discarding its bounded scope).
+- **Test discipline (anti over-fit-to-fixture):** the old `chat-fastlane.test.js` HARDCODED `scrutiny.action="watch"` in its fixture, proving the mechanism worked *if* the verdict was watch — never that a real input produces that verdict, which is why the dead feature passed 617/617. Added: an `act`-band fast-lane test, and a **band-independence** test driving the REAL `ScrutinyPanel` (documents that the same question scores `watch` cold / `act` warm depending on store state — proving the gate must not key on the band). Repaired two tests that legitimately began fast-laning (`verdict-consequences`, `specialist-bounds`) by feeding them imperative inputs so they exercise the pure verdict→policy path.
+- Tests: **619/619 pass on BOTH lanes** (`npm test` + `npm run test:prod-policy`), up from 617. Homoglyph byte-scan clean on all 4 changed files.
+- **Live-verified on the running daemon** (authed `POST /message`, post-restart): casual `"what is the capital of France?"` → `conversational:true`, `maxIterations:4`, reply "Paris"; work request `"please search the repo for TODO comments…"` → `conversational:false`, `maxIterations:120`. Both directions correct — pure token/latency win, zero reasoning loss.
+CHAT FASTLANE BAND-GATE FIX COMPLETE
+
 ## 2026-07-20 — Discord image attachments → vision (Seraphim)
 
 - **Fixed: Azazel could not see images sent on Discord.** Inbound attachments were never extracted, and image-only messages (no caption) were dropped at `if (!text) return`. Now:

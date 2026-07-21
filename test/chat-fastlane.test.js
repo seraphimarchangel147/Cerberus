@@ -12,9 +12,11 @@ import {
   CHAT_CORE_TOOLS,
   DEFAULT_CHAT_MAX_ITERATIONS,
   hasImperativeToolIntent,
+  isConversationalTurn,
   resolveChatMaxIterations
 } from "../src/agent-host.js";
 import { AnthropicProvider } from "../src/model-provider.js";
+import { ScrutinyPanel } from "../src/scrutiny-panel.js";
 import { saveEnv } from "../src/setup-wizard.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
@@ -107,6 +109,95 @@ test("plain watch and ignore questions use only chat-core schemas and four itera
       requests[0].context.__scrutinyPolicy,
       action === "watch" ? "read-only" : "none",
       "the fast lane must not relax invoke-time scrutiny"
+    );
+  }
+});
+
+test("a plain question in the `act` band fast-lanes (the real casual verdict, not just watch/ignore)", async (t) => {
+  // REGRESSION GUARD for the over-fit-to-fixture band bug: a genuine casual
+  // question ("what is the capital of France?") scores ~0.58 in the live panel
+  // → consensus verdict `act`, NOT watch/ignore. The old gate keyed on
+  // {ignore, watch} so it NEVER fired for the turns it was built to optimize.
+  // The chat-vs-work separator is the task/imperative filter, not the band.
+  isolateEnv(t, ["OPENAGI_CHAT_MAX_ITERATIONS", "OPENAGI_MAX_MODEL_TOOLS"]);
+  delete process.env.OPENAGI_CHAT_MAX_ITERATIONS;
+  process.env.OPENAGI_MAX_MODEL_TOOLS = "128";
+
+  const { host, requests } = makeHarness("act");
+  const turn = await host.handleMessage({
+    channel: "discord",
+    from: "creator",
+    sessionId: "plain-act",
+    text: "what is the capital of France?"
+  });
+
+  assert.equal(turn.conversational, true, "an `act` casual turn must take the fast lane");
+  assert.equal(requests[0].maxIterations, DEFAULT_CHAT_MAX_ITERATIONS);
+  assert.deepEqual(requests[0].tools.map((tool) => tool.name), CHAT_CORE_TOOLS);
+  assert.deepEqual(requests[0].context.__advertisedTools, CHAT_CORE_TOOLS);
+  assert.equal(
+    requests[0].context.__scrutinyPolicy,
+    null,
+    "the fast lane trims schemas only — an `act` turn keeps full (null) invoke-time policy"
+  );
+});
+
+test("the fast-lane gate is band-independent: same casual question fast-lanes whether the live panel calls it ignore, watch, or act", () => {
+  // ROOT of the over-fit-to-fixture band bug: the SAME plain question scores a
+  // DIFFERENT verdict depending on runtime store state — `watch`@~0.37 cold
+  // (no memory/outcomes), `act`@~0.58 warm (the live daemon, low novelty). A
+  // gate keyed on {ignore, watch} therefore silently died the moment the panel
+  // warmed the question into the `act` band. Proof both directions, from the
+  // real ScrutinyPanel and the real gate:
+  const text = "what is the capital of France?";
+
+  // 1) The real panel, cold, actually lands this in a fast-lane-eligible band
+  //    (not ask/propagate) — documents the live behavior instead of hardcoding it.
+  const panel = new ScrutinyPanel();
+  const signal = {
+    id: "sig_fastlane_probe",
+    source: "discord",
+    type: "message",
+    domain: "general",
+    taskType: "adaptation-review",
+    summary: text,
+    content: text,
+    urgency: 0.45,
+    impact: 0.41,
+    externalPressure: 0.55,
+    internalPressure: 0.5,
+    novelty: 0.4,
+    repetition: 0.2,
+    risk: 0.35,
+    ambiguity: 0.35,
+    confidence: 0.5,
+    specificity: 0.36,
+    conflict: 0,
+    goalAlignment: 0.75,
+    strategicFit: 0.7,
+    requiresSpecialist: false
+  };
+  const live = panel.evaluate({ signal, memories: [], context: {} });
+  assert.ok(
+    live.action !== "ask" && live.action !== "propagate",
+    `the real panel put a plain question in '${live.action}'@${live.score.toFixed(2)} — that must be a fast-lane band`
+  );
+
+  // 2) The gate itself must fire across the ENTIRE non-gating band range, so a
+  //    verdict drift from watch→act (warm stores) cannot silently disable it.
+  for (const verdict of ["ignore", "watch", "act"]) {
+    assert.equal(
+      isConversationalTurn({ channel: "discord", verdict, detectedTask: "", text }),
+      true,
+      `a plain question with verdict '${verdict}' must fast-lane`
+    );
+  }
+  // 3) ...and it must NOT fire for the verdicts that mean the model wants to gate.
+  for (const verdict of ["ask", "propagate"]) {
+    assert.equal(
+      isConversationalTurn({ channel: "discord", verdict, detectedTask: "", text }),
+      false,
+      `verdict '${verdict}' must stay on the full lane`
     );
   }
 });

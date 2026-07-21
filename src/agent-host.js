@@ -55,11 +55,20 @@ export function resolveChatMaxIterations(env = process.env) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_CHAT_MAX_ITERATIONS;
 }
 
-export function isConversationalTurn({ channel, verdict, detectedTask, text }) {
+export function isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist = false }) {
   const interactive = channel !== "autopilot" && channel !== "cron" && channel !== "subagent";
+  // The band gate is NOT the chat-vs-work separator — a plain factual question
+  // ("what is the capital of France?") scores ~0.58 → verdict `act`, so keying on
+  // {ignore, watch} left the fast lane inert in prod. The real separator is the
+  // task/imperative filters below; here we only exclude the verdicts that mean the
+  // model itself wants to gate the turn (`ask` = clarify first, `propagate` = escalate).
+  const bandAllowsFastLane = verdict !== "ask" && verdict !== "propagate";
   return Boolean(
     interactive
-    && (verdict === "ignore" || verdict === "watch")
+    // Specialists carry a bounded scoped allowlist that IS the point of the
+    // turn — never trim them to the generic chat-core set.
+    && !isSpecialist
+    && bandAllowsFastLane
     && !detectedTask
     && !hasImperativeToolIntent(text)
   );
@@ -259,7 +268,7 @@ export class AgentHost {
     if (typeof input.onToolEvent === "function") {
       try { input.onToolEvent({ phase: "verdict", action: verdict, score: output.scrutiny.score }); } catch { /* advisory */ }
     }
-    const conversational = isConversationalTurn({ channel, verdict, detectedTask, text });
+    const conversational = isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist });
     const toolRegistry = this.runtime.tools;
     // The fast lane trims schemas only. Side-effect and scope enforcement
     // below remains authoritative even for core tools advertised on a watch
