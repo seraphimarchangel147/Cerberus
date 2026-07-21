@@ -756,7 +756,15 @@ async function fetchDiscordImages(message, log) {
         log?.({ op: "image-skip-large", filename: a.filename, size: a.size });
         continue;
       }
-      const res = await fetch(a.url);
+      // Bound the CDN download so a stalled fetch can't hang the whole turn.
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 20000);
+      let res;
+      try {
+        res = await fetch(a.url, { signal: ctrl.signal });
+      } finally {
+        clearTimeout(to);
+      }
       if (!res.ok) { log?.({ op: "image-fetch-failed", filename: a.filename, status: res.status }); continue; }
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length > MAX_IMAGE_BYTES) { log?.({ op: "image-skip-large", filename: a.filename, size: buf.length }); continue; }

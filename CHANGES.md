@@ -11,6 +11,7 @@ Every Legion agent modifying this harness: append an entry here.
 - Verified the live model **kimi-k3** (api.kimi.com) IS vision-capable via direct probe. End-to-end: harness `AnthropicProvider.generate()` with a real green PNG + live config → reply "Green".
 - Slash commands (`/status`, `/model`, `/pending`, etc., 17 total) were already implemented in `discord-commands.js` and confirmed registered on the guild — no change needed there.
 - Tests: 4 new vision-plumbing regressions in `model-provider-iterations.test.js`; full suite **563/563 pass**. Homoglyph byte-scan clean.
+- Follow-up hardening: the CDN download in `fetchDiscordImages()` is now bounded by a 20s AbortController so a stalled attachment fetch can't hang a whole turn; `channels.js` `handleLocalMessage` also forwards `images` so the HTTP `/message` path is vision-capable. Verified on the LIVE daemon via authed `POST /message` with a real image → reply "Red" in ~10s.
 VISION ATTACHMENT PHASE COMPLETE
 
 ## 2026-07-17 — Consent lane and scrutiny anti-loop (Codex)
