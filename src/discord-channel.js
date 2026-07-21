@@ -84,7 +84,9 @@ export class DiscordChannel {
     this.memberRoles = new Map(); // guildId -> Set(roleIds of our member)
     this.stopped = true;
     this.reconnectDelay = 1000;
-    this.busy = Promise.resolve(); // serialize agent turns
+    // Turns in one conversation must stay ordered, but unrelated users must
+    // not wait behind each other. Settled tails are removed by enqueueTurn.
+    this.turnLocks = new Map();
     // ── Hermes-style observability ──────────────────────────────────
     // Live status: a message we post + edit while a turn runs so the user
     // can watch scrutiny verdicts and tool calls in real time.
@@ -303,18 +305,40 @@ export class DiscordChannel {
       }
     }
 
-    // Serialize turns so parallel pings don't interleave sessions.
-    // NOTE: runTurn has its own try/catch, so a rejection here means the
-    // error path itself failed. Log it and surface it — never end in silence.
-    this.busy = this.busy.then(() => this.runTurn(message, cleaned)).catch((err) => {
-      this.log({ op: "turn-rejected", error: err?.message ?? String(err) });
-      this.sendMessage(
+    // Dispatch without awaiting the shared gateway handler. enqueueTurn keeps
+    // same-session ordering while allowing unrelated conversations to overlap.
+    this.enqueueTurn(message, cleaned);
+  }
+
+  sessionKeyFor(message) {
+    const guild = message.guild_id ?? "dm";
+    const channel = message.channel_id;
+    // Guild channels are multi-user, so include the author to prevent context
+    // bleed. DMs are already one-to-one and retain their historical key.
+    const user = message.guild_id ? (message.author?.id ?? "unknown") : null;
+    return user
+      ? `discord:${guild}:${channel}:${user}`
+      : `discord:${guild}:${channel}`;
+  }
+
+  enqueueTurn(message, cleaned) {
+    const key = this.sessionKeyFor(message);
+    const previous = this.turnLocks.get(key) ?? Promise.resolve();
+    // runTurn normally catches its own failures. This final boundary prevents
+    // a failed error path from poisoning every later turn for the same key.
+    const next = previous.then(() => this.runTurn(message, cleaned)).catch((err) => {
+      this.log({ op: "turn-rejected", key, error: err?.message ?? String(err) });
+      return this.sendMessage(
         message.channel_id,
         `⚠ Turn failed hard: ${(err?.message ?? String(err)).slice(0, 400)}`,
         message.id
-      ).catch((sendErr) => this.log({ op: "turn-rejected-notify-failed", error: sendErr?.message ?? String(sendErr) }));
+      ).catch((sendErr) => this.log({ op: "turn-rejected-notify-failed", key, error: sendErr?.message ?? String(sendErr) }));
     });
-    await this.busy;
+    this.turnLocks.set(key, next);
+    next.finally(() => {
+      if (this.turnLocks.get(key) === next) this.turnLocks.delete(key);
+    });
+    return next;
   }
 
   // ── Discord-side approvals (mirrors /pending-actions endpoints) ────
@@ -382,7 +406,7 @@ export class DiscordChannel {
         channel: "discord",
         from: message.author?.id ?? "unknown",
         agentId: "main",
-        sessionId: `discord:${message.guild_id ?? "dm"}:${message.channel_id}`,
+        sessionId: this.sessionKeyFor(message),
         text: message.guild_id ? `[${authorName}] ${text}` : text,
         images,
         onToolEvent: (ev) => status.onEvent(ev),
@@ -636,7 +660,7 @@ export class DiscordChannel {
   }
 
   activityChannelFor(sessionId) {
-    const match = /^discord:[^:]+:(\d+)$/.exec(String(sessionId ?? ""));
+    const match = /^discord:[^:]+:(\d+)(?::.+)?$/.exec(String(sessionId ?? ""));
     return match?.[1] ?? this.lastActiveChannel ?? this.activityChannel ?? null;
   }
 
@@ -664,9 +688,9 @@ export class DiscordChannel {
     this.feedBound = true;
     // Route each feed post to the channel the agent is actually WORKING in
     // (Hermes-style): prefer the event's own session channel (events carry
-    // sessionId "discord:<guild>:<channel>" when a Discord turn triggered
-    // them), then the channel of the most recent inbound message, then the
-    // configured home channel as the static fallback.
+    // sessionId "discord:<guild>:<channel>[:<user>]" when a Discord turn
+    // triggered them), then the channel of the most recent inbound message,
+    // then the configured home channel as the static fallback.
     const post = (text, d = null) => {
       const chan = this.activityChannelFor(d?.sessionId);
       if (!chan) return;

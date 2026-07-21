@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Discord per-user sessions and per-key concurrency (Codex)
+
+- Replaced the global Discord turn promise with garbage-collected per-session promise tails, preserving message order within one conversation while allowing unrelated users and channels to run concurrently.
+- Guild session ids now include the author id to prevent shared-channel context bleed; one-to-one DMs retain their historical channel key. Approval and activity routing accepts both key shapes.
+- Added deterministic deferred-promise coverage for cross-key overlap, same-key serialization, lock cleanup, session identity, and four-segment activity routing.
+- Validation: `npm test` and `npm run test:prod-policy` both pass 628/628. The live-daemon probe was deliberately skipped because the operator required strict isolation from `/home/usapcool/openagi`; no service was contacted or restarted.
+DISCORD CONCURRENCY PHASE COMPLETE
+
 ## 2026-07-21 — Stall-aware timeout + force-an-answer on every early stop (Seraphim)
 
 Creator's ask: the harness should check whether the LLM is **still trying** instead of
