@@ -9,6 +9,7 @@ import { AbiRuntime } from "../src/abi-runtime.js";
 import { AgentHost, stricterToolPolicy } from "../src/agent-host.js";
 import { FileBackedAgentStore } from "../src/agent-store.js";
 import { BudgetGuard } from "../src/budget-guard.js";
+import { registerCodeTools } from "../src/code-tools.js";
 import { LiveStatus } from "../src/discord-channel.js";
 import { MemorySystem } from "../src/memory-system.js";
 import {
@@ -87,6 +88,38 @@ function makeHarness(provider, { scrutinyAction = "act" } = {}) {
 function delegateHandler(tools) {
   return tools.get("delegate_task").handler;
 }
+
+test("legacy delegate_subtask is removed and governed delegate_task covers a single child", async () => {
+  const tools = new ToolRegistry();
+  const childTurns = [];
+  const runtime = {
+    tools,
+    agentHost: {
+      async handleMessage(input) {
+        childTurns.push(input);
+        return { reply: "governed child summary", model: { iterations: 1, stopReason: "completed" } };
+      }
+    }
+  };
+  registerCodeTools(tools, runtime);
+  registerDelegateTaskTool(runtime);
+
+  assert.equal(tools.has("delegate_subtask"), false);
+  assert.equal(tools.get("delegate_task").sideEffects, true);
+  const result = await delegateHandler(tools)({ goal: "inspect the isolated fixture" }, {
+    sessionId: "parent-governance",
+    from: "creator",
+    __scrutinyPolicy: "read-only"
+  });
+
+  assert.equal(result.results[0].summary, "governed child summary");
+  assert.equal(childTurns.length, 1);
+  assert.equal(childTurns[0].routeTo, false);
+  assert.equal(childTurns[0].scrutinyPolicyCeiling, "read-only");
+  assert.equal(childTurns[0].spawnDepth, 1);
+  assert.equal(childTurns[0].maxIterations, SUBAGENT_DEFAULTS.maxIterations);
+  assert.equal(childTurns[0].maxTurnSeconds, SUBAGENT_DEFAULTS.maxTurnSeconds);
+});
 
 test("single delegate_task returns only the summary and keeps child turns out of the parent session", async () => {
   const seen = {};

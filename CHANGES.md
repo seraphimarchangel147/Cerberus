@@ -2,6 +2,13 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Remove the ungoverned legacy delegation path (Codex)
+
+- Chose Spec 12 Option B after confirming `delegate_task` already covers both single and batched isolated children with side-effect classification, parent scrutiny ceilings, shared provider budget accounting, `OPENAGI_MAX_CHILDREN`, depth limits, cancellation, and bounded child turn settings.
+- Removed redundant `delegate_subtask` registration from the code-tool lane so models cannot bypass those controls through a direct AgentHost call; cleaned the obsolete child-tool exclusion while retaining `send_message` and `schedule_message` isolation.
+- Added a regression proving the legacy name is absent and a single governed `delegate_task` still carries scrutiny, depth, iteration, and wall-clock bounds into the child turn.
+DELEGATE GOVERNANCE PHASE COMPLETE
+
 ## 2026-07-21 — Ranked and filtered session search (Codex)
 
 - Changed the SQLite FTS5 path from recency-only ordering to `bm25(messages)` relevance with timestamp tie-breaking; the JSONL compatibility path remains explicitly recency-ordered because it has no FTS ranker.

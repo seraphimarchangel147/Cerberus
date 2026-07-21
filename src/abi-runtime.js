@@ -464,7 +464,7 @@ export class AbiRuntime {
       });
       registerCoreTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
-      // tests, gated shell, sub-agent delegation. See src/code-tools.js.
+      // tests, and gated shell. Governed delegation registers separately.
       registerCodeTools(this.tools, this);
       // A VM script can compact multi-step tool work, but every nested call
       // re-enters this same registry so scrutiny and catastrophic gates hold.

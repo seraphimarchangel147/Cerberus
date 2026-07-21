@@ -399,34 +399,4 @@ export function registerCodeTools(registry, runtime, options = {}) {
     }
   });
 
-  registry.register({
-    name: "delegate_subtask",
-    description: "Spawn an isolated sub-agent turn: the prompt runs in a fresh session (no shared history) and the final reply is returned to you. Use for parallel research or self-contained sub-problems. No nesting — a delegated turn cannot delegate again.",
-    parameters: {
-      type: "object",
-      properties: {
-        prompt: { type: "string", description: "Self-contained task for the sub-agent. Include all needed context — it has none of yours." },
-        label: { type: "string", description: "Short label for logs." }
-      },
-      required: ["prompt"],
-      additionalProperties: false
-    },
-    summarize: (args) => `Delegate: ${(args.label ?? args.prompt ?? "").slice(0, 80)}`,
-    handler: async (args, context) => {
-      if (context?.channel === "subagent") throw new Error("Nested delegation is not allowed.");
-      const host = runtime.agentHost;
-      if (!host?.handleMessage) throw new Error("Agent host unavailable for delegation.");
-      const subId = `sub-${Date.now().toString(36)}`;
-      const result = await host.handleMessage({
-        channel: "subagent",
-        from: context?.from ?? "delegator",
-        agentId: "main",
-        sessionId: `subagent:${subId}`,
-        text: String(args.prompt),
-        origin: "subagent",
-        metadata: { delegatedBy: context?.sessionId ?? null, label: args.label ?? null }
-      });
-      return { subId, reply: String(result?.reply ?? "").slice(0, 8000) };
-    }
-  });
 }

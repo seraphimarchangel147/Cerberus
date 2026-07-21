@@ -7,12 +7,10 @@ const DEFAULT_MAX_TURN_SECONDS = 600;
 const MAX_SUMMARY_CHARS = 16_000;
 
 // Headless workers cannot ask the user or schedule a later conversation. The
-// legacy delegation tool is also removed so every nested spawn uses this
-// module's audited depth and scrutiny ceilings.
+// Every nested spawn uses this module's audited depth and scrutiny ceilings.
 export const SUBAGENT_INTERACTIVE_TOOLS = Object.freeze([
   "send_message",
-  "schedule_message",
-  "delegate_subtask"
+  "schedule_message"
 ]);
 
 function positiveInteger(value, fallback) {
