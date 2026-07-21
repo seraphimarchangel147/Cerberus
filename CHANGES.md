@@ -2,6 +2,15 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Provider retry resilience and tool transcript repair (Codex)
+
+- Added a shared bounded provider-request retry layer for both OpenAI Responses and Anthropic Messages. Network failures and HTTP 429/500/502/503/504/529 use exponential full-jitter backoff, honor bounded `Retry-After`, emit advisory retry progress, and end as a typed `ProviderError`; 400/auth/caller-abort failures are never retried.
+- Added `OPENAGI_PROVIDER_MAX_RETRIES` (default 3) and `OPENAGI_PROVIDER_RETRY_BASE_MS` (default 500) to both provider configurations and the setup allowlist. Exhausted retryable failures now preserve completed work through a graceful partial answer instead of discarding the turn.
+- Forced-final requests now reconcile dangling OpenAI `function_call` and Anthropic `tool_use` entries. Completed Anthropic results are attached incrementally, while only unstarted calls receive synthetic error results.
+- Same-endpoint fallback-model failover remains deferred: the spec marks it optional, while a correct key/base-url selection policy needs explicit operator configuration. Live fault injection was skipped to preserve the operator-mandated isolation from Azazel's daemon.
+- Validation: `npm test` and `npm run test:prod-policy` both pass 637/637.
+PROVIDER RESILIENCE PHASE COMPLETE
+
 ## 2026-07-21 — Discord per-user sessions and per-key concurrency (Codex)
 
 - Replaced the global Discord turn promise with garbage-collected per-session promise tails, preserving message order within one conversation while allowing unrelated users and channels to run concurrently.

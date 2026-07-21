@@ -12,6 +12,9 @@ const DEFAULT_STALL_TIMEOUT_MS = 120000;
 // cut short (stall / timeout / iteration-cap). Mirrors Hermes forcing a reply
 // at the iteration limit instead of returning nothing.
 const DEFAULT_FORCE_ANSWER_MS = 60000;
+const DEFAULT_PROVIDER_MAX_RETRIES = 3;
+const DEFAULT_PROVIDER_RETRY_BASE_MS = 500;
+const MAX_PROVIDER_RETRY_DELAY_MS = 8000;
 const SYNTHETIC_CONTINUE = [
   "[system] Continue the same task now.",
   "Use the accumulated tool results and conversation above.",
@@ -45,6 +48,103 @@ class ModelStallError extends Error {
     super(`The model produced no output for ${Math.round(stallMs)}ms (stalled).`);
     this.name = "ModelStallError";
     this.stallMs = stallMs;
+  }
+}
+
+export class ProviderError extends Error {
+  constructor(message, { status = null, retryAfterMs = null, cause = null } = {}) {
+    super(message, cause ? { cause } : undefined);
+    this.name = "ProviderError";
+    this.status = Number.isInteger(status) ? status : null;
+    this.retryAfterMs = Number.isFinite(retryAfterMs) ? retryAfterMs : null;
+  }
+}
+
+const RETRYABLE_PROVIDER_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+
+function nonNegativeInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function retryAfterMs(response, now = Date.now()) {
+  const raw = response?.headers?.get?.("retry-after");
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
+}
+
+function isRetryableNetworkError(error) {
+  if (!error || error instanceof ProviderError) return false;
+  if (error instanceof TurnDeadlineError || error instanceof RequestTimeoutError || error instanceof ModelStallError) return false;
+  if (error.name === "AbortError") return false;
+  return error instanceof TypeError
+    || ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ENETUNREACH", "ETIMEDOUT"].includes(error.code);
+}
+
+async function responseProviderError(response) {
+  const body = await response.json().catch(() => ({}));
+  return new ProviderError(
+    body?.error?.message ?? `Provider request failed with ${response.status}`,
+    { status: response.status, retryAfterMs: retryAfterMs(response) }
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepWithSignal(ms, signal) {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    }
+    function aborted() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", aborted);
+      reject(abortReason(signal));
+    }
+    signal.addEventListener("abort", aborted, { once: true });
+  });
+}
+
+// Retry only the model HTTP request. Tool execution stays outside this helper,
+// so replaying a transient provider request can never repeat a side effect.
+export async function requestWithRetry(doRequest, options = {}) {
+  const retries = nonNegativeInteger(options.retries, DEFAULT_PROVIDER_MAX_RETRIES);
+  const baseDelayMs = nonNegativeInteger(options.baseDelayMs, DEFAULT_PROVIDER_RETRY_BASE_MS);
+  const wait = options.sleep ?? sleep;
+  const random = options.random ?? Math.random;
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const response = await doRequest(attempt);
+      if (response?.ok === false) throw await responseProviderError(response);
+      return response;
+    } catch (error) {
+      const retryable = error instanceof ProviderError
+        ? RETRYABLE_PROVIDER_STATUSES.has(error.status)
+        : isRetryableNetworkError(error);
+      if (!retryable || attempt >= retries) {
+        if (error instanceof ProviderError) throw error;
+        if (retryable) throw new ProviderError(error.message ?? "Provider network request failed", { cause: error });
+        throw error;
+      }
+
+      const jitterCap = Math.min(MAX_PROVIDER_RETRY_DELAY_MS, baseDelayMs * (2 ** attempt));
+      const jittered = Math.floor(Math.max(0, Math.min(1, Number(random()) || 0)) * jitterCap);
+      const delayMs = error.retryAfterMs === null
+        ? jittered
+        : Math.min(MAX_PROVIDER_RETRY_DELAY_MS, error.retryAfterMs);
+      try { options.onRetry?.({ attempt: attempt + 1, delayMs, error }); } catch { /* advisory */ }
+      await wait(delayMs);
+    }
   }
 }
 
@@ -110,10 +210,41 @@ function applyIterationSettings(provider, options) {
   );
   provider.stallTimeoutMs = resolveStallTimeoutMs(options);
   provider.forceAnswerMs = resolveForceAnswerMs(options);
+  provider.providerMaxRetries = nonNegativeInteger(
+    options.providerMaxRetries ?? process.env.OPENAGI_PROVIDER_MAX_RETRIES,
+    DEFAULT_PROVIDER_MAX_RETRIES
+  );
+  provider.providerRetryBaseMs = nonNegativeInteger(
+    options.providerRetryBaseMs ?? process.env.OPENAGI_PROVIDER_RETRY_BASE_MS,
+    DEFAULT_PROVIDER_RETRY_BASE_MS
+  );
+  provider.retrySleep = options.retrySleep;
+  provider.retryRandom = options.retryRandom;
   provider.now = options.now ?? Date.now;
   // Keep this readable for integrations that inspect the old property. The
   // value now represents the whole-turn iteration cap.
   provider.maxToolHops = provider.maxIterations;
+}
+
+function providerRetryOptions(provider, context, signal) {
+  return {
+    retries: provider.providerMaxRetries,
+    baseDelayMs: provider.providerRetryBaseMs,
+    sleep: provider.retrySleep ?? ((ms) => sleepWithSignal(ms, signal)),
+    random: provider.retryRandom,
+    onRetry: ({ attempt, delayMs, error }) => {
+      try {
+        context?.__onToolEvent?.({
+          phase: "provider-retry",
+          attempt,
+          delayMs,
+          status: error?.status ?? null
+        });
+      } catch {
+        // Retry progress is advisory and cannot break recovery.
+      }
+    }
+  };
 }
 
 function emitIteration(context, n, max) {
@@ -173,6 +304,11 @@ function deadlineExpired(provider, deadline, error) {
 // discarding the entire turn with a raw "This operation was aborted".
 function requestTimedOut(error) {
   return error instanceof RequestTimeoutError || error instanceof ModelStallError;
+}
+
+function providerUnavailable(error) {
+  return error instanceof ProviderError
+    && (error.status === null || RETRYABLE_PROVIDER_STATUSES.has(error.status));
 }
 
 function budgetExceeded(error) {
@@ -359,6 +495,57 @@ function appendAnthropicUserText(convo, text) {
   }
 }
 
+// Forced-final requests must not contain tool calls without matching results.
+// Providers reject that malformed transcript before the model can salvage the
+// turn, so synthesize errors only for calls the interrupted batch never closed.
+export function reconcileOrphanedToolCalls(conversation, format = "auto") {
+  const anthropic = format === "anthropic"
+    || (format === "auto" && conversation.some((message) => (
+      Array.isArray(message?.content) && message.content.some((block) => block?.type === "tool_use")
+    )));
+
+  if (anthropic) {
+    const calls = [];
+    const completed = new Set();
+    for (const message of conversation) {
+      if (!Array.isArray(message?.content)) continue;
+      for (const block of message.content) {
+        if (block?.type === "tool_use" && block.id) calls.push(block.id);
+        if (block?.type === "tool_result" && block.tool_use_id) completed.add(block.tool_use_id);
+      }
+    }
+    const missing = [...new Set(calls)].filter((id) => !completed.has(id));
+    if (missing.length > 0) {
+      conversation.push({
+        role: "user",
+        content: missing.map((id) => ({
+          type: "tool_result",
+          tool_use_id: id,
+          content: JSON.stringify({ error: "tool aborted: turn ended before completion" }),
+          is_error: true
+        }))
+      });
+    }
+    return missing.length;
+  }
+
+  const calls = [];
+  const completed = new Set();
+  for (const item of conversation) {
+    if (item?.type === "function_call" && item.call_id) calls.push(item.call_id);
+    if (item?.type === "function_call_output" && item.call_id) completed.add(item.call_id);
+  }
+  const missing = [...new Set(calls)].filter((id) => !completed.has(id));
+  for (const callId of missing) {
+    conversation.push({
+      type: "function_call_output",
+      call_id: callId,
+      output: JSON.stringify({ error: "tool aborted: turn ended before completion" })
+    });
+  }
+  return missing.length;
+}
+
 // The system prompt appended to the final "force an answer" call when a turn is
 // cut short. Tells the model to stop, not call tools, and answer from work so
 // far — the reason tunes the guidance so the reply names the right knob.
@@ -372,6 +559,9 @@ function forceAnswerPrompt(reason, iterations, maxIterations) {
   }
   if (reason === "request-timeout") {
     return `${base} The previous step took too long; summarise progress and give your best current answer (OPENAGI_REQUEST_TIMEOUT_MS can be raised for longer steps).`;
+  }
+  if (reason === "provider-error") {
+    return `${base} The provider stayed unavailable after bounded retries; summarise completed work and give your best current answer.`;
   }
   // turn-timeout
   return `${base} The overall time budget is nearly spent; be concise and note OPENAGI_MAX_TURN_SECONDS can be raised.`;
@@ -395,6 +585,9 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
   }
   if (reason === "budget-cap") {
     return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because a budget cap was reached. ${detail} Raise OPENAGI_MAX_TURN_USD for a larger per-turn budget, or OPENAGI_DAILY_USD_LIMIT for the daily budget.${prior}`;
+  }
+  if (reason === "provider-error") {
+    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model provider remained unavailable after bounded retries. ${detail} Retry the turn when the provider recovers.${prior}`;
   }
   return `Turn reached the iteration cap after ${iterations}/${maxIterations} iterations. ${detail} Raise OPENAGI_MAX_ITERATIONS if this task needs more steps.${prior}`;
 }
@@ -563,6 +756,7 @@ export class OpenAIResponsesProvider {
         ), context);
       } catch (error) {
         if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
+        if (providerUnavailable(error)) { stopReason = "provider-error"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
         break;
@@ -652,8 +846,9 @@ export class OpenAIResponsesProvider {
     // Force a real answer whenever the turn was cut short (see the Anthropic
     // path for the rationale). No tools, fresh short budget, so the model
     // always gets a chance to reply instead of returning only a canned string.
-    const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout"]);
+    const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout", "provider-error"]);
     if (FORCE_ANSWER_REASONS.has(stopReason)) {
+      reconcileOrphanedToolCalls(conversationInput, "openai");
       appendOpenAIContinue(conversationInput);
       conversationInput.at(-1).content[0].text = forceAnswerPrompt(stopReason, iterations, maxIterations);
       try {
@@ -668,11 +863,11 @@ export class OpenAIResponsesProvider {
       } catch (error) {
         // Best-effort: if the forced answer also fails, fall through to the
         // canned summary below — never rethrow and lose the turn.
-        if (!budgetExceeded(error) && !requestTimedOut(error) && !deadlineExpired(this, deadline, error)) throw error;
+        if (!budgetExceeded(error) && !requestTimedOut(error) && !providerUnavailable(error) && !deadlineExpired(this, deadline, error)) throw error;
       }
     }
 
-    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled")) {
+    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error")) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
@@ -704,7 +899,7 @@ export class OpenAIResponsesProvider {
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      const response = await fetch(`${this.baseUrl}/responses`, {
+      const response = await requestWithRetry(() => fetch(`${this.baseUrl}/responses`, {
         method: "POST",
         signal: controller.signal,
         headers: {
@@ -712,9 +907,8 @@ export class OpenAIResponsesProvider {
           authorization: `Bearer ${this.apiKey}`
         },
         body: JSON.stringify(body)
-      });
+      }), providerRetryOptions(this, context, controller.signal));
       const json = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(json?.error?.message ?? `OpenAI request failed with ${response.status}`);
       const callTools = (json.output ?? []).filter((item) => item.type === "function_call").map((item) => item.name);
       const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
         channel: context.channel,
@@ -850,6 +1044,7 @@ export class AnthropicProvider {
         }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
       } catch (error) {
         if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
+        if (providerUnavailable(error)) { stopReason = "provider-error"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
         break;
@@ -864,6 +1059,10 @@ export class AnthropicProvider {
       if (!wantsContinuation) break;
 
       const toolResults = [];
+      // Keep completed results attached even if a later call in this same
+      // batch hits the deadline. Reconciliation can then mark only the calls
+      // that truly never ran instead of discarding successful tool work.
+      if (toolUses.length > 0) convo.push({ role: "user", content: toolResults });
       for (const use of toolUses) {
         let invocation;
         try {
@@ -885,8 +1084,6 @@ export class AnthropicProvider {
           is_error: !invocation.ok
         });
       }
-      if (toolResults.length > 0) convo.push({ role: "user", content: toolResults });
-
       if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
         break;
@@ -905,8 +1102,9 @@ export class AnthropicProvider {
     // string. Mirrors Hermes forcing the LLM to answer at the iteration limit.
     // The final call carries NO tools (so it can't loop again), a fresh short
     // budget (forceAnswerMs), and is non-streaming (a clean blocking ask).
-    const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout"]);
+    const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout", "provider-error"]);
     if (FORCE_ANSWER_REASONS.has(stopReason)) {
+      reconcileOrphanedToolCalls(convo, "anthropic");
       appendAnthropicUserText(convo, forceAnswerPrompt(stopReason, iterations, maxIterations));
       try {
         checkRequestBudget(this, turnBudget);
@@ -922,11 +1120,11 @@ export class AnthropicProvider {
         // The forced answer is best-effort. If IT also times out/stalls or the
         // budget is gone, fall through to the canned partial summary below —
         // never rethrow and lose the turn.
-        if (!budgetExceeded(error) && !requestTimedOut(error) && !deadlineExpired(this, deadline, error)) throw error;
+        if (!budgetExceeded(error) && !requestTimedOut(error) && !providerUnavailable(error) && !deadlineExpired(this, deadline, error)) throw error;
       }
     }
 
-    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled")) {
+    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error")) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
@@ -986,7 +1184,7 @@ export class AnthropicProvider {
       ? () => { clearTimeout(timer); timer = armStallTimeout(); }
       : undefined;
     try {
-      const response = await fetch(`${this.baseUrl}/messages`, {
+      const response = await requestWithRetry(() => fetch(`${this.baseUrl}/messages`, {
         method: "POST",
         signal: controller.signal,
         headers: {
@@ -995,11 +1193,7 @@ export class AnthropicProvider {
           "anthropic-version": this.version
         },
         body: JSON.stringify(body)
-      });
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
-        throw new Error(errorBody?.error?.message ?? `Anthropic request failed with ${response.status}`);
-      }
+      }), providerRetryOptions(this, context, controller.signal));
       const contentType = response.headers?.get?.("content-type") ?? "";
       const json = streaming && /text\/event-stream/i.test(contentType)
         ? await readAnthropicEventStream(response, { onDelta: options.onDelta, onActivity })
