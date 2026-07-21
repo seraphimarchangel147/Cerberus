@@ -290,6 +290,9 @@ export class AgentHost {
       target: from,
       agentId,
       sessionId,
+      // Channel-native tools such as speak need the destination selected by
+      // the inbound adapter, not the user's id stored in `from`.
+      channelId: input.metadata?.channelId ?? null,
       runtime: this.runtime,
       // Enforced in ToolRegistry.invoke — the filtered tool list above is
       // advisory to the model; this gate is not.

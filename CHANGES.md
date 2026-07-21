@@ -240,3 +240,10 @@ SUBAGENTS PHASE COMPLETE
 - Added SQLite and forced-JSONL-fallback regressions for result shape, no-hit behavior, limit handling, scrutiny enforcement, and invocation-runtime isolation.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 593/593.
 CTX SEARCH PHASE COMPLETE
+
+## 2026-07-21 - Voice replies with pluggable TTS (Codex)
+
+- Added the side-effecting `speak` tool with private UUID-named audio caching and Discord MP3 attachment delivery; non-Discord turns degrade to returning the cached path.
+- Added a zero-dependency provider layer for the `edge-tts` CLI plus env-gated OpenAI and ElevenLabs HTTP APIs, with live provider/voice configuration, a 4000-character cap, request timeouts, secret-safe errors, and clear missing-CLI guidance.
+- Kept `speak` inside the normal tool registry so scrutiny, approval, audit, specialist bounds, and the catastrophic gate remain authoritative.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 601/601.
