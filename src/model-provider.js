@@ -16,6 +16,18 @@ class TurnDeadlineError extends Error {
   }
 }
 
+// A SINGLE model request exceeded the per-request timeout (this.timeoutMs).
+// Distinct from TurnDeadlineError (the whole-turn wall-clock guard): one slow
+// hop must NOT nuke the entire turn with a raw undici "This operation was
+// aborted" — the loop catches this and stops gracefully with a partial summary.
+class RequestTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`A single model request exceeded the ${Math.round(timeoutMs)}ms request timeout.`);
+    this.name = "RequestTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -118,6 +130,14 @@ async function withinTurn(provider, deadline, task, context = {}) {
 
 function deadlineExpired(provider, deadline, error) {
   return error instanceof TurnDeadlineError || provider.now() >= deadline;
+}
+
+// A single model request hit its per-request timeout. Unlike a hard error this
+// is recoverable: the turn stops gracefully and returns whatever partial work
+// (prior text + completed tool calls) it already has, instead of discarding the
+// entire turn with a raw "This operation was aborted".
+function requestTimedOut(error) {
+  return error instanceof RequestTimeoutError;
 }
 
 function budgetExceeded(error) {
@@ -309,6 +329,9 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
   if (reason === "turn-timeout") {
     return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached. ${detail} Raise OPENAGI_MAX_TURN_SECONDS if this task needs more time.${prior}`;
   }
+  if (reason === "request-timeout") {
+    return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because a single model request exceeded the per-request timeout (the model took too long on one step). ${detail} Raise OPENAGI_REQUEST_TIMEOUT_MS, or break the task into smaller asks.${prior}`;
+  }
   if (reason === "budget-cap") {
     return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because a budget cap was reached. ${detail} Raise OPENAGI_MAX_TURN_USD for a larger per-turn budget, or OPENAGI_DAILY_USD_LIMIT for the daily budget.${prior}`;
   }
@@ -365,12 +388,22 @@ export class DeterministicModelProvider {
   }
 }
 
+function resolveRequestTimeoutMs(options) {
+  // Per-request (single model hop) timeout. A slow reasoning model on an
+  // open-ended task can legitimately exceed the old hard-coded 120s; make it
+  // configurable and default higher so a heavy first hop no longer aborts the
+  // whole turn. The whole-turn wall-clock guard (OPENAGI_MAX_TURN_SECONDS,
+  // default 900s) remains the real ceiling.
+  if (options.timeoutMs !== undefined) return options.timeoutMs;
+  return positiveInteger(process.env.OPENAGI_REQUEST_TIMEOUT_MS, 300000);
+}
+
 export class OpenAIResponsesProvider {
   constructor(options = {}) {
     this.apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
     this.model = options.model ?? process.env.OPENAI_MODEL ?? "gpt-5";
     this.baseUrl = options.baseUrl ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
-    this.timeoutMs = options.timeoutMs ?? 120000;
+    this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
     // Per-task model tiering. Defaults to base for everything until tier env
@@ -468,6 +501,7 @@ export class OpenAIResponsesProvider {
           this.postResponses(body, context, { timeoutMs: remainingMs, turnBudget })
         ), context);
       } catch (error) {
+        if (requestTimedOut(error)) { stopReason = "request-timeout"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
         break;
@@ -505,6 +539,7 @@ export class OpenAIResponsesProvider {
               ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
           ), context);
         } catch (error) {
+          if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
           if (!deadlineExpired(this, deadline, error)) throw error;
           stopReason = "turn-timeout";
           break iterationLoop;
@@ -571,7 +606,7 @@ export class OpenAIResponsesProvider {
       }
     }
 
-    if (stopReason === "turn-timeout" || stopReason === "budget-cap") {
+    if (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout") {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
@@ -600,7 +635,8 @@ export class OpenAIResponsesProvider {
     const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
     const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
       const response = await fetch(`${this.baseUrl}/responses`, {
         method: "POST",
@@ -629,6 +665,10 @@ export class OpenAIResponsesProvider {
       // winner so deadline expiry still returns a partial summary, while a
       // provider's ordinary shorter request timeout keeps its old error path.
       if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();
+      // Our own per-request timer fired (not the caller's abort): convert the
+      // raw undici "This operation was aborted" into a typed RequestTimeoutError
+      // so the turn loop can stop gracefully instead of dying with a raw string.
+      if (timedOut && error?.name === "AbortError") throw new RequestTimeoutError(timeoutMs);
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -644,7 +684,7 @@ export class AnthropicProvider {
     this.baseUrl = options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com/v1";
     this.version = options.version ?? "2023-06-01";
     this.maxTokens = options.maxTokens ?? (Number(process.env.OPENAGI_MAX_TOKENS) || 8192);
-    this.timeoutMs = options.timeoutMs ?? 120000;
+    this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
     this.router = options.router ?? new ModelRouter({ envPrefix: "ANTHROPIC", baseModel: this.model });
@@ -738,6 +778,7 @@ export class AnthropicProvider {
           ...(tools.length > 0 ? { tools } : {})
         }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
       } catch (error) {
+        if (requestTimedOut(error)) { stopReason = "request-timeout"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
         break;
@@ -760,6 +801,7 @@ export class AnthropicProvider {
               ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
           ), context);
         } catch (error) {
+          if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
           if (!deadlineExpired(this, deadline, error)) throw error;
           stopReason = "turn-timeout";
           break iterationLoop;
@@ -809,7 +851,7 @@ export class AnthropicProvider {
       }
     }
 
-    if (stopReason === "turn-timeout" || stopReason === "budget-cap") {
+    if (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout") {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
@@ -850,7 +892,8 @@ export class AnthropicProvider {
     const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
     const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
       const response = await fetch(`${this.baseUrl}/messages`, {
         method: "POST",
@@ -883,6 +926,7 @@ export class AnthropicProvider {
     } catch (error) {
       if (externalSignal?.aborted) throw abortReason(externalSignal);
       if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();
+      if (timedOut && error?.name === "AbortError") throw new RequestTimeoutError(timeoutMs);
       throw error;
     } finally {
       clearTimeout(timeout);

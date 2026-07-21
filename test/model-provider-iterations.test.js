@@ -450,6 +450,64 @@ for (const spec of [
   });
 }
 
+// REGRESSION: a single slow model request (fetch exceeds the per-request
+// timeout) must NOT kill the whole turn with a raw undici "This operation was
+// aborted". It must be normalized to a RequestTimeoutError and surface a
+// graceful partial summary. This is the root cause of the live "operation was
+// aborted" turn-errors that produced no reply.
+for (const spec of [
+  {
+    name: "OpenAI",
+    make: () => new OpenAIResponsesProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 30 })
+  },
+  {
+    name: "Anthropic",
+    make: () => new AnthropicProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 30 })
+  }
+]) {
+  test(`${spec.name} a per-request timeout stops gracefully, never leaking a raw abort`, async (t) => {
+    const provider = spec.make();
+    // fetch hangs forever; the provider's own 30ms request timer must abort it,
+    // and that abort must be classified as a recoverable request-timeout.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (_url, opts) => new Promise((_resolve, reject) => {
+      opts?.signal?.addEventListener("abort", () => {
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        reject(err);
+      }, { once: true });
+    });
+    t.after(() => { globalThis.fetch = originalFetch; });
+
+    let result;
+    await assert.doesNotReject(async () => {
+      result = await provider.generate({ input: "slow first hop", agent });
+    }, "a per-request timeout must not throw out of generate()");
+    assert.equal(result.stopReason, "request-timeout");
+    assert.equal(result.iterations, 1);
+    assert.doesNotMatch(result.text, /This operation was aborted/, "the raw undici abort string must never reach the user");
+    assert.match(result.text, /request timeout|OPENAGI_REQUEST_TIMEOUT_MS/i);
+  });
+}
+
+test("OPENAGI_REQUEST_TIMEOUT_MS overrides the default per-request timeout on both providers", (t) => {
+  const saved = process.env.OPENAGI_REQUEST_TIMEOUT_MS;
+  t.after(() => {
+    if (saved === undefined) delete process.env.OPENAGI_REQUEST_TIMEOUT_MS;
+    else process.env.OPENAGI_REQUEST_TIMEOUT_MS = saved;
+  });
+  // Default is 300s (raised from the old hard-coded 120s so a heavy reasoning
+  // hop no longer aborts the turn).
+  delete process.env.OPENAGI_REQUEST_TIMEOUT_MS;
+  assert.equal(new OpenAIResponsesProvider({ apiKey: "test" }).timeoutMs, 300000);
+  assert.equal(new AnthropicProvider({ apiKey: "test" }).timeoutMs, 300000);
+  process.env.OPENAGI_REQUEST_TIMEOUT_MS = "60000";
+  assert.equal(new OpenAIResponsesProvider({ apiKey: "test" }).timeoutMs, 60000);
+  assert.equal(new AnthropicProvider({ apiKey: "test" }).timeoutMs, 60000);
+  // An explicit constructor option still wins over the env var.
+  assert.equal(new AnthropicProvider({ apiKey: "test", timeoutMs: 5000 }).timeoutMs, 5000);
+});
+
 test("the wall-clock guard also bounds a tool invocation that never settles", async () => {
   const provider = new OpenAIResponsesProvider({
     apiKey: "test-key",

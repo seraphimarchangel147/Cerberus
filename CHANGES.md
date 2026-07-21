@@ -2,6 +2,19 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Fix: heavy turns aborting with "This operation was aborted" / no reply (Seraphim)
+
+- **Symptom (Creator-reported):** asking Azazel an open-ended heavy question ("do a deep dive on your harness…") produced NO reply and a cryptic `⚠ This operation was aborted`; turns "took forever" then died. Confirmed in `channels/discord/events.jsonl`: inbound 11:50:50 → `turn-error: "This operation was aborted"` at 11:56:48 (~358s later). Three such aborts (03:39, 03:42, 11:56) — a **pre-existing bug**, not the fast-lane change or the daemon restart (the restart came AFTER the abort).
+- **Root cause (`src/model-provider.js`):** each single model request was capped by a **hard-coded 120s fetch timeout** (`this.timeoutMs = 120000`). When kimi reasons long on one hop, the fetch hits 120s and `controller.abort()` fires with no reason → undici throws the raw string `"This operation was aborted"`. That raw `AbortError` was only normalized to a graceful `TurnDeadlineError` when `deadlineLimited` was true (late in a turn); early on it was re-thrown, and the turn loop's `deadlineExpired()` didn't recognize it (120s ≪ 900s wall-clock), so it did `throw error` — **killing the entire turn, discarding all partial work, surfacing the raw string with no reply.**
+- **Fix (both providers, symmetric):**
+  1. New typed `RequestTimeoutError` — the per-request timer now sets a `timedOut` flag and the fetch catch converts its own abort into `RequestTimeoutError` instead of leaking undici's raw string. (Caller-initiated aborts and the wall-clock `TurnDeadlineError` paths are unchanged.)
+  2. The turn loop (model-call catch + tool-invoke catch, both providers) treats `RequestTimeoutError` as a **recoverable** stop: `stopReason = "request-timeout"`, break, and emit a graceful `localPartialSummary()` (prior text + completed tool calls + "raise OPENAGI_REQUEST_TIMEOUT_MS"). A slow hop can no longer nuke the whole turn.
+  3. Per-request timeout is now env-configurable via **`OPENAGI_REQUEST_TIMEOUT_MS`** and the default is **raised 120s → 300s** (a heavy first hop no longer aborts). Whole-turn ceiling `OPENAGI_MAX_TURN_SECONDS` (900s) is unchanged. Added to `WIZARD_FIELDS` so `/setup` can tune it.
+- Tests: 3 new regressions in `model-provider-iterations.test.js` — per-request timeout stops gracefully & never leaks the raw abort string (both providers), and `OPENAGI_REQUEST_TIMEOUT_MS` override/default. **622/622 both lanes** (was 619). Homoglyph scan clean on all 3 changed files.
+- **Live-verified post-restart:** the exact request that aborted before ("upgrades you'd make to your harness…") now returns a clean 4-bullet answer in ~15s, `stopReason:"completed"`. Health endpoint green.
+- Honest note: my earlier fast-lane QA covered the casual-chat lane I built, NOT long heavyweight work-turns — this abort class was outside that test surface. Now covered.
+REQUEST-TIMEOUT ABORT FIX COMPLETE
+
 ## 2026-07-21 — Chat fast-lane band-gate fix (Seraphim)
 
 - **Fixed: the conversational fast lane never fired in production (inert feature).** The gate in `isConversationalTurn()` (`src/agent-host.js`) required scrutiny verdict `ignore`/`watch`, but a genuine casual question (`"what is the capital of France?"`) scores `act`@~0.57 on the live 3-judge panel — so the exact turns the fast lane was built to optimize never qualified. Live probe before fix: `conversational:false`, `maxIterations:120`, full ~57-tool catalog still sent.
