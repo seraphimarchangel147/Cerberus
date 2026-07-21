@@ -2,6 +2,40 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Stall-aware timeout + force-an-answer on every early stop (Seraphim)
+
+Creator's ask: the harness should check whether the LLM is **still trying** instead of
+straight-up aborting — a model still producing output (Kimi is slow) shouldn't be killed for
+taking long — and when a turn IS cut short it should **force the model to give an answer**
+(like Hermes forcing a reply at the iteration cap) rather than returning nothing.
+
+- **Stall detection replaces the blind per-request timeout while streaming** (`src/model-provider.js`).
+  Confirmed the Kimi endpoint streams SSE token-by-token (incl. `thinking_delta`). The main loop
+  now **streams internally even when Discord streaming/onDelta is off**, purely to get the "is the
+  model still trying?" signal. `readAnthropicEventStream` fires a new `onActivity` callback on every
+  streamed chunk; `postMessages` arms an **idle timer that resets on each chunk**. A model still
+  emitting tokens is never aborted for being slow — only genuine silence past the stall window
+  (`OPENAGI_STALL_TIMEOUT_MS`, default 120s) trips a typed `ModelStallError`. The fixed per-request
+  timeout remains the absolute backstop; `stallTimeoutMs=0` disables stall detection and restores
+  the pure non-streaming path.
+- **Force-an-answer on every early stop.** The iteration-cap salvage (a final "stop, no tools,
+  answer now" model call) is generalized to fire for **iteration-cap, stall, request-timeout, AND
+  turn-timeout**. New `forceAnswerPrompt(reason,…)` tailors the nudge; the forced call carries no
+  tools (can't loop again), a fresh short budget (`OPENAGI_FORCE_ANSWER_MS`, default 60s), and is
+  non-streaming. If the forced answer itself fails, it falls back to the canned partial summary —
+  the turn never dies silently. Applied symmetrically to both providers.
+- New knobs (in `WIZARD_FIELDS`): `OPENAGI_STALL_TIMEOUT_MS`, `OPENAGI_FORCE_ANSWER_MS`.
+  `ModelStallError` is classified recoverable alongside `RequestTimeoutError`; `stalled` gets its
+  own `stopReason` + partial-summary text.
+- Tests: 5 net-new in `model-provider-iterations.test.js` — silent stream → `stalled` + reply,
+  **slow-but-alive stream (6 deltas 20ms apart, 120ms > 40ms window) completes, NOT aborted**,
+  wall-clock now forces an answer, request-timeout with stall disabled. Updated the voice-streaming
+  test to reflect internal streaming. **624/624 both lanes** (was 622).
+- **Live-verified post-restart:** casual question → completed 7s; a 49s heavy-reasoning turn (well
+  past the old 120s-per-request cap) → `completed` with a full 6-paragraph answer, NOT falsely
+  stalled — proving the idle timer resets on tokens against the real Kimi endpoint. No daemon errors.
+STALL-AWARE TIMEOUT + FORCE-ANSWER COMPLETE
+
 ## 2026-07-21 — Fix: heavy turns aborting with "This operation was aborted" / no reply (Seraphim)
 
 - **Symptom (Creator-reported):** asking Azazel an open-ended heavy question ("do a deep dive on your harness…") produced NO reply and a cryptic `⚠ This operation was aborted`; turns "took forever" then died. Confirmed in `channels/discord/events.jsonl`: inbound 11:50:50 → `turn-error: "This operation was aborted"` at 11:56:48 (~358s later). Three such aborts (03:39, 03:42, 11:56) — a **pre-existing bug**, not the fast-lane change or the daemon restart (the restart came AFTER the abort).

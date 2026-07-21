@@ -434,7 +434,7 @@ for (const spec of [
     }
   }
 ]) {
-  test(`${spec.name} wall-clock guard returns a graceful partial summary`, async () => {
+  test(`${spec.name} wall-clock guard forces an answer or a graceful summary`, async () => {
     const provider = spec.make();
     spec.stub(provider);
     const events = [];
@@ -445,24 +445,32 @@ for (const spec of [
     });
     assert.equal(result.stopReason, "turn-timeout");
     assert.equal(result.iterations, 1);
-    assert.match(result.text, /OPENAGI_MAX_TURN_SECONDS|wall-clock/i);
+    // The turn was cut short by the wall-clock guard; the harness then forces a
+    // final answer (no tools). With these stubs that forced call returns model
+    // text ("too late"); if it could not, a canned wall-clock summary is used.
+    // Either way the user gets a real reply, never a raw abort.
+    assert.ok(
+      /too late/.test(result.text) || /OPENAGI_MAX_TURN_SECONDS|wall-clock/i.test(result.text),
+      `expected a forced answer or a wall-clock summary, got: ${result.text}`
+    );
     assert.deepEqual(events, [{ phase: "iteration", n: 1, max: 5 }]);
   });
 }
 
 // REGRESSION: a single slow model request (fetch exceeds the per-request
 // timeout) must NOT kill the whole turn with a raw undici "This operation was
-// aborted". It must be normalized to a RequestTimeoutError and surface a
-// graceful partial summary. This is the root cause of the live "operation was
-// aborted" turn-errors that produced no reply.
+// aborted". It must be normalized and surface a graceful reply. This is the
+// root cause of the live "operation was aborted" turn-errors that gave no reply.
+// With stall detection DISABLED (OPENAGI_STALL_TIMEOUT_MS=0) the fixed
+// per-request timeout is the sole guard and the classification is request-timeout.
 for (const spec of [
   {
     name: "OpenAI",
-    make: () => new OpenAIResponsesProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 30 })
+    make: () => new OpenAIResponsesProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 30, stallTimeoutMs: 0 })
   },
   {
     name: "Anthropic",
-    make: () => new AnthropicProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 30 })
+    make: () => new AnthropicProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 30, stallTimeoutMs: 0 })
   }
 ]) {
   test(`${spec.name} a per-request timeout stops gracefully, never leaking a raw abort`, async (t) => {
@@ -489,6 +497,95 @@ for (const spec of [
     assert.match(result.text, /request timeout|OPENAGI_REQUEST_TIMEOUT_MS/i);
   });
 }
+
+// A model that goes SILENT mid-stream (no tokens for the stall window) must be
+// classified as a recoverable stall — never a raw abort — and still produce a
+// reply. This is the "check if the LLM is still trying" behaviour: total silence
+// past the window trips it; a model still emitting tokens would not (covered by
+// the "slow but alive" test below).
+test("Anthropic classifies a silent stream as a stall and still replies", async (t) => {
+  const provider = new AnthropicProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 5000, stallTimeoutMs: 30, forceAnswerMs: 30 });
+  const originalFetch = globalThis.fetch;
+  let call = 0;
+  // First call: streaming body that never yields a chunk → pure silence (stall).
+  // Second call: the forced "answer now" call (non-streaming) also goes silent
+  // here, so the harness must fall back to the canned stall summary. Proves the
+  // whole path survives even when the force-answer itself can't complete.
+  globalThis.fetch = async (_url, opts) => {
+    call += 1;
+    return {
+      ok: true,
+      headers: { get: () => "text/event-stream" },
+      json: async () => new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener("abort", () => {
+          const err = new Error("This operation was aborted");
+          err.name = "AbortError";
+          reject(err);
+        }, { once: true });
+      }),
+      body: {
+        getReader: () => ({
+          read: () => new Promise((_resolve, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              const err = new Error("This operation was aborted");
+              err.name = "AbortError";
+              reject(err);
+            }, { once: true });
+          })
+        })
+      }
+    };
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  let result;
+  await assert.doesNotReject(async () => {
+    result = await provider.generate({ input: "model goes quiet", agent });
+  });
+  assert.equal(result.stopReason, "stalled");
+  assert.doesNotMatch(result.text, /This operation was aborted/);
+  assert.match(result.text, /stall|silent|OPENAGI_STALL_TIMEOUT_MS/i);
+});
+
+// A model that keeps emitting tokens — even slowly, past the stall window in
+// TOTAL but never idle for the window — must NOT be aborted. The stall timer
+// resets on every streamed chunk (the "is it still trying?" signal).
+test("Anthropic does NOT abort a slow-but-alive stream that keeps emitting tokens", async (t) => {
+  const provider = new AnthropicProvider({ apiKey: "test", maxIterations: 5, maxTurnSeconds: 900, timeoutMs: 5000, stallTimeoutMs: 40 });
+  const originalFetch = globalThis.fetch;
+  const enc = new TextEncoder();
+  // Emit 6 text deltas 20ms apart (120ms total > 40ms stall window), then end.
+  // No single gap exceeds the window, so the turn must complete normally.
+  const chunks = [];
+  chunks.push(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "m", role: "assistant", content: [], usage: {} } })}\n\n`);
+  chunks.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`);
+  for (let i = 0; i < 6; i += 1) {
+    chunks.push(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `tok${i} ` } })}\n\n`);
+  }
+  chunks.push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+  chunks.push(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" } })}\n\n`);
+  globalThis.fetch = async () => {
+    let i = 0;
+    return {
+      ok: true,
+      headers: { get: () => "text/event-stream" },
+      body: {
+        getReader: () => ({
+          read: () => new Promise((resolve) => {
+            if (i >= chunks.length) { resolve({ done: true, value: undefined }); return; }
+            const value = enc.encode(chunks[i]); i += 1;
+            setTimeout(() => resolve({ done: false, value }), 20);
+          })
+        })
+      }
+    };
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const result = await provider.generate({ input: "slow but alive", agent });
+  assert.equal(result.stopReason, "completed", "a still-emitting model must not be stalled");
+  assert.match(result.text, /tok0.*tok5/s);
+});
 
 test("OPENAGI_REQUEST_TIMEOUT_MS overrides the default per-request timeout on both providers", (t) => {
   const saved = process.env.OPENAGI_REQUEST_TIMEOUT_MS;

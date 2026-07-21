@@ -3,6 +3,15 @@ import { ModelRouter } from "./model-router.js";
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
 const DEFAULT_MAX_TURN_SECONDS = 900;
+// Max silence (no streamed tokens/events) before a single request is treated
+// as stalled. A model that keeps producing output — even slowly, like Kimi —
+// resets this on every event and is never aborted for being slow. 0 disables
+// stall detection and falls back to the fixed per-request timeout.
+const DEFAULT_STALL_TIMEOUT_MS = 120000;
+// Budget for the final "stop, no tools, answer now" call made when a turn is
+// cut short (stall / timeout / iteration-cap). Mirrors Hermes forcing a reply
+// at the iteration limit instead of returning nothing.
+const DEFAULT_FORCE_ANSWER_MS = 60000;
 const SYNTHETIC_CONTINUE = [
   "[system] Continue the same task now.",
   "Use the accumulated tool results and conversation above.",
@@ -26,6 +35,30 @@ class RequestTimeoutError extends Error {
     this.name = "RequestTimeoutError";
     this.timeoutMs = timeoutMs;
   }
+}
+
+// The model stopped streaming output for longer than the stall window (it went
+// silent, as opposed to still-producing-tokens-slowly). Recoverable: the turn
+// forces a final answer, same as a request timeout — never a raw abort.
+class ModelStallError extends Error {
+  constructor(stallMs) {
+    super(`The model produced no output for ${Math.round(stallMs)}ms (stalled).`);
+    this.name = "ModelStallError";
+    this.stallMs = stallMs;
+  }
+}
+
+function resolveStallTimeoutMs(options) {
+  if (options.stallTimeoutMs !== undefined) return options.stallTimeoutMs;
+  const parsed = Number(process.env.OPENAGI_STALL_TIMEOUT_MS);
+  // Explicit 0 disables stall detection; anything else falls back to default.
+  if (process.env.OPENAGI_STALL_TIMEOUT_MS?.trim() && Number.isFinite(parsed) && parsed >= 0) return parsed;
+  return DEFAULT_STALL_TIMEOUT_MS;
+}
+
+function resolveForceAnswerMs(options) {
+  if (options.forceAnswerMs !== undefined) return options.forceAnswerMs;
+  return positiveInteger(process.env.OPENAGI_FORCE_ANSWER_MS, DEFAULT_FORCE_ANSWER_MS);
 }
 
 function positiveInteger(value, fallback) {
@@ -75,6 +108,8 @@ function applyIterationSettings(provider, options) {
   provider.maxTurnUsd = optionalPositiveNumber(
     options.maxTurnUsd ?? process.env.OPENAGI_MAX_TURN_USD
   );
+  provider.stallTimeoutMs = resolveStallTimeoutMs(options);
+  provider.forceAnswerMs = resolveForceAnswerMs(options);
   provider.now = options.now ?? Date.now;
   // Keep this readable for integrations that inspect the old property. The
   // value now represents the whole-turn iteration cap.
@@ -132,12 +167,12 @@ function deadlineExpired(provider, deadline, error) {
   return error instanceof TurnDeadlineError || provider.now() >= deadline;
 }
 
-// A single model request hit its per-request timeout. Unlike a hard error this
-// is recoverable: the turn stops gracefully and returns whatever partial work
-// (prior text + completed tool calls) it already has, instead of discarding the
-// entire turn with a raw "This operation was aborted".
+// A single model request hit its per-request timeout OR stalled (went silent).
+// Unlike a hard error this is recoverable: the turn stops gracefully, forces a
+// final answer, and returns whatever partial work it already has — instead of
+// discarding the entire turn with a raw "This operation was aborted".
 function requestTimedOut(error) {
-  return error instanceof RequestTimeoutError;
+  return error instanceof RequestTimeoutError || error instanceof ModelStallError;
 }
 
 function budgetExceeded(error) {
@@ -186,7 +221,7 @@ function extractAnthropicText(response) {
 // here keeps tool calls, usage accounting, budgets, and continuation behavior
 // on one path. Only user-visible text deltas leave this parser; thinking and
 // tool-input JSON remain internal to the agent loop.
-export async function readAnthropicEventStream(response, { onDelta } = {}) {
+export async function readAnthropicEventStream(response, { onDelta, onActivity } = {}) {
   if (!response?.body?.getReader) throw new Error("Anthropic streaming response has no readable body.");
 
   const message = { type: "message", role: "assistant", content: [], usage: {} };
@@ -264,6 +299,11 @@ export async function readAnthropicEventStream(response, { onDelta } = {}) {
 
   while (true) {
     const { done, value } = await reader.read();
+    // Every chunk (any streamed byte — text, thinking, or tool-input delta) is
+    // proof the model is still producing output. Reset the stall watchdog.
+    if (typeof onActivity === "function" && (value?.length || !done)) {
+      try { onActivity(); } catch { /* watchdog callback is advisory */ }
+    }
     pending += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     let newline;
     while ((newline = pending.indexOf("\n")) >= 0) {
@@ -319,6 +359,24 @@ function appendAnthropicUserText(convo, text) {
   }
 }
 
+// The system prompt appended to the final "force an answer" call when a turn is
+// cut short. Tells the model to stop, not call tools, and answer from work so
+// far — the reason tunes the guidance so the reply names the right knob.
+function forceAnswerPrompt(reason, iterations, maxIterations) {
+  const base = "[system] Stop here and answer the user now. Do NOT call any tools. Using the conversation and any tool results above, give the best complete answer you can with what you have.";
+  if (reason === "iteration-cap") {
+    return `${base} The turn reached its iteration limit after ${iterations}/${maxIterations} steps; if work remains, say briefly what's left and note OPENAGI_MAX_ITERATIONS can be raised.`;
+  }
+  if (reason === "stalled") {
+    return `${base} The previous step went quiet for too long; summarise progress and give your best current answer.`;
+  }
+  if (reason === "request-timeout") {
+    return `${base} The previous step took too long; summarise progress and give your best current answer (OPENAGI_REQUEST_TIMEOUT_MS can be raised for longer steps).`;
+  }
+  // turn-timeout
+  return `${base} The overall time budget is nearly spent; be concise and note OPENAGI_MAX_TURN_SECONDS can be raised.`;
+}
+
 function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText }) {
   const completed = toolCalls.length;
   const recent = toolCalls.slice(-5).map((call) => call.name).join(", ");
@@ -328,6 +386,9 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
   const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
   if (reason === "turn-timeout") {
     return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached. ${detail} Raise OPENAGI_MAX_TURN_SECONDS if this task needs more time.${prior}`;
+  }
+  if (reason === "stalled") {
+    return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model went silent (no output for the stall window) and could not be revived. ${detail} This usually means a transient provider hiccup — retry the request. OPENAGI_STALL_TIMEOUT_MS tunes how long silence is tolerated.${prior}`;
   }
   if (reason === "request-timeout") {
     return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because a single model request exceeded the per-request timeout (the model took too long on one step). ${detail} Raise OPENAGI_REQUEST_TIMEOUT_MS, or break the task into smaller asks.${prior}`;
@@ -501,7 +562,7 @@ export class OpenAIResponsesProvider {
           this.postResponses(body, context, { timeoutMs: remainingMs, turnBudget })
         ), context);
       } catch (error) {
-        if (requestTimedOut(error)) { stopReason = "request-timeout"; break; }
+        if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
         break;
@@ -588,25 +649,30 @@ export class OpenAIResponsesProvider {
     }
 
     let text;
-    if (stopReason === "iteration-cap") {
+    // Force a real answer whenever the turn was cut short (see the Anthropic
+    // path for the rationale). No tools, fresh short budget, so the model
+    // always gets a chance to reply instead of returning only a canned string.
+    const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout"]);
+    if (FORCE_ANSWER_REASONS.has(stopReason)) {
       appendOpenAIContinue(conversationInput);
-      conversationInput.at(-1).content[0].text = `[system] The turn reached its true limit after ${iterations} iterations. Do not call tools. Give a concise partial summary of completed work, findings, and what remains. Mention that OPENAGI_MAX_ITERATIONS can be raised.`;
+      conversationInput.at(-1).content[0].text = forceAnswerPrompt(stopReason, iterations, maxIterations);
       try {
         checkRequestBudget(this, turnBudget);
-        response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
+        response = await this.postResponses({
           model,
           instructions: baseInstructions,
           input: conversationInput
-        }, context, { timeoutMs: remainingMs, turnBudget }), context);
-        text = extractResponseText(response);
+        }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
+        const forced = extractResponseText(response);
+        if (forced) text = forced;
       } catch (error) {
-        if (budgetExceeded(error)) stopReason = "budget-cap";
-        else if (deadlineExpired(this, deadline, error)) stopReason = "turn-timeout";
-        else throw error;
+        // Best-effort: if the forced answer also fails, fall through to the
+        // canned summary below — never rethrow and lose the turn.
+        if (!budgetExceeded(error) && !requestTimedOut(error) && !deadlineExpired(this, deadline, error)) throw error;
       }
     }
 
-    if (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout") {
+    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled")) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
@@ -768,17 +834,22 @@ export class AnthropicProvider {
       }
       iterations += 1;
       emitIteration(context, iterations, maxIterations);
+      // Stream internally whenever stall detection is enabled, even if we're not
+      // surfacing deltas to the user (onDelta): the token stream is the "is the
+      // model still trying?" signal the stall watchdog needs. A slow-but-alive
+      // model keeps the turn open; only true silence trips the guard.
+      const wantStream = typeof onDelta === "function" || this.stallTimeoutMs > 0;
       try {
         response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
           model,
           max_tokens: this.maxTokens,
           system,
           messages: convo,
-          ...(typeof onDelta === "function" ? { stream: true } : {}),
+          ...(wantStream ? { stream: true } : {}),
           ...(tools.length > 0 ? { tools } : {})
         }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
       } catch (error) {
-        if (requestTimedOut(error)) { stopReason = "request-timeout"; break; }
+        if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
         stopReason = "turn-timeout";
         break;
@@ -829,29 +900,33 @@ export class AnthropicProvider {
     }
 
     let text;
-    if (stopReason === "iteration-cap") {
-      appendAnthropicUserText(
-        convo,
-        `[system] The turn reached its true limit after ${iterations} iterations. Do not call tools. Give a concise partial summary of completed work, findings, and what remains. Mention that OPENAGI_MAX_ITERATIONS can be raised.`
-      );
+    // Force a real answer whenever the turn was cut short — iteration cap,
+    // stall, request timeout, or wall-clock — instead of returning only a canned
+    // string. Mirrors Hermes forcing the LLM to answer at the iteration limit.
+    // The final call carries NO tools (so it can't loop again), a fresh short
+    // budget (forceAnswerMs), and is non-streaming (a clean blocking ask).
+    const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout"]);
+    if (FORCE_ANSWER_REASONS.has(stopReason)) {
+      appendAnthropicUserText(convo, forceAnswerPrompt(stopReason, iterations, maxIterations));
       try {
         checkRequestBudget(this, turnBudget);
-        response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
+        response = await this.postMessages({
           model,
           max_tokens: this.maxTokens,
           system,
-          messages: convo,
-          ...(typeof onDelta === "function" ? { stream: true } : {})
-        }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
-        text = extractAnthropicText(response);
+          messages: convo
+        }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
+        const forced = extractAnthropicText(response);
+        if (forced) text = forced;
       } catch (error) {
-        if (budgetExceeded(error)) stopReason = "budget-cap";
-        else if (deadlineExpired(this, deadline, error)) stopReason = "turn-timeout";
-        else throw error;
+        // The forced answer is best-effort. If IT also times out/stalls or the
+        // budget is gone, fall through to the canned partial summary below —
+        // never rethrow and lose the turn.
+        if (!budgetExceeded(error) && !requestTimedOut(error) && !deadlineExpired(this, deadline, error)) throw error;
       }
     }
 
-    if (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout") {
+    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled")) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
@@ -892,8 +967,24 @@ export class AnthropicProvider {
     const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
     const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
+    // Stall watchdog: when we stream, the hard per-request timeout is replaced
+    // by an IDLE timer that resets on every streamed chunk. A model still
+    // producing tokens (even slowly) is never aborted for taking long; only
+    // genuine silence past the stall window trips it. Without streaming (or
+    // when disabled), the fixed timeout is the sole guard.
+    const streaming = body.stream === true;
+    const stallMs = streaming && this.stallTimeoutMs > 0
+      ? Math.max(1, Math.min(this.stallTimeoutMs, timeoutMs))
+      : 0;
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    let stalled = false;
+    let timer = null;
+    const armHardTimeout = () => setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    const armStallTimeout = () => setTimeout(() => { stalled = true; controller.abort(); }, stallMs);
+    timer = stallMs > 0 ? armStallTimeout() : armHardTimeout();
+    const onActivity = stallMs > 0
+      ? () => { clearTimeout(timer); timer = armStallTimeout(); }
+      : undefined;
     try {
       const response = await fetch(`${this.baseUrl}/messages`, {
         method: "POST",
@@ -910,8 +1001,8 @@ export class AnthropicProvider {
         throw new Error(errorBody?.error?.message ?? `Anthropic request failed with ${response.status}`);
       }
       const contentType = response.headers?.get?.("content-type") ?? "";
-      const json = body.stream === true && /text\/event-stream/i.test(contentType)
-        ? await readAnthropicEventStream(response, { onDelta: options.onDelta })
+      const json = streaming && /text\/event-stream/i.test(contentType)
+        ? await readAnthropicEventStream(response, { onDelta: options.onDelta, onActivity })
         : await response.json().catch(() => ({}));
       const callTools = (json.content ?? []).filter((b) => b.type === "tool_use").map((b) => b.name);
       const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
@@ -926,10 +1017,11 @@ export class AnthropicProvider {
     } catch (error) {
       if (externalSignal?.aborted) throw abortReason(externalSignal);
       if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();
+      if (stalled && error?.name === "AbortError") throw new ModelStallError(stallMs);
       if (timedOut && error?.name === "AbortError") throw new RequestTimeoutError(timeoutMs);
       throw error;
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timer);
       externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }

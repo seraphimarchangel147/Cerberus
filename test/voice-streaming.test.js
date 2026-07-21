@@ -169,11 +169,12 @@ test("Anthropic tool-use SSE stays internal and only final prose reaches onDelta
   assert.equal(result.text, "Final answer.");
 });
 
-test("Anthropic keeps the JSON path unchanged when onDelta is absent", async (t) => {
+test("Anthropic streams internally for stall detection even when onDelta is absent, but surfaces no deltas", async (t) => {
   const originalFetch = globalThis.fetch;
   let sentBody = null;
   globalThis.fetch = async (_url, init) => {
     sentBody = JSON.parse(init.body);
+    // Server may still answer with a plain JSON body; the provider handles both.
     return new Response(JSON.stringify({
       id: "msg_json",
       role: "assistant",
@@ -184,13 +185,25 @@ test("Anthropic keeps the JSON path unchanged when onDelta is absent", async (t)
   };
   t.after(() => { globalThis.fetch = originalFetch; });
 
-  const result = await new AnthropicProvider({ apiKey: "test-key" }).generate({
+  // Default: stall detection is on, so the loop streams internally (stream:true)
+  // to get the "is the model still trying?" signal — regardless of onDelta.
+  const streamed = await new AnthropicProvider({ apiKey: "test" }).generate({
     input: "ordinary",
     agent,
     context: { __scrutinyPolicy: "none" }
   });
-  assert.equal(Object.hasOwn(sentBody, "stream"), false);
-  assert.equal(result.text, "ordinary response");
+  assert.equal(sentBody.stream, true, "internal streaming enables the stall watchdog");
+  assert.equal(streamed.text, "ordinary response");
+
+  // Disabling stall detection restores the pure non-streaming JSON path.
+  sentBody = null;
+  const plain = await new AnthropicProvider({ apiKey: "test", stallTimeoutMs: 0 }).generate({
+    input: "ordinary",
+    agent,
+    context: { __scrutinyPolicy: "none" }
+  });
+  assert.equal(Object.hasOwn(sentBody, "stream"), false, "no stall detection and no onDelta → no streaming");
+  assert.equal(plain.text, "ordinary response");
 });
 
 test("the SSE parser rejects malformed tool JSON instead of invoking with partial input", async () => {
