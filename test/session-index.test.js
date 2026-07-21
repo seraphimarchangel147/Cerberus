@@ -58,6 +58,101 @@ test("session index search: multi-word query matches terms in any order (AND, no
   assert.match(hits[0].snippet, /decision/i);
 });
 
+test("FTS session search ranks textual relevance ahead of recency", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-rank-"));
+  const index = new SessionIndex({ dir });
+  await index.ready;
+  if (index.fallback) {
+    t.skip("node:sqlite FTS5 is unavailable on this Node build");
+    return;
+  }
+  await index.indexMessage("older-best", "main", {
+    id: "msg_rank_best",
+    role: "assistant",
+    content: "orchid orchid orchid orchid launch",
+    createdAt: "2026-07-01T10:00:00.000Z"
+  });
+  await index.indexMessage("newer-weak", "main", {
+    id: "msg_rank_weak",
+    role: "assistant",
+    content: `orchid ${"unrelated filler ".repeat(80)}`,
+    createdAt: "2026-07-20T10:00:00.000Z"
+  });
+
+  const hits = await index.search("orchid", { limit: 2 });
+  assert.deepEqual(hits.map((hit) => hit.sessionId), ["older-best", "newer-weak"]);
+});
+
+test("session search binds role, session, and inclusive time filters", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-filters-"));
+  const index = new SessionIndex({ dir });
+  await index.ready;
+  const rows = [
+    ["alpha", "user", "2026-07-01T10:00:00.000Z"],
+    ["alpha", "assistant", "2026-07-02T10:00:00.000Z"],
+    ["beta", "assistant", "2026-07-03T10:00:00.000Z"],
+    ["alpha", "tool", "2026-07-04T10:00:00.000Z"]
+  ];
+  for (const [sessionId, role, createdAt] of rows) {
+    await index.indexMessage(sessionId, "main", {
+      id: `msg_filter_${sessionId}_${role}`,
+      role,
+      content: `nebula decision by ${role}`,
+      createdAt
+    });
+  }
+
+  const filtered = await index.search("nebula", {
+    role: "assistant",
+    sessionId: "alpha",
+    since: "2026-07-02T10:00:00.000Z",
+    until: "2026-07-02T10:00:00.000Z"
+  });
+  assert.deepEqual(filtered.map((hit) => [hit.sessionId, hit.role, hit.ts]), [
+    ["alpha", "assistant", "2026-07-02T10:00:00.000Z"]
+  ]);
+  assert.deepEqual(
+    await index.search("nebula", { sessionId: "alpha' OR 1=1 --" }),
+    [],
+    "a SQL-shaped session id remains a bound value"
+  );
+  await assert.rejects(index.search("nebula", { role: "assistant' OR 1=1 --" }), /role must be/iu);
+  await assert.rejects(index.search("nebula", { since: "2026-07-05", until: "2026-07-01" }), /since must not be after until/iu);
+});
+
+test("JSONL fallback applies filters while retaining recency ordering", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-filter-fallback-"));
+  const index = new SessionIndex({ dir, fallback: true });
+  await index.ready;
+  await index.indexMessage("alpha", "main", {
+    id: "msg_fallback_user",
+    role: "user",
+    content: "cobalt fallback decision",
+    createdAt: "2026-07-01T10:00:00.000Z"
+  });
+  await index.indexMessage("alpha", "main", {
+    id: "msg_fallback_assistant",
+    role: "assistant",
+    content: "cobalt fallback response",
+    createdAt: "2026-07-02T10:00:00.000Z"
+  });
+  await index.indexMessage("beta", "main", {
+    id: "msg_fallback_other",
+    role: "assistant",
+    content: "cobalt fallback other",
+    createdAt: "2026-07-03T10:00:00.000Z"
+  });
+
+  const hits = await index.search("cobalt", {
+    role: "assistant",
+    sessionId: "alpha",
+    since: "2026-07-02T00:00:00Z",
+    until: "2026-07-02T23:59:59Z"
+  });
+  assert.deepEqual(hits.map((hit) => hit.sessionId), ["alpha"]);
+  assert.equal(hits[0].role, "assistant");
+});
+
 test("search snippets are capped at 160 chars", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-sessidx-cap-"));
   const index = new SessionIndex({ dir });
@@ -209,6 +304,23 @@ test("search_sessions tool is registered read-only and returns formatted results
   assert.match(hit.when, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/, "human-readable timestamp");
   assert.equal(hit.role, "user");
   assert.ok(hit.snippet.length <= 160);
+
+  await runtime.sessionIndex.indexMessage("local:user:main", "main", {
+    id: "msg_tool_0002",
+    role: "assistant",
+    content: "I confirmed the flamingo report deadline.",
+    createdAt: "2026-06-05T09:31:00.000Z"
+  });
+  const filtered = await runtime.tools.invoke("search_sessions", {
+    query: "flamingo",
+    role: "assistant",
+    sessionId: "local:user:main",
+    since: "2026-06-05T09:31:00Z",
+    until: "2026-06-05T09:31:00Z"
+  });
+  assert.equal(filtered.ok, true);
+  assert.equal(filtered.result.count, 1);
+  assert.equal(filtered.result.results[0].role, "assistant");
 });
 
 // Code-review finding: init() had no attached rejection handler anywhere

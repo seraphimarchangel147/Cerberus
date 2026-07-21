@@ -688,14 +688,24 @@ export function registerCoreTools(registry, runtime) {
       type: "object",
       properties: {
         query: { type: "string", description: "Free-text search across past conversation messages." },
-        limit: { type: "integer", minimum: 1, maximum: 25, description: "Maximum results to return (default 8)." }
+        limit: { type: "integer", minimum: 1, maximum: 25, description: "Maximum results to return (default 8)." },
+        role: { type: "string", enum: ["user", "assistant", "tool"], description: "Optional exact message-role filter." },
+        sessionId: { type: "string", description: "Optional exact session id filter." },
+        since: { type: "string", description: "Optional inclusive ISO timestamp lower bound." },
+        until: { type: "string", description: "Optional inclusive ISO timestamp upper bound." }
       },
       required: ["query"],
       additionalProperties: false
     },
     handler: async (args) => {
       if (!runtime.sessionIndex) return { error: "no session index" };
-      const results = await runtime.sessionIndex.search(String(args.query ?? ""), { limit: args.limit ?? 8 });
+      const results = await runtime.sessionIndex.search(String(args.query ?? ""), {
+        limit: args.limit ?? 8,
+        role: args.role ?? null,
+        sessionId: args.sessionId ?? null,
+        since: args.since ?? null,
+        until: args.until ?? null
+      });
       return {
         count: results.length,
         results: results.map((r) => ({

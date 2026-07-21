@@ -41,6 +41,8 @@ test("searcmcp_sessions returns capped transcript hits under read-only scrutiny"
   const tool = runtime.tools.get("searcmcp_sessions");
 
   assert.equal(tool.sideEffects, false);
+  assert.equal(runtime.tools.get("searchmcp_sessions"), undefined, "there is no stale typo alias beside the intentional name");
+  assert.equal([...runtime.tools.tools.keys()].filter((name) => name === "searcmcp_sessions").length, 1);
   const outcome = await runtime.tools.invoke("searcmcp_sessions", {
     query: "heliotrope",
     limit: 8
@@ -128,4 +130,34 @@ test("searcmcp_sessions prefers the invocation runtime index when supplied", asy
   assert.equal(outcome.result.count, 1);
   assert.equal(outcome.result.hits[0].sessionId, "context-session");
   assert.equal(outcome.result.hits[0].snippet, "decision:2");
+});
+
+test("searcmcp_sessions forwards role, session, and time filters", async () => {
+  const seen = [];
+  const runtime = makeTool({
+    async search(query, options) {
+      seen.push({ query, options });
+      return [];
+    }
+  });
+  const outcome = await runtime.tools.invoke("searcmcp_sessions", {
+    query: "release",
+    role: "assistant",
+    sessionId: "discord:guild:channel:user",
+    since: "2026-07-01T00:00:00Z",
+    until: "2026-07-21T23:59:59Z",
+    limit: 5
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(seen, [{
+    query: "release",
+    options: {
+      limit: 5,
+      role: "assistant",
+      sessionId: "discord:guild:channel:user",
+      since: "2026-07-01T00:00:00Z",
+      until: "2026-07-21T23:59:59Z"
+    }
+  }]);
 });

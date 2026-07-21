@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Ranked and filtered session search (Codex)
+
+- Changed the SQLite FTS5 path from recency-only ordering to `bm25(messages)` relevance with timestamp tie-breaking; the JSONL compatibility path remains explicitly recency-ordered because it has no FTS ranker.
+- Added safely bound exact role/session filters and inclusive `since`/`until` ranges to SessionIndex and both transcript-search tool surfaces, with validation for roles, timestamps, and inverted ranges.
+- Made fallback JSONL search tolerate isolated corrupt lines while applying the same filters, and added regressions for relevance, filter narrowing, SQL-shaped bound values, fallback behavior, and tool forwarding.
+- Confirmed the registered read-only tool is exactly `searcmcp_sessions`, once, with no stale `searchmcp_sessions` duplicate. No typo was found; the existing name is intentional and was not renamed to avoid breaking callers.
+SESSION SEARCH PHASE COMPLETE
+
 ## 2026-07-21 — Skill diagnostics, allowlists, and revisions (Codex)
 
 - Skill reloads now skip malformed files without crashing while retaining structured diagnostics and warning once with the exact file and parse/size reason; malformed structured frontmatter is no longer silently treated as text.

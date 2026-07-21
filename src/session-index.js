@@ -24,6 +24,7 @@ import { resolveDataDir } from "./data-dir.js";
 // sensitive store the agent can read. Full text stays in the DB. Same intent
 // as TRANSCRIPT_SEARCH_TEXT_CAP in observation-store.js, tighter bound.
 const SNIPPET_CAP = 160;
+const SEARCH_ROLES = new Set(["user", "assistant", "tool"]);
 
 function capSnippet(text) {
   const s = String(text ?? "");
@@ -137,17 +138,32 @@ export class SessionIndex {
     return { indexed: 1, mode: "sqlite" };
   }
 
-  async search(query, { limit = 8 } = {}) {
+  async search(query, { limit = 8, role = null, sessionId = null, since = null, until = null } = {}) {
     await this.ready;
     const q = String(query ?? "").trim();
     if (!q) return [];
+    const filters = normalizeSearchFilters({ role, sessionId, since, until });
     if (this.fallback) {
-      // Naive fallback search through the JSONL log.
+      // Naive fallback search through the JSONL log. It intentionally keeps
+      // recency ordering because bm25 exists only on the FTS5 virtual table.
       let rows = [];
-      try { rows = fs.readFileSync(this.fallbackPath, "utf8").split("\n").filter(Boolean).map(JSON.parse); } catch { return []; }
+      try {
+        rows = fs.readFileSync(this.fallbackPath, "utf8").split("\n").filter(Boolean).flatMap((line) => {
+          try {
+            const parsed = JSON.parse(line);
+            return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? [parsed] : [];
+          } catch {
+            return [];
+          }
+        });
+      } catch { return []; }
       const needle = q.toLowerCase();
       return rows
         .filter((r) => (r.text || "").toLowerCase().includes(needle))
+        .filter((r) => !filters.role || r.role === filters.role)
+        .filter((r) => !filters.sessionId || r.sessionId === filters.sessionId)
+        .filter((r) => !filters.since || String(r.ts ?? "") >= filters.since)
+        .filter((r) => !filters.until || String(r.ts ?? "") <= filters.until)
         .sort((a, b) => (b.ts ?? "").localeCompare(a.ts ?? ""))
         .slice(0, limit)
         .map((r) => ({ sessionId: r.sessionId, ts: r.ts, role: r.role, snippet: capSnippet(r.text) }));
@@ -162,11 +178,30 @@ export class SessionIndex {
     const matchExpr = q.split(/\s+/).filter(Boolean)
       .map((term) => `"${term.replace(/"/g, '""')}"`)
       .join(" ");
+    const where = ["messages MATCH ?"];
+    const params = [matchExpr];
+    if (filters.role) {
+      where.push("role = ?");
+      params.push(filters.role);
+    }
+    if (filters.sessionId) {
+      where.push("session_id = ?");
+      params.push(filters.sessionId);
+    }
+    if (filters.since) {
+      where.push("ts >= ?");
+      params.push(filters.since);
+    }
+    if (filters.until) {
+      where.push("ts <= ?");
+      params.push(filters.until);
+    }
+    params.push(limit);
     const rows = this.db.prepare(
       `SELECT session_id, ts, role, snippet(messages, 5, '<mark>', '</mark>', '…', 12) AS snippet
-       FROM messages WHERE messages MATCH ?
-       ORDER BY ts DESC LIMIT ?`
-    ).all(matchExpr, limit);
+       FROM messages WHERE ${where.join(" AND ")}
+       ORDER BY bm25(messages), ts DESC LIMIT ?`
+    ).all(...params);
     return rows.map((r) => ({ sessionId: r.session_id, ts: r.ts, role: r.role, snippet: capSnippet(r.snippet) }));
   }
 
@@ -215,4 +250,37 @@ export class SessionIndex {
     const m = this.db.prepare("SELECT COUNT(*) AS n FROM messages").get();
     return { mode: "sqlite", messages: m.n };
   }
+}
+
+function normalizeSearchFilters({ role, sessionId, since, until }) {
+  const normalizedRole = role === null || role === undefined || String(role).trim() === ""
+    ? null
+    : String(role).trim().toLowerCase();
+  if (normalizedRole && !SEARCH_ROLES.has(normalizedRole)) {
+    throw new Error("Session search role must be user, assistant, or tool.");
+  }
+  const normalizedSessionId = sessionId === null || sessionId === undefined || String(sessionId).trim() === ""
+    ? null
+    : String(sessionId).trim();
+  if (normalizedSessionId && normalizedSessionId.length > 500) {
+    throw new Error("Session search sessionId is too long.");
+  }
+  const normalizedSince = normalizeTimeFilter(since, "since");
+  const normalizedUntil = normalizeTimeFilter(until, "until");
+  if (normalizedSince && normalizedUntil && normalizedSince > normalizedUntil) {
+    throw new Error("Session search since must not be after until.");
+  }
+  return {
+    role: normalizedRole,
+    sessionId: normalizedSessionId,
+    since: normalizedSince,
+    until: normalizedUntil
+  };
+}
+
+function normalizeTimeFilter(value, label) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const millis = Date.parse(String(value));
+  if (!Number.isFinite(millis)) throw new Error(`Session search ${label} must be a valid timestamp.`);
+  return new Date(millis).toISOString();
 }
