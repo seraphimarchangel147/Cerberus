@@ -1,4 +1,4 @@
-import { createId, nowIso } from "./utils.js";
+import { createId, nowIso, tokenOverlapScore } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { isCatastrophicToolCall } from "./catastrophic-policy.js";
 
@@ -73,8 +73,8 @@ export class ToolRegistry {
   // provider's limit. A handful of large MCP servers (e.g. PostHog ~118 tools)
   // can push the total past ~250, which makes the OpenAI Responses API reject
   // EVERY call with a server_error. Core/internal tools are always advertised;
-  // MCP tools fill the remaining budget, whole servers at a time (smallest
-  // first, so many small integrations beat one giant one). Anything not
+    // MCP tools fill the remaining budget at per-tool granularity, rotating
+    // across servers so one giant integration cannot crowd out every peer. Anything not
   // advertised is STILL invokable via run_mcp_tool + discoverable via
   // list_mcp_tools — no capability is lost, just the direct function affordance.
   _modelToolList(options = {}) {
@@ -86,26 +86,52 @@ export class ToolRegistry {
       ? listed.filter((tool) => options.only.includes(tool.name))
       : listed;
     const max = Number(process.env.OPENAGI_MAX_MODEL_TOOLS) || 128;
-    if (all.length <= max) return all;
+    if (all.length <= max) {
+      this._lastToolOverflow = null;
+      return all;
+    }
     const core = all.filter((t) => t.source !== "mcp");
     const mcp = all.filter((t) => t.source === "mcp");
-    const budget = Math.max(0, max - core.length);
+    const selectedCore = core.slice(0, max);
+    const budget = Math.max(0, max - selectedCore.length);
     const byServer = new Map();
     for (const t of mcp) {
       const s = t.metadata?.server ?? "?";
       if (!byServer.has(s)) byServer.set(s, []);
       byServer.get(s).push(t);
     }
-    const servers = [...byServer.entries()].sort((a, b) => a[1].length - b[1].length);
+    const servers = [...byServer.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     const picked = [];
-    const advertised = [];
-    const overflow = [];
-    for (const [name, tools] of servers) {
-      if (picked.length + tools.length <= budget) { picked.push(...tools); advertised.push(name); }
-      else overflow.push(`${name}(${tools.length})`);
+    let cursor = 0;
+    while (picked.length < budget && servers.some(([, tools]) => cursor < tools.length)) {
+      for (const [, tools] of servers) {
+        if (picked.length >= budget) break;
+        if (cursor < tools.length) picked.push(tools[cursor]);
+      }
+      cursor += 1;
     }
-    this._logToolCap(all.length, max, advertised, overflow);
-    return [...core, ...picked];
+    const pickedNames = new Set(picked.map((tool) => tool.name));
+    const overflow = servers
+      .map(([name, tools]) => ({ name, count: tools.filter((tool) => !pickedNames.has(tool.name)).length }))
+      .filter((entry) => entry.count > 0);
+    const omittedCore = Math.max(0, core.length - selectedCore.length);
+    this._lastToolOverflow = {
+      total: all.length,
+      max,
+      omitted: overflow.reduce((sum, entry) => sum + entry.count, omittedCore),
+      omittedCore,
+      servers: overflow
+    };
+    this._logToolCap(all.length, max, servers.map(([name]) => name), overflow.map((entry) => `${entry.name}(${entry.count})`));
+    return [...selectedCore, ...picked];
+  }
+
+  modelToolOverflowNotice() {
+    const overflow = this._lastToolOverflow;
+    if (!overflow?.omitted) return null;
+    const servers = overflow.servers.slice(0, 6).map((entry) => `${entry.name}:${entry.count}`).join(", ");
+    const core = overflow.omittedCore ? `; ${overflow.omittedCore} core tools also omitted` : "";
+    return `Tool catalog cap: ${overflow.omitted} tools are not advertised directly (${servers || "MCP overflow"}${core}). Use searcmcp_tools to find them, then run_mcp_tool to invoke them.`;
   }
 
   // Surface what got capped (once per distinct overflow set) — never silently
@@ -747,6 +773,42 @@ export function registerCoreTools(registry, runtime) {
     handler: async () => {
       const tools = runtime.mcp?.listTools?.() ?? [];
       return { count: tools.length, items: tools };
+    }
+  });
+
+  registry.register({
+    name: "searcmcp_tools",
+    sideEffects: false,
+    description: "Search the complete MCP tool catalog by server, name, or description, including tools omitted from the direct model-tool cap.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Keyword or short phrase to search for." },
+        limit: { type: "integer", minimum: 1, maximum: 50 }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    handler: async ({ query, limit = 20 }) => {
+      const text = String(query ?? "").trim();
+      if (!text) return { query: text, count: 0, items: [] };
+      const items = (runtime.mcp?.listTools?.() ?? [])
+        .map((tool) => ({
+          tool,
+          score: tokenOverlapScore(text, `${tool.server} ${tool.name} ${tool.registeredName ?? ""} ${tool.description ?? ""}`)
+        }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score || String(a.tool.registeredName ?? a.tool.name).localeCompare(String(b.tool.registeredName ?? b.tool.name)))
+        .slice(0, Math.max(1, Math.min(50, Number(limit) || 20)))
+        .map(({ tool, score }) => ({
+          server: tool.server,
+          name: tool.name,
+          registeredName: tool.registeredName,
+          description: tool.description ?? "",
+          connected: Boolean(tool.connected),
+          score
+        }));
+      return { query: text, count: items.length, items };
     }
   });
 

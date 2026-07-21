@@ -286,6 +286,9 @@ export class AgentHost {
     if (chatCoreUnavailable) {
       tools = toolRegistry?.toOpenAITools?.({ readOnly: true }) ?? [];
     }
+    const toolOverflowNotice = toolPolicy === "none" && !conversational
+      ? null
+      : toolRegistry?.modelToolOverflowNotice?.() ?? null;
 
     // Specialist bounds: a bounded specialist sees (and may invoke) only its
     // scoped allowlist + the core set every specialist needs. Without this,
@@ -387,7 +390,7 @@ export class AgentHost {
         messages: sessionBefore.messages,
         images: Array.isArray(input.images) ? input.images : [],
         instructions: this.instructionsForAgent(agent),
-        turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null),
+        turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice),
         tools,
         toolRegistry,
         context: modelContext,
@@ -594,7 +597,7 @@ Answer the user plainly. If a specialist was created, mention its name and scope
   // Per-turn [context] block prepended to the latest user message (see
   // buildTurnContext in model-provider.js for the provider-side fallback).
   // Carries everything that used to make the system prompt churn per turn.
-  turnContextForAgent(output, memoryHits = [], intuitions = [], ambientContext = null, screenContext = null) {
+  turnContextForAgent(output, memoryHits = [], intuitions = [], ambientContext = null, screenContext = null, toolOverflowNotice = null) {
     const sections = [];
 
     sections.push(`Current decision: ${output.scrutiny.action}`);
@@ -613,6 +616,8 @@ Answer the user plainly. If a specialist was created, mention its name and scope
     if (intuitions.length > 0) {
       sections.push(`Intuitions (distilled long-term principles, may apply):\n${intuitions.map((i) => `- (${i.score.toFixed(2)}) ${i.text}`).join("\n")}`);
     }
+
+    if (toolOverflowNotice) sections.push(toolOverflowNotice);
 
     if (ambientContext && (ambientContext.apps?.length || ambientContext.snippets?.length)) {
       const lines = ["Recent on-screen activity (last ~10 minutes — opt-in screen capture, on-device OCR):"];

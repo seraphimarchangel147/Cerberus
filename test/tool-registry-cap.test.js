@@ -1,7 +1,7 @@
 // The model tool list is bounded so a few large MCP servers can't push the
 // array past the provider's limit (which makes OpenAI reject EVERY call).
-// Core tools are always advertised; MCP servers fill the rest, smallest first;
-// overflow stays reachable via run_mcp_tool.
+// Core tools are always advertised; MCP servers share the rest per tool so a
+// giant server contributes useful representatives without crowding out peers.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ToolRegistry } from "../src/tool-registry.js";
@@ -21,7 +21,7 @@ test("under the cap, every tool is advertised", () => {
   assert.equal(reg.toOpenAITools().length, 36);
 });
 
-test("over the cap: core always kept, small MCP servers win, giant ones overflow", () => {
+test("over the cap: core stays and every MCP server contributes a bounded subset", () => {
   process.env.OPENAGI_MAX_MODEL_TOOLS = "100";
   const reg = new ToolRegistry();
   regCore(reg, 50);
@@ -29,10 +29,12 @@ test("over the cap: core always kept, small MCP servers win, giant ones overflow
   regMcp(reg, "linear", 46);
   regMcp(reg, "posthog", 118);
   const names = reg.toOpenAITools().map((t) => t.name);
-  // budget = 100 - 50 core = 50 → airtable(16) fits; linear(46) would be 62 > 50; posthog never.
+  // budget = 100 - 50 core = 50, distributed round-robin across servers.
   assert.ok(names.length <= 100, `advertised ${names.length} must be <= cap`);
   assert.ok(names.filter((n) => n.startsWith("core_")).length === 50, "all core tools kept");
   assert.ok(names.some((n) => n.startsWith("mcp_airtable_")), "small server advertised");
-  assert.ok(!names.some((n) => n.startsWith("mcp_posthog_")), "giant server overflowed");
+  assert.ok(names.some((n) => n.startsWith("mcp_linear_")), "medium server advertised");
+  assert.ok(names.some((n) => n.startsWith("mcp_posthog_")), "giant server contributes representatives");
+  assert.ok(names.filter((n) => n.startsWith("mcp_posthog_")).length < 118, "giant server remains bounded");
   delete process.env.OPENAGI_MAX_MODEL_TOOLS;
 });

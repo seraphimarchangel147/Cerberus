@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Per-tool MCP advertisement and in-band discovery (Codex)
+
+- Replaced whole-server MCP cap selection with deterministic per-tool round-robin selection. Core tools remain first and unrelated MCP servers each contribute useful representatives without letting a giant catalog monopolize the schema budget.
+- The registry now exposes a compact overflow notice to AgentHost, which inserts it into the model's per-turn context only when truncation occurred. It reports omitted counts and directs the model to discovery plus `run_mcp_tool`; under-cap schema arrays remain byte-identical.
+- Added the specified read-only `searcmcp_tools` tool over the complete uncapped MCP catalog, ranked by query overlap across server, names, and descriptions.
+- Validation: `npm test` and `npm run test:prod-policy` both pass 659/659.
+MCP PER-TOOL PHASE COMPLETE
+
 ## 2026-07-21 — Bundled work-plan mode v0 (Codex)
 
 - Added a parser-safe bundled `work-plan` skill that directs the model to inspect real paths, write commit-sized numbered steps, state dependencies and risks, and attach focused verification to every step before execution.
