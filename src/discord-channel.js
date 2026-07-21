@@ -726,6 +726,14 @@ export class DiscordChannel {
     events.on("skill-candidate", (d) => {
       post(`🧪 **Skill candidate mined** — ${d.title ?? d.name ?? "(unnamed)"}\n${(d.rationale ?? d.description ?? "").slice(0, 300)}`);
     });
+    events.on("background-review", (d) => {
+      const details = [
+        d.memoriesAdded ? `${d.memoriesAdded} durable memor${d.memoriesAdded === 1 ? "y" : "ies"}` : null,
+        d.duplicatesSkipped ? `${d.duplicatesSkipped} duplicate${d.duplicatesSkipped === 1 ? "" : "s"} merged` : null,
+        d.skillPending ? `skill proposal pending: **${d.skillTitle ?? "untitled"}**` : null
+      ].filter(Boolean);
+      if (details.length > 0) post(`🧠 **Background review** — ${details.join(" · ")}`, d);
+    });
     events.on("suggestion-resolved", (d) => {
       post(`✅ Suggestion \`${d.id}\` resolved: **${d.status}**${d.category ? ` (${d.category})` : ""}`);
     });

@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-21 — Optional post-turn background review (Codex)
+
+- Added a default-off, best-effort review pass that yields the completed reply before asking the provider's nano-tier `review` task for strict structured memory and skill proposals. Reviews are bounded to two iterations and never recurse through AgentHost.
+- Durable memory suggestions now follow confidence-based medium/long tiering and the condenser's symmetric near-duplicate merge behavior; invalid kinds and malformed model output are ignored without affecting the turn.
+- Repeatable-workflow suggestions enter the existing proactive suggestion pipeline as pending skill candidates, never write a skill silently, and review results are persisted to `background-review/reviews.jsonl` plus surfaced on the runtime/Discord activity feed.
+- Added the live `OPENAGI_BACKGROUND_REVIEW` setup field (default OFF) and regression coverage for substantive scheduling, conversational skipping, failure isolation, de-duplication, tiering, persistence, and pending-skill routing.
+BACKGROUND REVIEW PHASE COMPLETE
+
 ## 2026-07-21 — Per-tool MCP advertisement and in-band discovery (Codex)
 
 - Replaced whole-server MCP cap selection with deterministic per-tool round-robin selection. Core tools remain first and unrelated MCP servers each contribute useful representatives without letting a giant catalog monopolize the schema budget.

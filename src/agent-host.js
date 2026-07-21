@@ -5,6 +5,7 @@ import { detectTaskInChat } from "./task-store.js";
 import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZE_RE } from "./signal-axes.js";
 import { autoApproveEnabled } from "./tool-registry.js";
 import { sanitizeForAudit } from "./redact.js";
+import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -122,6 +123,14 @@ export class AgentHost {
     if (!this.runtime) throw new Error("AgentHost requires a runtime.");
     this.store = options.store ?? new InMemoryAgentStore(options.storeOptions);
     this.modelProvider = options.modelProvider ?? createModelProvider(options.modelProviderOptions);
+    this.backgroundReviewer = options.backgroundReviewer ?? new BackgroundReviewer({
+      runtime: this.runtime,
+      modelProvider: this.modelProvider
+    });
+    this.backgroundReviewLog = options.backgroundReviewLog ?? ((error) => {
+      console.warn(`[openagi] background review failed: ${error?.message ?? String(error)}`);
+    });
+    this.lastBackgroundReview = null;
   }
 
   async handleMessage(input) {
@@ -490,6 +499,20 @@ export class AgentHost {
       );
     }
 
+    if (!ephemeral && !conversational && input.backgroundReview !== false) {
+      this.queueBackgroundReview({
+        sessionId,
+        agentId,
+        memoryScope,
+        userText: text,
+        assistantText: modelResult.text,
+        toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
+          name: call.name,
+          ok: call.result?.ok ?? false
+        }))
+      });
+    }
+
     return {
       id: createId("turn"),
       createdAt: nowIso(),
@@ -511,6 +534,20 @@ export class AgentHost {
       conversational,
       output
     };
+  }
+
+  queueBackgroundReview(turn) {
+    if (!backgroundReviewEnabled() || typeof this.backgroundReviewer?.review !== "function") return null;
+    // WHY: yield the completed turn back to the channel first. The auxiliary
+    // review is best-effort and must never delay or replace the user reply.
+    const pending = new Promise((resolve) => setImmediate(resolve))
+      .then(() => this.backgroundReviewer.review(turn))
+      .catch((error) => {
+        try { this.backgroundReviewLog(error); } catch { /* logging is advisory */ }
+        return { skipped: true, reason: `review failed: ${error?.message ?? String(error)}` };
+      });
+    this.lastBackgroundReview = pending;
+    return pending;
   }
 
   async messageToSignal({ text, channel, from, agent, sessionId, metadata, scrutinyOverrides = null }) {

@@ -92,6 +92,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("computer-use", (data) => broadcast("computer-use", data));
   events.on("outreach", (data) => broadcast("outreach", data));
   events.on("outreach-resolved", (data) => broadcast("outreach-resolved", data));
+  events.on("background-review", (data) => broadcast("background-review", data));
 
   // Expose the bus to runtime subsystems (pattern miner, session miner) so
   // they can emit "skill-candidate" without holding a reference to this
