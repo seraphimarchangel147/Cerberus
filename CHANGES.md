@@ -2,6 +2,13 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-22 — Reversible cron job control from the agent loop (Seraphim)
+
+- Added `set_cron_job_enabled(id, enabled)` tool: turns a scheduled cron job OFF (pause, reversible — preserved with `nextRunAt=null`) or ON (resume, recomputes `nextRunAt`) via the existing `runtime.cron.enableJob()`. This closes the gap where the only in-loop control was the destructive `cancel_cron_job` — "turn it off" now means pause, not delete.
+- Added a shared `resolveCronJob()` helper so both `set_cron_job_enabled` and `cancel_cron_job` accept a job **id OR name** (exact → case-insensitive → unique-match; ambiguous matches refused with an actionable error, unknown ids return an error instead of a silent no-op). Motivated by a live `nightly-qa` job Azazel could create but not pause from his runtime.
+- Documented `list_cron_jobs` / `set_cron_job_enabled` / `cancel_cron_job` in the model system prompt so the agent knows job control exists.
+- Regression: `test/cron-tool-toggle.test.js` (off→preserved→on, resolve-by-name, delete-by-name, unknown-job error). Both lanes 682/682.
+
 ## 2026-07-21 — Remove the ungoverned legacy delegation path (Codex)
 
 - Chose Spec 12 Option B after confirming `delegate_task` already covers both single and batched isolated children with side-effect classification, parent scrutiny ceilings, shared provider budget accounting, `OPENAGI_MAX_CHILDREN`, depth limits, cancellation, and bounded child turn settings.

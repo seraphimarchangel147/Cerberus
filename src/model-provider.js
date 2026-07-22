@@ -1378,6 +1378,9 @@ Tools available to you (call them when useful):
 - remember(content, tags?, importance?) — save a durable note
 - recall(query, limit?) — search memory
 - schedule_message(prompt, delaySeconds | intervalSeconds | dailyAt, channel?, target?) — schedule a future prompt that pings the user back
+- list_cron_jobs — see every scheduled job and whether it is enabled
+- set_cron_job_enabled(id, enabled) — turn a scheduled job OFF (enabled=false, pauses it, reversible) or ON (enabled=true); accepts the job id or its name
+- cancel_cron_job(id) — permanently delete a scheduled job (irreversible; prefer set_cron_job_enabled to just pause one)
 - list_skills / run_skill — invoke named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
 - list_sessions — see recent conversations

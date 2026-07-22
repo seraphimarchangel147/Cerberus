@@ -932,16 +932,71 @@ export function registerCoreTools(registry, runtime) {
     handler: async () => runtime.cron.listJobs()
   });
 
+  // Resolve a cron job by exact id first, then by exact name, then by a
+  // unique case-insensitive name match. Returns { job } or { error } so the
+  // LLM gets an actionable message (e.g. "turn off nightly-qa" by name) rather
+  // than a silent no-op. Ambiguous name matches are refused, not guessed.
+  const resolveCronJob = (idOrName) => {
+    if (!runtime.cron) return { error: "Cron scheduler is not available." };
+    const needle = String(idOrName ?? "").trim();
+    if (!needle) return { error: "Provide a cron job id or name." };
+    const jobs = runtime.cron.listJobs();
+    const byId = jobs.find((j) => j.id === needle);
+    if (byId) return { job: byId };
+    const exactName = jobs.filter((j) => j.name === needle);
+    if (exactName.length === 1) return { job: exactName[0] };
+    const lower = needle.toLowerCase();
+    const ci = jobs.filter((j) => (j.name ?? "").toLowerCase() === lower || j.id.toLowerCase() === lower);
+    if (ci.length === 1) return { job: ci[0] };
+    if (ci.length > 1 || exactName.length > 1) {
+      return { error: `Ambiguous: "${needle}" matches ${(ci.length || exactName.length)} jobs. Use the exact id from list_cron_jobs.` };
+    }
+    return { error: `No cron job matches "${needle}". Use list_cron_jobs to see valid ids/names.` };
+  };
+
   registry.register({
     name: "cancel_cron_job",
-    description: "Remove a scheduled cron job by id. Use list_cron_jobs first to find the id.",
+    description: "Permanently DELETE a scheduled cron job by id or name. This is irreversible — to temporarily turn a job off (and keep the option to turn it back on), use set_cron_job_enabled instead. Use list_cron_jobs first to find the id/name.",
     parameters: {
       type: "object",
-      properties: { id: { type: "string" } },
+      properties: {
+        id: { type: "string", description: "The cron job id (preferred) or its exact name." }
+      },
       required: ["id"],
       additionalProperties: false
     },
-    handler: async (args) => ({ id: args.id, removed: runtime.cron.removeJob(args.id) })
+    handler: async (args) => {
+      const found = resolveCronJob(args.id);
+      if (found.error) return { id: args.id, removed: false, error: found.error };
+      const removed = runtime.cron.removeJob(found.job.id);
+      return { id: found.job.id, name: found.job.name, removed };
+    }
+  });
+
+  registry.register({
+    name: "set_cron_job_enabled",
+    description: "Turn a scheduled cron job OFF or ON without deleting it. Set enabled=false to pause a job (it stops firing but is preserved and can be re-enabled later); set enabled=true to resume it. This is the right tool when asked to 'turn off', 'pause', 'disable', 'stop', or 're-enable' a recurring job. Accepts the job id or its exact name. Use list_cron_jobs to see current jobs and their enabled state.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The cron job id (preferred) or its exact name." },
+        enabled: { type: "boolean", description: "false = turn off/pause; true = turn on/resume." }
+      },
+      required: ["id", "enabled"],
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      const found = resolveCronJob(args.id);
+      if (found.error) return { id: args.id, enabled: null, ok: false, error: found.error };
+      const job = runtime.cron.enableJob(found.job.id, Boolean(args.enabled));
+      return {
+        id: job.id,
+        name: job.name,
+        enabled: job.enabled,
+        nextRunAt: job.nextRunAt,
+        ok: true
+      };
+    }
   });
 
   registry.register({
