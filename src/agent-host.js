@@ -1,4 +1,4 @@
-import { InMemoryAgentStore } from "./agent-store.js";
+import { InMemoryAgentStore, legacyDiscordKey } from "./agent-store.js";
 import { createModelProvider } from "./model-provider.js";
 import { createId, nowIso } from "./utils.js";
 import { detectTaskInChat } from "./task-store.js";
@@ -162,6 +162,16 @@ export class AgentHost {
     const requestedMemoryScope = String(input.memoryScope ?? "").trim();
     const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
     const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
+
+    // Recover an orphaned pre-upgrade Discord transcript on first resolve. When
+    // the guild session key gained a :user segment, the old 3-segment history
+    // was stranded. Copy it into the new key once, idempotently, best-effort --
+    // a failure degrades to a fresh session, never breaks the turn.
+    const legacyId = legacyDiscordKey(sessionId);
+    if (legacyId && typeof this.store.migrateLegacyKey === "function") {
+      try { this.store.migrateLegacyKey(sessionId, legacyId); }
+      catch (err) { this.log?.({ op: "session-migrate-failed", sessionId, legacyId, error: err?.message ?? String(err) }); }
+    }
 
     const detectedTask = detectTaskInChat(text);
 

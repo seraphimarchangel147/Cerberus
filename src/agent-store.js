@@ -4,6 +4,17 @@ import { ensureDir, readJsonFile, safeFilename, writeJsonAtomic } from "./file-u
 import { createId, nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 
+// Given a 4-segment guild Discord session key (discord:<guild>:<channel>:<user>)
+// return its 3-segment legacy ancestor (discord:<guild>:<channel>). Any other
+// shape -- already 3-segment, a DM key, or a non-discord key -- returns null,
+// meaning there is no legacy lineage to recover. Pure and unit-testable.
+export function legacyDiscordKey(sessionId) {
+  if (typeof sessionId !== "string") return null;
+  const match = /^discord:([^:]+):([^:]+):([^:]+)$/.exec(sessionId);
+  if (!match) return null;
+  return `discord:${match[1]}:${match[2]}`;
+}
+
 export class InMemoryAgentStore {
   constructor(options = {}) {
     this.agents = new Map();
@@ -167,6 +178,33 @@ export class FileBackedAgentStore extends InMemoryAgentStore {
       ...session,
       updatedAt: nowIso()
     });
+  }
+
+  // One-time, idempotent recovery of an orphaned legacy transcript into a new
+  // session key. Best-effort and never-clobbering:
+  //   1. If the new-key file already has messages, do nothing (return false) --
+  //      real history is present; never overwrite it.
+  //   2. Else if the legacy file has messages, copy them onto the new key
+  //      (preserving createdAt) and leave the legacy file in place. Return true.
+  //   3. Else nothing to migrate (return false).
+  // Safe to call on every turn: after the first copy, guard 1 makes it a no-op.
+  migrateLegacyKey(newId, legacyId) {
+    if (!newId || !legacyId || newId === legacyId) return false;
+    const existing = readJsonFile(this.sessionPath(newId), null);
+    if (existing && Array.isArray(existing.messages) && existing.messages.length > 0) {
+      return false;
+    }
+    const legacy = readJsonFile(this.sessionPath(legacyId), null);
+    if (!legacy || !Array.isArray(legacy.messages) || legacy.messages.length === 0) {
+      return false;
+    }
+    this.saveSession({
+      ...legacy,
+      id: newId,
+      createdAt: legacy.createdAt ?? nowIso(),
+      metadata: { ...(legacy.metadata ?? {}), migratedFrom: legacyId }
+    });
+    return true;
   }
 
   appendMessage(sessionId, message) {
