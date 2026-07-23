@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createDurableRuntime, createHostedInterface } from "./index.js";
+import {
+  createDurableRuntime,
+  createHostedInterface,
+  startCapabilityServers
+} from "./index.js";
 import { loadEnvFile } from "./file-utils.js";
 import { resolveDataDir, _resetDataDirCache } from "./data-dir.js";
 import { SecretsStore } from "./secrets-store.js";
@@ -165,6 +169,103 @@ export function installGracefulShutdown(app, {
   return controller;
 }
 
+// Start the existing hosted interface before the optional capability
+// listeners. Keeping this small lifecycle seam separate from environment and
+// persistence bootstrapping lets embedders and tests compose the same
+// all-or-nothing startup without constructing a second durable runtime.
+export async function startServerApplications({
+  app,
+  runtime,
+  secretsStore,
+  env = process.env,
+  capabilityServersFactory = startCapabilityServers,
+  capabilityServerOptions = {}
+} = {}) {
+  if (!app || typeof app.listen !== "function" || typeof app.close !== "function") {
+    throw new TypeError("startServerApplications requires a hosted app with listen() and close()");
+  }
+  if (typeof capabilityServersFactory !== "function") {
+    throw new TypeError("capabilityServersFactory must be a function");
+  }
+  if (
+    !capabilityServerOptions
+    || typeof capabilityServerOptions !== "object"
+    || Array.isArray(capabilityServerOptions)
+  ) {
+    throw new TypeError("capabilityServerOptions must be an object");
+  }
+
+  const address = await app.listen();
+  let capabilities = null;
+  try {
+    capabilities = await capabilityServersFactory({
+      runtime,
+      secretsStore,
+      env,
+      ...capabilityServerOptions
+    });
+    if (
+      !capabilities
+      || typeof capabilities.listen !== "function"
+      || typeof capabilities.close !== "function"
+    ) {
+      throw new TypeError(
+        "startCapabilityServers must return listen() and close()"
+      );
+    }
+    const listenedAddresses = await capabilities.listen();
+    const capabilityAddresses = capabilities.addresses ?? listenedAddresses ?? {};
+    attachCapabilityLifecycle(app, capabilities, capabilityAddresses);
+    return {
+      app,
+      address,
+      capabilities,
+      capabilityAddresses,
+      addresses: capabilityAddresses
+    };
+  } catch (error) {
+    // A capability aggregate may have started one listener before another
+    // failed. Give it a chance to roll that listener back, then always close
+    // the already-listening hosted interface. Cleanup must not replace the
+    // startup error that explains why boot failed.
+    try { await capabilities?.close?.(); } catch { /* best effort rollback */ }
+    try { await app.close(); } catch { /* best effort rollback */ }
+    throw error;
+  }
+}
+
+function attachCapabilityLifecycle(app, capabilities, capabilityAddresses) {
+  const closeHosted = app.close.bind(app);
+  let closePromise = null;
+
+  app.capabilities = capabilities;
+  app.capabilityAddresses = capabilityAddresses;
+  app.close = () => {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      const failures = [];
+      try {
+        await capabilities.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      // Keep the dashboard available while capability requests drain. Once
+      // they have stopped, close the hosted interface even if their cleanup
+      // reported an error.
+      try {
+        await closeHosted();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "Server shutdown failed");
+      }
+    })();
+    return closePromise;
+  };
+}
+
 // Boot env + start the hosted interface. Returns the listen address.
 // host/port fall back to HOST/PORT env then sane defaults; callers (the CLI)
 // can override. Binding to 0.0.0.0 is safe because the HTTP interface enforces
@@ -227,8 +328,32 @@ export async function startServer({ host, port } = {}) {
   }
 
   const runtime = createDurableRuntime({ dataDir, secrets });
-  const app = createHostedInterface(runtime, { host: resolvedHost, port: resolvedPort });
-  const address = await app.listen();
+  const hostedApp = createHostedInterface(runtime, {
+    host: resolvedHost,
+    port: resolvedPort
+  });
+  const {
+    app,
+    address,
+    capabilities,
+    capabilityAddresses
+  } = await startServerApplications({
+    app: hostedApp,
+    runtime,
+    secretsStore: secrets,
+    env: process.env
+  });
   const shutdown = installGracefulShutdown(app);
-  return { app, runtime, address, dataDir, host: resolvedHost, port: resolvedPort, shutdown };
+  return {
+    app,
+    runtime,
+    address,
+    dataDir,
+    host: resolvedHost,
+    port: resolvedPort,
+    capabilities,
+    capabilityAddresses,
+    addresses: capabilityAddresses,
+    shutdown
+  };
 }

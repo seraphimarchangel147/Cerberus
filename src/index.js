@@ -138,4 +138,12 @@ export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";
 export { registerCoreTools, ToolRegistry } from "./tool-registry.js";
 export { createHostedInterface } from "./hosted-interface.js";
+export {
+  DEFAULT_API_SERVER_PORT,
+  DEFAULT_CAPABILITY_BODY_BYTES,
+  DEFAULT_SUBSCRIPTION_PROXY_PORT,
+  createApiServer,
+  createSubscriptionProxy,
+  startCapabilityServers
+} from "./api-server.js";
 export { contentWords, countProperNouns, deriveSpecialistScope, measureAxes, measureSpecificity } from "./signal-axes.js";

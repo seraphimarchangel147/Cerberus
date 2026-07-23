@@ -602,3 +602,14 @@ BATCH COMPLETE
 - Added public exports, setup allowlisting and escaped inputs for routing and provider base URLs, plus normalization, precedence, endpoint, serialization, non-mutation, fallback, and MoA regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1060/1060 with no environment pinning.
 PROVIDER ROUTING COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: subscription proxy and API server (Codex)
+
+- Added a loopback OpenAI-compatible chat-completions server that runs unique ephemeral full AgentHost turns with tools, memory, skills, bounded request bodies, timing-safe bearer authentication, abort propagation, and OpenAI-shaped responses and errors.
+- Added streaming completion chunks with visible sanitized tool state, provider text deltas, final fallback text, finish reasons, and a terminal DONE event without exposing tool inputs, outputs, error details, or credentials.
+- Added a loopback raw subscription proxy that accepts any nonblank client bearer, resolves the configured managed credential from SecretsStore for every request, replaces inbound credential headers, and preserves method, path, query, bytes, status, and safe response headers without following redirects.
+- Added fixed-upstream and header-injection validation, hop-by-hop and connection-nominated header stripping, bounded proxy bodies, secret-safe failures, provider-derived upstream and authentication settings, and partial-listener rollback.
+- Wired flag-gated capability startup into the daemon's all-or-nothing boot and idempotent graceful shutdown, exported the public construction contract, and allowlisted escaped setup fields while never rendering the saved API server key.
+- Added API shape, authentication, streaming, proxy substitution, raw forwarding, redirect, redaction, setup, lifecycle, rollback, and both-policy regressions; a live curl probe through a real AgentHost returned a valid chat completion.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1075/1075 with no environment pinning.
+API SERVER COMPLETE
