@@ -613,3 +613,5 @@ PROVIDER ROUTING COMPLETE
 - Added API shape, authentication, streaming, proxy substitution, raw forwarding, redirect, redaction, setup, lifecycle, rollback, and both-policy regressions; a live curl probe through a real AgentHost returned a valid chat completion.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1075/1075 with no environment pinning.
 API SERVER COMPLETE
+
+PARITY WAVE 3 PHASE 2 COMPLETE
