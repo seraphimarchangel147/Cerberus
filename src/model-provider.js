@@ -2075,6 +2075,14 @@ Tools available to you (call them when useful):
 - list_goals / link_task_to_goal - inspect goal rollups and attach tasks to a goal
 - goal_status / pause_goal / resume_goal / clear_goal - inspect or control this session's automatic goal loop
 - list_checkpoints / rollback - inspect automatic pre-mutation file snapshots and restore a confirmed checkpoint
+- kanban_show(taskId) - inspect one local coordination task with blockers, comments, runs, and handoffs
+- kanban_list(board?, status?, assignee?, limit?) - list local Kanban boards and work
+- kanban_create(title, body?, board?, assignee?, blockedBy?) - create and optionally assign coordinated work
+- kanban_complete(taskId, summary?, handoffTo?, metadata?) - complete unblocked work with a structured handoff
+- kanban_block(taskId, blockedBy?, reason?) / kanban_unblock(taskId, blockerId?) - control blocking state
+- kanban_comment(taskId, body) - add an identity-attributed task comment
+- kanban_heartbeat(taskId, runId?, state?, assignee?, detail?) - claim work and update or append run attempts
+- kanban_link(parentId, childId) - make a child depend on a parent task
 - list_skills / use_skill / run_skill / restore_skill - discover, load, run, or restore named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
 - list_sessions — see recent conversations

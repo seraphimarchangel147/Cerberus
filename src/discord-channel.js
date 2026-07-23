@@ -790,6 +790,10 @@ export class DiscordChannel {
     events.on("task-reminder", (d) => {
       post(`🗒️ **${d.title ?? "Task"}**${d.body ? `\n${String(d.body).slice(0, 200)}` : ""}`);
     });
+    events.on("kanban-status", (d) => {
+      const transition = `${d.fromStatus ?? "new"} -> ${d.status ?? "unknown"}`;
+      post(`**Kanban status** - ${d.title ?? d.taskId ?? "task"}\n\`${transition}\`${d.assignee ? ` - assignee: ${d.assignee}` : ""}`, d);
+    });
     events.on("daily-recap", (d) => {
       if (d?.summary) post(`🌙 **Daily recap**\n${String(d.summary).slice(0, 1500)}`);
     });

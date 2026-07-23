@@ -77,6 +77,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
   events.on("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
   events.on("task-updated", (data) => broadcast("task-updated", data));
+  events.on("kanban-updated", (data) => broadcast("kanban-updated", data));
+  events.on("kanban-status", (data) => broadcast("kanban-status", data));
   events.on("clarification-created", (data) => broadcast("clarification-created", data));
   events.on("clarification-resolved", (data) => broadcast("clarification-resolved", data));
   events.on("draft-created", (data) => broadcast("draft-created", data));
@@ -1346,6 +1348,73 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           }));
         return sendJson(res, 200, { integrations, catalog, categories: CATEGORIES });
       }
+      if (method === "GET" && pathname === "/kanban") {
+        if (!runtime.kanban?.boardView) return sendJson(res, 503, { error: "no Kanban store" });
+        const board = url.searchParams.get("board") || undefined;
+        const status = url.searchParams.get("status") || undefined;
+        const assignee = url.searchParams.get("assignee") || undefined;
+        const limit = url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined;
+        try {
+          return sendJson(res, 200, await runtime.kanban.boardView({ board, status, assignee, limit }));
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname === "/kanban") {
+        if (!runtime.kanban?.createTask) return sendJson(res, 503, { error: "no Kanban store" });
+        const body = await readJson(req);
+        const action = String(body.action ?? "create").trim().toLowerCase();
+        const context = {
+          agentId: "dashboard",
+          sessionId: typeof body.sessionId === "string" ? body.sessionId : null,
+          channel: "local",
+          from: "http:/kanban"
+        };
+        try {
+          let result;
+          if (action === "create") {
+            const { action: _action, sessionId: _sessionId, ...input } = body;
+            result = await runtime.kanban.createTask(input, context);
+          } else if (action === "assign") {
+            result = await runtime.kanban.assignTask(
+              body.taskId,
+              body.assignee,
+              context,
+              { reason: body.reason }
+            );
+          } else if (action === "complete") {
+            result = await runtime.kanban.completeTask(body.taskId, body, context);
+          } else if (action === "block") {
+            result = await runtime.kanban.blockTask(body.taskId, body, context);
+          } else if (action === "unblock") {
+            result = await runtime.kanban.unblockTask(body.taskId, body, context);
+          } else if (action === "comment") {
+            result = await runtime.kanban.commentTask(body.taskId, body.body, context);
+          } else if (action === "heartbeat") {
+            result = await runtime.kanban.heartbeatTask(body.taskId, body, context);
+          } else if (action === "link") {
+            result = await runtime.kanban.linkTasks(body.parentId, body.childId, context);
+          } else {
+            return sendJson(res, 400, { error: `unknown Kanban action: ${action}` });
+          }
+          return sendJson(res, 200, result);
+        } catch (error) {
+          const statusCode = /^Unknown Kanban task:/.test(error.message) ? 404 : 400;
+          return sendJson(res, statusCode, { error: error.message });
+        }
+      }
+      if (method === "GET" && pathname.match(/^\/kanban\/[^/]+$/)) {
+        if (!runtime.kanban?.getTask) return sendJson(res, 503, { error: "no Kanban store" });
+        const id = decodeURIComponent(pathname.split("/")[2]);
+        try {
+          const task = await runtime.kanban.getTask(id);
+          return task
+            ? sendJson(res, 200, task)
+            : sendJson(res, 404, { error: "unknown Kanban task" });
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
       if (method === "GET" && pathname === "/tasks") {
         if (!runtime.tasks?.list) return sendJson(res, 503, { error: "no task store" });
         const queue = url.searchParams.get("queue") || undefined;
@@ -1856,7 +1925,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       catch (error) { console.warn(`[hooks] gateway:shutdown failed open: ${error?.message ?? String(error)}`); }
       try { await runtime.hooks?.flush?.(); }
       catch (error) { console.warn(`[hooks] shutdown flush failed open: ${error?.message ?? String(error)}`); }
-      return new Promise((resolve, reject) => {
+      await new Promise((resolve, reject) => {
         if (tickerHandle) clearInterval(tickerHandle);
         if (heartbeatHandle) clearInterval(heartbeatHandle);
         for (const client of sseClients) try { client.end(); } catch { /* ignore */ }
@@ -1866,6 +1935,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         runtime.mcp?.disconnectAll?.().catch(() => {});
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      await runtime.kanban?.close?.();
     }
   };
 
@@ -2555,6 +2625,7 @@ function renderApp() {
             <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones.">MCP</button>
             <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored.">Skills</button>
             <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs.">Cron</button>
+            <button data-tab="kanban" title="Local multi-agent coordination board with blockers, runs, and handoffs.">Kanban</button>
             <button data-tab="channels" title="Telegram / webhook channels the agent can deliver through.">Channels</button>
             <button data-tab="agents" title="Specialists the propagation controller has spawned for repeated tasks.">Agents</button>
             <button data-tab="nodes" title="Which machines are paired, which one is main, and who's online right now.">Nodes</button>
@@ -2594,7 +2665,9 @@ const state = {
   channel: "local",
   from: "browser",
   messages: [],
-  health: null
+  health: null,
+  kanban: null,
+  kanbanTaskId: null
 };
 
 const $ = (id) => document.getElementById(id);
@@ -2813,6 +2886,8 @@ newBtn.addEventListener("click", async () => {
     renderTab();
   } else if (state.tab === "cron") {
     openCronComposer();
+  } else if (state.tab === "kanban") {
+    openKanbanComposer();
   } else if (state.tab === "skills") {
     // Triggers both miners (pattern + session) and shows scanned/found
     // counts so the user sees the system working even when nothing landed.
@@ -2860,6 +2935,11 @@ async function switchTab(tab) {
     sidebarTitle.textContent = "Schedules";
     newBtn.textContent = "+ Schedule";
     await refreshCron();
+  } else if (tab === "kanban") {
+    showSidebar(true);
+    sidebarTitle.textContent = "Kanban";
+    newBtn.textContent = "+ Task";
+    await refreshKanban();
   } else if (tab === "skills") {
     showSidebar(true);
     sidebarTitle.textContent = "Skills";
@@ -3256,6 +3336,183 @@ function renderCronDetail(job) {
   $("deleteJob").addEventListener("click", async () => {
     await fetch(\`/cron/\${encodeURIComponent(job.id)}\`, { method: "DELETE" });
     refreshCron();
+  });
+}
+
+async function refreshKanban() {
+  const data = await fetchJson("/kanban");
+  state.kanban = data;
+  const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+  const boards = Array.isArray(data.boards) ? data.boards : [];
+  const columns = Array.isArray(data.columns)
+    ? data.columns
+    : ["backlog", "in-progress", "blocked", "review", "done"];
+  sidebarList.innerHTML = "";
+
+  if (tasks.length === 0) {
+    sidebarList.innerHTML = '<li class="empty">No Kanban tasks</li>';
+    openKanbanComposer();
+    return;
+  }
+
+  for (const board of boards) {
+    const boardTasks = tasks.filter((task) => task.board === board.id);
+    if (boardTasks.length === 0) continue;
+    const boardHeader = document.createElement("li");
+    boardHeader.className = "empty";
+    boardHeader.style.textTransform = "uppercase";
+    boardHeader.style.letterSpacing = ".08em";
+    boardHeader.textContent = board.name + " (" + boardTasks.length + ")";
+    sidebarList.appendChild(boardHeader);
+
+    for (const column of columns) {
+      const columnTasks = boardTasks.filter((task) => task.status === column);
+      if (columnTasks.length === 0) continue;
+      const columnHeader = document.createElement("li");
+      columnHeader.style.padding = "5px 10px 2px";
+      columnHeader.style.fontSize = "10px";
+      columnHeader.style.color = "var(--muted)";
+      columnHeader.textContent = column + " (" + columnTasks.length + ")";
+      sidebarList.appendChild(columnHeader);
+      for (const task of columnTasks) {
+        const li = document.createElement("li");
+        li.className = state.kanbanTaskId === task.id ? "active" : "";
+        li.innerHTML = \`<div class="title">\${escapeHtml(task.title)}</div><div class="preview">\${escapeHtml(task.assignee || "unassigned")} &middot; \${escapeHtml(task.status)}</div>\`;
+        li.addEventListener("click", () => renderKanbanDetail(task.id));
+        sidebarList.appendChild(li);
+      }
+    }
+  }
+
+  const selected = tasks.find((task) => task.id === state.kanbanTaskId) ?? tasks[0];
+  await renderKanbanDetail(selected.id);
+}
+
+async function renderKanbanDetail(taskId) {
+  const task = await fetchJson(\`/kanban/\${encodeURIComponent(taskId)}\`);
+  state.kanbanTaskId = task.id;
+  for (const li of sidebarList.querySelectorAll("li")) li.classList.remove("active");
+
+  const blockers = (task.blockedBy ?? []).length
+    ? (task.blockedBy ?? []).map((id) => \`<span class="badge warn">\${escapeHtml(id)}</span>\`).join(" ")
+    : '<span class="muted">none</span>';
+  const comments = (task.comments ?? []).length
+    ? task.comments.map((comment) => \`
+        <div class="card" style="margin:6px 0;padding:8px 10px;">
+          <div class="muted" style="font-size:11px;">\${escapeHtml(comment.author)} &middot; \${escapeHtml(new Date(comment.createdAt).toLocaleString())}</div>
+          <div style="white-space:pre-wrap;">\${escapeHtml(comment.body)}</div>
+        </div>
+      \`).join("")
+    : '<div class="muted">No comments.</div>';
+  const runs = (task.runs ?? []).length
+    ? task.runs.map((run) => \`
+        <tr>
+          <td>#\${escapeHtml(run.attempt)}</td>
+          <td>\${escapeHtml(run.state)}</td>
+          <td>\${escapeHtml(run.worker?.agentName || run.workerId || "")}</td>
+          <td>\${escapeHtml(new Date(run.heartbeatAt).toLocaleString())}</td>
+        </tr>
+      \`).join("")
+    : '<tr><td colspan="4" class="muted">No worker attempts yet.</td></tr>';
+  const handoffs = (task.handoffs ?? []).length
+    ? task.handoffs.map((handoff) => \`
+        <li>
+          \${escapeHtml(handoff.fromAssignee || "unassigned")} &rarr; \${escapeHtml(handoff.toAssignee)}
+          \${handoff.summary ? \`<div class="muted">\${escapeHtml(handoff.summary)}</div>\` : ""}
+        </li>
+      \`).join("")
+    : '<li class="muted">No handoffs yet.</li>';
+
+  main.innerHTML = \`
+    <div class="pane">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px;">
+        <div>
+          <h2>\${escapeHtml(task.title)}</h2>
+          <div class="muted">\${escapeHtml(task.id)} &middot; \${escapeHtml(task.boardName || task.board)}</div>
+        </div>
+        <span class="badge \${task.status === "blocked" ? "warn" : task.status === "done" ? "ok" : ""}">\${escapeHtml(task.status)}</span>
+      </div>
+      <div class="row" style="gap:6px;margin:12px 0;">
+        <span class="badge">assignee: \${escapeHtml(task.assignee || "unassigned")}</span>
+        <span class="badge">runs: \${escapeHtml((task.runs ?? []).length)}</span>
+      </div>
+      <p style="white-space:pre-wrap;">\${escapeHtml(task.body || "No description.")}</p>
+      <h3>Blocked by</h3>
+      <div>\${blockers}</div>
+      \${task.blockReason ? \`<p class="warn">\${escapeHtml(task.blockReason)}</p>\` : ""}
+      <div class="row" style="gap:8px;margin:16px 0;">
+        \${task.status === "blocked" ? '<button class="secondary" id="kanbanUnblock">Unblock</button>' : '<button class="secondary" id="kanbanBlock">Block</button>'}
+        \${task.status !== "done" ? '<button class="secondary" id="kanbanComplete">Complete</button>' : ""}
+      </div>
+      <h3>Runs</h3>
+      <table>
+        <thead><tr><th>Attempt</th><th>State</th><th>Worker</th><th>Heartbeat</th></tr></thead>
+        <tbody>\${runs}</tbody>
+      </table>
+      <h3>Handoffs</h3>
+      <ul>\${handoffs}</ul>
+      <h3>Comments</h3>
+      <div>\${comments}</div>
+      <form id="kanbanCommentForm" class="form" style="margin-top:10px;">
+        <div class="row" style="gap:8px;">
+          <input class="ui-input" name="body" placeholder="Add a comment" required style="flex:1;">
+          <button class="secondary" type="submit">Comment</button>
+        </div>
+      </form>
+      <div class="muted" style="margin-top:16px;">Created \${escapeHtml(new Date(task.createdAt).toLocaleString())} &middot; updated \${escapeHtml(new Date(task.updatedAt).toLocaleString())}</div>
+    </div>
+  \`;
+
+  $("kanbanBlock")?.addEventListener("click", async () => {
+    const reason = window.prompt("Why is this task blocked?") || "";
+    await postJson("/kanban", { action: "block", taskId: task.id, reason });
+    await refreshKanban();
+  });
+  $("kanbanUnblock")?.addEventListener("click", async () => {
+    await postJson("/kanban", { action: "unblock", taskId: task.id });
+    await refreshKanban();
+  });
+  $("kanbanComplete")?.addEventListener("click", async () => {
+    const summary = window.prompt("Completion handoff summary") || "";
+    await postJson("/kanban", { action: "complete", taskId: task.id, summary });
+    await refreshKanban();
+  });
+  $("kanbanCommentForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    await postJson("/kanban", { action: "comment", taskId: task.id, body: form.get("body") });
+    await renderKanbanDetail(task.id);
+  });
+}
+
+function openKanbanComposer() {
+  state.kanbanTaskId = null;
+  main.innerHTML = \`
+    <div class="pane">
+      <h2>New Kanban task</h2>
+      <p class="muted">This is the local openAGI board. Cross-agent shared boards are intentionally separate.</p>
+      <form class="form" id="kanbanForm">
+        <div style="margin-bottom:var(--space-3);"><label>Title</label><input class="ui-input" name="title" required maxlength="300"></div>
+        <div style="margin-bottom:var(--space-3);"><label>Body</label><textarea class="ui-textarea" name="body" rows="5"></textarea></div>
+        <div class="row" style="gap:var(--space-2);margin-bottom:var(--space-3);">
+          <div style="flex:1;"><label>Board id</label><input class="ui-input" name="board" value="default"></div>
+          <div style="flex:1;"><label>Assignee</label><input class="ui-input" name="assignee" placeholder="agent name"></div>
+        </div>
+        <button class="ui-btn" type="submit">Create task</button>
+      </form>
+    </div>
+  \`;
+  $("kanbanForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const created = await postJson("/kanban", {
+      title: form.get("title"),
+      body: form.get("body"),
+      board: form.get("board") || "default",
+      assignee: form.get("assignee") || undefined
+    });
+    state.kanbanTaskId = created.id;
+    await refreshKanban();
   });
 }
 
@@ -5547,6 +5804,23 @@ evt.addEventListener("task-updated", () => {
   if (state.tab === "tasks") renderTasks();
 });
 
+evt.addEventListener("kanban-updated", () => {
+  if (state.tab === "kanban") refreshKanban();
+});
+
+evt.addEventListener("kanban-status", (event) => {
+  try {
+    const data = JSON.parse(event.data);
+    const transition = (data.fromStatus ? data.fromStatus + " -> " : "") + data.status;
+    showToast("Kanban: " + (data.title || data.taskId) + " (" + transition + ")", data.status !== "blocked");
+    if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+      new Notification("Kanban status changed", {
+        body: (data.title || data.taskId) + ": " + transition
+      });
+    }
+  } catch {}
+});
+
 // Auto-changed task (observation-driven completion or in-progress).
 // Surface as a toast so the user sees what we did and can revert.
 evt.addEventListener("task-auto-changed", (e) => {
@@ -5634,7 +5908,7 @@ refreshAmbientBadge();
 
 // Honor ?tab=X in URL on first load — notifications + Mac tray menu deep-link
 // to specific tabs and we need to land on them. Defaults to chat.
-const VALID_TABS = new Set(["chat","tasks","memory","cron","skills","mcp","integrations","agents","nodes","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
+const VALID_TABS = new Set(["chat","tasks","memory","cron","kanban","skills","mcp","integrations","agents","nodes","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
 const initialTab = (() => {
   try {
     const t = new URLSearchParams(window.location.search).get("tab");

@@ -513,3 +513,12 @@ HONCHO COMPLETE
 SECRETS MANAGER COMPLETE
 
 PARITY WAVE 3 PHASE 1 COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: Kanban board (Codex)
+
+- Added a local SQLite multi-board Kanban store with blocker-safe lifecycle transitions, trusted process identities, per-attempt runs, comments, dependency links, structured handoffs, gateway notifications, a JSONL journal, and an atomic snapshot.
+- Registered and documented all nine agent tools, plus authenticated HTTP, CLI, dashboard, SSE, and Discord activity surfaces over the same store.
+- Enforced cross-board and cyclic-link rejection, immutable terminal tasks and runs, worker-owned heartbeats, completed-parent unblocking, and status-change audit events.
+- Added store, registry, prompt, persistence, HTTP, CLI, dashboard-escaping, identity, dependency, and live tool-to-GET probe coverage.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 934/934 with no environment pinning.
+KANBAN COMPLETE

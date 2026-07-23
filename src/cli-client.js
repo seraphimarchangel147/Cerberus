@@ -436,6 +436,22 @@ export class CliClient {
   }
   tick() { return this.request("POST", "/tick", {}); }
   tasks() { return this.request("GET", "/tasks"); }
+  kanban(filters = {}) {
+    const query = new URLSearchParams();
+    for (const key of ["board", "status", "assignee", "limit"]) {
+      if (filters[key] !== undefined && filters[key] !== null && filters[key] !== "") {
+        query.set(key, String(filters[key]));
+      }
+    }
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return this.request("GET", `/kanban${suffix}`);
+  }
+  kanbanTask(id) {
+    return this.request("GET", `/kanban/${encodeURIComponent(id)}`);
+  }
+  createKanban(input) {
+    return this.request("POST", "/kanban", input);
+  }
   integrations() { return this.request("GET", "/integrations/status"); }
 }
 

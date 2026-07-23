@@ -34,6 +34,7 @@ export { McpRegistry } from "./mcp-registry.js";
 export { createSecretsStore, SecretsStore } from "./secrets-store.js";
 export { PendingActionStore } from "./pending-actions.js";
 export { GoalStore } from "./goal-store.js";
+export { KanbanStore, KANBAN_COLUMNS } from "./kanban-store.js";
 export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";

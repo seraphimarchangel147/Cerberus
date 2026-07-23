@@ -1443,6 +1443,217 @@ export function registerCoreTools(registry, runtime) {
 
   // ─── Tasks (user todo list + agent queue) ──────────────────────────────
 
+  // Kanban is the local multi-agent coordination board. Every mutation
+  // remains inside the normal registry path so scrutiny, hooks, approvals,
+  // checkpoints, and activity observers see the real tool name.
+
+  registry.register({
+    name: "kanban_show",
+    sideEffects: false,
+    description: "Show one local Kanban task with blockers, comments, run attempts, handoffs, links, and timestamps.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Kanban task id." }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId }) => {
+      if (!runtime.kanban?.getTask) throw new Error("Kanban store is unavailable.");
+      const task = await runtime.kanban.getTask(taskId);
+      if (!task) throw new Error(`Unknown Kanban task: ${taskId}`);
+      return task;
+    }
+  });
+
+  registry.register({
+    name: "kanban_list",
+    sideEffects: false,
+    description: "List local Kanban boards and tasks. Filter by board, status, or assignee.",
+    parameters: {
+      type: "object",
+      properties: {
+        board: { type: "string", description: "Optional board id." },
+        status: {
+          type: "string",
+          enum: ["backlog", "in-progress", "blocked", "review", "done"]
+        },
+        assignee: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 500 }
+      },
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      if (!runtime.kanban?.boardView) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.boardView(args);
+    }
+  });
+
+  registry.register({
+    name: "kanban_create",
+    description: "Create a task on the local multi-agent Kanban board. Assign it now when the intended worker is known; parent task ids become blockers.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short task title." },
+        body: { type: "string", description: "Optional detailed task body." },
+        board: { type: "string", description: "ASCII board id. Defaults to 'default'." },
+        boardName: { type: "string", description: "Display name when creating a new board." },
+        assignee: { type: "string", description: "Agent or worker name." },
+        status: {
+          type: "string",
+          enum: ["backlog", "in-progress", "blocked", "review", "done"]
+        },
+        blockedBy: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 100,
+          description: "Parent task ids that must finish before this task can complete."
+        },
+        reason: { type: "string", description: "Optional initial blocking reason." }
+      },
+      required: ["title"],
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (!runtime.kanban?.createTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.createTask(args, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_complete",
+    description: "Complete a Kanban task and write its structured completion handoff. Tasks with unresolved blockers cannot complete.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        summary: { type: "string", description: "What was delivered or learned." },
+        handoffTo: { type: "string", description: "Optional next owner or reviewer." },
+        metadata: {
+          type: "object",
+          description: "Optional structured handoff metadata.",
+          additionalProperties: true
+        }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, ...input }, context) => {
+      if (!runtime.kanban?.completeTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.completeTask(taskId, input, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_block",
+    description: "Move a Kanban task to blocked. Optionally record parent task ids and a reason.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        blockedBy: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 100
+        },
+        reason: { type: "string" }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, ...input }, context) => {
+      if (!runtime.kanban?.blockTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.blockTask(taskId, input, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_unblock",
+    description: "Remove a Kanban task's blocking state. Pass blockerId to remove one dependency; omit it to clear every blocker.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        blockerId: { type: "string" }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, blockerId }, context) => {
+      if (!runtime.kanban?.unblockTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.unblockTask(taskId, { blockerId }, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_comment",
+    description: "Add a comment to a Kanban task. The author is derived from the trusted agent identity.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        body: { type: "string" }
+      },
+      required: ["taskId", "body"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, body }, context) => {
+      if (!runtime.kanban?.commentTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.commentTask(taskId, body, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_heartbeat",
+    description: "Claim a Kanban task or update a worker run. state='start' appends a new attempt; later heartbeats update that run by runId.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        runId: { type: "string" },
+        state: {
+          type: "string",
+          enum: ["start", "heartbeat", "review", "succeeded", "failed"]
+        },
+        assignee: { type: "string" },
+        reason: { type: "string" },
+        detail: {
+          description: "Short string or structured liveness/progress detail.",
+          anyOf: [
+            { type: "string" },
+            { type: "object", additionalProperties: true }
+          ]
+        }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, ...input }, context) => {
+      if (!runtime.kanban?.heartbeatTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.heartbeatTask(taskId, input, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_link",
+    description: "Link a parent Kanban task to a child dependency. The child stays blocked until every parent task is done.",
+    parameters: {
+      type: "object",
+      properties: {
+        parentId: { type: "string", description: "Task that must finish first." },
+        childId: { type: "string", description: "Task that depends on the parent." }
+      },
+      required: ["parentId", "childId"],
+      additionalProperties: false
+    },
+    handler: async ({ parentId, childId }, context) => {
+      if (!runtime.kanban?.linkTasks) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.linkTasks(parentId, childId, context);
+    }
+  });
+
   registry.register({
     name: "add_task",
     description: "Add a task to the user's todo list (default) or the agent's own queue. Use queue='agent' when YOU are committing to do this task yourself; use queue='user' when the human should do it. Buckets: today, this_week, this_month, this_quarter, this_year, someday, done — pick the one matching the realistic horizon.",
