@@ -13,6 +13,14 @@ import {
 
 const agent = { id: "main", name: "Main Agent" };
 
+function anthropicText(message) {
+  if (typeof message?.content === "string") return message.content;
+  return (message?.content ?? [])
+    .filter((block) => block?.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
 const hitsA = [
   { score: 0.91, item: { id: "mem_1", tier: "short", content: "Spencer prefers espresso" } }
 ];
@@ -61,13 +69,14 @@ test("Anthropic path: static system block keeps cache_control; per-turn context 
 
   const lastUser1 = first.messages.at(-1);
   assert.equal(lastUser1.role, "user");
-  assert.match(lastUser1.content, /^\[context\]/);
-  assert.ok(lastUser1.content.includes("- [short] Spencer prefers espresso"));
-  assert.ok(lastUser1.content.endsWith("first question"));
+  assert.match(anthropicText(lastUser1), /^\[context\]/);
+  assert.ok(anthropicText(lastUser1).includes("- [short] Spencer prefers espresso"));
+  assert.ok(anthropicText(lastUser1).endsWith("first question"));
+  assert.deepEqual(lastUser1.content.at(-1).cache_control, { type: "ephemeral" });
 
   const lastUser2 = second.messages.at(-1);
-  assert.ok(lastUser2.content.includes("- [long] Weekly review is on Sundays"));
-  assert.ok(lastUser2.content.endsWith("second question"));
+  assert.ok(anthropicText(lastUser2).includes("- [long] Weekly review is on Sundays"));
+  assert.ok(anthropicText(lastUser2).endsWith("second question"));
 });
 
 test("Anthropic path: an explicit turnContext wins over the fallback", async () => {
@@ -86,7 +95,7 @@ test("Anthropic path: an explicit turnContext wins over the fallback", async () 
     messages: []
   });
   assert.equal(sent.system[0].text, "STATIC SYSTEM TEXT");
-  assert.equal(sent.messages.at(-1).content, "[context]\ncustom block\n[/context]\n\nhello");
+  assert.equal(anthropicText(sent.messages.at(-1)), "[context]\ncustom block\n[/context]\n\nhello");
 });
 
 test("OpenAI path: instructions stay byte-stable and context rides the user turn (no cache markers)", async () => {

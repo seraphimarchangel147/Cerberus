@@ -21,6 +21,8 @@ import { inferToneScore } from "./outcome-store.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
 import { NodeRegistry, readOrCreateIdentity } from "./node-registry.js";
 import { readNodeConfig } from "./cli-client.js";
+import { redactKnownValues, sanitizeForAudit } from "./redact.js";
+import { approvePendingAction } from "./pending-actions.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -71,6 +73,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("cron-catchup", (data) => broadcast("cron-catchup", data));
   events.on("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
   events.on("cron-interrupted", (data) => broadcast("cron-interrupted", data));
+  events.on("cron-model-mismatch", (data) => broadcast("cron-model-mismatch", data));
   events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
   events.on("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
   events.on("task-updated", (data) => broadcast("task-updated", data));
@@ -80,7 +83,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("draft-resolved", (data) => broadcast("draft-resolved", data));
   events.on("task-reminder", (data) => broadcast("task-reminder", data));
   events.on("task-auto-changed", (data) => broadcast("task-auto-changed", data));
-  events.on("pending-action", (data) => broadcast("pending-action", data));
+  events.on("pending-action", (data) => broadcast("pending-action", sanitizeForAudit(data)));
   events.on("daily-recap", (data) => broadcast("daily-recap", data));
   events.on("daily-plan", (data) => broadcast("daily-plan", data));
   events.on("task-unblocked", (data) => broadcast("task-unblocked", data));
@@ -90,6 +93,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("computer-use", (data) => broadcast("computer-use", data));
   events.on("outreach", (data) => broadcast("outreach", data));
   events.on("outreach-resolved", (data) => broadcast("outreach-resolved", data));
+  events.on("background-review", (data) => broadcast("background-review", data));
 
   // Expose the bus to runtime subsystems (pattern miner, session miner) so
   // they can emit "skill-candidate" without holding a reference to this
@@ -150,6 +154,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
   let tickerHandle = null;
   let heartbeatHandle = null;
+  let gatewayStarted = false;
   const tickerMs = options.tickerMs ?? Number.parseInt(process.env.OPENAGI_TICKER_MS ?? "10000", 10);
 
   const server = http.createServer(async (req, res) => {
@@ -162,6 +167,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // but on first run it bypasses the auth gate since no token exists yet.
       const setupActive = isFirstRun();
       const setupRoutes = pathname === "/setup" || pathname === "/setup/save" || pathname === "/setup/test";
+      const secretsRoute = pathname === "/secrets" || pathname.startsWith("/secrets/");
 
       if (setupActive && method === "GET" && pathname === "/") {
         res.writeHead(302, { Location: "/setup" });
@@ -184,7 +190,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const extraCookies = [];
       const setupBypass = setupActive && setupRoutes;
       if (!isPublicRoute(pathname) && !setupBypass) {
-        const auth = checkAuth(req, url, getAuthToken());
+        const authToken = getAuthToken();
+        // The rest of the local-only API retains its backwards-compatible
+        // auth-disabled mode. The secrets surface is different: it must never
+        // become anonymously reachable because OPENAGI_AUTH_TOKEN is absent.
+        const auth = secretsRoute && !authToken
+          ? { ok: false, reason: "OPENAGI_AUTH_TOKEN is required for the secrets API" }
+          : checkAuth(req, url, authToken);
         if (!auth.ok) {
           // Browsers (Accept: text/html) get the login form on ANY failed GET,
           // not just GET /. After sign-in, redirect back to the original path.
@@ -231,26 +243,106 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname === "/setup/save") {
         const body = await readJson(req);
-        const dataDir = resolveDataDir();
-        const result = saveEnv({ dataDir, values: body });
+        let result;
+        try {
+          result = saveEnv({
+            dataDir,
+            values: body,
+            store: runtime.secrets,
+            decidedBy: "http:/setup/save"
+          });
+        } catch {
+          return sendSecretsJson(res, 500, { error: "setup persistence failed" });
+        }
         try {
           const { createModelProvider } = await import("./model-provider.js");
           if (runtime.agentHost) {
             runtime.agentHost.modelProvider = createModelProvider({ budgetGuard: runtime.budget });
           }
         } catch { /* swallow */ }
-        return sendJson(res, 200, result);
+        if (process.env.OPENAGI_AUTH_TOKEN) {
+          res.setHeader("Set-Cookie", buildSetCookie(process.env.OPENAGI_AUTH_TOKEN));
+        }
+        return sendSecretsJson(res, 200, result);
       }
       if (method === "POST" && pathname === "/setup/test") {
         const body = await readJson(req);
-        if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
+        if (!channels) return sendSecretsJson(res, 503, { error: "agent-host-disabled" });
         try {
           // ephemeral: the connectivity test must not seed a session, task,
           // memory item, or outcome — it's plumbing, not conversation.
           const turn = await channels.handleLocalMessage({ text: body.text ?? "Say hi in one short sentence.", from: "setup", ephemeral: true });
-          return sendJson(res, 200, { reply: turn.reply, model: turn.model });
+          let safeTurn = { reply: turn.reply, model: turn.model };
+          if (runtime.secrets) {
+            const names = runtime.secrets.listSecretNames({
+              decidedBy: "http:/setup/test:list"
+            });
+            const values = runtime.secrets.exportEnv({
+              names,
+              decidedBy: "http:/setup/test:redact"
+            });
+            safeTurn = redactKnownValues(safeTurn, Object.values(values));
+          }
+          return sendSecretsJson(res, 200, safeTurn);
+        } catch {
+          return sendSecretsJson(res, 500, { error: "setup connectivity test failed" });
+        }
+      }
+
+      if (method === "GET" && pathname === "/secrets") {
+        if (!runtime.secrets?.listSecrets) {
+          return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
+        }
+        try {
+          const secrets = runtime.secrets
+            .listSecrets({ decidedBy: "http:GET:/secrets" })
+            .map((entry) => publicSecretMetadata(entry));
+          return sendSecretsJson(res, 200, { secrets });
+        } catch {
+          return sendSecretsJson(res, 500, { error: "secrets-unavailable" });
+        }
+      }
+      if (method === "POST" && pathname === "/secrets") {
+        if (!runtime.secrets?.setSecret) {
+          return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return sendSecretsJson(res, 400, { error: "valid JSON object required" });
+        }
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        if (!name || typeof body.value !== "string" || !body.value.trim()) {
+          return sendSecretsJson(res, 400, { error: "name and non-blank string value are required" });
+        }
+        try {
+          const stored = runtime.secrets.setSecret(name, body.value, {
+            decidedBy: "http:POST:/secrets"
+          });
+          return sendSecretsJson(res, 200, { secret: publicSecretMetadata(stored, name) });
         } catch (error) {
-          return sendJson(res, 500, { error: error.message });
+          return sendSecretsJson(res, 400, { error: publicSecretError(error) });
+        }
+      }
+      if (method === "DELETE" && pathname.match(/^\/secrets\/[^/]+$/)) {
+        if (!runtime.secrets?.removeSecret) {
+          return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
+        }
+        const name = decodeURIComponent(pathname.slice("/secrets/".length)).trim();
+        // Removing the live auth token would make checkAuth enter its legacy
+        // auth-disabled mode for every other route in this running process.
+        // Rotation via POST remains available; remote deletion does not.
+        if (name === "OPENAGI_AUTH_TOKEN") {
+          return sendSecretsJson(res, 409, {
+            error: "OPENAGI_AUTH_TOKEN cannot be removed through the secrets API; rotate it with POST /secrets"
+          });
+        }
+        try {
+          const removed = runtime.secrets.removeSecret(name, {
+            decidedBy: "http:DELETE:/secrets"
+          });
+          return sendSecretsJson(res, 200, { name, removed: Boolean(removed) });
+        } catch (error) {
+          return sendSecretsJson(res, 400, { error: publicSecretError(error) });
         }
       }
 
@@ -264,30 +356,74 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/") return sendHtml(res, 200, renderApp(), extraCookies);
       // firstRun lets clients (Mac app) know setup has never completed, so
       // they can take the user to the wizard instead of sitting silent.
-      if (method === "GET" && pathname === "/health") return sendJson(res, 200, { ok: true, firstRun: isFirstRun(), status: runtime.status() });
+      if (method === "GET" && pathname === "/health") {
+        // Public liveness only — {ok, firstRun}. The full runtime status
+        // (cron records + inputs, channel state, etc.) used to be public
+        // here; it now requires auth (Tier-1 hardening, 2026-07).
+        const authed = checkAuth(req, url, getAuthToken()).ok;
+        return sendJson(res, 200, authed
+          ? { ok: true, firstRun: isFirstRun(), status: runtime.status() }
+          : { ok: true, firstRun: isFirstRun() });
+      }
       if (method === "GET" && pathname === "/memory") return sendJson(res, 200, runtime.memory.snapshot());
       if (method === "POST" && pathname === "/memory/remember") {
         // Direct memory import (auth-gated) — for migrations from another
         // agent, bulk seeding, or integrations. Body: { content, tags?,
-        // importance?, scope?, source? }. Mirrors the `remember` tool.
+        // importance?, scope?, source?, replaceIds? }. Mirrors `remember`.
         const body = await readJson(req);
         const content = String(body?.content ?? "").trim();
         if (!content) return sendJson(res, 400, { error: "content required" });
+        if (body.replaceIds !== undefined && !Array.isArray(body.replaceIds)) {
+          return sendJson(res, 400, { error: "replaceIds must be an array of active curated-memory ids" });
+        }
+        const replaceIds = Array.isArray(body.replaceIds) ? body.replaceIds : [];
+        if (replaceIds.length > 20
+          || replaceIds.some((id) => typeof id !== "string" || !id.trim())
+          || new Set(replaceIds.map((id) => id.trim())).size !== replaceIds.length) {
+          return sendJson(res, 400, {
+            error: "replaceIds must contain at most 20 unique, non-empty string ids"
+          });
+        }
         const importance = body.importance ?? "normal";
-        const item = runtime.memory.remember(
-          {
-            source: body.source ?? "import",
-            scope: body.scope ?? "main",
-            content,
-            tags: ["import", ...(Array.isArray(body.tags) ? body.tags : [])],
-            risk: importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45,
-            specificity: 0.7,
-            repetition: 0.4,
-            novelty: 0.5
-          },
-          { source: "memory-import", strength: importance === "high" ? 0.85 : 0.6 }
-        );
-        return sendJson(res, 200, { id: item.id, tier: item.tier });
+        try {
+          const item = runtime.memory.remember(
+            {
+              source: body.source ?? "import",
+              scope: body.scope ?? "main",
+              content,
+              tags: ["import", ...(Array.isArray(body.tags) ? body.tags : [])],
+              risk: importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45,
+              specificity: 0.7,
+              repetition: 0.4,
+              novelty: 0.5
+            },
+            {
+              source: "memory-import",
+              strength: importance === "high" ? 0.85 : 0.6,
+              capacityManaged: true,
+              replaceIds: replaceIds.map((id) => id.trim())
+            }
+          );
+          return sendJson(res, 200, {
+            id: item.id,
+            tier: item.tier,
+            replaced: item.metadata?.replaces ?? []
+          });
+        } catch (error) {
+          if (error?.code === "MEMORY_CAPACITY_EXCEEDED") {
+            return sendJson(res, 409, {
+              error: error.message,
+              code: error.code,
+              usedChars: error.usedChars,
+              requestedChars: error.requestedChars,
+              maxChars: error.maxChars
+            });
+          }
+          if (/^Cannot replace curated memory /u.test(String(error?.message ?? ""))) {
+            return sendJson(res, 409, { error: error.message, code: "MEMORY_REPLACEMENT_CONFLICT" });
+          }
+          throw error;
+        }
       }
       if (method === "GET" && pathname === "/agents") return sendJson(res, 200, runtime.agentHost?.store.listAgents() ?? runtime.propagation.list());
       if (method === "GET" && pathname === "/specialists") {
@@ -301,6 +437,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, sp);
       }
       if (method === "GET" && pathname === "/sessions") return sendJson(res, 200, runtime.agentHost?.store.listSessions() ?? []);
+      if (method === "POST" && pathname === "/sessions/reset") {
+        if (typeof runtime.agentHost?.resetSession !== "function") {
+          return sendJson(res, 503, { error: "agent-host-disabled" });
+        }
+        const body = await readJson(req);
+        if (!body?.sessionId) return sendJson(res, 400, { error: "sessionId required" });
+        return sendJson(res, 200, runtime.agentHost.resetSession({
+          sessionId: body.sessionId,
+          channel: body.channel,
+          from: body.from,
+          agentId: body.agentId
+        }));
+      }
       if (method === "GET" && pathname.startsWith("/sessions/")) {
         const id = decodeURIComponent(pathname.slice("/sessions/".length));
         return sendJson(res, 200, runtime.agentHost?.store.getSession(id) ?? { error: "agent-host-disabled" });
@@ -354,7 +503,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             });
           } finally { clearTimeout(timer); }
           if (!upstream.ok) throw new Error(`upstream ${upstream.status}`);
-          const upstreamJson = await upstream.json();
+          const upstreamJson = redactKnownValues(
+            await upstream.json(),
+            pairing.token ? [pairing.token] : []
+          );
           const cached = { ...upstreamJson, cachedAt: new Date().toISOString() };
           // Best-effort only: a fresh roster we already have in hand must
           // still be returned even if persisting it to disk fails (e.g. a
@@ -369,7 +521,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             cachedAt: cached.cachedAt
           });
         } catch {
-          const cached = readJsonFile(nodesCachePath, null);
+          const cached = redactKnownValues(
+            readJsonFile(nodesCachePath, null),
+            pairing.token ? [pairing.token] : []
+          );
+          if (cached) {
+            try { writeJsonAtomic(nodesCachePath, cached); } catch { /* best effort */ }
+          }
           return sendJson(res, 200, {
             self: { nodeId: identity.nodeId, name: identity.name, role: "node", version: PACKAGE_VERSION, pairedTo: pairing.remote },
             nodes: cached?.nodes ?? [],
@@ -386,10 +544,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, {
           ...status,
           publicUrl: pub,
-          // The URL to paste into BuildBetter's webhook config. Only useful
-          // once a public URL + webhook secret are set; secret goes in the
-          // query string so webhook UIs that only take a URL still work.
-          buildBetterWebhook: base && bbSecret ? `${base}/webhooks/buildbetter?secret=${encodeURIComponent(bbSecret)}` : null,
+          // Return the endpoint, never the credential-bearing query string.
+          // BuildBetter can send the saved value via its webhook-secret
+          // header, or the user can append it locally in BuildBetter's UI.
+          buildBetterWebhook: base ? `${base}/webhooks/buildbetter` : null,
           buildBetterWebhookReady: Boolean(base && bbSecret)
         });
       }
@@ -550,7 +708,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // Also persist to .env so it survives restart.
         try {
           const { saveEnv } = await import("./setup-wizard.js");
-          saveEnv({ values: { OPENAGI_PROVIDER: choice } });
+          saveEnv({
+            dataDir,
+            values: { OPENAGI_PROVIDER: choice },
+            store: runtime.secrets,
+            decidedBy: "http:/admin/provider"
+          });
         } catch { /* fall back to runtime-only */ }
         return sendJson(res, 200, {
           preference: choice,
@@ -643,6 +806,76 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "GET" && pathname === "/skills") return sendJson(res, 200, runtime.skills?.list() ?? []);
       if (method === "GET" && pathname === "/skills/suggested") return sendJson(res, 200, runtime.patternMiner?.list() ?? []);
+      // Edit history across all skills (or one, via ?skill=). Feeds the
+      // dashboard's "how he improves them" timeline.
+      if (method === "GET" && pathname === "/skills/history") {
+        const skill = url.searchParams.get("skill");
+        return sendJson(res, 200, runtime.skills?.history(skill || null, Number(url.searchParams.get("limit") ?? 50)) ?? { edits: [] });
+      }
+      // Full skill view: body + linked files + stats. ?file= reads one
+      // linked file. Marked view=0 to skip usage bump for dashboard reads.
+      if (method === "GET" && pathname.match(/^\/skills\/[^/]+\/view$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        try {
+          const file = url.searchParams.get("file");
+          if (!file && url.searchParams.get("count") === "0") {
+            // dashboard read — don't inflate usage stats
+            const skill = runtime.skills.mustGet(name);
+            return sendJson(res, 200, {
+              name: skill.name, description: skill.description, category: skill.category,
+              pinned: skill.pinned, bundled: skill.bundled ?? false, createdBy: skill.createdBy,
+              createdAt: skill.createdAt, sourceSuggestionId: skill.sourceSuggestionId,
+              body: skill.body, linkedFiles: skill.linkedFiles ?? [], path: skill.path,
+              stats: runtime.skills.statsFor(name)
+            });
+          }
+          return sendJson(res, 200, runtime.skills.view(name, file || null));
+        } catch (error) {
+          return sendJson(res, 404, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname === "/skills/create") {
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          const result = runtime.skills.createSkill({ ...body, createdBy: body.createdBy ?? "dashboard" });
+          events.emit("skills", { op: "created", skill: result.slug });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/edit$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          const result = body.old_string !== undefined
+            ? runtime.skills.patchSkill(name, body.old_string, body.new_string ?? "", body.by ?? "dashboard")
+            : runtime.skills.editSkill(name, body, body.by ?? "dashboard");
+          events.emit("skills", { op: "edited", skill: name });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/pin$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          return sendJson(res, 200, runtime.skills.setPinned(name, body.pinned !== false, body.by ?? "dashboard"));
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/delete$/)) {
+        const name = decodeURIComponent(pathname.split("/")[2]);
+        try {
+          const result = runtime.skills.deleteSkill(name, "dashboard");
+          events.emit("skills", { op: "deleted", skill: name });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
       if (method === "POST" && pathname.match(/^\/skills\/replay\/[^/]+$/)) {
         const skill = decodeURIComponent(pathname.split("/")[3]);
         const body = await readJson(req).catch(() => ({}));
@@ -675,11 +908,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // the MCP with `${VAR}` indirection — never with a literal.
         const body = await readJson(req).catch(() => ({}));
         const catalogId = body.catalogId;
-        if (!catalogId) return sendJson(res, 400, { error: "catalogId required" });
+        if (!catalogId) return sendSecretsJson(res, 400, { error: "catalogId required" });
         const { MCP_CATALOG } = await import("./mcp-catalog.js");
         const entry = MCP_CATALOG.find((e) => e.id === catalogId);
-        if (!entry) return sendJson(res, 404, { error: "not in catalog" });
-        if (!entry.register) return sendJson(res, 400, { error: "catalog entry has no register info" });
+        if (!entry) return sendSecretsJson(res, 404, { error: "not in catalog" });
+        if (!entry.register) {
+          return sendSecretsJson(res, 400, { error: "catalog entry has no register info" });
+        }
         try {
           // API-key path: any catalog entry that declares apiKeyEnvVar
           // needs that env var populated before we register, regardless
@@ -688,13 +923,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           // so we just need it on disk + in the registry's allowlist.
           if (entry.apiKeyEnvVar) {
             const incoming = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-            const existing = process.env[entry.apiKeyEnvVar] ?? "";
+            const existing = isStoredSecretConfigured(runtime.secrets, entry.apiKeyEnvVar, {
+              decidedBy: "http:/integrations/connect-mcp:credential-check"
+            });
             if (incoming) {
               const { saveEnv } = await import("./setup-wizard.js");
-              const dataDir = resolveDataDir();
-              saveEnv({ dataDir, values: { [entry.apiKeyEnvVar]: incoming } });
+              saveEnv({
+                dataDir,
+                values: { [entry.apiKeyEnvVar]: incoming },
+                store: runtime.secrets,
+                decidedBy: "http:/integrations/connect-mcp"
+              });
             } else if (!existing) {
-              return sendJson(res, 400, {
+              return sendSecretsJson(res, 400, {
                 error: `apiKey required (catalog entry '${entry.id}' uses ${entry.apiKeyEnvVar} which isn't set yet)`,
                 apiKeyEnvVar: entry.apiKeyEnvVar
               });
@@ -709,15 +950,15 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           if (runtime.mcp?.connect) {
             runtime.mcp.connect(server.name).catch(() => { /* OAuth path surfaces via SSE */ });
           }
-          return sendJson(res, 200, { name: server.name, transport: server.transport });
-        } catch (error) {
-          return sendJson(res, 400, { error: error.message });
+          return sendSecretsJson(res, 200, { name: server.name, transport: server.transport });
+        } catch {
+          return sendSecretsJson(res, 400, { error: "MCP connection setup rejected" });
         }
       }
       if (method === "GET" && pathname === "/pending-actions") {
         const status = url.searchParams.get("status") || undefined;
         return sendJson(res, 200, {
-          actions: runtime.pendingActions?.list({ status }) ?? []
+          actions: sanitizeForAudit(runtime.pendingActions?.list({ status }) ?? [])
         });
       }
       if (method === "GET" && pathname === "/outreach/feed") {
@@ -795,17 +1036,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const action = runtime.pendingActions?.get(id);
         if (!action) return sendJson(res, 404, { error: "unknown pending action" });
         if (action.status !== "pending") return sendJson(res, 409, { error: `action already ${action.status}` });
-        // Re-invoke the original tool with the bypass flag so the gate
-        // doesn't re-queue the same call. Persist the result on the action.
-        const invokeResult = await runtime.tools.invoke(action.toolName, action.args, {
-          ...action.context,
-          __confirmed: true
-        });
-        runtime.pendingActions.decide(id, {
-          decision: "approve",
+        // Resolve a live suspended turn instead of racing it with a second
+        // invocation. Restart-era actions without a waiter still execute once.
+        const invokeResult = await approvePendingAction(runtime, id, {
           decidedBy: "user",
-          result: invokeResult.ok ? invokeResult.result : null,
-          error: invokeResult.ok ? null : invokeResult.error
+          approvedVia: "http"
         });
         return sendJson(res, invokeResult.ok ? 200 : 400, invokeResult);
       }
@@ -821,6 +1056,32 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           error: body.reason ?? "denied by user"
         });
         return sendJson(res, 200, { id, status: "denied" });
+      }
+      if (method === "GET" && pathname === "/auto-approve") {
+        // Report current auto-approve state (live env, not cached).
+        const { autoApproveEnabled } = await import("./tool-registry.js");
+        return sendJson(res, 200, { enabled: autoApproveEnabled() });
+      }
+      if (method === "POST" && pathname === "/auto-approve") {
+        // Flip auto-approve on/off without a daemon restart. Persists to
+        // .openagi/.env (allowlisted in WIZARD_FIELDS) and mutates
+        // process.env so autoApproveEnabled() sees it immediately.
+        const body = await readJson(req).catch(() => ({}));
+        const enable = Boolean(body.enable);
+        const { saveEnv } = await import("./setup-wizard.js");
+        try {
+          saveEnv({
+            dataDir,
+            values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" },
+            store: runtime.secrets,
+            decidedBy: "http:/auto-approve"
+          });
+        } catch {
+          return sendJson(res, 500, { error: "configuration persistence failed" });
+        }
+        process.env.OPENAGI_AUTO_APPROVE = enable ? "1" : "0";
+        events.emit("auto-approve", { enabled: enable });
+        return sendJson(res, 200, { enabled: enable });
       }
       if (method === "GET" && pathname === "/computer-use/log") {
         if (!runtime.computerUseLog) return sendJson(res, 503, { error: "no computer-use log" });
@@ -844,17 +1105,31 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const enable = Boolean(body.enable);
         const { saveEnv } = await import("./setup-wizard.js");
         const { registerComputerUseTools, unregisterComputerUseTools } = await import("./integrations/computer-use.js");
-        const dataDir = resolveDataDir();
         // saveEnv writes only allowlisted keys; OPENAGI_COMPUTER_USE has
         // to be in WIZARD_FIELDS (added in this commit) for the write to
         // land in .env.
-        if (enable) {
-          saveEnv({ dataDir, values: { OPENAGI_COMPUTER_USE: "1" } });
-          process.env.OPENAGI_COMPUTER_USE = "1";
-        } else {
-          saveEnv({ dataDir, values: {}, clear: ["OPENAGI_COMPUTER_USE"] });
-          // saveEnv's clear path also strips process.env, but be explicit:
-          delete process.env.OPENAGI_COMPUTER_USE;
+        try {
+          if (enable) {
+            saveEnv({
+              dataDir,
+              values: { OPENAGI_COMPUTER_USE: "1" },
+              store: runtime.secrets,
+              decidedBy: "http:/computer-use/toggle"
+            });
+            process.env.OPENAGI_COMPUTER_USE = "1";
+          } else {
+            saveEnv({
+              dataDir,
+              values: {},
+              clear: ["OPENAGI_COMPUTER_USE"],
+              store: runtime.secrets,
+              decidedBy: "http:/computer-use/toggle"
+            });
+            // saveEnv's clear path also strips process.env, but be explicit:
+            delete process.env.OPENAGI_COMPUTER_USE;
+          }
+        } catch {
+          return sendJson(res, 500, { error: "configuration persistence failed" });
         }
         if (enable) {
           registerComputerUseTools(runtime.tools, runtime);
@@ -1047,6 +1322,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // the UI can say "this is the MCP version of an integration you also
         // have a non-MCP (API) path for above".
         const featuredIds = new Set(integrations.map((i) => i.id));
+        const storedSecretNames = configuredSecretNames(runtime.secrets, {
+          decidedBy: "http:/integrations/status:credential-check"
+        });
         const catalog = MCP_CATALOG
           .map((entry) => ({
             id: entry.id,
@@ -1057,7 +1335,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             status: entry.status,
             apiKeyEnvVar: entry.apiKeyEnvVar ?? null,
             apiKeyHelp: entry.apiKeyHelp ?? null,
-            apiKeyConfigured: entry.apiKeyEnvVar ? Boolean(process.env[entry.apiKeyEnvVar]) : true,
+            apiKeyConfigured: entry.apiKeyEnvVar
+              ? (storedSecretNames === null
+                  ? Boolean(process.env[entry.apiKeyEnvVar])
+                  : storedSecretNames.has(entry.apiKeyEnvVar))
+              : true,
             connectable: entry.status === "available" && Boolean(entry.register),
             configured: mcpInCatalog(entry.id),
             featured: featuredIds.has(entry.id)
@@ -1390,7 +1672,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           connecting: runtime.mcp.isConnecting?.(s.name) ?? false,
           pendingAuthUrl: pendingOauth.get(s.name)?.url ?? null
         }));
-        return sendJson(res, 200, servers);
+        return sendJson(res, 200, sanitizeForAudit(servers));
       }
       if (method === "GET" && pathname === "/mcp/tools") return sendJson(res, 200, runtime.mcp.listTools());
       if (method === "POST" && pathname.match(/^\/mcp\/connect\/[^/]+$/)) {
@@ -1416,11 +1698,21 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 202, { name, status: "connecting" });
       }
       if (method === "POST" && pathname.match(/^\/mcp\/clear-auth\/[^/]+$/)) {
-        const name = decodeURIComponent(pathname.split("/")[3]);
+        const name = parseMcpServerName(pathname.split("/")[3]);
+        if (!name) {
+          return sendJson(res, 400, { error: "invalid MCP server name" });
+        }
         pendingOauth.delete(name);
         // Wipe cached OAuth tokens so the next connect starts a fresh flow.
         try {
-          const authPath = path.join(resolveDataDir(), "mcp", "auth", `${name}.json`);
+          const authDir = path.resolve(dataDir, "mcp", "auth");
+          const authPath = path.resolve(authDir, `${name}.json`);
+          if (path.dirname(authPath) !== authDir) {
+            return sendJson(res, 400, { error: "invalid MCP server name" });
+          }
+          if (fsSync.existsSync(authDir) && fsSync.lstatSync(authDir).isSymbolicLink()) {
+            return sendJson(res, 400, { error: "MCP auth storage is not a safe directory" });
+          }
           if (fsSync.existsSync(authPath)) fsSync.unlinkSync(authPath);
         } catch { /* ignore */ }
         return sendJson(res, 200, { ok: true });
@@ -1447,8 +1739,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname === "/mcp/register") {
         const body = await readJson(req);
-        const server = runtime.mcp.registerServer(body);
-        return sendJson(res, 200, server);
+        try {
+          const server = runtime.mcp.registerServer(body);
+          return sendJson(res, 200, {
+            name: server.name,
+            transport: server.transport
+          });
+        } catch {
+          // Registration errors can be derived from credential-bearing input.
+          // Keep the HTTP rejection useful without reflecting any raw field.
+          return sendJson(res, 400, { error: "MCP registration rejected" });
+        }
       }
 
       if (method === "POST" && pathname === "/tick") {
@@ -1529,11 +1830,32 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           }
           const address = server.address();
           const actualPort = typeof address === "object" && address ? address.port : port;
+          if (!gatewayStarted) {
+            gatewayStarted = true;
+            let platforms = ["local"];
+            try {
+              const status = channels?.status?.() ?? {};
+              platforms = Object.entries(status)
+                .filter(([name, value]) => name === "local" || value?.configured || value?.enabled)
+                .map(([name]) => name);
+            } catch { /* use local fallback */ }
+            try {
+              runtime.hooks?.notify?.("gateway:startup", { host, port: actualPort, platforms });
+            } catch (error) {
+              console.warn(`[hooks] gateway:startup failed open: ${error?.message ?? String(error)}`);
+            }
+          }
           resolve({ host, port: actualPort, url: `http://${host}:${actualPort}` });
         });
       });
     },
-    close() {
+    async close() {
+      try { await runtime.agentHost?.endActiveHookSessions?.("gateway-close"); }
+      catch (error) { console.warn(`[openagi] session review flush failed open: ${error?.message ?? String(error)}`); }
+      try { runtime.hooks?.notify?.("gateway:shutdown", { host, port }); }
+      catch (error) { console.warn(`[hooks] gateway:shutdown failed open: ${error?.message ?? String(error)}`); }
+      try { await runtime.hooks?.flush?.(); }
+      catch (error) { console.warn(`[hooks] shutdown flush failed open: ${error?.message ?? String(error)}`); }
       return new Promise((resolve, reject) => {
         if (tickerHandle) clearInterval(tickerHandle);
         if (heartbeatHandle) clearInterval(heartbeatHandle);
@@ -1568,7 +1890,11 @@ function handleSse(req, res, clients) {
 }
 
 function sendHtml(res, status, value, cookies = []) {
-  const headers = { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(value) };
+  const headers = {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(value),
+    "cache-control": "no-store"
+  };
   if (cookies.length) headers["Set-Cookie"] = cookies;
   res.writeHead(status, headers);
   res.end(value);
@@ -1609,6 +1935,77 @@ function sendJson(res, status, value) {
   res.end(body);
 }
 
+function sendSecretsJson(res, status, value) {
+  res.setHeader("Cache-Control", "no-store");
+  return sendJson(res, status, value);
+}
+
+function parseMcpServerName(encoded) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(String(encoded ?? ""));
+  } catch {
+    return null;
+  }
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(decoded)
+    || /[ .]$/.test(decoded)
+  ) {
+    return null;
+  }
+  const stem = decoded.split(".")[0].toUpperCase();
+  return /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)
+    ? null
+    : decoded;
+}
+
+function publicSecretMetadata(entry, fallbackName = "") {
+  const name = fallbackName
+    ? String(fallbackName)
+    : (typeof entry?.name === "string" ? entry.name : "");
+  const last4 = typeof entry?.last4 === "string" && entry.last4.length <= 4
+    ? entry.last4
+    : null;
+  return {
+    name,
+    last4,
+    preview: last4 ? `****${last4}` : "****"
+  };
+}
+
+function publicSecretError(error) {
+  if (error instanceof TypeError && /^Unknown secret name:/.test(error.message)) {
+    return "unknown secret name";
+  }
+  return "secret operation rejected";
+}
+
+function configuredSecretNames(store, { decidedBy } = {}) {
+  if (!store) return null;
+  try {
+    if (typeof store.listSecretNames === "function") {
+      return new Set(store.listSecretNames({ decidedBy }));
+    }
+    if (typeof store.listSecrets === "function") {
+      return new Set(
+        store.listSecrets({ decidedBy })
+          .map((entry) => entry?.name)
+          .filter((name) => typeof name === "string")
+      );
+    }
+  } catch {
+    return new Set();
+  }
+  // A store exists, so process.env is not an acceptable fallback source.
+  return new Set();
+}
+
+function isStoredSecretConfigured(store, name, { decidedBy } = {}) {
+  const names = configuredSecretNames(store, { decidedBy });
+  if (names !== null) return names.has(name);
+  return Boolean(process.env[name]);
+}
+
 // Map an outreach action to the real action on the underlying source. Throws
 // on a failed delegation so the route can mark the item status:"error".
 async function applyOutreachAction(runtime, item, action, note) {
@@ -1631,8 +2028,10 @@ async function applyOutreachAction(runtime, item, action, note) {
         const a = runtime.pendingActions?.get(ref.id);
         if (!a) throw new Error("pending action gone");
         if (a.status !== "pending") return; // already decided elsewhere — don't re-run the side-effecting tool
-        const r = await runtime.tools.invoke(a.toolName, a.args, { ...a.context, __confirmed: true });
-        runtime.pendingActions.decide(ref.id, { decision: "approve", decidedBy: "user", result: r.ok ? r.result : null, error: r.ok ? null : r.error });
+        const r = await approvePendingAction(runtime, ref.id, {
+          decidedBy: "user",
+          approvedVia: "outreach"
+        });
         if (!r.ok) throw new Error(r.error ?? "tool failed");
         return;
       }
@@ -1686,10 +2085,23 @@ async function applyOutreachFeedback(runtime, item, verdict, note = null) {
   return resolved;
 }
 
+// Cap request bodies so an exposed/tunneled daemon can't be OOM'd by an
+// unbounded POST (Tier-1 hardening). 5 MB is far above any legit payload.
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       if (chunks.length === 0) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
@@ -1702,7 +2114,16 @@ function readJson(req) {
 function readForm(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       const text = Buffer.concat(chunks).toString("utf8");
       const params = new URLSearchParams(text);
@@ -2372,9 +2793,23 @@ function showToast(msg, ok = true) {
 
 newBtn.addEventListener("click", async () => {
   if (state.tab === "chat") {
-    state.sessionId = null;
+    if (state.sessionId) {
+      try {
+        const reset = await postJson("/sessions/reset", {
+          sessionId: state.sessionId,
+          channel: state.channel,
+          from: state.from,
+          agentId: state.agentId
+        });
+        state.sessionId = reset.sessionId ?? null;
+      } catch {
+        state.sessionId = null;
+      }
+    } else {
+      state.sessionId = null;
+    }
     state.messages = [];
-    state.from = "browser-" + Date.now();
+    if (!state.sessionId) state.from = "browser-" + Date.now();
     renderTab();
   } else if (state.tab === "cron") {
     openCronComposer();
@@ -2913,15 +3348,24 @@ async function refreshSkills(reload = false) {
   if (skills.length === 0 && pendingSuggested.length === 0) {
     sidebarList.innerHTML = '<li class="empty">No skills loaded</li>';
   }
-  for (const s of skills) {
+  // Sort: most-used first, then alphabetical — the sidebar doubles as a
+  // "what does he actually reach for" ranking.
+  const sorted = [...skills].sort((a, b) => ((b.stats?.runs ?? 0) + (b.stats?.views ?? 0)) - ((a.stats?.runs ?? 0) + (a.stats?.views ?? 0)) || a.name.localeCompare(b.name));
+  for (const s of sorted) {
     const li = document.createElement("li");
-    li.innerHTML = \`<div class="title">\${escapeHtml(s.name)}</div><div class="preview">\${escapeHtml(s.description ?? "")}</div>\`;
+    const st = s.stats ?? {};
+    const used = (st.runs ?? 0) + (st.views ?? 0);
+    const scoreBadge = typeof st.avgScore === "number"
+      ? \`<span class="badge \${st.avgScore >= 0.6 ? "ok" : st.avgScore >= 0.4 ? "" : "err"}" style="font-size:10px;">\${(st.avgScore * 100).toFixed(0)}%</span>\`
+      : "";
+    li.innerHTML = \`<div class="title">\${s.pinned ? "📌 " : ""}\${escapeHtml(s.name)} \${scoreBadge}</div>
+      <div class="preview">\${s.category ? \`<span style="color:var(--accent);">[\${escapeHtml(s.category)}]</span> \` : ""}\${used > 0 ? \`\${used} use\${used > 1 ? "s" : ""} · \` : ""}\${escapeHtml(s.description ?? "")}</div>\`;
     li.addEventListener("click", () => renderSkillDetail(s));
     sidebarList.appendChild(li);
   }
 
   if (pendingSuggested.length > 0) renderSuggestedDetail(pendingSuggested[0]);
-  else if (skills.length > 0) renderSkillDetail(skills[0]);
+  else if (sorted.length > 0) renderSkillDetail(sorted[0]);
   else main.innerHTML = '<div class="pane"><div class="empty">No skills loaded yet. Drop a SKILL.md into <code>.openagi/skills/&lt;name&gt;/</code>, or let the hourly workflow miner surface a repeated routine.</div></div>';
 }
 
@@ -2986,11 +3430,99 @@ function renderSuggestedDetail(candidate) {
   });
 }
 
-function renderSkillDetail(skill) {
+async function renderSkillDetail(skill) {
+  // Pull the full view (body + linked files + stats) and edit history in
+  // parallel. count=0 keeps dashboard reads out of the usage stats.
+  let full = skill;
+  let history = { edits: [] };
+  try {
+    [full, history] = await Promise.all([
+      fetchJson(\`/skills/\${encodeURIComponent(skill.name)}/view?count=0\`),
+      fetchJson(\`/skills/history?skill=\${encodeURIComponent(skill.name)}&limit=20\`).catch(() => ({ edits: [] }))
+    ]);
+  } catch { /* fall back to the list-shape skill */ }
+  const st = full.stats ?? skill.stats ?? {};
+  const recent = st.recentRuns ?? [];
+
+  // Score sparkline: one bar per recent graded run, colored by band.
+  const spark = recent.length
+    ? \`<div class="row" style="gap:2px;align-items:flex-end;height:34px;margin:4px 0 2px;">\${recent.map((r) => {
+        const h = Math.max(4, Math.round(r.score * 32));
+        const c = r.score >= 0.6 ? "var(--ok, #4caf82)" : r.score >= 0.4 ? "var(--warn, #d9a441)" : "var(--err, #d96b6b)";
+        return \`<div title="\${(r.score * 100).toFixed(0)}% · \${escapeHtml(r.at ?? "")}" style="width:10px;height:\${h}px;background:\${c};border-radius:2px 2px 0 0;"></div>\`;
+      }).join("")}</div><div class="ui-muted" style="font-size:10px;">last \${recent.length} graded runs →</div>\`
+    : '<p class="ui-muted" style="font-size:12px;">No graded runs yet — run it once to start the quality track record.</p>';
+
+  const lineage = [];
+  if (full.createdBy) lineage.push(\`created by <strong>\${escapeHtml(full.createdBy)}</strong>\`);
+  if (full.createdAt) lineage.push(\`on \${escapeHtml(String(full.createdAt).slice(0, 10))}\`);
+  if (full.sourceSuggestionId) lineage.push(\`from suggestion <code>\${escapeHtml(full.sourceSuggestionId)}</code>\`);
+  if (full.bundled) lineage.push('<span class="badge">bundled · read-only</span>');
+
+  const linked = (full.linkedFiles ?? []);
+  const linkedHtml = linked.length
+    ? \`<div class="row" style="gap:6px;flex-wrap:wrap;">\${linked.map((f) => \`<span class="chip linked-file" data-file="\${escapeHtml(f)}" style="cursor:pointer;font-size:12px;" title="Click to view">📄 \${escapeHtml(f)}</span>\`).join("")}</div>\`
+    : '<p class="ui-muted" style="font-size:12px;">None — add references/, scripts/, or templates/ inside the skill dir for deep material.</p>';
+
+  const editIcons = { created: "🌱", patched: "🔧", edited: "✏️", pinned: "📌", unpinned: "📍", deleted: "🗑" };
+  const historyHtml = (history.edits ?? []).length
+    ? \`<div style="border-left:2px solid var(--line);padding-left:12px;">\${history.edits.map((e) => \`
+        <div style="margin-bottom:8px;">
+          <div style="font-size:12px;">\${editIcons[e.action] ?? "•"} <strong>\${escapeHtml(e.action)}</strong> <span class="ui-muted">by \${escapeHtml(e.by ?? "?")} · \${escapeHtml(String(e.at ?? "").replace("T", " ").slice(0, 16))}</span></div>
+          \${e.summary ? \`<div class="ui-muted" style="font-size:11px;white-space:pre-wrap;">\${escapeHtml(e.summary)}</div>\` : ""}
+        </div>\`).join("")}</div>\`
+    : '<p class="ui-muted" style="font-size:12px;">No recorded edits yet — history starts with the first patch/edit through the new tools.</p>';
+
+  const fmt = (n) => (n === null || n === undefined) ? "—" : (typeof n === "number" && n <= 1 ? (n * 100).toFixed(0) + "%" : String(n));
+
   main.innerHTML = \`
     <div class="pane">
-      <h2 style="margin-bottom: var(--space-2);">\${escapeHtml(skill.name)}</h2>
-      <p class="ui-muted" style="margin-bottom: var(--space-4);">\${escapeHtml(skill.description ?? "")}</p>
+      <div class="row" style="gap:6px;align-items:center;margin-bottom:2px;">
+        <h2 style="margin:0;">\${full.pinned ? "📌 " : ""}\${escapeHtml(full.name)}</h2>
+        \${full.category ? \`<span class="badge">\${escapeHtml(full.category)}</span>\` : ""}
+      </div>
+      <p class="ui-muted" style="margin-bottom: var(--space-2);">\${escapeHtml(full.description ?? "")}</p>
+      \${lineage.length ? \`<p class="ui-muted" style="font-size:11px;margin-bottom:var(--space-3);">\${lineage.join(" · ")}</p>\` : ""}
+
+      <div class="row" style="gap:14px;flex-wrap:wrap;margin-bottom:var(--space-3);">
+        <div><div style="font-size:20px;font-weight:600;">\${st.runs ?? 0}</div><div class="ui-muted" style="font-size:11px;">runs</div></div>
+        <div><div style="font-size:20px;font-weight:600;">\${st.views ?? 0}</div><div class="ui-muted" style="font-size:11px;">loads</div></div>
+        <div><div style="font-size:20px;font-weight:600;">\${fmt(st.avgScore)}</div><div class="ui-muted" style="font-size:11px;">avg quality</div></div>
+        <div><div style="font-size:20px;font-weight:600;">\${fmt(st.lastScore)}</div><div class="ui-muted" style="font-size:11px;">last score</div></div>
+        <div><div style="font-size:14px;font-weight:600;padding-top:4px;">\${st.lastUsedAt ? escapeHtml(String(st.lastUsedAt).replace("T", " ").slice(0, 16)) : "never"}</div><div class="ui-muted" style="font-size:11px;">last used</div></div>
+      </div>
+      \${spark}
+
+      <div class="ui-section" style="margin-top:var(--space-3);">
+        <div class="ui-section-header row" style="justify-content:space-between;align-items:center;">
+          <h3>Instructions (SKILL.md)</h3>
+          <div class="row" style="gap:6px;">
+            \${full.bundled ? "" : \`<button class="ui-btn secondary" id="skillEditBtn" style="font-size:12px;">✏️ Edit</button>
+            <button class="ui-btn secondary" id="skillPinBtn" style="font-size:12px;">\${full.pinned ? "📍 Unpin" : "📌 Pin"}</button>
+            <button class="ui-btn secondary" id="skillDelBtn" style="font-size:12px;color:var(--err,#d96b6b);">🗑 Delete</button>\`}
+          </div>
+        </div>
+        <pre id="skillBody" style="white-space:pre-wrap;max-height:340px;overflow:auto;">\${escapeHtml(full.body ?? "(body not loaded)")}</pre>
+        <div id="skillEditor" style="display:none;">
+          <textarea class="ui-textarea" id="skillEditorText" rows="14" style="width:100%;font-family:monospace;font-size:12px;"></textarea>
+          <div class="row" style="gap:8px;margin-top:8px;">
+            <button class="ui-btn" id="skillSaveBtn">💾 Save body</button>
+            <button class="ui-btn secondary" id="skillCancelBtn">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ui-section">
+        <div class="ui-section-header"><h3>Linked files</h3></div>
+        \${linkedHtml}
+        <pre id="linkedOut" style="display:none;white-space:pre-wrap;max-height:260px;overflow:auto;margin-top:8px;"></pre>
+      </div>
+
+      <div class="ui-section">
+        <div class="ui-section-header"><h3>Edit history</h3></div>
+        \${historyHtml}
+      </div>
+
       <div class="ui-section">
         <div class="ui-section-header"><h3>Run</h3></div>
         <form class="form" id="skillForm">
@@ -3000,24 +3532,66 @@ function renderSkillDetail(skill) {
           </div>
           <button class="ui-btn" type="submit">Run skill</button>
         </form>
-      </div>
-      <div class="ui-section">
-        <div class="ui-section-header"><h3>Output</h3></div>
-        <pre id="skillOut" class="ok"></pre>
+        <pre id="skillOut" class="ok" style="margin-top:8px;"></pre>
       </div>
     </div>
   \`;
+
   $("skillForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = e.target.input.value;
     const out = $("skillOut");
     out.textContent = "running…";
     try {
-      const res = await postJson(\`/skills/\${encodeURIComponent(skill.name)}/run\`, { input });
+      const res = await postJson(\`/skills/\${encodeURIComponent(full.name)}/run\`, { input });
       out.textContent = res.output ?? JSON.stringify(res, null, 2);
+      setTimeout(() => renderSkillDetail(full), 1200); // refresh stats + sparkline
     } catch (err) {
       out.textContent = "[error] " + err.message;
     }
+  });
+
+  document.querySelectorAll(".linked-file").forEach((chip) => {
+    chip.addEventListener("click", async () => {
+      const out = $("linkedOut");
+      out.style.display = "block";
+      out.textContent = "loading…";
+      try {
+        const res = await fetchJson(\`/skills/\${encodeURIComponent(full.name)}/view?file=\${encodeURIComponent(chip.dataset.file)}\`);
+        out.textContent = res.content ?? "(empty)";
+      } catch (err) { out.textContent = "[error] " + err.message; }
+    });
+  });
+
+  $("skillEditBtn")?.addEventListener("click", () => {
+    $("skillBody").style.display = "none";
+    $("skillEditor").style.display = "block";
+    $("skillEditorText").value = full.body ?? "";
+  });
+  $("skillCancelBtn")?.addEventListener("click", () => {
+    $("skillEditor").style.display = "none";
+    $("skillBody").style.display = "block";
+  });
+  $("skillSaveBtn")?.addEventListener("click", async () => {
+    try {
+      await postJson(\`/skills/\${encodeURIComponent(full.name)}/edit\`, { body: $("skillEditorText").value, by: "dashboard" });
+      showToast("Skill body saved", true);
+      refreshSkills(true);
+    } catch (err) { showToast("Save failed: " + err.message, false); }
+  });
+  $("skillPinBtn")?.addEventListener("click", async () => {
+    try {
+      await postJson(\`/skills/\${encodeURIComponent(full.name)}/pin\`, { pinned: !full.pinned, by: "dashboard" });
+      refreshSkills(true);
+    } catch (err) { showToast("Pin failed: " + err.message, false); }
+  });
+  $("skillDelBtn")?.addEventListener("click", async () => {
+    if (!confirm(\`Delete skill '\${full.name}'? It moves to .trash (recoverable).\`)) return;
+    try {
+      await postJson(\`/skills/\${encodeURIComponent(full.name)}/delete\`, {});
+      showToast("Skill moved to .trash", true);
+      refreshSkills(true);
+    } catch (err) { showToast("Delete failed: " + err.message, false); }
   });
 }
 
@@ -3194,7 +3768,7 @@ function openMcpComposer() {
             <input class="ui-input" name="url" placeholder="https://mcp.example.com/mcp">
           </div>
           <div data-kind="http-bearer">
-            <label>API key (or \\\${ENV_VAR})</label>
+            <label>API key secret reference (exact \\\${ENV_VAR})</label>
             <input class="ui-input" name="apiKey" placeholder="\\\${MY_MCP_KEY}">
           </div>
           <div data-kind="http-oauth" style="margin-bottom: var(--space-3);">
@@ -3202,8 +3776,8 @@ function openMcpComposer() {
             <input class="ui-input" name="clientId" placeholder="\\\${OAUTH_CLIENT_ID} or literal">
           </div>
           <div data-kind="http-oauth">
-            <label>Client secret <span class="ui-meta">· optional, only for confidential clients</span></label>
-            <input class="ui-input" type="password" name="clientSecret" autocomplete="off">
+            <label>Client secret reference <span class="ui-meta">· optional exact \\\${ENV_VAR}; store the value through Secrets first</span></label>
+            <input class="ui-input" name="clientSecret" placeholder="\\\${MY_OAUTH_CLIENT_SECRET}" autocomplete="off">
           </div>
         </div>
 
@@ -3279,6 +3853,22 @@ function openMcpComposer() {
     if (kind === "stdio" && !body.command) { showOut("command is required for stdio", "err"); reset(); return; }
     if ((kind === "http-oauth" || kind === "http-bearer") && !body.url) { showOut("url is required for http", "err"); reset(); return; }
     if (kind === "http-bearer" && !body.apiKey) { showOut("apiKey is required for http+bearer", "err"); reset(); return; }
+    const isSecretReference = (value) => (
+      typeof value === "string"
+      && value.startsWith("$" + "{")
+      && value.endsWith("}")
+      && /^[A-Z_][A-Z0-9_]*$/.test(value.slice(2, -1))
+    );
+    if (body.apiKey && !isSecretReference(body.apiKey)) {
+      showOut("apiKey must be an exact \${ENV_VAR} secret reference", "err");
+      reset();
+      return;
+    }
+    if (body.clientSecret && !isSecretReference(body.clientSecret)) {
+      showOut("clientSecret must be an exact \${ENV_VAR} secret reference", "err");
+      reset();
+      return;
+    }
 
     const btn = $("registerSubmit");
     btn.disabled = true;
@@ -3471,8 +4061,8 @@ async function renderNodes() {
 
 async function renderChannels() {
   const ch = await fetchJson("/channels");
-  const bbWebhookLine = ch.buildBetterWebhook
-    ? \`<div class="desc" style="margin-top:6px;">BuildBetter webhook: <code>\${escapeHtml(ch.buildBetterWebhook)}</code> <span class="sub">— paste into BuildBetter to sync calls instantly</span></div>\`
+  const bbWebhookLine = ch.buildBetterWebhookReady
+    ? \`<div class="desc" style="margin-top:6px;">BuildBetter webhook endpoint: <code>\${escapeHtml(ch.buildBetterWebhook)}</code> <span class="sub">— authentication is configured. Send the saved secret as <code>X-BuildBetter-Webhook-Secret</code>, or append it as <code>?secret=...</code> in BuildBetter; the dashboard keeps it hidden.</span></div>\`
     : (ch.publicUrl ? \`<div class="desc" style="margin-top:6px;" class="sub">BuildBetter webhook: set <code>BUILDBETTER_WEBHOOK_SECRET</code> to enable instant call sync.</div>\` : "");
   const tunnelBlock = ch.publicUrl
     ? \`<div class="card"><div class="name">Public URL</div><div class="desc"><code>\${escapeHtml(ch.publicUrl)}</code></div>\${bbWebhookLine}</div>\`
@@ -4798,7 +5388,7 @@ async function postJson(path, body) {
   }
   return r.json();
 }
-function escapeHtml(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]); }
+function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]); }
 
 // Inline help marker — renders a (?) chip with a hover tooltip. Use it for
 // obscure terms in dense panes so users don't have to leave the page to

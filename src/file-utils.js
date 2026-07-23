@@ -30,14 +30,22 @@ export function writeJsonAtomic(filePath, value, mode = 0o600) {
 export function writeTextAtomic(filePath, data, mode = 0o600) {
   ensureDir(path.dirname(filePath));
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tempPath, data, { mode });
-  const fd = fs.openSync(tempPath, "r");
+  let committed = false;
   try {
-    fs.fsyncSync(fd);
+    fs.writeFileSync(tempPath, data, { mode });
+    const fd = fs.openSync(tempPath, "r");
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tempPath, filePath);
+    committed = true;
   } finally {
-    fs.closeSync(fd);
+    if (!committed) {
+      try { fs.rmSync(tempPath, { force: true }); } catch { /* best effort */ }
+    }
   }
-  fs.renameSync(tempPath, filePath);
 }
 
 export function appendJsonLine(filePath, value, mode = 0o600) {

@@ -1,4 +1,9 @@
-export { AbiRuntime, createDefaultRuntime, createDurableRuntime } from "./abi-runtime.js";
+export {
+  AbiRuntime,
+  createDefaultRuntime,
+  createDurableRuntime,
+  resolveExternalMemoryProvider
+} from "./abi-runtime.js";
 export { AgentHost } from "./agent-host.js";
 export { BudgetGuard } from "./budget-guard.js";
 export {
@@ -11,6 +16,12 @@ export {
 export { cosine, createEmbedder, HashBagEmbedder, OpenAIEmbedder } from "./embeddings.js";
 export { VectorStore } from "./vector-store.js";
 export { RizeClient, registerRizeIntegration } from "./integrations/rize.js";
+export {
+  assertExternalMemoryProvider,
+  createExternalMemoryProvider,
+  HonchoMemoryProvider,
+  isExternalMemoryProvider
+} from "./integrations/honcho-provider.js";
 export { FileBackedAgentStore, InMemoryAgentStore } from "./agent-store.js";
 export { ChannelManager, TelegramChannel } from "./channels.js";
 export { CronScheduler, createDailyAdaptationReviewJob, createDailyPersonaResearchJob } from "./cron-scheduler.js";
@@ -20,7 +31,11 @@ export { FileBackedMemorySystem } from "./file-backed-memory-system.js";
 export { FileBackedPropagationController } from "./file-backed-propagation-controller.js";
 export { createAbiIntegration, IntegrationRegistry, normalizeSignal } from "./integration-registry.js";
 export { McpRegistry } from "./mcp-registry.js";
+export { createSecretsStore, SecretsStore } from "./secrets-store.js";
 export { PendingActionStore } from "./pending-actions.js";
+export { GoalStore } from "./goal-store.js";
+export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
+export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";
 export { McpStdioClient } from "./mcp-client.js";
 export { McpHttpClient } from "./mcp-http-client.js";
@@ -37,7 +52,11 @@ export { Introspector } from "./introspector.js";
 export { ScrutinyFitter } from "./scrutiny-fitter.js";
 export { ScrutinyPanel } from "./scrutiny-panel.js";
 export { SpecialistRouter } from "./specialist-router.js";
-export { MemorySystem } from "./memory-system.js";
+export {
+  DEFAULT_CURATED_MEMORY_MAX_CHARS,
+  MemoryCapacityError,
+  MemorySystem
+} from "./memory-system.js";
 export { AnthropicProvider, createModelProvider, DeterministicModelProvider, OpenAIResponsesProvider } from "./model-provider.js";
 export { ModelRouter, TASK_PROFILES, TIERS, renderModelPlan } from "./model-router.js";
 export { PropagationController } from "./propagation-controller.js";

@@ -30,6 +30,9 @@
 // produced in its assistant text turn alongside the tool call — captured
 // via a separate `reasoning` param that the agent is instructed to fill.
 
+import { redactKnownValues } from "../redact.js";
+import { secretRedactionSpellings } from "../credential-redaction.js";
+
 const SAFETY_NOTE = "Computer use is experimental. Every action is logged with the reasoning you provide; the log is visible to the user. Input synthesis (click/type/key/scroll/move) is NOT available in this build — those calls are logged and then refused, so do not assume they succeed.";
 
 const EXECUTION_UNAVAILABLE = "computer-use input synthesis is not available in this build. The intent was recorded to the audit log but NOT performed. Do not assume the action succeeded.";
@@ -66,14 +69,25 @@ function computerNode() {
 }
 
 async function callNode(node, path, body, fetchImpl) {
-  const res = await fetchImpl(`${node.url}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...(node.token ? { authorization: `Bearer ${node.token}` } : {}) },
-    body: JSON.stringify(body ?? {})
-  });
+  const redactValues = secretRedactionSpellings(node.token);
+  let res;
+  try {
+    res = await fetchImpl(`${node.url}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(node.token ? { authorization: `Bearer ${node.token}` } : {}) },
+      body: JSON.stringify(body ?? {})
+    });
+  } catch (error) {
+    const message = redactKnownValues(
+      error?.message ?? String(error),
+      redactValues
+    );
+    throw new Error(message);
+  }
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `computer node HTTP ${res.status}`);
-  return json;
+  const safeJson = redactKnownValues(json, redactValues);
+  if (!res.ok) throw new Error(safeJson.error || `computer node HTTP ${res.status}`);
+  return safeJson;
 }
 
 /// Remove all computer-use tools from the registry. Caller is expected

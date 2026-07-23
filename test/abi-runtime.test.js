@@ -266,13 +266,17 @@ test("scheduled prompt fires through agent host and produces a reply", async () 
   assert.ok(fired.result.reply, "scheduled prompt should have a reply");
 });
 
-test("skills loader exposes bundled skills as tools", () => {
+test("skills loader exposes bundled skills via fixed-cost tools", () => {
   const runtime = createDefaultRuntime();
   assert.ok(runtime.skills, "runtime.skills should exist");
   const names = runtime.skills.list().map((s) => s.name);
   assert.ok(names.includes("recap"), "expected 'recap' skill bundled");
   const toolNames = runtime.tools.list().map((t) => t.name);
-  assert.ok(toolNames.some((n) => n.startsWith("skill_")), "expected at least one skill_* tool");
+  // Hermes-style tool economy: constant surface instead of one tool per skill.
+  for (const t of ["list_skills", "use_skill", "run_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill", "restore_skill"]) {
+    assert.ok(toolNames.includes(t), `expected ${t} tool`);
+  }
+  assert.ok(!toolNames.some((n) => n.startsWith("skill_")), "per-skill skill_* tools should be off by default (OPENAGI_SKILLS_AS_TOOLS=1 re-enables)");
 });
 
 test("budget guard records anthropic usage and computes USD", () => {
@@ -493,7 +497,7 @@ test("high-danger memory items resist compression and rank higher on tag-matched
   assert.match(hits[0].item.content, /hourglass/i);
 });
 
-test("memory condenser groups items by tag overlap and writes a principle to long-tier", async () => {
+test("memory condenser fallback writes a quarantined, decaying principle", async () => {
   const runtime = createDefaultRuntime();
   const tags = ["work", "standup"];
   for (let i = 0; i < 4; i += 1) {
@@ -502,13 +506,11 @@ test("memory condenser groups items by tag overlap and writes a principle to lon
       { tier: "medium" }
     );
   }
-  const before = runtime.memory.byTier("long").length;
   const result = await runtime.condenser.condense();
   assert.ok(result.principles >= 1, `expected at least one principle, got ${result.principles}`);
-  const after = runtime.memory.byTier("long");
-  assert.ok(after.length > before);
-  const principle = after.find((m) => m.kind === "principle");
+  const principle = runtime.memory.byTier("medium").find((m) => m.kind === "principle");
   assert.ok(principle);
+  assert.equal(principle.metadata.confidence, "low");
   assert.ok(principle.metadata.sources.length >= 3);
   assert.ok(principle.metadata.quarantineUntil);
 });
@@ -751,7 +753,7 @@ test("scrutiny fitter judge signal averages with correlation deltas", () => {
   assert.ok(runtime.scrutiny.judges.pragmatic.weights.evidence > before);
 });
 
-test("retiring a specialist with scoped memory creates a legacy principle in main", async () => {
+test("retiring a specialist with scoped memory creates a decaying legacy principle in main", async () => {
   const runtime = createDefaultRuntime();
   const r = runtime.propagation.propagate({
     signal: { domain: "general", taskType: "legacy", summary: "to-retire", repetition: 0.9 },
@@ -774,7 +776,7 @@ test("retiring a specialist with scoped memory creates a legacy principle in mai
     originSpecialistId: sp.id
   });
   assert.ok(result.principles >= 1);
-  const legacy = runtime.memory.byTier("long").find((m) => m.metadata?.originSpecialistId === sp.id);
+  const legacy = runtime.memory.byTier("medium").find((m) => m.metadata?.originSpecialistId === sp.id);
   assert.ok(legacy);
   assert.ok(legacy.tags.includes(`legacy:${sp.id}`));
   assert.equal(legacy.scope, "main");
@@ -1315,16 +1317,16 @@ test("McpRegistry persist: ${VAR} placeholder round-trips, raw key is rejected",
   assert.equal(onDisk.servers.stripe.apiKey, "${STRIPE_MCP_API_KEY}",
     "placeholder is preserved on disk, never the raw secret");
 
-  // A second registry constructed from the same configPath expands the
-  // placeholder against the current env when loadConfigFile runs.
+  // A second registry preserves the placeholder in memory too. Resolution is
+  // delayed until doConnect constructs the transport client.
   const r2 = new McpRegistry({
     dataDir: dir,
     configPath,
     permittedEnvKeys: new Set(["STRIPE_MCP_API_KEY"])
   });
   r2.loadConfigFile(configPath);
-  assert.equal(r2.servers.get("stripe").apiKey, "sk_test_round_trip",
-    "loaded registration expands ${VAR} from process.env");
+  assert.equal(r2.servers.get("stripe").apiKey, "${STRIPE_MCP_API_KEY}",
+    "loaded registration never places a raw secret in registry state");
 
   // Raw bearer is refused — would otherwise leak into mcp.json.
   assert.throws(
@@ -1335,7 +1337,7 @@ test("McpRegistry persist: ${VAR} placeholder round-trips, raw key is rejected",
       auth: "bearer",
       apiKey: "sk_live_real_secret_here"
     }),
-    /refusing to persist a literal apiKey/
+    /refusing a literal apiKey/
   );
 
   fs.rmSync(dir, { recursive: true });
@@ -1369,15 +1371,20 @@ test("McpRegistry allowEnvKey extends the in-memory permitted set", async () => 
     auth: "bearer",
     apiKey: "${POSTHOG_MCP_API_KEY}"
   });
-  assert.equal(ok.apiKey, "phx_test");
+  assert.equal(ok.apiKey, "${POSTHOG_MCP_API_KEY}");
 
   fs.rmSync(dir, { recursive: true });
   delete process.env.POSTHOG_MCP_API_KEY;
 });
 
-test("ToolRegistry: needsConfirmation gate queues action instead of running", async () => {
+test("ToolRegistry: needsConfirmation gate suspends until a decision", async () => {
   const { ToolRegistry } = await import("../src/tool-registry.js");
   const { PendingActionStore } = await import("../src/pending-actions.js");
+  // This test asserts QUEUE semantics, so pin auto-approve off locally —
+  // it must pass in both the default and the prod-policy (auto-approve=1) lane.
+  const savedAA = process.env.OPENAGI_AUTO_APPROVE;
+  process.env.OPENAGI_AUTO_APPROVE = "0";
+  try {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-pending-"));
   const pending = new PendingActionStore({ dir });
   const tools = new ToolRegistry();
@@ -1392,18 +1399,19 @@ test("ToolRegistry: needsConfirmation gate queues action instead of running", as
     handler: async (args) => { ran++; return { didIt: args.x }; }
   });
 
-  // Without __confirmed, the call queues instead of running.
-  const queued = await tools.invoke("do_thing", { x: 42 }, { sessionId: "s1" });
+  // Without __confirmed, the call queues and remains suspended.
+  const queued = tools.invoke("do_thing", { x: 42 }, { sessionId: "s1" });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(ran, 0, "handler did not execute");
-  assert.equal(queued.ok, true);
-  assert.equal(queued.result.status, "awaiting_confirmation");
-  assert.equal(queued.result.summary, "Do thing with 42");
 
   const list = pending.list({ status: "pending" });
   assert.equal(list.length, 1);
   assert.equal(list[0].toolName, "do_thing");
   assert.equal(list[0].args.x, 42);
   assert.equal(list[0].context.sessionId, "s1");
+  assert.equal(list[0].summary, "Do thing with 42");
+  pending.decide(list[0].id, { decision: "deny", decidedBy: "test" });
+  assert.equal((await queued).ok, false);
 
   // With __confirmed, it bypasses the queue and runs.
   const ok = await tools.invoke("do_thing", { x: 99 }, { __confirmed: true });
@@ -1411,6 +1419,10 @@ test("ToolRegistry: needsConfirmation gate queues action instead of running", as
   assert.deepEqual(ok.result, { didIt: 99 });
 
   fs.rmSync(dir, { recursive: true });
+  } finally {
+    if (savedAA === undefined) delete process.env.OPENAGI_AUTO_APPROVE;
+    else process.env.OPENAGI_AUTO_APPROVE = savedAA;
+  }
 });
 
 test("PendingActionStore: enqueue + decide + replay across instances", async () => {
@@ -2209,7 +2221,7 @@ test("register_mcp_server.summarize: short stdio doesn't add ellipsis", async ()
   assert.match(summary, /server-filesystem/);
 });
 
-test("connect_catalog_mcp.summarize: with apiKey shows prefix to detect substitution", async () => {
+test("connect_catalog_mcp never accepts or summarizes a secret value", async () => {
   const { ToolRegistry, registerCoreTools } = await import("../src/tool-registry.js");
   const fakeRuntime = {
     memory: { remember: () => ({}), retrieve: () => [] },
@@ -2230,15 +2242,15 @@ test("connect_catalog_mcp.summarize: with apiKey shows prefix to detect substitu
 
   const tool = registry.get("connect_catalog_mcp");
   assert.ok(tool.summarize, "connect_catalog_mcp has summarize");
+  assert.equal(tool.parameters.properties.apiKey, undefined);
 
-  // Without apiKey — plain summary.
   const noKey = tool.summarize({ catalogId: "stripe" });
   assert.equal(noKey, "Connect MCP: stripe");
 
-  // With apiKey — first 8 chars shown so user can detect a substituted key.
-  const withKey = tool.summarize({ catalogId: "stripe", apiKey: "sk_live_realkey123" });
-  assert.match(withKey, /sk_live_/, "first 8 chars of key appear in summary");
-  assert.doesNotMatch(withKey, /realkey123/, "rest of key is not shown");
+  const canary = "sk_live_never_reach_the_model";
+  const withUnexpectedKey = tool.summarize({ catalogId: "stripe", apiKey: canary });
+  assert.equal(withUnexpectedKey, "Connect MCP: stripe");
+  assert.doesNotMatch(withUnexpectedKey, new RegExp(canary, "u"));
 });
 
 test("ToolRegistry.invoke: gated tool's summary persists through to pending action", async () => {
@@ -2249,6 +2261,11 @@ test("ToolRegistry.invoke: gated tool's summary persists through to pending acti
   const { PendingActionStore } = await import("../src/pending-actions.js");
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-summary-"));
+  // Queue-semantics test — pin auto-approve off so it holds in the
+  // prod-policy lane (OPENAGI_AUTO_APPROVE=1) too.
+  const savedAA = process.env.OPENAGI_AUTO_APPROVE;
+  process.env.OPENAGI_AUTO_APPROVE = "0";
+  try {
   const pending = new PendingActionStore({ dir: tmp });
   const registry = new ToolRegistry();
   registry.bindPendingActions(pending);
@@ -2258,18 +2275,23 @@ test("ToolRegistry.invoke: gated tool's summary persists through to pending acti
   };
   registerCoreTools(registry, fakeRuntime);
 
-  const result = await registry.invoke("register_mcp_server", {
+  const invocation = registry.invoke("register_mcp_server", {
     name: "innocuous-looking",
     transport: "stdio",
     command: "docker",
     args: ["run", "--rm", "-v", "/:/host", "alpine"]
   }, { sessionId: "test" });
-
-  assert.equal(result.result.status, "awaiting_confirmation");
-  const queued = pending.get(result.result.actionId);
+  await new Promise((resolve) => setImmediate(resolve));
+  const queued = pending.list({ status: "pending" })[0];
   assert.match(queued.summary, /docker/, "queued summary exposes command");
   assert.match(queued.summary, /-v/, "queued summary exposes mount arg");
+  pending.decide(queued.id, { decision: "deny", decidedBy: "test" });
+  await invocation;
   fs.rmSync(tmp, { recursive: true });
+  } finally {
+    if (savedAA === undefined) delete process.env.OPENAGI_AUTO_APPROVE;
+    else process.env.OPENAGI_AUTO_APPROVE = savedAA;
+  }
 });
 
 test("approval cards: args render with <details open> by default (C4 regression)", async () => {
@@ -2375,8 +2397,9 @@ test("McpRegistry: stdio args get ${VAR} expansion (statsig mcp-remote bridge)",
     args: ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=${STATSIG_API_KEY}"]
   });
 
-  // Expanded form is what gets handed to the spawn — secret resolved.
-  assert.deepEqual(reg.args, ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=secret-statsig-key"]);
+  // Registry state keeps the placeholder. The client receives the resolved
+  // form only when doConnect constructs it.
+  assert.deepEqual(reg.args, ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=${STATSIG_API_KEY}"]);
 
   // Persisted form keeps the placeholder so the secret never lands on disk.
   const onDisk = JSON.parse(fs.readFileSync(path.join(tmpDir, "mcp.json"), "utf8"));

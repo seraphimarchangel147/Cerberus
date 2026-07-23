@@ -6,7 +6,7 @@ import { resolveDataDir } from "./data-dir.js";
 
 export class FileBackedCronScheduler extends CronScheduler {
   constructor(options = {}) {
-    super();
+    super(options);
     this.storePath = options.storePath ?? path.join(resolveDataDir(), "cron", "jobs.json");
     ensureDir(path.dirname(this.storePath));
     // { runningJobId, startedAt } while a job handler is executing; persisted
@@ -16,6 +16,7 @@ export class FileBackedCronScheduler extends CronScheduler {
     // Consumed once at boot via consumeInterruption().
     this._interrupted = null;
     if (options.autoLoad !== false) this.load();
+    if (this.modelResolver) this.bindModelResolver(this.modelResolver, { backfill: true });
   }
 
   load() {
@@ -76,6 +77,10 @@ export class FileBackedCronScheduler extends CronScheduler {
   // save() if this was the last job — before a crash could observe the gap.
   noteJobEnd() {
     this.running = null;
+  }
+
+  _modelPinsChanged() {
+    this.save();
   }
 
   // Boot note: return the marker left by a process that died mid-job (or

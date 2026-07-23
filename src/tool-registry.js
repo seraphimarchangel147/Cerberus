@@ -1,9 +1,19 @@
-import { createId, nowIso } from "./utils.js";
-import { resolveDataDir } from "./data-dir.js";
+import { createId, nowIso, tokenOverlapScore } from "./utils.js";
+import { HookRegistry } from "./hook-registry.js";
+import { sanitizeForAudit } from "./redact.js";
+import { validateMcpServerSpec } from "./mcp-registry.js";
+
+const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
+const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
+const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 
 export class ToolRegistry {
-  constructor() {
+  constructor(options = {}) {
     this.tools = new Map();
+    // Hermes's "always" choice is intentionally bounded to one live session.
+    // Keeping it in memory guarantees a daemon restart clears every allowance.
+    this.sessionAllows = new Set();
+    this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
   }
 
   register(tool) {
@@ -15,9 +25,11 @@ export class ToolRegistry {
       parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
       source: tool.source ?? "internal",
       handler: tool.handler,
-      // When true, invoke() queues a pending-action and returns
-      // {status:"awaiting_confirmation"} instead of running. The action is
-      // surfaced in the dashboard for the user to approve/deny.
+      // Synchronous input validation that runs before observers, hooks,
+      // summaries, or durable approval records can see the arguments.
+      preflight: typeof tool.preflight === "function" ? tool.preflight : null,
+      // When true, invoke() queues a pending action and suspends until the
+      // user approves, denies, or the bounded approval window expires.
       needsConfirmation: Boolean(tool.needsConfirmation),
       // Short human-readable summary used in the approval UI when the args
       // alone don't describe the action well. Optional fn(args) -> string.
@@ -39,6 +51,24 @@ export class ToolRegistry {
     this.pendingActions = pendingActions;
   }
 
+  bindCheckpoints(checkpoints) {
+    this.checkpoints = checkpoints;
+  }
+
+  bindHooks(hooks) {
+    this.hooks = hooks ?? new HookRegistry({ loadConfig: false });
+  }
+
+  allowForSession(sessionId, toolName) {
+    if (!sessionId || !toolName) return false;
+    this.sessionAllows.add(sessionAllowKey(sessionId, toolName));
+    return true;
+  }
+
+  isAllowedForSession(sessionId, toolName) {
+    return Boolean(sessionId && toolName && this.sessionAllows.has(sessionAllowKey(sessionId, toolName)));
+  }
+
   unregister(name) {
     return this.tools.delete(name);
   }
@@ -52,7 +82,7 @@ export class ToolRegistry {
   }
 
   list({ readOnly = false } = {}) {
-    const all = [...this.tools.values()].map(({ handler, ...rest }) => rest);
+    const all = [...this.tools.values()].map(({ handler, preflight, ...rest }) => rest);
     return readOnly ? all.filter((tool) => !tool.sideEffects) : all;
   }
 
@@ -60,33 +90,65 @@ export class ToolRegistry {
   // provider's limit. A handful of large MCP servers (e.g. PostHog ~118 tools)
   // can push the total past ~250, which makes the OpenAI Responses API reject
   // EVERY call with a server_error. Core/internal tools are always advertised;
-  // MCP tools fill the remaining budget, whole servers at a time (smallest
-  // first, so many small integrations beat one giant one). Anything not
+    // MCP tools fill the remaining budget at per-tool granularity, rotating
+    // across servers so one giant integration cannot crowd out every peer. Anything not
   // advertised is STILL invokable via run_mcp_tool + discoverable via
   // list_mcp_tools — no capability is lost, just the direct function affordance.
   _modelToolList(options = {}) {
-    const all = this.list(options);
+    const listed = this.list(options);
+    // `only` narrows what the model sees; it never removes tools from the
+    // registry or changes invoke-time policy. Leaving it unset preserves the
+    // existing hot path byte-for-byte at the API boundary.
+    const all = Array.isArray(options.only)
+      ? listed.filter((tool) => options.only.includes(tool.name))
+      : listed;
     const max = Number(process.env.OPENAGI_MAX_MODEL_TOOLS) || 128;
-    if (all.length <= max) return all;
+    if (all.length <= max) {
+      this._lastToolOverflow = null;
+      return all;
+    }
     const core = all.filter((t) => t.source !== "mcp");
     const mcp = all.filter((t) => t.source === "mcp");
-    const budget = Math.max(0, max - core.length);
+    const selectedCore = core.slice(0, max);
+    const budget = Math.max(0, max - selectedCore.length);
     const byServer = new Map();
     for (const t of mcp) {
       const s = t.metadata?.server ?? "?";
       if (!byServer.has(s)) byServer.set(s, []);
       byServer.get(s).push(t);
     }
-    const servers = [...byServer.entries()].sort((a, b) => a[1].length - b[1].length);
+    const servers = [...byServer.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     const picked = [];
-    const advertised = [];
-    const overflow = [];
-    for (const [name, tools] of servers) {
-      if (picked.length + tools.length <= budget) { picked.push(...tools); advertised.push(name); }
-      else overflow.push(`${name}(${tools.length})`);
+    let cursor = 0;
+    while (picked.length < budget && servers.some(([, tools]) => cursor < tools.length)) {
+      for (const [, tools] of servers) {
+        if (picked.length >= budget) break;
+        if (cursor < tools.length) picked.push(tools[cursor]);
+      }
+      cursor += 1;
     }
-    this._logToolCap(all.length, max, advertised, overflow);
-    return [...core, ...picked];
+    const pickedNames = new Set(picked.map((tool) => tool.name));
+    const overflow = servers
+      .map(([name, tools]) => ({ name, count: tools.filter((tool) => !pickedNames.has(tool.name)).length }))
+      .filter((entry) => entry.count > 0);
+    const omittedCore = Math.max(0, core.length - selectedCore.length);
+    this._lastToolOverflow = {
+      total: all.length,
+      max,
+      omitted: overflow.reduce((sum, entry) => sum + entry.count, omittedCore),
+      omittedCore,
+      servers: overflow
+    };
+    this._logToolCap(all.length, max, servers.map(([name]) => name), overflow.map((entry) => `${entry.name}(${entry.count})`));
+    return [...selectedCore, ...picked];
+  }
+
+  modelToolOverflowNotice() {
+    const overflow = this._lastToolOverflow;
+    if (!overflow?.omitted) return null;
+    const servers = overflow.servers.slice(0, 6).map((entry) => `${entry.name}:${entry.count}`).join(", ");
+    const core = overflow.omittedCore ? `; ${overflow.omittedCore} core tools also omitted` : "";
+    return `Tool catalog cap: ${overflow.omitted} tools are not advertised directly (${servers || "MCP overflow"}${core}). Use searcmcp_tools to find them, then run_mcp_tool to invoke them.`;
   }
 
   // Surface what got capped (once per distinct overflow set) — never silently
@@ -119,12 +181,28 @@ export class ToolRegistry {
   // notifications so channels (Discord live status) can render what the
   // agent is doing in real time. context.__onToolEvent is advisory and
   // best-effort — a throwing observer must never break a tool call.
-  async invoke(name, args, context = {}) {
+  async invoke(name, args, context = {}, internalToken = null) {
+    const tool = this.tools.get(name);
+    if (tool?.preflight) {
+      try {
+        const result = tool.preflight(args ?? {}, context);
+        if (result && typeof result.then === "function") {
+          throw new TypeError(`Tool ${name} preflight must be synchronous.`);
+        }
+      } catch (error) {
+        return { ok: false, error: error?.message ?? String(error) };
+      }
+    }
     const notify = typeof context?.__onToolEvent === "function" ? context.__onToolEvent : null;
     if (notify) {
       try { notify({ phase: "start", name, args }); } catch { /* observer must not break tools */ }
     }
-    const outcome = await this._invokeGated(name, args, context);
+    const outcome = await this._invokeGated(
+      name,
+      args,
+      context,
+      internalToken === PRE_TOOL_HOOKS_PASSED
+    );
     if (notify) {
       try {
         notify({
@@ -139,7 +217,98 @@ export class ToolRegistry {
     return outcome;
   }
 
-  async _invokeGated(name, args, context = {}) {
+  async _suspendForApproval(action, name, args, context, { preToolHooksPassed = false } = {}) {
+    // Lightweight store doubles used by embedders may only implement the old
+    // queue API. Preserve that contract while the real store provides the
+    // Hermes-style suspend/resume rail.
+    if (typeof this.pendingActions?.waitForDecision !== "function") {
+      return {
+        ok: true,
+        result: {
+          status: "awaiting_confirmation",
+          actionId: action.id,
+          summary: action.summary,
+          message: "Queued for human approval."
+        }
+      };
+    }
+
+    try {
+      context?.__onToolEvent?.({
+        phase: "awaiting-approval",
+        actionId: action.id,
+        toolName: name,
+        summary: action.summary
+      });
+    } catch {
+      // Approval progress is advisory; the durable queue is authoritative.
+    }
+
+    const configured = Number(process.env.OPENAGI_APPROVAL_TIMEOUT_MS);
+    const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 300000;
+    const decision = await this.pendingActions.waitForDecision(action.id, {
+      timeoutMs,
+      signal: context?.__abortSignal
+    });
+    if (decision.decision === "approve") {
+      // A legacy approval surface may already have executed before deciding.
+      // Honor its recorded completion rather than replaying the side effect.
+      if (decision.completed) {
+        return decision.error
+          ? { ok: false, error: decision.error }
+          : { ok: true, result: decision.result };
+      }
+      if (context?.__abortSignal?.aborted) {
+        const error = "turn ended before the approved action could resume";
+        this.pendingActions.complete?.(action.id, { result: null, error });
+        return { ok: false, error };
+      }
+      const invokeResult = await this.invoke(
+        name,
+        args,
+        {
+          ...(context ?? {}),
+          __confirmed: true,
+          __approval: {
+            description: action.reason ?? "flagged as dangerous",
+            via: decision.approvedVia ?? "pending-action",
+            decider: decision.decider ?? decision.decidedBy ?? "user"
+          }
+        },
+        preToolHooksPassed ? PRE_TOOL_HOOKS_PASSED : null
+      );
+      this.pendingActions.complete?.(action.id, {
+        result: invokeResult.ok ? invokeResult.result : null,
+        error: invokeResult.ok ? null : invokeResult.error
+      });
+      return invokeResult;
+    }
+    if (decision.decision === "timeout") {
+      this.pendingActions.decide?.(action.id, {
+        decision: "deny",
+        decidedBy: "timeout",
+        error: "approval timed out"
+      });
+      return {
+        ok: false,
+        error: `Action ${action.id} timed out awaiting approval after ${Math.round(timeoutMs / 1000)}s.`
+      };
+    }
+    if (decision.decision === "cancelled") {
+      this.pendingActions.decide?.(action.id, {
+        decision: "deny",
+        decidedBy: "turn-cancelled",
+        error: "turn ended while awaiting approval"
+      });
+      return { ok: false, error: `Action ${action.id} cancelled because the turn ended while awaiting approval.` };
+    }
+    return {
+      ok: false,
+      error: `Action ${action.id} denied by ${decision.decidedBy ?? "human"}${decision.error ? `: ${decision.error}` : "."}`
+    };
+  }
+
+  async _invokeGated(name, args, context = {}, preToolHooksPassed = false) {
     const tool = this.tools.get(name);
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
@@ -173,13 +342,82 @@ export class ToolRegistry {
         error: `Tool ${name} is blocked this turn: scrutiny verdict 'watch' permits read-only tools only.`
       };
     }
+    const sessionAllowed = this.isAllowedForSession(context?.sessionId, name);
+    if (!preToolHooksPassed) {
+      let hookDecision = { action: "allow" };
+      try {
+        hookDecision = await this.hooks?.beforeToolCall?.(
+          buildHookPayload({ name, args, context, tool, sessionAllowed })
+        ) ?? hookDecision;
+      } catch (error) {
+        console.warn(`[hooks] pre_tool_call registry failed open: ${error?.message ?? String(error)}`);
+      }
+      if (hookDecision?.action === "block") {
+        if (isTrustedCatastrophicBlock(hookDecision)) {
+          const reason = hookDecision.reason ?? hookDecision.message ?? "catastrophic policy veto";
+          if (!this.pendingActions) {
+            return { ok: false, error: `Catastrophic tool call requires human approval: ${reason}` };
+          }
+          const baseSummary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
+          const summary = `${baseSummary ?? `Run ${name}`} [CATASTROPHIC: ${reason}]`;
+          const action = this.pendingActions.enqueue({
+            toolName: name,
+            args,
+            context,
+            summary,
+            reason,
+            severity: "catastrophic"
+          });
+          return this._suspendForApproval(action, name, args, context);
+        }
+        const error = hookDecision.message ?? `Tool ${name} was blocked by a pre_tool_call hook.`;
+        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+          ok: false,
+          error,
+          blocked: true,
+          dispatched: false,
+          blockedBy: hookDecision.blockedBy ?? null
+        });
+        return { ok: false, error };
+      }
+      preToolHooksPassed = true;
+    }
+
     // Confirmation gate. When set, divert the call into the pending-action
     // queue UNLESS context.__confirmed is true (which the approve endpoint
     // sets after a human OKs the action). Scrutiny 'ask' turns extend this
     // to EVERY side-effecting tool, not just the always-gated ones.
     const scrutinyConfirm = context?.__scrutinyPolicy === "confirm" && tool.sideEffects;
-    if ((tool.needsConfirmation || scrutinyConfirm) && !context?.__confirmed && this.pendingActions) {
+    if ((tool.needsConfirmation || scrutinyConfirm) && !context?.__confirmed && !sessionAllowed && this.pendingActions) {
       const summary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
+      // Auto-approve mode (Story: hands-free operation). When enabled the
+      // gate still records the action for the audit trail, but runs the
+      // handler immediately instead of parking it in the queue. Toggle via
+      // POST /auto-approve, /autoapprove Discord command, or
+      // OPENAGI_AUTO_APPROVE in .env. Default is ON — only an explicit
+      // "0"/"false" disables it.
+      if (autoApproveEnabled()) {
+        const action = this.pendingActions.enqueue({
+          toolName: name,
+          args,
+          context,
+          summary,
+          reason: context.__reason ?? null
+        });
+        const invokeResult = await this.invoke(
+          name,
+          args,
+          { ...(context ?? {}), __confirmed: true },
+          PRE_TOOL_HOOKS_PASSED
+        );
+        this.pendingActions.decide?.(action.id, {
+          decision: "approve",
+          decidedBy: "auto-approve",
+          result: invokeResult.ok ? invokeResult.result : null,
+          error: invokeResult.ok ? null : invokeResult.error
+        });
+        return invokeResult;
+      }
       const action = this.pendingActions.enqueue({
         toolName: name,
         args,
@@ -187,33 +425,255 @@ export class ToolRegistry {
         summary,
         reason: context.__reason ?? null
       });
-      return {
-        ok: true,
-        result: {
-          status: "awaiting_confirmation",
-          actionId: action.id,
-          summary: action.summary,
-          message: `Queued for human approval. Visit the dashboard's Approvals tab (or run /pending-actions) to approve or deny.`
-        }
-      };
+      return this._suspendForApproval(action, name, args, context, { preToolHooksPassed });
     }
+    const startedAt = Date.now();
+    let dispatched = false;
     try {
+      await this.checkpoints?.beforeToolCall?.({
+        toolName: name,
+        args: args ?? {},
+        context
+      });
+      dispatched = true;
       const result = await tool.handler(args ?? {}, context);
-      return { ok: true, result };
+      this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+        ok: true,
+        result,
+        dispatched,
+        durationMs: Date.now() - startedAt
+      });
+      return { ok: true, result: appendApprovalNote(result, context?.__approval) };
     } catch (error) {
+      this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+        ok: false,
+        error: error.message ?? String(error),
+        dispatched,
+        durationMs: Date.now() - startedAt
+      });
       return { ok: false, error: error.message ?? String(error) };
     }
   }
+
+  _notifyPostToolCall(base, outcome) {
+    try {
+      this.hooks?.notify?.("post_tool_call", {
+        ...buildHookPayload(base),
+        ...sanitizeForAudit(outcome)
+      });
+    } catch {
+      // Observer hooks are advisory and never alter a tool result.
+    }
+  }
+}
+
+function buildHookPayload({ name, args, context = {}, tool, sessionAllowed }) {
+  return {
+    toolName: name,
+    args: sanitizeForAudit(args ?? {}),
+    sessionId: context?.sessionId ?? null,
+    turnId: context?.__turnId ?? context?.turnId ?? null,
+    agentId: context?.agentId ?? null,
+    channel: context?.channel ?? null,
+    from: context?.from ?? null,
+    cwd: args?.cwd ?? null,
+    sideEffects: tool?.sideEffects !== false,
+    needsConfirmation: Boolean(tool?.needsConfirmation),
+    confirmed: context?.__confirmed === true,
+    sessionAllowed: Boolean(sessionAllowed)
+  };
+}
+
+function isTrustedCatastrophicBlock(decision) {
+  return decision?.blockedBy === "catastrophic-policy"
+    && decision?.blockedTier === "gateway"
+    && decision?.builtin === true;
 }
 
 function safeSummarize(fn, args) {
   try { return String(fn(args ?? {})).slice(0, 240); } catch { return null; }
 }
 
+function sessionAllowKey(sessionId, toolName) {
+  return `${String(sessionId)}\u0000${String(toolName)}`;
+}
+
+function appendApprovalNote(result, approval) {
+  if (!approval) return result;
+  const description = approval.description ?? "flagged as dangerous";
+  const approvalNote = `Command required approval (${description}) and was approved by the user.`;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    return { ...result, approvalNote };
+  }
+  return { value: result ?? null, approvalNote };
+}
+
+function externalMemoryIdentity(context = {}) {
+  const channel = identityPart(context?.channel, "agent");
+  const owner = identityPart(
+    context?.from ?? context?.userId ?? context?.agentId,
+    "default"
+  );
+  return {
+    userId: `${channel}:${owner}`,
+    observerId: identityPart(context?.agentId, "main")
+  };
+}
+
+async function invokeExternalMemory(provider, method, args, upstreamSignal = null) {
+  if (!provider) {
+    return {
+      enabled: false,
+      value: null,
+      status: null
+    };
+  }
+
+  const providerName = externalMemoryProviderName(provider);
+  if (typeof provider[method] !== "function") {
+    return {
+      enabled: true,
+      value: null,
+      status: {
+        status: "error",
+        provider: providerName,
+        error: `External memory provider does not implement ${method}.`
+      }
+    };
+  }
+
+  const configuredTimeout = Number(provider.timeoutMs);
+  const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? Math.min(Math.floor(configuredTimeout), EXTERNAL_MEMORY_MAX_TIMEOUT_MS)
+    : EXTERNAL_MEMORY_TIMEOUT_MS;
+  const timeoutCode = "EXTERNAL_MEMORY_TIMEOUT";
+  const cancelledCode = "EXTERNAL_MEMORY_CANCELLED";
+  const controller = new AbortController();
+  if (upstreamSignal?.aborted) {
+    return {
+      enabled: true,
+      value: null,
+      status: {
+        status: "cancelled",
+        provider: providerName,
+        error: "External memory request was cancelled."
+      }
+    };
+  }
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const error = new Error(`External memory request timed out after ${timeoutMs}ms.`);
+      error.code = timeoutCode;
+      reject(error);
+    }, timeoutMs);
+  });
+  let onUpstreamAbort;
+  const cancelled = upstreamSignal
+    ? new Promise((_, reject) => {
+      onUpstreamAbort = () => {
+        controller.abort(upstreamSignal.reason);
+        const error = new Error("External memory request was cancelled.");
+        error.code = cancelledCode;
+        reject(error);
+      };
+      upstreamSignal.addEventListener("abort", onUpstreamAbort, { once: true });
+    })
+    : null;
+
+  try {
+    const requests = [
+      Promise.resolve().then(() => provider[method]({
+        ...args,
+        signal: controller.signal
+      })),
+      timeout
+    ];
+    if (cancelled) requests.push(cancelled);
+    const value = await Promise.race(requests);
+    return {
+      enabled: true,
+      value,
+      status: {
+        status: "ok",
+        provider: externalMemoryProviderName(provider, value)
+      }
+    };
+  } catch (error) {
+    const timedOut = error?.code === timeoutCode;
+    const cancelledRequest = error?.code === cancelledCode;
+    return {
+      enabled: true,
+      value: null,
+      status: {
+        status: timedOut ? "timeout" : cancelledRequest ? "cancelled" : "error",
+        provider: providerName,
+        error: timedOut
+          ? `External memory request timed out after ${timeoutMs}ms.`
+          : cancelledRequest
+            ? "External memory request was cancelled."
+            : "External memory provider request failed."
+      }
+    };
+  } finally {
+    clearTimeout(timer);
+    if (onUpstreamAbort) {
+      upstreamSignal.removeEventListener("abort", onUpstreamAbort);
+    }
+  }
+}
+
+function identityPart(value, fallback) {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function externalMemoryProviderName(provider, result = null) {
+  const name = result?.provider ?? provider?.provider ?? provider?.name ?? "external";
+  const safe = String(sanitizeForAudit(String(name))).trim();
+  return /^[A-Za-z0-9._-]{1,64}$/.test(safe) ? safe : "external";
+}
+
+function externalUserModelValue(result) {
+  if (result == null) return null;
+  if (typeof result !== "object") return result;
+  return result.answer ?? result.model ?? result.userModel ?? null;
+}
+
+// Auto-approve gate check. Reads process.env each call (not cached) so the
+// /auto-approve toggle endpoint can flip it live without a restart.
+// DEFAULT ON: anything except an explicit "0"/"false"/"off" means enabled.
+export function autoApproveEnabled() {
+  const v = String(process.env.OPENAGI_AUTO_APPROVE ?? "1").trim().toLowerCase();
+  return !(v === "0" || v === "false" || v === "off");
+}
+
 export function registerCoreTools(registry, runtime) {
   registry.register({
+    name: "read_tool_output",
+    description: "Read a chunk of a large tool result that was elided from model context. Pass the ref shown in the truncation marker and increase offset to continue.",
+    sideEffects: false,
+    parameters: {
+      type: "object",
+      properties: {
+        ref: { type: "string", pattern: "^out_[a-f0-9]{16}$" },
+        offset: { type: "integer", minimum: 0 },
+        maxChars: { type: "integer", minimum: 1, maximum: 50000 }
+      },
+      required: ["ref"],
+      additionalProperties: false
+    },
+    handler: async ({ ref, offset, maxChars }) => {
+      if (!runtime.toolOutputs) throw new Error("Tool-output store is unavailable.");
+      return runtime.toolOutputs.read(ref, { offset, maxChars });
+    }
+  });
+
+  registry.register({
     name: "remember",
-    description: "Save a piece of information to long-lived memory so it can be recalled in future turns. Use when the user says 'remember', 'save', or shares a durable fact.",
+    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. The built-in memory is always written first and, when configured, the fact is also mirrored to the external user model. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
     parameters: {
       type: "object",
       properties: {
@@ -227,6 +687,13 @@ export function registerCoreTools(registry, runtime) {
           type: "string",
           enum: ["low", "normal", "high"],
           description: "Higher importance items resist decay and may promote to long-term memory."
+        },
+        replaceIds: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 20,
+          uniqueItems: true,
+          description: "Optional active curated memory IDs to atomically supersede with this consolidated note. Use after a capacity error."
         }
       },
       required: ["content"],
@@ -234,8 +701,11 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       const importance = args.importance ?? "normal";
+      const replaceIds = validateReplaceIds(args.replaceIds);
       const risk = importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45;
-      const scope = context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
       const item = runtime.memory.remember(
         {
           source: context.channel ?? "tool",
@@ -247,16 +717,45 @@ export function registerCoreTools(registry, runtime) {
           novelty: 0.55,
           metadata: { agentId: context.agentId, sessionId: context.sessionId }
         },
-        { source: "remember-tool", strength: importance === "high" ? 0.85 : 0.6 }
+        {
+          source: "remember-tool",
+          strength: importance === "high" ? 0.85 : 0.6,
+          capacityManaged: true,
+          replaceIds
+        }
       );
-      return { id: item.id, tier: item.tier, content: item.content };
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "setUserModel",
+        {
+          ...externalMemoryIdentity(context),
+          content: item.content,
+          metadata: {
+            type: "memory",
+            action: "remember",
+            tags: item.tags ?? [],
+            importance,
+            localMemoryId: item.id,
+            scope,
+            sessionId: context.sessionId ?? null
+          }
+        },
+        context?.__abortSignal
+      );
+      return {
+        id: item.id,
+        tier: item.tier,
+        content: item.content,
+        replaced: item.metadata?.replaces ?? [],
+        ...(external.enabled ? { externalMemory: external.status } : {})
+      };
     }
   });
 
   registry.register({
     name: "recall",
     sideEffects: false,
-    description: "Search memory for items related to a query. Returns the most relevant items across short, medium, and long-term memory.",
+    description: "Search built-in memory for items related to a query and, when configured, query the external cross-session user model too. Local items are always returned even if the external provider is unavailable. Only replaceable IDs are valid in remember.replaceIds.",
     parameters: {
       type: "object",
       properties: {
@@ -267,9 +766,19 @@ export function registerCoreTools(registry, runtime) {
       additionalProperties: false
     },
     handler: async (args, context) => {
-      const scope = context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
-      const hits = runtime.memory.retrieve(String(args.query ?? ""), { limit: args.limit ?? 5, scope });
-      return {
+      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
+      const effectiveScope = scope ?? "main";
+      const query = String(args.query ?? "");
+      const hits = runtime.memory.retrieve(query, { limit: args.limit ?? 5, scope });
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "queryUserModel",
+        { ...externalMemoryIdentity(context), query },
+        context?.__abortSignal
+      );
+      const response = {
         count: hits.length,
         items: hits.map(({ item, score }) => ({
           id: item.id,
@@ -278,6 +787,10 @@ export function registerCoreTools(registry, runtime) {
           tags: item.tags,
           content: item.content,
           kind: item.kind ?? "raw",
+          scope: item.scope ?? "main",
+          curated: item.metadata?.capacityManaged === true,
+          replaceable: item.metadata?.capacityManaged === true
+            && (item.scope ?? "main") === effectiveScope,
           // Confidence signals: fidelity ("specific" = precise, trust details),
           // strength (decays unless reinforced), locked (a user correction).
           fidelity: item.fidelity ?? "normal",
@@ -285,12 +798,20 @@ export function registerCoreTools(registry, runtime) {
           locked: Boolean(item.locked)
         }))
       };
+      if (!external.enabled) return response;
+      return {
+        ...response,
+        externalUserModel: external.status.status === "ok"
+          ? externalUserModelValue(external.value)
+          : null,
+        externalMemory: external.status
+      };
     }
   });
 
   registry.register({
     name: "correct_memory",
-    description: "Replace a stored memory that turned out to be WRONG. Hides the stale version from all future recall and locks in the corrected fact so the mistake never repeats. Use when the user corrects something previously stored or stated (a time, name, decision, preference) — do NOT just call remember with a second conflicting fact.",
+    description: "Replace a stored memory that turned out to be WRONG. The built-in correction commits first and, when configured, the corrected fact is mirrored to the external user model. Hides the stale version from all future recall and locks in the corrected fact so the mistake never repeats. Use when the user corrects something previously stored or stated (a time, name, decision, preference) - do NOT just call remember with a second conflicting fact.",
     parameters: {
       type: "object",
       properties: {
@@ -304,7 +825,9 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       if (!runtime.memory?.correct) return { error: "memory system does not support corrections" };
-      const scope = context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
       const result = runtime.memory.correct({
         id: args.id ?? null,
         query: args.query ?? null,
@@ -314,12 +837,31 @@ export function registerCoreTools(registry, runtime) {
         source: "correct-memory-tool",
         metadata: { agentId: context.agentId, sessionId: context.sessionId }
       });
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "setUserModel",
+        {
+          ...externalMemoryIdentity(context),
+          content: result.item.content,
+          metadata: {
+            type: "memory",
+            action: "correct",
+            tags: result.item.tags ?? [],
+            localMemoryId: result.item.id,
+            supersededIds: result.superseded.map((item) => item.id),
+            scope,
+            sessionId: context.sessionId ?? null
+          }
+        },
+        context?.__abortSignal
+      );
       return {
         id: result.item.id,
         tier: result.item.tier,
         content: result.item.content,
         supersededCount: result.superseded.length,
-        superseded: result.superseded.map((item) => ({ id: item.id, content: item.content.slice(0, 120) }))
+        superseded: result.superseded.map((item) => ({ id: item.id, content: item.content.slice(0, 120) })),
+        ...(external.enabled ? { externalMemory: external.status } : {})
       };
     }
   });
@@ -473,14 +1015,24 @@ export function registerCoreTools(registry, runtime) {
       type: "object",
       properties: {
         query: { type: "string", description: "Free-text search across past conversation messages." },
-        limit: { type: "integer", minimum: 1, maximum: 25, description: "Maximum results to return (default 8)." }
+        limit: { type: "integer", minimum: 1, maximum: 25, description: "Maximum results to return (default 8)." },
+        role: { type: "string", enum: ["user", "assistant", "tool"], description: "Optional exact message-role filter." },
+        sessionId: { type: "string", description: "Optional exact session id filter." },
+        since: { type: "string", description: "Optional inclusive ISO timestamp lower bound." },
+        until: { type: "string", description: "Optional inclusive ISO timestamp upper bound." }
       },
       required: ["query"],
       additionalProperties: false
     },
     handler: async (args) => {
       if (!runtime.sessionIndex) return { error: "no session index" };
-      const results = await runtime.sessionIndex.search(String(args.query ?? ""), { limit: args.limit ?? 8 });
+      const results = await runtime.sessionIndex.search(String(args.query ?? ""), {
+        limit: args.limit ?? 8,
+        role: args.role ?? null,
+        sessionId: args.sessionId ?? null,
+        since: args.since ?? null,
+        until: args.until ?? null
+      });
       return {
         count: results.length,
         results: results.map((r) => ({
@@ -562,6 +1114,42 @@ export function registerCoreTools(registry, runtime) {
   });
 
   registry.register({
+    name: "searcmcp_tools",
+    sideEffects: false,
+    description: "Search the complete MCP tool catalog by server, name, or description, including tools omitted from the direct model-tool cap.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Keyword or short phrase to search for." },
+        limit: { type: "integer", minimum: 1, maximum: 50 }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    handler: async ({ query, limit = 20 }) => {
+      const text = String(query ?? "").trim();
+      if (!text) return { query: text, count: 0, items: [] };
+      const items = (runtime.mcp?.listTools?.() ?? [])
+        .map((tool) => ({
+          tool,
+          score: tokenOverlapScore(text, `${tool.server} ${tool.name} ${tool.registeredName ?? ""} ${tool.description ?? ""}`)
+        }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score || String(a.tool.registeredName ?? a.tool.name).localeCompare(String(b.tool.registeredName ?? b.tool.name)))
+        .slice(0, Math.max(1, Math.min(50, Number(limit) || 20)))
+        .map(({ tool, score }) => ({
+          server: tool.server,
+          name: tool.name,
+          registeredName: tool.registeredName,
+          description: tool.description ?? "",
+          connected: Boolean(tool.connected),
+          score
+        }));
+      return { query: text, count: items.length, items };
+    }
+  });
+
+  registry.register({
     name: "run_mcp_tool",
     description: "Invoke a tool on a connected MCP server. Use this for any MCP tool that isn't available as a direct function (large servers like PostHog are reached this way). Call list_mcp_tools first if unsure of the exact server/tool name.",
     parameters: {
@@ -584,8 +1172,9 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "register_mcp_server",
-    description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with static API key), http+oauth (URL with browser-based OAuth). After registering, the user typically needs to call connect_mcp_server. THIS REQUIRES USER APPROVAL — registering an MCP can mean spawning an arbitrary process or contacting an arbitrary host. Prefer connect_catalog_mcp when the server is already in the curated catalog.",
+    description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with a ${VAR} secret reference), http+oauth (URL with browser-based OAuth). Store credentials through the authenticated secrets surface first; never pass a literal secret to this tool. After registering, the user typically needs to call connect_mcp_server. THIS REQUIRES USER APPROVAL - registering an MCP can mean spawning an arbitrary process or contacting an arbitrary host. Prefer connect_catalog_mcp when the server is already in the curated catalog.",
     needsConfirmation: true,
+    preflight: (args) => preflightRegisterMcpServer(args),
     // Summary is what shows in the menu-bar notification and dashboard
     // approval card header. Critically include the fields that determine
     // whether the action is dangerous: the stdio command + first few args,
@@ -604,7 +1193,11 @@ export function registerCoreTools(registry, runtime) {
         // http
         url: { type: "string", description: "http: MCP endpoint URL." },
         auth: { type: "string", enum: ["none", "bearer", "oauth"], description: "http: auth mode." },
-        apiKey: { type: "string", description: "http+bearer: API key. Use ${ENV_VAR} for env var expansion." },
+        apiKey: {
+          type: "string",
+          pattern: "^\\$\\{[A-Z_][A-Z0-9_]*\\}$",
+          description: "http+bearer: exact ${ENV_VAR} reference only. Add the value through /secrets or authenticated setup; never put the value here."
+        },
         clientId: { type: "string", description: "http+oauth: pre-registered client ID for servers without dynamic registration." },
         scope: { type: "string", description: "http+oauth: requested scopes." },
         trustLevel: { type: "string", enum: ["trusted", "untrusted"], description: "Default trusted." }
@@ -671,16 +1264,71 @@ export function registerCoreTools(registry, runtime) {
     handler: async () => runtime.cron.listJobs()
   });
 
+  // Resolve a cron job by exact id first, then by exact name, then by a
+  // unique case-insensitive name match. Returns { job } or { error } so the
+  // LLM gets an actionable message (e.g. "turn off nightly-qa" by name) rather
+  // than a silent no-op. Ambiguous name matches are refused, not guessed.
+  const resolveCronJob = (idOrName) => {
+    if (!runtime.cron) return { error: "Cron scheduler is not available." };
+    const needle = String(idOrName ?? "").trim();
+    if (!needle) return { error: "Provide a cron job id or name." };
+    const jobs = runtime.cron.listJobs();
+    const byId = jobs.find((j) => j.id === needle);
+    if (byId) return { job: byId };
+    const exactName = jobs.filter((j) => j.name === needle);
+    if (exactName.length === 1) return { job: exactName[0] };
+    const lower = needle.toLowerCase();
+    const ci = jobs.filter((j) => (j.name ?? "").toLowerCase() === lower || j.id.toLowerCase() === lower);
+    if (ci.length === 1) return { job: ci[0] };
+    if (ci.length > 1 || exactName.length > 1) {
+      return { error: `Ambiguous: "${needle}" matches ${(ci.length || exactName.length)} jobs. Use the exact id from list_cron_jobs.` };
+    }
+    return { error: `No cron job matches "${needle}". Use list_cron_jobs to see valid ids/names.` };
+  };
+
   registry.register({
     name: "cancel_cron_job",
-    description: "Remove a scheduled cron job by id. Use list_cron_jobs first to find the id.",
+    description: "Permanently DELETE a scheduled cron job by id or name. This is irreversible — to temporarily turn a job off (and keep the option to turn it back on), use set_cron_job_enabled instead. Use list_cron_jobs first to find the id/name.",
     parameters: {
       type: "object",
-      properties: { id: { type: "string" } },
+      properties: {
+        id: { type: "string", description: "The cron job id (preferred) or its exact name." }
+      },
       required: ["id"],
       additionalProperties: false
     },
-    handler: async (args) => ({ id: args.id, removed: runtime.cron.removeJob(args.id) })
+    handler: async (args) => {
+      const found = resolveCronJob(args.id);
+      if (found.error) return { id: args.id, removed: false, error: found.error };
+      const removed = runtime.cron.removeJob(found.job.id);
+      return { id: found.job.id, name: found.job.name, removed };
+    }
+  });
+
+  registry.register({
+    name: "set_cron_job_enabled",
+    description: "Turn a scheduled cron job OFF or ON without deleting it. Set enabled=false to pause a job (it stops firing but is preserved and can be re-enabled later); set enabled=true to resume it. This is the right tool when asked to 'turn off', 'pause', 'disable', 'stop', or 're-enable' a recurring job. Accepts the job id or its exact name. Use list_cron_jobs to see current jobs and their enabled state.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The cron job id (preferred) or its exact name." },
+        enabled: { type: "boolean", description: "false = turn off/pause; true = turn on/resume." }
+      },
+      required: ["id", "enabled"],
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      const found = resolveCronJob(args.id);
+      if (found.error) return { id: args.id, enabled: null, ok: false, error: found.error };
+      const job = runtime.cron.enableJob(found.job.id, Boolean(args.enabled));
+      return {
+        id: job.id,
+        name: job.name,
+        enabled: job.enabled,
+        nextRunAt: job.nextRunAt,
+        ok: true
+      };
+    }
   });
 
   registry.register({
@@ -689,6 +1337,66 @@ export function registerCoreTools(registry, runtime) {
     description: "Get a structural health snapshot of the runtime: specialist counts, memory tier saturation, outcome quality (7d/30d), upcoming cron jobs, MCP servers, and any actionable findings (warn/err severity). Use this when the user asks 'how are you doing' or 'what's wrong'.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     handler: async () => runtime.introspector?.audit() ?? { error: "no introspector" }
+  });
+
+  registry.register({
+    name: "list_checkpoints",
+    sideEffects: false,
+    description: "List recent file checkpoints for this session, including bounded diff previews. Checkpoints exist only when OPENAGI_CHECKPOINTS=1.",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 20 },
+        directory: { type: "string", description: "Optional directory filter." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (!runtime.checkpoints) return { enabled: false, checkpoints: [] };
+      const checkpoints = await runtime.checkpoints.list({
+        limit: args.limit ?? 10,
+        sessionId: context?.sessionId ?? null,
+        directory: args.directory ?? null
+      });
+      const withPreviews = await Promise.all(checkpoints.map(async (checkpoint) => ({
+        ...checkpoint,
+        preview: await runtime.checkpoints.preview(checkpoint.id)
+      })));
+      return {
+        enabled: true,
+        count: checkpoints.length,
+        checkpoints: withPreviews
+      };
+    }
+  });
+
+  registry.register({
+    name: "rollback",
+    needsConfirmation: true,
+    description: "Restore one file or every file in a checkpoint. Always inspect list_checkpoints first; rollback requires human confirmation.",
+    parameters: {
+      type: "object",
+      properties: {
+        checkpointId: { type: "string", description: "Checkpoint id from list_checkpoints." },
+        path: { type: "string", description: "Optional single file to restore; omit to restore the whole checkpoint." }
+      },
+      required: ["checkpointId"],
+      additionalProperties: false
+    },
+    summarize: (args) => `Rollback checkpoint ${args.checkpointId}${args.path ? ` file ${args.path}` : ""}`,
+    handler: async (args, context) => {
+      if (!runtime.checkpoints) throw new Error("Checkpoints are disabled. Set OPENAGI_CHECKPOINTS=1 and restart.");
+      const result = await runtime.checkpoints.rollback(args.checkpointId, {
+        path: args.path ?? null,
+        decidedBy: context?.__approval?.decider
+          ?? context?.__approval?.decidedBy
+          ?? context?.from
+          ?? "user",
+        ...(context?.sessionId != null ? { sessionId: context.sessionId } : {})
+      });
+      if (!result) throw new Error(`Checkpoint not found: ${args.checkpointId}`);
+      return result;
+    }
   });
 
   registry.register({
@@ -719,7 +1427,11 @@ export function registerCoreTools(registry, runtime) {
       // Persist
       try {
         const { saveEnv } = await import("./setup-wizard.js");
-        saveEnv({ values: { OPENAGI_PROVIDER: args.preference } });
+        saveEnv({
+          values: { OPENAGI_PROVIDER: args.preference },
+          store: runtime.secrets,
+          decidedBy: "agent:set_provider"
+        });
       } catch { /* ignore */ }
       return {
         preference: args.preference,
@@ -839,7 +1551,16 @@ export function registerCoreTools(registry, runtime) {
       required: ["title"],
       additionalProperties: false
     },
-    handler: async (args) => runtime.tasks.addGoal(args)
+    handler: async (args, context) => {
+      const goal = runtime.tasks.addGoal(args);
+      const sessionId = context?.sessionId;
+      if (!sessionId || typeof runtime.goals?.activate !== "function") return goal;
+      const objective = goal.description
+        ? `${goal.title}: ${goal.description}`
+        : goal.title;
+      const goalMode = runtime.goals.activate(sessionId, { goalId: goal.id, objective });
+      return { ...goal, goalMode };
+    }
   });
 
   registry.register({
@@ -876,6 +1597,77 @@ export function registerCoreTools(registry, runtime) {
       additionalProperties: false
     },
     handler: async (args) => runtime.tasks.linkTaskToGoal(args.taskId, args.goalId)
+  });
+
+  registry.register({
+    name: "goal_status",
+    sideEffects: false,
+    description: "Show the persistent goal-mode state for this session, including status, turn budget, and the latest judge result.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "goal_status requires a session" };
+      if (typeof runtime.goals?.get !== "function") return { error: "goal store not available" };
+      const goal = runtime.goals.get(sessionId);
+      return goal ?? { sessionId, status: "none" };
+    }
+  });
+
+  registry.register({
+    name: "pause_goal",
+    description: "Pause automatic work on the active goal for this session without deleting its state.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Optional reason recorded in the goal audit trail." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "pause_goal requires a session" };
+      if (typeof runtime.goals?.pause !== "function") return { error: "goal store not available" };
+      return runtime.goals.pause(sessionId, args.reason ?? "paused-by-agent")
+        ?? { error: "no goal for this session" };
+    }
+  });
+
+  registry.register({
+    name: "resume_goal",
+    description: "Resume automatic work on the paused goal for this session, subject to its remaining turn budget.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Optional reason recorded in the goal audit trail." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "resume_goal requires a session" };
+      if (typeof runtime.goals?.resume !== "function") return { error: "goal store not available" };
+      return runtime.goals.resume(sessionId, args.reason ?? "resumed-by-agent")
+        ?? { error: "no goal for this session" };
+    }
+  });
+
+  registry.register({
+    name: "clear_goal",
+    description: "Clear goal mode for this session and stop automatic continuation. The persisted audit history is retained.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Optional reason recorded in the goal audit trail." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "clear_goal requires a session" };
+      if (typeof runtime.goals?.clear !== "function") return { error: "goal store not available" };
+      return runtime.goals.clear(sessionId, args.reason ?? "cleared-by-agent")
+        ?? { error: "no goal for this session" };
+    }
   });
 
   registry.register({
@@ -992,43 +1784,41 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "connect_catalog_mcp",
-    description: "One-click register an MCP server from the curated catalog by id. For bearer-auth entries (Stripe, PostHog, etc.), pass the user's API key via apiKey — it'll be persisted to .env under the entry's declared env var, then the MCP is registered with `${VAR}` indirection. For OAuth entries (Linear, Notion, GitHub), no key is needed; the OAuth handshake will surface in the dashboard's MCP tab. THIS REQUIRES USER APPROVAL — you'll get back {status:'awaiting_confirmation'} and the user must approve via the dashboard before the registration actually runs.",
+    description: "One-click register an MCP server from the curated catalog by id. Bearer credentials must already be stored through the authenticated /secrets, Discord modal, or setup surface; this tool never accepts or returns secret values. For OAuth entries (Linear, Notion, GitHub), the handshake will surface in the dashboard's MCP tab. THIS REQUIRES USER APPROVAL - the user must approve through the normal approval surface before registration runs.",
+    preflight: (args) => preflightConnectCatalogMcp(args),
     parameters: {
       type: "object",
       properties: {
-        catalogId: { type: "string", description: "Catalog entry id (see list_mcp_catalog)." },
-        apiKey: { type: "string", description: "Required for bearer-auth entries when their env var isn't already populated. Never invent — only pass a key the user has explicitly given you." }
+        catalogId: { type: "string", description: "Catalog entry id (see list_mcp_catalog)." }
       },
       required: ["catalogId"],
       additionalProperties: false
     },
     needsConfirmation: true,
-    // When apiKey is supplied, include a short prefix in the summary so
-    // the user can sanity-check that the agent is forwarding *their* key
-    // and not a substituted attacker key from prompt injection. Full key
-    // still appears in the args details for users who want to verify.
-    summarize: (args) => {
-      let label = `Connect MCP: ${args.catalogId}`;
-      if (args.apiKey) {
-        const prefix = String(args.apiKey).slice(0, 8);
-        label += ` (with key starting "${prefix}…")`;
-      }
-      return label;
-    },
-    handler: async (args) => {
+    summarize: (args) => `Connect MCP: ${args.catalogId}`,
+    handler: async (args, context) => {
       const { MCP_CATALOG } = await import("./mcp-catalog.js");
       const entry = MCP_CATALOG.find((e) => e.id === args.catalogId);
       if (!entry) throw new Error(`Catalog entry '${args.catalogId}' not found. Use list_mcp_catalog to see what's available.`);
       if (!entry.register) throw new Error(`Catalog entry '${entry.id}' has no register info (likely status=coming-soon).`);
       if (entry.register.auth === "bearer" && entry.apiKeyEnvVar) {
-        const incoming = typeof args.apiKey === "string" ? args.apiKey.trim() : "";
-        const existing = process.env[entry.apiKeyEnvVar] ?? "";
-        if (incoming) {
-          const { saveEnv } = await import("./setup-wizard.js");
-          const dataDir = resolveDataDir();
-          saveEnv({ dataDir, values: { [entry.apiKeyEnvVar]: incoming } });
-        } else if (!existing) {
-          throw new Error(`Catalog entry '${entry.id}' uses ${entry.apiKeyEnvVar} which isn't set. Ask the user for their key, then call this tool again with apiKey set.`);
+        const decidedBy = context?.agentId
+          ? `agent:${context.agentId}:connect_catalog_mcp`
+          : "agent:connect_catalog_mcp";
+        const hasSecretStore = typeof runtime.secrets?.listSecretNames === "function";
+        let storedNames;
+        try {
+          storedNames = hasSecretStore
+            ? runtime.secrets.listSecretNames({ decidedBy })
+            : [];
+        } catch {
+          throw new Error("Secret store unavailable for catalog connection.");
+        }
+        const configured = hasSecretStore
+          ? storedNames.includes(entry.apiKeyEnvVar)
+          : Boolean(process.env[entry.apiKeyEnvVar]);
+        if (!configured) {
+          throw new Error(`Catalog entry '${entry.id}' requires ${entry.apiKeyEnvVar}. Ask the user to add it through /secrets or setup, then retry without putting the value in chat.`);
         }
         runtime.mcp.allowEnvKey?.(entry.apiKeyEnvVar);
       }
@@ -1089,12 +1879,30 @@ export function registerCoreTools(registry, runtime) {
   return registry;
 }
 
+function validateReplaceIds(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("replaceIds must be an array of active curated-memory ids.");
+  if (value.length > 20) throw new Error("replaceIds accepts at most 20 ids.");
+  const ids = value.map((id) => {
+    if (typeof id !== "string" || !id.trim()) {
+      throw new Error("replaceIds must contain only non-empty string ids.");
+    }
+    return id.trim();
+  });
+  if (new Set(ids).size !== ids.length) throw new Error("replaceIds must not contain duplicate ids.");
+  return ids;
+}
+
 // Builds the human-readable summary shown on register_mcp_server approval
 // cards. Always includes the fields that determine whether the call is
 // dangerous (stdio command + first 3 args, or http URL + auth mode) so the
 // user can't approve a hidden `docker run -v /:/host` based on the name
 // alone. Exported for testing.
 export function summarizeRegisterMcpServer(args = {}) {
+  // Direct callers must not turn this UI helper into a reflection surface.
+  // The invocation path runs the same validator even earlier, before any
+  // observer, hook, or pending-action journal receives the arguments.
+  validateMcpServerSpec(args);
   const transport = args.transport ?? (args.url ? "http" : args.command ? "stdio" : "config");
   const name = args.name ?? "(unnamed)";
   if (transport === "stdio") {
@@ -1108,4 +1916,55 @@ export function summarizeRegisterMcpServer(args = {}) {
     return `Register http MCP '${name}' → ${args.url ?? "(no url)"} (auth=${auth})`;
   }
   return `Register MCP '${name}' (${transport})`;
+}
+
+const REGISTER_MCP_SERVER_FIELDS = new Set([
+  "name",
+  "transport",
+  "command",
+  "args",
+  "url",
+  "auth",
+  "apiKey",
+  "clientId",
+  "scope",
+  "trustLevel"
+]);
+
+export function preflightRegisterMcpServer(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("Invalid MCP server registration request.");
+  }
+  if (Object.keys(args).some((key) => !REGISTER_MCP_SERVER_FIELDS.has(key))) {
+    throw new Error("Invalid MCP server registration request.");
+  }
+  if (
+    args.args !== undefined
+    && (!Array.isArray(args.args) || args.args.some((value) => typeof value !== "string"))
+  ) {
+    throw new Error("Invalid MCP server registration request.");
+  }
+  try {
+    validateMcpServerSpec(args);
+  } catch {
+    // This error crosses model/channel boundaries. Never include any supplied
+    // field value, even when the underlying validator has a useful local
+    // diagnostic.
+    throw new Error("Invalid MCP server registration request.");
+  }
+  return true;
+}
+
+export function preflightConnectCatalogMcp(args) {
+  if (
+    !args
+    || typeof args !== "object"
+    || Array.isArray(args)
+    || Object.keys(args).length !== 1
+    || !Object.hasOwn(args, "catalogId")
+    || typeof args.catalogId !== "string"
+  ) {
+    throw new Error("Invalid MCP catalog connection request.");
+  }
+  return true;
 }

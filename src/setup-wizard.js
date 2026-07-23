@@ -1,9 +1,9 @@
 import path from "node:path";
 import fs from "node:fs";
-import { ensureDir, writeTextAtomic } from "./file-utils.js";
 import { generateToken } from "./auth.js";
 import { MCP_CATALOG, CATEGORIES } from "./mcp-catalog.js";
 import { resolveDataDir } from "./data-dir.js";
+import { SecretsStore } from "./secrets-store.js";
 
 // Cross-platform first-run setup wizard. When the daemon detects no API keys
 // configured (no ANTHROPIC_API_KEY, no OPENAI_API_KEY) AND no auth token, every
@@ -15,6 +15,7 @@ const WIZARD_FIELDS = [
   "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
   "OPENAI_API_KEY", "OPENAI_MODEL",
   "OPENAGI_AUTH_TOKEN",
+  "DISCORD_BOT_TOKEN",
   "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
   "TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_POLLING",
   "RIZE_API_KEY",
@@ -25,8 +26,29 @@ const WIZARD_FIELDS = [
   "BUILDBETTER_API_URL", "BUILDBETTER_APP_URL", "BUILDBETTER_MCP_URL",
   "IMESSAGE_ENABLED", "IMESSAGE_SELF_HANDLE", "IMESSAGE_INTERVAL_MS", "IMESSAGE_MODE", "IMESSAGE_BACKFILL_DAYS",
   "OPENAGI_COMPUTER_USE",
+  "OPENAGI_COMPUTER_NODE_TOKEN",
+  "OPENAGI_IMESSAGE_NODE_TOKEN",
+  "OPENAGI_REMOTE_TOKEN",
+  "OPENAGI_AUTO_APPROVE",
   "OPENAGI_PUBLIC_URL",
   "OPENAGI_DAILY_USD_LIMIT",
+  "OPENAGI_MAX_CHILDREN", "OPENAGI_MAX_SPAWN_DEPTH",
+  "OPENAGI_SUBAGENT_MAX_ITERATIONS", "OPENAGI_SUBAGENT_MAX_TURN_SECONDS",
+  "OPENAGI_CHAT_MAX_ITERATIONS",
+  "OPENAGI_GOAL_MAX_TURNS",
+  "OPENAGI_CHECKPOINTS",
+  "OPENAGI_CURATOR_STALE_DAYS", "OPENAGI_CURATOR_ARCHIVE_DAYS",
+  "OPENAGI_BACKGROUND_REVIEW",
+  "OPENAGI_MEMORY_PROVIDER",
+  "HONCHO_API_KEY", "HONCHO_URL", "HONCHO_WORKSPACE_ID",
+  "OPENAGI_REQUEST_TIMEOUT_MS",
+  "OPENAGI_STALL_TIMEOUT_MS", "OPENAGI_FORCE_ANSWER_MS",
+  "OPENAGI_PROVIDER_MAX_RETRIES", "OPENAGI_PROVIDER_RETRY_BASE_MS",
+  "OPENAGI_APPROVAL_TIMEOUT_MS",
+  "OPENAGI_MAX_TOOL_OUTPUT_CHARS", "OPENAGI_CONTEXT_COMPACT_CHARS", "OPENAGI_CONTEXT_KEEP_RECENT_HOPS",
+  "OPENAGI_CONTEXT_WINDOW_TOKENS",
+  "OPENAGI_TTS_PROVIDER", "OPENAGI_TTS_VOICE", "ELEVENLABS_API_KEY",
+  "DISCORD_STREAMING",
   "EXA_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY", "BRAVE_API_KEY",
   "PERPLEXITY_API_KEY", "SERPAPI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID",
   "WEB_SEARCH_PROVIDER",
@@ -60,41 +82,46 @@ export function readExistingEnv(dataDir) {
   }
 }
 
-export function saveEnv({ dataDir, values, clear = [] }) {
-  const file = envFilePath(dataDir);
-  ensureDir(path.dirname(file));
+export function saveEnv({
+  dataDir,
+  values = {},
+  clear = [],
+  store,
+  decidedBy = "setup-wizard"
+}) {
+  const secrets = store ?? new SecretsStore({
+    dataDir: dataDir ?? resolveDataDir(),
+    allowlist: WIZARD_FIELDS,
+    env: { ...process.env }
+  });
+  secrets.initialize({ decidedBy });
 
-  // Merge: read existing env (if any), overlay the new values, write back.
-  // Only allow-listed keys can be set this way. Other keys already in the
-  // file are preserved verbatim (including comments / unknown vars from
-  // hand-edits). Empty-string values are SKIPPED (wizard's blank-field =
-  // "don't change") — use the `clear` list to remove a key explicitly.
-  const existing = parseEnvText(readExistingEnv(dataDir));
+  // The snapshot is the source of truth. SecretsStore keeps a compatible
+  // .env projection while preserving entries outside this allowlist.
+  // Empty wizard fields mean "do not change"; clear removes a value.
   const incoming = {};
   for (const key of WIZARD_FIELDS) {
     if (values[key] === undefined || values[key] === null) continue;
-    const v = String(values[key]).replace(/\n/g, " ").trim();
-    if (v.length === 0) continue;
-    incoming[key] = v;
-    process.env[key] = v;
+    const value = String(values[key]).replace(/[\r\n]+/g, " ").trim();
+    if (value.length === 0) continue;
+    incoming[key] = value;
+    secrets.setSecret(key, value, { decidedBy });
+    process.env[key] = value;
   }
 
-  const merged = { ...existing, ...incoming };
   for (const key of clear) {
-    if (!WIZARD_FIELDS.includes(key)) continue; // still allowlisted
-    delete merged[key];
+    if (!WIZARD_FIELDS.includes(key)) continue;
+    secrets.removeSecret(key, { decidedBy });
     delete process.env[key];
   }
-  const lines = [
-    `# Written by OpenAGI setup wizard at ${new Date().toISOString()}`,
-    "# Edit by hand or rerun /setup to change values.",
-    ""
-  ];
-  for (const [k, v] of Object.entries(merged)) {
-    lines.push(`${k}=${v}`);
-  }
-  writeTextAtomic(file, `${lines.join("\n")}\n`, 0o600);
-  return { written: file, keys: Object.keys(incoming), totalKeys: Object.keys(merged).length };
+
+  const file = secrets.envPath ?? envFilePath(dataDir);
+  const projected = parseEnvText(fs.readFileSync(file, "utf8"));
+  return {
+    written: file,
+    keys: Object.keys(incoming),
+    totalKeys: Object.keys(projected).length
+  };
 }
 
 function parseEnvText(text) {
@@ -120,8 +147,9 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
   // MISSING — `??` would keep the empty string and ship an auth-disabled
   // dashboard. Generate a real token instead.
   const existingToken = (existingEnv.OPENAGI_AUTH_TOKEN ?? "").trim() || null;
-  const token = proposedToken ?? existingToken ?? generateToken(32);
   const hasExistingToken = Boolean(existingToken);
+  const hideExistingToken = hasExistingToken && !proposedToken;
+  const token = proposedToken ?? (hideExistingToken ? "" : generateToken(32));
   const val = (key, fallback = "") => escapeHtml(existingEnv[key] ?? fallback);
   // "✓ saved" marker for secret fields that already have a value — blank
   // means "keep what's saved", so the user can see what's configured
@@ -238,12 +266,12 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
       <h2>3 / 8 · auth</h2>
       <h3>Bearer token</h3>
       <p>${hasExistingToken
-        ? "This is your <strong>existing</strong> dashboard token — saving keeps it unchanged. Regenerate only if you want to rotate it (other signed-in browsers will need the new one)."
+        ? "Your <strong>existing</strong> dashboard token is saved but hidden. Saving a blank keeps it unchanged. Regenerate only if you want to rotate it (other signed-in browsers will need the new one)."
         : "This is the password for your dashboard. Save it now — you'll need it to log in. We auto-generated a strong one for you, or paste your own."}</p>
-      <div class="token" id="tokenView">${escapeHtml(token)}</div>
+      <div class="token" id="tokenView">${hideExistingToken ? "Saved (hidden)" : escapeHtml(token)}</div>
       <input type="hidden" name="OPENAGI_AUTH_TOKEN" id="tokenInput" value="${escapeHtml(token)}">
       <div class="actions">
-        <button type="button" class="secondary" id="copyToken">Copy</button>
+        <button type="button" class="secondary" id="copyToken"${hideExistingToken ? " disabled" : ""}>Copy</button>
         <button type="button" class="secondary" id="regenToken">Regenerate</button>
       </div>
       <div style="margin-top:14px; padding-top:12px; border-top:1px solid #2a352f;">
@@ -429,6 +457,7 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
     const b64 = btoa(String.fromCharCode(...arr)).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
     document.getElementById("tokenView").textContent = b64;
     document.getElementById("tokenInput").value = b64;
+    document.getElementById("copyToken").disabled = false;
   }
   document.getElementById("regenToken").addEventListener("click", refreshToken);
   document.getElementById("copyToken").addEventListener("click", async () => {
@@ -465,14 +494,15 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
       const saveRes = await fetch("/setup/save", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj) });
       const saveBody = await saveRes.json();
       if (!saveRes.ok) throw new Error(saveBody.error ?? "save failed");
-      out.innerHTML = '<span class="ok">Saved.</span> Now testing the agent…';
+      out.textContent = "Saved. Now testing the agent…";
 
-      // Set the auth cookie so subsequent requests work in this browser.
-      document.cookie = "openagi_token=" + encodeURIComponent(obj.OPENAGI_AUTH_TOKEN) + "; path=/; max-age=2592000; SameSite=Strict";
+      // /setup/save installs a same-origin HttpOnly auth cookie after first
+      // setup or rotation. Re-runs keep the existing cookie.
+      const authHeaders = { "content-type": "application/json" };
 
       const testRes = await fetch("/setup/test", {
         method: "POST",
-        headers: { "content-type": "application/json", "authorization": "Bearer " + obj.OPENAGI_AUTH_TOKEN },
+        headers: authHeaders,
         body: JSON.stringify({ text: "Say hi in one short sentence." })
       });
       const testBody = await testRes.json();
@@ -488,7 +518,7 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
         try {
           const r = await fetch("/integrations/connect-mcp", {
             method: "POST",
-            headers: { "content-type": "application/json", "authorization": "Bearer " + obj.OPENAGI_AUTH_TOKEN },
+            headers: authHeaders,
             body: JSON.stringify({ catalogId })
           });
           const rb = await r.json();
@@ -498,20 +528,20 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
         }
       }));
       const mcpSummary = mcpResults.length === 0 ? "" :
-        '\\n\\n<span class="ok">MCPs registered:</span> ' +
+        "\\n\\nMCPs registered: " +
         mcpResults.filter((r) => r.ok).map((r) => r.name ?? r.catalogId).join(", ") +
-        (mcpResults.some((r) => !r.ok) ? '\\n<span class="err">Failed:</span> ' + mcpResults.filter((r) => !r.ok).map((r) => r.catalogId + " (" + r.error + ")").join(", ") : "");
+        (mcpResults.some((r) => !r.ok) ? "\\nFailed: " + mcpResults.filter((r) => !r.ok).map((r) => r.catalogId + " (" + r.error + ")").join(", ") : "");
       const target = checkedMcps.length > 0 ? "/?tab=integrations" : "/";
 
       // Bounce the daemon so existing integrations (Linear/BuildBetter/Twilio
       // etc) re-read their .env values. The Mac app's DaemonController auto-
       // respawns. For bare-metal users running 'npm run serve', they'll need
       // to relaunch — we surface a fallback message after a generous timeout.
-      out.innerHTML = '<span class="ok">✓ Agent reply:</span>\\n\\n' + (testBody.reply ?? "(empty)") + mcpSummary + '\\n\\n<span class="ok">Restarting daemon to apply new settings…</span>';
+      out.textContent = "✓ Agent reply:\\n\\n" + String(testBody.reply ?? "(empty)") + mcpSummary + "\\n\\nRestarting daemon to apply new settings…";
       try {
         await fetch("/control/restart", {
           method: "POST",
-          headers: { "content-type": "application/json", "authorization": "Bearer " + obj.OPENAGI_AUTH_TOKEN },
+          headers: authHeaders,
           body: "{}"
         });
       } catch { /* the daemon exits before flushing — expected */ }
@@ -528,13 +558,18 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
         } catch { /* still down, keep polling */ }
       }
       if (backUp) {
-        out.innerHTML += '\\n<span class="ok">✓ Daemon back up. Loading dashboard…</span>';
+        out.textContent += "\\n✓ Daemon back up. Loading dashboard…";
         setTimeout(() => { window.location.href = target; }, 600);
       } else {
-        out.innerHTML += '\\n<span class="err">Daemon didn\\'t come back automatically.</span> Open it from the menu bar (or relaunch your terminal serve), then <a href="' + target + '">continue to dashboard</a>.';
+        out.textContent += "\\nDaemon didn't come back automatically. Open it from the menu bar (or relaunch your terminal serve), then ";
+        const link = document.createElement("a");
+        link.href = target;
+        link.textContent = "continue to dashboard";
+        out.appendChild(link);
+        out.appendChild(document.createTextNode("."));
       }
     } catch (err) {
-      out.innerHTML = '<span class="err">Error:</span> ' + (err.message ?? err);
+      out.textContent = "Error: " + String(err.message ?? err);
       btn.disabled = false;
     }
   });

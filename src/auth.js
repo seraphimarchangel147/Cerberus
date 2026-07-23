@@ -70,8 +70,13 @@ export function checkOrigin(req) {
   return { ok: true };
 }
 
+// Fail CLOSED when no secret is configured (Tier-1 hardening, 2026-07):
+// the webhook drives agent turns, so accepting unauthenticated pings when
+// the operator forgot to set TELEGRAM_WEBHOOK_SECRET is a takeover vector.
+// Setting up telegram via the wizard writes the secret, so a configured
+// install is unaffected; an unconfigured one now 401s instead of trusting.
 export function verifyTelegramSecret({ headerValue, expected }) {
-  if (!expected) return { ok: true, reason: "no telegram secret configured" };
+  if (!expected) return { ok: false, reason: "no telegram webhook secret configured (fail-closed)" };
   return safeEqual(headerValue, expected) ? { ok: true } : { ok: false, reason: "telegram secret mismatch" };
 }
 

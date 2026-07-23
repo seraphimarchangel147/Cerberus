@@ -12,6 +12,27 @@ export const TIMEOUT_MS = 10 * 60 * 1000;
 
 const TIMED_OUT = Symbol("cron-job-timed-out");
 
+function pinText(value) {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
+
+export function modelProviderIdentity(provider) {
+  if (!provider || typeof provider !== "object") return null;
+  const providerName = pinText(provider.provider)
+    ?? pinText(provider.name)
+    ?? pinText(provider.constructor?.name);
+  const model = pinText(provider.model) ?? pinText(provider.name);
+  return providerName && model ? { provider: providerName, model } : null;
+}
+
+function normalizeModelIdentity(value) {
+  if (!value || typeof value !== "object") return null;
+  const provider = pinText(value.provider);
+  const model = pinText(value.model);
+  return provider && model ? { provider, model } : modelProviderIdentity(value);
+}
+
 // Env override: OPENAGI_CRON_JOB_TIMEOUT_MS, parsed with Number and only
 // honored when finite and > 0; anything else falls back to TIMEOUT_MS.
 export function resolveJobTimeoutMs(env = process.env) {
@@ -22,15 +43,73 @@ export function resolveJobTimeoutMs(env = process.env) {
 }
 
 export class CronScheduler {
-  constructor() {
+  constructor(options = {}) {
     this.jobs = new Map();
+    this.modelResolver = typeof options.modelResolver === "function" ? options.modelResolver : null;
   }
+
+  currentModelIdentity() {
+    try {
+      return normalizeModelIdentity(this.modelResolver?.());
+    } catch {
+      return null;
+    }
+  }
+
+  bindModelResolver(resolver, { backfill = true } = {}) {
+    this.modelResolver = typeof resolver === "function" ? resolver : null;
+    const identity = this.currentModelIdentity();
+    let updated = 0;
+    if (backfill && identity) {
+      for (const job of this.jobs.values()) {
+        if (this._pinJob(job, identity)) updated += 1;
+      }
+      if (updated > 0) this._modelPinsChanged();
+    }
+    return { identity, updated };
+  }
+
+  checkModelPin(job) {
+    const current = this.currentModelIdentity();
+    if (current && this._pinJob(job, current)) {
+      if (this.jobs.get(job.id) === job) this._modelPinsChanged();
+    }
+    const expected = {
+      provider: pinText(job?.pinnedProvider),
+      model: pinText(job?.pinnedModel)
+    };
+    if (!expected.provider || !expected.model) {
+      return { ok: false, reason: "model-pin-missing", expected, current };
+    }
+    if (!current) {
+      return { ok: false, reason: "model-identity-unavailable", expected, current: null };
+    }
+    const ok = expected.provider === current.provider && expected.model === current.model;
+    return { ok, reason: ok ? null : "model-pin-mismatch", expected, current };
+  }
+
+  _pinJob(job, identity) {
+    if (!job || !identity) return false;
+    let changed = false;
+    if (!pinText(job.pinnedProvider)) {
+      job.pinnedProvider = identity.provider;
+      changed = true;
+    }
+    if (!pinText(job.pinnedModel)) {
+      job.pinnedModel = identity.model;
+      changed = true;
+    }
+    return changed;
+  }
+
+  _modelPinsChanged() {}
 
   addJob(job) {
     const id = job.id ?? createId("job");
     const existing = this.jobs.get(id);
     if (existing && job.replace !== true) return existing;
 
+    const identity = this.currentModelIdentity();
     const normalized = {
       id,
       name: job.name ?? "Scheduled job",
@@ -41,7 +120,9 @@ export class CronScheduler {
       dailyAt: job.dailyAt ?? null,
       nextRunAt: job.nextRunAt ?? this.computeNextRun(job, new Date()).toISOString(),
       createdAt: job.createdAt ?? nowIso(),
-      lastRunAt: null
+      lastRunAt: null,
+      pinnedProvider: pinText(job.pinnedProvider) ?? identity?.provider ?? null,
+      pinnedModel: pinText(job.pinnedModel) ?? identity?.model ?? null
     };
     this.jobs.set(normalized.id, normalized);
     return normalized;
@@ -170,6 +251,16 @@ export function createDailyAdaptationReviewJob(input = {}) {
       requiresSpecialist: true,
       ...(input.signal ?? {})
     }
+  };
+}
+
+export function createDailySkillCuratorJob(input = {}) {
+  return {
+    id: "daily-skill-curator",
+    name: "Daily skill curator",
+    enabled: true,
+    task: "skill-curator",
+    dailyAt: input.dailyAt ?? "03:45"
   };
 }
 

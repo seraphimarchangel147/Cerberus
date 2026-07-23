@@ -2,7 +2,7 @@ import path from "node:path";
 import { resolveDataDir } from "./data-dir.js";
 import { AgentHost } from "./agent-host.js";
 import { FileBackedAgentStore } from "./agent-store.js";
-import { CronScheduler, createDailyAdaptationReviewJob } from "./cron-scheduler.js";
+import { CronScheduler, createDailyAdaptationReviewJob, createDailySkillCuratorJob, modelProviderIdentity } from "./cron-scheduler.js";
 import { DirectionalAdaptiveScrutiny } from "./directional-adaptive-scrutiny.js";
 import { FileBackedCronScheduler } from "./file-backed-cron-scheduler.js";
 import { FileBackedMemorySystem } from "./file-backed-memory-system.js";
@@ -11,15 +11,26 @@ import { createAbiIntegration, IntegrationRegistry } from "./integration-registr
 import { fileURLToPath } from "node:url";
 import { BudgetGuard } from "./budget-guard.js";
 import { registerRizeIntegration } from "./integrations/rize.js";
+import {
+  assertExternalMemoryProvider,
+  createExternalMemoryProvider
+} from "./integrations/honcho-provider.js";
 import { registerLinearTaskSource } from "./integrations/linear-tasks.js";
 import { registerInboxWatcher } from "./integrations/inbox-watcher.js";
 import { registerIMessagePoller } from "./integrations/imessage-poller.js";
 import { registerBuildBetterTaskSource } from "./integrations/buildbetter-tasks.js";
 import { registerCalendarIntegration } from "./integrations/calendar.js";
 import { registerWebSearchTools } from "./integrations/web-search.js";
+import { registerExecuteCodeTool } from "./integrations/execute-code.js";
+import { registerDelegateTaskTool } from "./integrations/delegate-task.js";
+import { registerSessionSearchTool } from "./integrations/session-search-tool.js";
+import { registerTtsTool } from "./integrations/tts.js";
 import { registerImessageSearchTool } from "./integrations/imessage-search-tool.js";
 import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
+import { SecretsStore } from "./secrets-store.js";
+import { SETUP_FIELDS } from "./setup-wizard.js";
+import { reconcileLegacyNodePairing } from "./cli-client.js";
 import { MemoryCondenser } from "./memory-condenser.js";
 import { ObservationStore } from "./observation-store.js";
 import { buildAmbientDigest } from "./ambient-digest.js";
@@ -32,7 +43,11 @@ import { IMessageExtractor } from "./imessage-extractor.js";
 import { TaskSweep } from "./task-sweep.js";
 import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
+import { GoalStore } from "./goal-store.js";
+import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
+import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
+import { ToolOutputStore } from "./tool-output-store.js";
 import { ComputerUseLog } from "./computer-use-log.js";
 import { ClarificationStore } from "./clarification-store.js";
 import { DraftStore } from "./draft-store.js";
@@ -101,6 +116,38 @@ No generalities. Cite specific session ids, job names, specialist ids.`;
 // much higher bar before acting unprompted during its own self-review turn.
 const HARSH_REVIEW_SCRUTINY_OVERRIDES = { act: 0.85 };
 
+export function isSilentCronOutput(value) {
+  return String(value ?? "").trim() === "[SILENT]";
+}
+
+function guardCronModelPin(runtime, job) {
+  if (typeof runtime.cron?.checkModelPin !== "function") return null;
+  const check = runtime.cron.checkModelPin(job);
+  if (check.ok) return null;
+  const alert = {
+    at: nowIso(),
+    jobId: job?.id ?? null,
+    jobName: job?.name ?? "Scheduled job",
+    sessionId: job?.input?.sessionId ?? null,
+    reason: check.reason,
+    expected: check.expected,
+    current: check.current
+  };
+  console.warn(
+    `[openagi] skipped cron job ${alert.jobId ?? "unknown"}: ${check.reason}; `
+    + `pinned ${check.expected?.provider ?? "?"}/${check.expected?.model ?? "?"}, `
+    + `current ${check.current?.provider ?? "?"}/${check.current?.model ?? "?"}`
+  );
+  runtime.events?.emit?.("cron-model-mismatch", alert);
+  return {
+    skipped: true,
+    reason: check.reason,
+    expected: check.expected,
+    current: check.current,
+    alert
+  };
+}
+
 function nextSundayEvening() {
   const d = new Date();
   d.setHours(20, 0, 0, 0);
@@ -117,6 +164,58 @@ function nextSundayMorning(hour = 5) {
   return d;
 }
 
+export function resolveExternalMemoryProvider(options = {}) {
+  const env = options.env ?? process.env;
+  const warning = typeof options.externalMemoryWarningLog === "function"
+    ? options.externalMemoryWarningLog
+    : typeof options.externalMemoryWarning === "function"
+      ? options.externalMemoryWarning
+      : console.warn;
+  const hasExplicitProvider = options.externalMemoryProvider !== undefined;
+  let selected = "";
+
+  try {
+    if (hasExplicitProvider) {
+      if (options.externalMemoryProvider === null) return null;
+      assertExternalMemoryProvider(options.externalMemoryProvider);
+      return options.externalMemoryProvider;
+    }
+    selected = String(env.OPENAGI_MEMORY_PROVIDER ?? "").trim().toLowerCase();
+
+    // Built-in memory remains the default. External memory is additive and
+    // activates only when the operator explicitly selects Honcho.
+    if (!selected || ["builtin", "built-in", "none"].includes(selected)) return null;
+    if (selected !== "honcho") {
+      throw new Error("unknown provider selection");
+    }
+
+    const provider = createExternalMemoryProvider({
+      provider: selected,
+      env,
+      fetchImpl: options.externalMemoryFetch ?? globalThis.fetch,
+      logger: options.externalMemoryLogger
+    });
+    if (!provider) throw new Error("provider factory returned no provider");
+    assertExternalMemoryProvider(provider);
+    return provider;
+  } catch {
+    const source = hasExplicitProvider
+      ? "explicit provider"
+      : selected === "honcho" ? "honcho" : "configuration";
+    const reason = hasExplicitProvider
+      ? "invalid provider contract"
+      : selected === "honcho"
+        ? "invalid or incomplete Honcho configuration"
+        : "unknown provider selection";
+    try {
+      warning(`[openagi] external memory disabled (${source}): ${reason}`);
+    } catch {
+      // Diagnostics must never turn an optional provider into a boot failure.
+    }
+    return null;
+  }
+}
+
 export class AbiRuntime {
   constructor(options = {}) {
     this.context = {
@@ -131,14 +230,43 @@ export class AbiRuntime {
     this.integrations = options.integrations ?? new IntegrationRegistry();
     this.workflows = options.workflows ?? registerDefaultWorkflows(new WorkflowRegistry());
     this.memory = options.memory ?? new MemorySystem(options.memoryOptions);
+    this.externalMemoryProvider = resolveExternalMemoryProvider(options);
+    const secretsDataDir = options.dataDir
+      ?? options.mcpOptions?.dataDir
+      ?? resolveDataDir();
+    this.secrets = options.secrets ?? new SecretsStore({
+      dataDir: secretsDataDir,
+      allowlist: SETUP_FIELDS,
+      env: options.env ?? process.env
+    });
     this.scrutiny = options.scrutiny ?? (options.scrutinyMode === "single"
       ? new DirectionalAdaptiveScrutiny(options.scrutinyOptions)
       : new ScrutinyPanel(options.scrutinyOptions));
     this.propagation = options.propagation ?? new PropagationController(options.propagationOptions);
     this.cron = options.cron ?? new CronScheduler();
-    this.mcp = options.mcp ?? new McpRegistry(options.mcpOptions ?? {});
-    this.tools = options.tools ?? new ToolRegistry();
+    this.mcp = options.mcp ?? new McpRegistry({
+      ...(options.mcpOptions ?? {}),
+      secretStore: this.secrets
+    });
+    this.mcp.bindSecretStore?.(this.secrets);
+    this.hooks = options.hooks
+      ?? options.tools?.hooks
+      ?? new HookRegistry({ dataDir: options.dataDir, ...(options.hookOptions ?? {}) });
+    this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks });
+    this.tools.bindHooks?.(this.hooks);
     this.mcp.bindToolRegistry(this.tools);
+    const checkpointOptIn = options.checkpointOptions?.enabled
+      ?? checkpointsEnabled(options.env ?? process.env);
+    this.checkpoints = options.checkpoints
+      ?? (checkpointOptIn
+        ? new CheckpointStore({
+            dataDir: options.dataDir,
+            workspaceDir: options.workspaceDir ?? process.cwd(),
+            ...(options.checkpointOptions ?? {}),
+            enabled: true
+          })
+        : null);
+    this.tools.bindCheckpoints?.(this.checkpoints);
     // Pending-action queue: tools flagged needsConfirmation route through
     // here so the user can approve/deny before the agent's intent runs.
     this.pendingActions = options.pendingActions ?? new PendingActionStore({
@@ -146,6 +274,9 @@ export class AbiRuntime {
       ...(options.pendingActionStoreOptions ?? {})
     });
     this.tools.bindPendingActions(this.pendingActions);
+    this.toolOutputs = options.toolOutputs ?? new ToolOutputStore({
+      dir: options.dataDir ? path.join(options.dataDir, "tool-outputs") : undefined
+    });
     // Computer-use log is always allocated so the dashboard can render the
     // log surface even when the feature is off (showing zero sessions).
     // The actual tools only register when OPENAGI_COMPUTER_USE=1.
@@ -185,7 +316,11 @@ export class AbiRuntime {
       ...(options.scrutinyFitterOptions ?? {})
     });
     this.introspector = options.introspector ?? new Introspector({ runtime: this });
-    this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher(options.tunnelWatcherOptions ?? {});
+    this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher({
+      dataDir: options.dataDir,
+      secretStore: this.secrets,
+      ...(options.tunnelWatcherOptions ?? {})
+    });
     this.patternMiner = options.patternMiner ?? new PatternMiner({ runtime: this, dataDir: options.dataDir, ...(options.patternMinerOptions ?? {}) });
     this.sessionMiner = options.sessionMiner ?? new SessionMiner({ runtime: this, dataDir: options.dataDir, ...(options.sessionMinerOptions ?? {}) });
     this.imessageExtractor = options.imessageExtractor ?? new IMessageExtractor({ runtime: this, dataDir: options.dataDir });
@@ -195,6 +330,7 @@ export class AbiRuntime {
     // a compact summary into the observer's system prompt each pass.
     this.suggestionFeedback = options.suggestionFeedback ?? new SuggestionFeedback({ runtime: this, dataDir: options.dataDir });
     this.tasks = options.tasks ?? new TaskStore({ runtime: this, dataDir: options.dataDir, ...(options.taskStoreOptions ?? {}) });
+    this.goals = options.goals ?? new GoalStore({ dataDir: options.dataDir, ...(options.goalStoreOptions ?? {}) });
     // Periodic task-list hygiene: dedupe, re-home to the right queue, cancel
     // stale auto-extracted items, archive old terminal tasks.
     this.taskSweep = options.taskSweep ?? new TaskSweep({ runtime: this });
@@ -243,6 +379,7 @@ export class AbiRuntime {
         task: "condense",
         dailyAt: "03:30"
       });
+      this.cron.addJob(createDailySkillCuratorJob());
       // Cadence is env-tunable: autopilot pulses carry a large prompt, so on a
       // metered model the interval is the single biggest cost lever. Default
       // 30 min; set OPENAGI_AUTOPILOT_INTERVAL_MIN to slow it (e.g. 120 = 2h).
@@ -456,8 +593,14 @@ export class AbiRuntime {
       });
       registerCoreTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
-      // tests, gated shell, sub-agent delegation. See src/code-tools.js.
+      // tests, and gated shell. Governed delegation registers separately.
       registerCodeTools(this.tools, this);
+      // A VM script can compact multi-step tool work, but every nested call
+      // re-enters this same registry so scrutiny and catastrophic gates hold.
+      registerExecuteCodeTool(this);
+      registerDelegateTaskTool(this);
+      registerSessionSearchTool(this);
+      registerTtsTool(this, { dataDir: options.dataDir });
       // Computer-use tools register only when explicitly opted-in via env
       // (OPENAGI_COMPUTER_USE=1). Default install doesn't expose them so
       // an LLM can't accidentally try to drive the user's screen. The
@@ -473,7 +616,7 @@ export class AbiRuntime {
       const userDir = options.skillsDir ?? null;
       const dirs = [bundled];
       if (userDir) dirs.push(userDir);
-      this.skills = new SkillRegistry({ runtime: this, dirs });
+      this.skills = new SkillRegistry({ runtime: this, dirs, dataDir: options.dataDir });
     }
 
     if (options.integrations !== false) {
@@ -525,7 +668,9 @@ export class AbiRuntime {
     });
 
     const parentSpecialistId = options.parentSpecialistId ?? null;
-    const propagationDecision = this.propagation.shouldPropagate({ signal, scrutiny, memoryHits, parentSpecialistId });
+    const propagationDecision = options.allowPropagation === false
+      ? { decision: false, blockedBy: "disabled-for-turn" }
+      : this.propagation.shouldPropagate({ signal, scrutiny, memoryHits, parentSpecialistId });
     const propagated =
       propagationDecision.decision && scrutiny.action !== "ignore"
         ? this.propagation.propagate({
@@ -559,6 +704,7 @@ export class AbiRuntime {
       memoryItem = this.memory.remember(
         {
           source: signal.source,
+          scope: options.scope ?? "main",
           content: `${signal.summary}\nDecision: ${scrutiny.action}\nReasons: ${scrutiny.reasons.join(" ")}`,
           tags: ["signal", signal.domain, signal.taskType, ...(signal.tags ?? [])],
           novelty: signal.novelty,
@@ -675,6 +821,10 @@ export class AbiRuntime {
       }
       if (job.task === "condense") {
         return this.condenser.condense({ now });
+      }
+      if (job.task === "skill-curator") {
+        if (!this.skills?.curate) return { skipped: true, reason: "skills disabled" };
+        return this.skills.curate({ now });
       }
       if (job.task === "self-update") {
         const { applyUpdate } = await import("./self-update.js");
@@ -1079,6 +1229,8 @@ export class AbiRuntime {
 
   async runAutopilot(job) {
     if (!this.agentHost) return { skipped: true, reason: "agent-host-disabled" };
+    const pinFailure = guardCronModelPin(this, job);
+    if (pinFailure) return pinFailure;
     // Cheap gate (no tokens): a queue-draining pulse must NOT spend a base-model
     // call when there's nothing committed to do. Jobs opt in via
     // input.requireQueuedWork; scheduled review prompts (weekly-harsh-review)
@@ -1151,6 +1303,8 @@ export class AbiRuntime {
 
   async runScheduledPrompt(job) {
     if (!this.agentHost) return { skipped: true, reason: "agent-host-disabled" };
+    const pinFailure = guardCronModelPin(this, job);
+    if (pinFailure) return pinFailure;
     const input = job.input ?? {};
     const result = await this.agentHost.handleMessage({
       channel: input.channel ?? "cron",
@@ -1161,7 +1315,9 @@ export class AbiRuntime {
       metadata: { scheduledJobId: job.id, scheduledJobName: job.name },
       origin: "cron"
     });
-    if (this.channels && input.channel && input.target) {
+    if (isSilentCronOutput(result.reply)) {
+      result.deliverySuppressed = "silent-output";
+    } else if (this.channels && input.channel && input.target) {
       try {
         await this.channels.deliver({
           channel: input.channel,
@@ -1177,6 +1333,10 @@ export class AbiRuntime {
       this.cron.removeJob(job.id);
     }
     return result;
+  }
+
+  guardCronModelPin(job) {
+    return guardCronModelPin(this, job);
   }
 
   reconcilePrincipleVectors() {
@@ -1239,6 +1399,10 @@ export function createDefaultRuntime(options = {}) {
         modelProvider: options.modelProvider,
         modelProviderOptions: { ...(options.modelProviderOptions ?? {}), budgetGuard: runtime.budget }
       });
+    runtime.cron.bindModelResolver?.(
+      () => modelProviderIdentity(runtime.agentHost?.modelProvider),
+      { backfill: true }
+    );
   }
   // First boot / backfill: when the session index is empty (missing DB, or a
   // DB file created empty), seed it from the transcripts already on disk.
@@ -1265,8 +1429,21 @@ export function createDefaultRuntime(options = {}) {
 export function createDurableRuntime(options = {}) {
   const dataDir = options.dataDir ?? resolveDataDir();
   const mcpLogDir = path.join(dataDir, "mcp", "logs");
+  const secrets = options.secrets ?? new SecretsStore({
+    dataDir,
+    allowlist: SETUP_FIELDS,
+    env: options.env ?? process.env
+  });
+  if (typeof secrets.initialize === "function") {
+    reconcileLegacyNodePairing({
+      dataDir,
+      store: secrets,
+      decidedBy: "runtime:boot"
+    });
+  }
   const runtime = createDefaultRuntime({
     ...options,
+    secrets,
     skillsDir: options.skillsDir ?? path.join(dataDir, "skills"),
     mcpOptions: {
       logDir: mcpLogDir,

@@ -6,6 +6,10 @@ import test from "node:test";
 import { ToolRegistry, createDefaultRuntime } from "../src/index.js";
 import { AgentHost } from "../src/agent-host.js";
 
+// Asserts approval-queue diversion under the "ask" verdict — pin auto-approve
+// off so the assertions hold in the prod-policy lane (OPENAGI_AUTO_APPROVE=1).
+process.env.OPENAGI_AUTO_APPROVE = "0";
+
 function makeRegistry() {
   const calls = [];
   const registry = new ToolRegistry();
@@ -106,7 +110,16 @@ function makeHost(verdict) {
         captured.context = args.context;
         captured.instructions = args.instructions;
         captured.turnContext = args.turnContext;
-        return { text: "ok", provider: "stub", model: "stub", id: "r1", toolCalls: [] };
+        return {
+          text: "ok",
+          provider: "stub",
+          model: "stub",
+          id: "r1",
+          toolCalls: [],
+          iterations: 2,
+          maxIterations: 25,
+          stopReason: "completed"
+        };
       }
     }
   });
@@ -122,8 +135,20 @@ test("agent turn under each verdict gets the right tools + enforcement context",
   ];
   for (const { verdict, toolNames, policy } of expectations) {
     const { host, captured } = makeHost(verdict);
-    const result = await host.handleMessage({ text: "hello there", channel: "local", from: "u" });
+    // Imperative work request (trips CHAT_TOOL_INTENT_RE) so this test exercises
+    // the pure verdict→enforcement-policy mapping, NOT the conversational fast
+    // lane (a plain "hello there" now fast-lanes to CHAT_CORE_TOOLS on `act`).
+    const result = await host.handleMessage({ text: "please look up the thing", channel: "local", from: "u" });
     assert.equal(result.reply, "ok", `${verdict}: user always gets a reply`);
+    assert.deepEqual(
+      {
+        iterations: result.model.iterations,
+        maxIterations: result.model.maxIterations,
+        stopReason: result.model.stopReason
+      },
+      { iterations: 2, maxIterations: 25, stopReason: "completed" },
+      `${verdict}: provider iteration metadata reaches channel adapters`
+    );
     assert.deepEqual((captured.tools ?? []).map((t) => t.name).sort(), toolNames.sort(), `${verdict}: tool list`);
     assert.equal(captured.context.__scrutinyPolicy, policy, `${verdict}: enforcement policy`);
     if (verdict !== "act" && verdict !== "propagate" && verdict !== "ignore") {

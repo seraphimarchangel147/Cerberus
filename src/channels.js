@@ -12,15 +12,16 @@ export class ChannelManager {
     this.dir = options.dir ?? path.join(resolveDataDir(), "channels");
     ensureDir(this.dir);
     this.eventsPath = path.join(this.dir, "events.jsonl");
+    const testMode = process.env.OPENAGI_TEST === "1";
     this.telegram = new TelegramChannel({
       agentHost: this.agentHost,
       dir: path.join(this.dir, "telegram"),
-      token: options.telegramToken ?? process.env.TELEGRAM_BOT_TOKEN
+      token: testMode ? null : (options.telegramToken ?? process.env.TELEGRAM_BOT_TOKEN)
     });
     this.discord = new DiscordChannel({
       agentHost: this.agentHost,
       dir: path.join(this.dir, "discord"),
-      token: options.discordToken ?? process.env.DISCORD_BOT_TOKEN
+      token: testMode ? null : (options.discordToken ?? process.env.DISCORD_BOT_TOKEN)
     });
     if (this.runtime) this.runtime.channels = this;
   }
@@ -32,6 +33,7 @@ export class ChannelManager {
       agentId: body.agentId ?? "main",
       sessionId: body.sessionId,
       text: body.text ?? body.message,
+      images: Array.isArray(body.images) ? body.images : [],
       metadata: body.metadata ?? {},
       // Ephemeral turns (setup-wizard test message) leave no trace: no
       // session, no memory write, no outcome — just a model round-trip.

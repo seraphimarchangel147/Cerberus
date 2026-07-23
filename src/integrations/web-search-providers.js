@@ -2,6 +2,7 @@
 // Provider adapters for web_search/fetch_url. Each adapter is independent and
 // env-gated. Responses are mapped to a NormalizedResult:
 //   { title, url, snippet, publishedDate?, content? }
+import { kimiWebSearch } from "./web-search-providers-kimi.js";
 
 const TIMEOUT_MS = 15_000;
 
@@ -38,6 +39,12 @@ async function getJson(url, { headers = {} } = {}) {
 }
 
 const str = (v) => (typeof v === "string" ? v : "");
+
+export const kimi = {
+  name: "kimi",
+  isConfigured: () => Boolean(process.env.ANTHROPIC_API_KEY),
+  search: kimiWebSearch
+};
 
 export const exa = {
   name: "exa",
@@ -160,6 +167,8 @@ export const serpapi = {
   }
 };
 
-// Default priority order (spec): exa -> tavily -> brave -> serpapi -> firecrawl -> perplexity.
-export const PROVIDERS = [exa, tavily, brave, serpapi, firecrawl, perplexity];
+// Native Kimi search is first because it needs no separate provider key.
+// Explicit WEB_SEARCH_PROVIDER selection still lets operators prefer any of
+// the existing external adapters when those keys are configured.
+export const PROVIDERS = [kimi, exa, tavily, brave, serpapi, firecrawl, perplexity];
 export const PROVIDER_BY_NAME = Object.fromEntries(PROVIDERS.map((p) => [p.name, p]));

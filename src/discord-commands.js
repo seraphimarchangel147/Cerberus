@@ -14,14 +14,17 @@ const T = {
   // Interaction types
   APPLICATION_COMMAND: 2,
   MESSAGE_COMPONENT: 3,
+  MODAL_SUBMIT: 5,
   // Response types
   REPLY: 4,
   DEFERRED_REPLY: 5,
-  UPDATE_MESSAGE: 7
+  UPDATE_MESSAGE: 7,
+  MODAL: 9
 };
 
 import { bar, COLORS, embed } from "./discord-embeds.js";
 import { renderChart } from "./discord-chart.js";
+import { approvePendingAction } from "./pending-actions.js";
 
 const EPHEMERAL = 64;
 
@@ -35,6 +38,14 @@ export const COMMAND_DEFS = [
     options: [{ type: 3, name: "name", description: "Model id (e.g. kimi-k3, claude-sonnet-4-6). Omit to show current.", required: false }]
   },
   { name: "pending", description: "Actions awaiting approval (approve/deny buttons)" },
+  {
+    name: "autoapprove",
+    description: "Show or toggle auto-approval of gated agent actions",
+    options: [{
+      type: 3, name: "mode", description: "on / off — omit to show current state", required: false,
+      choices: [{ name: "on", value: "on" }, { name: "off", value: "off" }]
+    }]
+  },
   {
     name: "tasks",
     description: "List tasks",
@@ -56,6 +67,27 @@ export const COMMAND_DEFS = [
   { name: "observe", description: "Force a proactive-observer pulse now" },
   { name: "sessions", description: "Recent conversation sessions" },
   {
+    name: "goal",
+    description: "Inspect or control persistent goal mode for this conversation",
+    options: [
+      { type: 1, name: "status", description: "Show the current persistent goal" },
+      { type: 1, name: "pause", description: "Pause automatic goal continuation" },
+      { type: 1, name: "resume", description: "Resume a paused persistent goal" },
+      { type: 1, name: "clear", description: "Clear the current persistent goal" }
+    ]
+  },
+  {
+    name: "rollback",
+    description: "List recent checkpoints or preview one for rollback",
+    options: [{
+      type: 4,
+      name: "number",
+      description: "Checkpoint number from the newest-first list",
+      required: false,
+      min_value: 1
+    }]
+  },
+  {
     name: "schedule",
     description: "Schedule a prompt: one-shot delay, recurring interval, or daily time",
     options: [
@@ -68,6 +100,39 @@ export const COMMAND_DEFS = [
     name: "jobs",
     description: "List scheduled cron jobs (with cancel buttons)"
   },
+  {
+    name: "secrets",
+    description: "List, set, or remove configured secrets",
+    options: [
+      { type: 1, name: "list", description: "List masked secret previews" },
+      {
+        type: 1,
+        name: "set",
+        description: "Set a secret through a private modal",
+        options: [{
+          type: 3,
+          name: "name",
+          description: "Allowlisted environment variable name",
+          required: true,
+          min_length: 1,
+          max_length: 64
+        }]
+      },
+      {
+        type: 1,
+        name: "remove",
+        description: "Remove a configured secret",
+        options: [{
+          type: 3,
+          name: "name",
+          description: "Allowlisted environment variable name",
+          required: true,
+          min_length: 1,
+          max_length: 64
+        }]
+      }
+    ]
+  },
   { name: "help", description: "List available commands" }
 ];
 
@@ -75,6 +140,8 @@ export class DiscordCommands {
   constructor(channel) {
     this.channel = channel; // DiscordChannel — rest(), log(), agentHost, allowFrom
     this.registered = false;
+    this.rollbackConfirmations = new Map();
+    this.rollbackConfirmationSeq = 0;
   }
 
   get runtime() {
@@ -117,6 +184,9 @@ export class DiscordCommands {
       if (interaction.type === T.MESSAGE_COMPONENT) {
         return await this.handleComponent(interaction, userId);
       }
+      if (interaction.type === T.MODAL_SUBMIT) {
+        return await this.handleModalSubmit(interaction, userId);
+      }
     } catch (error) {
       this.channel.log({ op: "interaction-error", error: error.message });
       return this.respond(interaction, { content: `⚠ ${error.message}`.slice(0, 500), flags: EPHEMERAL }).catch(() => {});
@@ -131,6 +201,7 @@ export class DiscordCommands {
       case "provider": return this.cmdProvider(interaction);
       case "model": return this.cmdModel(interaction, opts);
       case "pending": return this.cmdPending(interaction);
+      case "autoapprove": return this.cmdAutoApprove(interaction, opts);
       case "tasks": return this.cmdTasks(interaction, opts);
       case "memory": return this.cmdMemory(interaction, opts);
       case "suggestions": return this.cmdSuggestions(interaction);
@@ -140,8 +211,11 @@ export class DiscordCommands {
       case "plan": return this.cmdPlan(interaction);
       case "observe": return this.cmdObserve(interaction);
       case "sessions": return this.cmdSessions(interaction);
+      case "goal": return this.cmdGoal(interaction);
+      case "rollback": return this.cmdRollback(interaction, opts);
       case "schedule": return this.cmdSchedule(interaction, opts);
       case "jobs": return this.cmdJobs(interaction);
+      case "secrets": return this.cmdSecrets(interaction);
       case "help": return this.cmdHelp(interaction);
       default: return this.respond(interaction, { content: `Unknown command: ${name}`, flags: EPHEMERAL });
     }
@@ -151,13 +225,50 @@ export class DiscordCommands {
     const id = interaction.data?.custom_id ?? "";
     if (id === "provider-select") {
       const choice = interaction.data?.values?.[0];
-      const result = await this.switchProvider(choice);
+      const result = await this.switchProvider(choice, userId);
       return this.respond(interaction, { content: result, components: [] }, T.UPDATE_MESSAGE);
     }
     if (id.startsWith("pa-approve:") || id.startsWith("pa-deny:")) {
       const [verb, actionId] = id.split(":");
       const outcome = await this.decidePendingAction(actionId, verb === "pa-approve" ? "approve" : "deny", userId);
       return this.respond(interaction, { content: outcome, components: [] }, T.UPDATE_MESSAGE);
+    }
+    if (id.startsWith("rollback-confirm:")) {
+      const pending = this.rollbackConfirmations.get(id);
+      if (!pending) {
+        return this.respond(interaction, {
+          content: "This rollback confirmation is expired or was already used.",
+          flags: EPHEMERAL
+        });
+      }
+      const sessionId = this.goalSessionId(interaction);
+      if (pending.userId !== userId || pending.sessionId !== sessionId) {
+        return this.respond(interaction, {
+          content: "This rollback confirmation belongs to another session.",
+          flags: EPHEMERAL
+        });
+      }
+      if (typeof this.runtime?.tools?.invoke !== "function") {
+        return this.respond(interaction, { content: "Rollback is unavailable.", flags: EPHEMERAL });
+      }
+
+      // Delete before awaiting so simultaneous or replayed clicks cannot run
+      // the destructive restore more than once.
+      this.rollbackConfirmations.delete(id);
+      const outcome = await this.runtime.tools.invoke(
+        "rollback",
+        { checkpointId: pending.checkpointId },
+        {
+          channel: "discord",
+          sessionId,
+          __confirmed: true,
+          __approval: { approvedVia: "discord-button", decidedBy: userId }
+        }
+      );
+      const content = outcome?.ok
+        ? `Rollback complete for checkpoint ${pending.checkpointId}.`
+        : `Rollback failed: ${outcome?.error ?? "unknown error"}`;
+      return this.respond(interaction, { content: content.slice(0, 1900), components: [] }, T.UPDATE_MESSAGE);
     }
     if (id.startsWith("job-cancel:")) {
       const jobId = id.slice("job-cancel:".length);
@@ -167,7 +278,180 @@ export class DiscordCommands {
     return this.respond(interaction, { content: `Unknown component: ${id}`, flags: EPHEMERAL });
   }
 
+  async handleModalSubmit(interaction, userId) {
+    const id = String(interaction.data?.custom_id ?? "");
+    if (!id.startsWith("secret-set:")) {
+      return this.respond(interaction, {
+        content: "Unknown modal submission.",
+        flags: EPHEMERAL
+      });
+    }
+    if (!this.secretOwnerAllowed(userId)) {
+      return this.respond(interaction, {
+        content: "Secrets commands require a configured Discord owner allowlist.",
+        flags: EPHEMERAL
+      });
+    }
+    const store = this.runtime?.secrets;
+    if (typeof store?.setSecret !== "function") {
+      return this.respond(interaction, {
+        content: "Secrets manager is unavailable.",
+        flags: EPHEMERAL
+      });
+    }
+    const name = id.slice("secret-set:".length);
+    const value = modalTextValue(interaction, "secret-value");
+    if (!value) {
+      return this.respond(interaction, {
+        content: "Secret value must not be blank.",
+        flags: EPHEMERAL
+      });
+    }
+    try {
+      const saved = store.setSecret(name, value, {
+        decidedBy: discordDecisionActor(userId)
+      });
+      const publicSecret = discordSecretMetadata(saved, name);
+      return this.respond(interaction, {
+        content: `Saved ${publicSecret.name} (${publicSecret.preview}).`,
+        flags: EPHEMERAL
+      });
+    } catch {
+      return this.respond(interaction, {
+        content: "Secret could not be saved. Check that the name is allowlisted.",
+        flags: EPHEMERAL
+      });
+    }
+  }
+
   // ── Commands ────────────────────────────────────────────────────────
+
+  secretOwnerAllowed(userId) {
+    const allow = this.channel.allowFrom ?? [];
+    return Boolean(userId && allow.length > 0 && allow.includes(userId));
+  }
+
+  async cmdSecrets(interaction) {
+    const userId = discordUserId(interaction);
+    if (!this.secretOwnerAllowed(userId)) {
+      return this.respond(interaction, {
+        content: "Secrets commands require a configured Discord owner allowlist.",
+        flags: EPHEMERAL
+      });
+    }
+    const store = this.runtime?.secrets;
+    const option = interaction.data?.options?.[0];
+    const action = option?.type === 1 ? option.name : "list";
+    const name = String(option?.options?.find((item) => item.name === "name")?.value ?? "").trim();
+    const decidedBy = discordDecisionActor(userId);
+
+    if (action === "list") {
+      if (typeof store?.listSecrets !== "function") {
+        return this.respond(interaction, {
+          content: "Secrets manager is unavailable.",
+          flags: EPHEMERAL
+        });
+      }
+      try {
+        const listed = store.listSecrets({ decidedBy })
+          .map((entry) => discordSecretMetadata(entry))
+          .filter((entry) => entry.name);
+        const lines = listed.length === 0
+          ? ["No configured secrets."]
+          : ["Configured secrets:", ...listed.map((item) => `- ${item.name}: ${item.preview}`)];
+        return this.respond(interaction, {
+          content: lines.join("\n").slice(0, 1900),
+          flags: EPHEMERAL
+        });
+      } catch {
+        return this.respond(interaction, {
+          content: "Secrets could not be listed.",
+          flags: EPHEMERAL
+        });
+      }
+    }
+
+    if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(name)) {
+      return this.respond(interaction, {
+        content: "Provide a valid allowlisted secret name.",
+        flags: EPHEMERAL
+      });
+    }
+    let allowed = null;
+    try {
+      allowed = typeof store?.listAllowedNames === "function"
+        ? store.listAllowedNames()
+        : null;
+    } catch {
+      return this.respond(interaction, {
+        content: "Secrets manager policy is unavailable.",
+        flags: EPHEMERAL
+      });
+    }
+    if (allowed && !allowed.includes(name)) {
+      return this.respond(interaction, {
+        content: "Secret name is not allowlisted.",
+        flags: EPHEMERAL
+      });
+    }
+
+    if (action === "set") {
+      if (typeof store?.setSecret !== "function") {
+        return this.respond(interaction, {
+          content: "Secrets manager is unavailable.",
+          flags: EPHEMERAL
+        });
+      }
+      return this.respond(interaction, {
+        custom_id: `secret-set:${name}`,
+        title: `Set ${name}`.slice(0, 45),
+        components: [{
+          type: 1,
+          components: [{
+            type: 4,
+            custom_id: "secret-value",
+            label: "Secret value",
+            style: 1,
+            min_length: 1,
+            max_length: 4000,
+            required: true
+          }]
+        }]
+      }, T.MODAL);
+    }
+
+    if (action === "remove") {
+      if (typeof store?.removeSecret !== "function") {
+        return this.respond(interaction, {
+          content: "Secrets manager is unavailable.",
+          flags: EPHEMERAL
+        });
+      }
+      if (name === "OPENAGI_AUTH_TOKEN") {
+        return this.respond(interaction, {
+          content: "The dashboard auth token cannot be removed while running. Set a replacement to rotate it.",
+          flags: EPHEMERAL
+        });
+      }
+      try {
+        const removed = store.removeSecret(name, { decidedBy });
+        return this.respond(interaction, {
+          content: removed ? `Removed ${name}.` : `${name} was not configured.`,
+          flags: EPHEMERAL
+        });
+      } catch {
+        return this.respond(interaction, {
+          content: "Secret could not be removed.",
+          flags: EPHEMERAL
+        });
+      }
+    }
+
+    return this.respond(interaction, {
+      content: `Unknown secrets action: ${action}`,
+      flags: EPHEMERAL
+    });
+  }
 
   async cmdStatus(interaction) {
     const host = this.channel.agentHost;
@@ -215,7 +499,7 @@ export class DiscordCommands {
     });
   }
 
-  async switchProvider(choice) {
+  async switchProvider(choice, userId = null) {
     if (!["auto", "anthropic", "openai"].includes(choice)) return `⚠ invalid choice: ${choice}`;
     process.env.OPENAGI_PROVIDER = choice;
     try {
@@ -228,7 +512,11 @@ export class DiscordCommands {
     }
     try {
       const { saveEnv } = await import("./setup-wizard.js");
-      saveEnv({ values: { OPENAGI_PROVIDER: choice } });
+      saveEnv({
+        values: { OPENAGI_PROVIDER: choice },
+        store: this.runtime?.secrets,
+        decidedBy: discordDecisionActor(userId)
+      });
     } catch { /* runtime-only */ }
     const p = this.channel.agentHost?.modelProvider;
     return `✅ Provider set to **${choice}** → active: **${p?.constructor?.name?.replace(/Provider$/, "")}** · model \`${p?.model ?? "?"}\`${p?.isConfigured?.() ? "" : " ⚠ NOT configured (missing key)"}`;
@@ -251,9 +539,47 @@ export class DiscordCommands {
     const envKey = provider.constructor?.name === "OpenAIResponsesProvider" ? "OPENAI_MODEL" : "ANTHROPIC_MODEL";
     try {
       const { saveEnv } = await import("./setup-wizard.js");
-      saveEnv({ values: { [envKey]: model } });
+      saveEnv({
+        values: { [envKey]: model },
+        store: this.runtime?.secrets,
+        decidedBy: discordDecisionActor(discordUserId(interaction))
+      });
     } catch { /* runtime-only */ }
     return this.respond(interaction, { content: `✅ Model set to \`${model}\` (persisted as ${envKey})` });
+  }
+
+  async cmdAutoApprove(interaction, opts) {
+    // Show or flip the auto-approve gate. Mirrors the /auto-approve HTTP
+    // endpoint: persists to .env via saveEnv (allowlisted key) and mutates
+    // process.env so the live tool-registry check sees it immediately.
+    const { autoApproveEnabled } = await import("./tool-registry.js");
+    const mode = String(opts?.mode ?? "").toLowerCase();
+    if (mode !== "on" && mode !== "off") {
+      const on = autoApproveEnabled();
+      return this.respond(interaction, {
+        content: on
+          ? "🟢 Auto-approve is **ON** — gated actions run immediately (still logged to the approval history). `/autoapprove mode:off` to require manual approval."
+          : "🔴 Auto-approve is **OFF** — gated actions wait in the approval queue. `/autoapprove mode:on` to run them automatically."
+      });
+    }
+    const enable = mode === "on";
+    try {
+      const { saveEnv } = await import("./setup-wizard.js");
+      saveEnv({
+        values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" },
+        store: this.runtime?.secrets,
+        decidedBy: discordDecisionActor(discordUserId(interaction))
+      });
+    } catch { /* runtime-only if .env write fails */ }
+    process.env.OPENAGI_AUTO_APPROVE = enable ? "1" : "0";
+    // Mirror the HTTP toggle: broadcast on the runtime bus so the activity
+    // feed announces the state change in the home channel too.
+    this.runtime?.pendingActions?.events?.emit?.("auto-approve", { enabled: enable });
+    return this.respond(interaction, {
+      content: enable
+        ? "🟢 Auto-approve **enabled** — gated agent actions now run without manual approval (audit trail preserved in the Approvals history)."
+        : "🔴 Auto-approve **disabled** — gated agent actions will queue for manual approval again."
+    });
   }
 
   async cmdPending(interaction) {
@@ -283,8 +609,11 @@ export class DiscordCommands {
       store.decide(id, { decision: "deny", decidedBy: `discord:${userId}` });
       return `🚫 Denied \`${id}\` (**${action.toolName}**)`;
     }
-    const r = await this.runtime.tools.invoke(action.toolName, action.args, { ...(action.context ?? {}), __confirmed: true });
-    store.decide(id, { decision: "approve", decidedBy: `discord:${userId}`, result: r.ok ? r.result : null, error: r.ok ? null : r.error });
+    const r = await approvePendingAction(this.runtime, id, {
+      decidedBy: `discord:${userId}`,
+      approvedVia: "discord-command",
+      decider: userId
+    });
     return `👍 Approved \`${id}\` (**${action.toolName}**) — ${r.ok ? "✅ executed" : `❌ ${r.error}`}`;
   }
 
@@ -388,6 +717,184 @@ export class DiscordCommands {
       return this.followUp(interaction, { content: `👁️ Observer pulse ran — ${result?.reason ?? "no proposal"}` });
     } catch (error) {
       return this.followUp(interaction, { content: `⚠ observer failed: ${error.message}` });
+    }
+  }
+
+  goalSessionId(interaction) {
+    const userId = interaction.member?.user?.id ?? interaction.user?.id ?? "unknown";
+    return this.channel.sessionKeyFor({
+      guild_id: interaction.guild_id ?? null,
+      channel_id: interaction.channel_id,
+      author: { id: userId }
+    });
+  }
+
+  async cmdGoal(interaction) {
+    const goals = this.runtime?.goals;
+    if (!goals?.get) {
+      return this.respond(interaction, { content: "Goal mode is unavailable.", flags: EPHEMERAL });
+    }
+
+    const option = interaction.data?.options?.[0];
+    const action = option?.type === 1 ? option.name : "status";
+    const sessionId = this.goalSessionId(interaction);
+    const current = goals.get(sessionId);
+
+    if (action === "status") {
+      if (!current) return this.respond(interaction, { content: "No persistent goal is set for this conversation." });
+      const turns = Number.isFinite(current.turns) ? current.turns : 0;
+      const maxTurns = Number.isFinite(current.maxTurns) ? current.maxTurns : "?";
+      return this.respond(interaction, {
+        content: [
+          `Goal mode: **${current.status ?? "unknown"}**`,
+          `Objective: ${String(current.objective ?? "(not set)").slice(0, 1500)}`,
+          `Turns: ${turns}/${maxTurns}`
+        ].join("\n")
+      });
+    }
+
+    if (!current) {
+      return this.respond(interaction, { content: "No persistent goal is set for this conversation." });
+    }
+    if (action === "pause") {
+      goals.pause(sessionId);
+      return this.respond(interaction, { content: "Persistent goal paused." });
+    }
+    if (action === "resume") {
+      if (current.status !== "paused") {
+        const message = current.status === "active"
+          ? "Persistent goal is already active."
+          : `Persistent goal cannot resume from status ${current.status}.`;
+        return this.respond(interaction, { content: message });
+      }
+      const resumed = goals.resume(sessionId);
+      if (resumed && resumed.status !== "active") {
+        return this.respond(interaction, {
+          content: "Persistent goal cannot resume because its turn budget is exhausted. Clear it and create a new goal."
+        });
+      }
+      if (typeof this.channel.agentHost?.handleMessage !== "function" || !resumed) {
+        return this.respond(interaction, { content: "Persistent goal resumed." });
+      }
+      await this.defer(interaction);
+      try {
+        const userId = interaction.member?.user?.id ?? interaction.user?.id ?? "unknown";
+        const runContinuation = () => this.channel.agentHost.handleMessage({
+            channel: "discord",
+            from: userId,
+            agentId: "main",
+            sessionId,
+            text: `Continue the active persistent goal from saved progress. Objective: ${resumed.objective}`,
+            goalContinuation: true,
+            metadata: {
+              channelId: interaction.channel_id,
+              guildId: interaction.guild_id ?? null,
+              goalContinuation: true
+            }
+          });
+        const result = typeof this.channel.enqueueSessionTask === "function"
+          ? await this.channel.enqueueSessionTask(sessionId, runContinuation)
+          : await runContinuation();
+        const reply = String(result?.reply ?? "").trim();
+        return this.followUp(interaction, {
+          content: (reply || "Persistent goal resumed.").slice(0, 1900)
+        });
+      } catch (error) {
+        return this.followUp(interaction, { content: `Goal resume failed: ${error?.message ?? String(error)}`.slice(0, 1900) });
+      }
+    }
+    if (action === "clear") {
+      goals.clear(sessionId);
+      return this.respond(interaction, { content: "Persistent goal cleared." });
+    }
+    return this.respond(interaction, { content: `Unknown goal action: ${action}`, flags: EPHEMERAL });
+  }
+
+  async cmdRollback(interaction, opts = {}) {
+    const store = this.runtime?.checkpoints;
+    if (typeof store?.list !== "function") {
+      return this.respond(interaction, { content: "Checkpoints are unavailable.", flags: EPHEMERAL });
+    }
+    const sessionId = this.goalSessionId(interaction);
+    const listed = await store.list({ sessionId, limit: 10 });
+    const checkpoints = (Array.isArray(listed) ? listed : listed?.checkpoints ?? [])
+      .filter((checkpoint) => checkpointIdOf(checkpoint));
+    const requested = opts.number;
+
+    if (requested === undefined) {
+      if (checkpoints.length === 0) {
+        return this.respond(interaction, {
+          content: "No checkpoints are available for this session.",
+          flags: EPHEMERAL
+        });
+      }
+      const previews = await Promise.all(checkpoints.map(async (checkpoint) => ({
+        checkpoint,
+        preview: await this.checkpointPreview(checkpoint)
+      })));
+      const lines = ["Recent checkpoints for this session (newest first):"];
+      for (let index = 0; index < previews.length; index += 1) {
+        const { checkpoint, preview } = previews[index];
+        const summary = compactCheckpointPreview(checkpoint, preview, 180).replace(/\s*\n\s*/g, " / ");
+        lines.push(`${index + 1}. ${checkpointLabel(checkpoint)}${summary ? ` - ${summary}` : ""}`);
+      }
+      lines.push("Run /rollback number:<N> to preview and confirm a restore.");
+      return this.respond(interaction, { content: lines.join("\n").slice(0, 1900), flags: EPHEMERAL });
+    }
+
+    if (!Number.isInteger(requested) || requested < 1) {
+      return this.respond(interaction, {
+        content: "Rollback number must be a positive integer from the newest-first list.",
+        flags: EPHEMERAL
+      });
+    }
+    const checkpoint = checkpoints[requested - 1];
+    if (!checkpoint) {
+      return this.respond(interaction, {
+        content: `Checkpoint number ${requested} is out of range for this session.`,
+        flags: EPHEMERAL
+      });
+    }
+
+    const checkpointId = checkpointIdOf(checkpoint);
+    const preview = await this.checkpointPreview(checkpoint);
+    const previewText = compactCheckpointPreview(checkpoint, preview, 1200) || "No diff preview is available.";
+    const userId = interaction.member?.user?.id ?? interaction.user?.id ?? "unknown";
+    const confirmationId = `rollback-confirm:${(++this.rollbackConfirmationSeq).toString(36)}`;
+    if (this.rollbackConfirmations.size >= 50) {
+      const oldest = this.rollbackConfirmations.keys().next().value;
+      if (oldest) this.rollbackConfirmations.delete(oldest);
+    }
+    this.rollbackConfirmations.set(confirmationId, {
+      checkpointId,
+      sessionId,
+      userId
+    });
+    return this.respond(interaction, {
+      content: [
+        `Confirm rollback to checkpoint ${requested}: ${checkpointLabel(checkpoint)}`,
+        "Preview:",
+        previewText
+      ].join("\n").slice(0, 1900),
+      flags: EPHEMERAL,
+      components: [{
+        type: 1,
+        components: [{
+          type: 2,
+          style: 4,
+          label: `Confirm rollback ${requested}`,
+          custom_id: confirmationId
+        }]
+      }]
+    });
+  }
+
+  async checkpointPreview(checkpoint) {
+    if (typeof this.runtime?.checkpoints?.preview !== "function") return null;
+    try {
+      return await this.runtime.checkpoints.preview(checkpointIdOf(checkpoint));
+    } catch (error) {
+      return { error: error?.message ?? String(error) };
     }
   }
 
@@ -528,6 +1035,88 @@ export class DiscordCommands {
     }
     return response.json();
   }
+}
+
+function checkpointIdOf(checkpoint) {
+  return String(checkpoint?.id ?? checkpoint?.checkpointId ?? "").trim();
+}
+
+function checkpointLabel(checkpoint) {
+  const parts = [`\`${checkpointIdOf(checkpoint)}\``];
+  const createdAt = checkpoint?.createdAt ?? checkpoint?.at ?? null;
+  const target = checkpoint?.directory ?? checkpoint?.root ?? checkpoint?.path ?? null;
+  if (createdAt) parts.push(String(createdAt));
+  if (target) parts.push(String(target));
+  return parts.join(" | ");
+}
+
+function compactCheckpointPreview(checkpoint, preview, maxChars) {
+  const candidates = [];
+  if (typeof preview === "string") candidates.push(preview);
+  if (preview && typeof preview === "object") {
+    for (const key of ["summary", "preview", "diff", "diffPreview", "message", "error"]) {
+      if (typeof preview[key] === "string") candidates.push(preview[key]);
+    }
+    for (const collection of [preview.files, preview.changes]) {
+      if (!Array.isArray(collection)) continue;
+      for (const item of collection.slice(0, 5)) {
+        if (typeof item === "string") {
+          candidates.push(item);
+          continue;
+        }
+        const name = item?.path ?? item?.file ?? item?.name ?? "file";
+        const detail = item?.diffPreview ?? item?.diff ?? item?.summary ?? item?.status ?? "changed";
+        candidates.push(`${name}: ${detail}`);
+      }
+    }
+  }
+  if (candidates.length === 0) {
+    if (typeof checkpoint?.summary === "string") candidates.push(checkpoint.summary);
+    else if (Array.isArray(checkpoint?.files)) {
+      candidates.push(checkpoint.files.slice(0, 5).map((item) => item?.path ?? item?.file ?? item).join(", "));
+    } else if (preview != null) {
+      try { candidates.push(JSON.stringify(preview)); } catch { /* bounded fallback below */ }
+    }
+  }
+  return candidates
+    .filter(Boolean)
+    .join("\n")
+    .replace(/```/g, "'''")
+    .trim()
+    .slice(0, maxChars);
+}
+
+function discordUserId(interaction) {
+  return interaction.member?.user?.id ?? interaction.user?.id ?? null;
+}
+
+function discordDecisionActor(userId) {
+  const normalized = String(userId ?? "").trim();
+  return normalized ? `discord:${normalized}` : "discord:unknown";
+}
+
+function modalTextValue(interaction, customId) {
+  for (const row of interaction.data?.components ?? []) {
+    for (const component of row.components ?? []) {
+      if (component.custom_id === customId) return String(component.value ?? "").trim();
+    }
+  }
+  return "";
+}
+
+function discordSecretMetadata(entry, fallbackName = "") {
+  const name = fallbackName || (
+    typeof entry?.name === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(entry.name)
+      ? entry.name
+      : ""
+  );
+  const last4 = typeof entry?.last4 === "string" && entry.last4.length <= 4
+    ? entry.last4
+    : null;
+  return {
+    name,
+    preview: last4 ? `****${last4}` : "****"
+  };
 }
 
 function formatUptime(seconds) {

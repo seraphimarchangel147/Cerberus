@@ -284,12 +284,24 @@ function mineSequences(activity, { minLen, maxLen, minOccurrences }) {
   for (const [, info] of sequenceMap) {
     if (info.occurrences.length < minOccurrences) continue;
     const startHours = info.occurrences.map((t) => new Date(t).getHours());
-    const meanHour = startHours.reduce((a, b) => a + b, 0) / startHours.length;
-    const variance = startHours.reduce((a, h) => a + (h - meanHour) ** 2, 0) / startHours.length;
+    // Hours are CIRCULAR: 23:00 and 00:10 are 70 minutes apart, not 23 hours.
+    // Naive mean/variance scores a routine straddling midnight as chaos
+    // (variance ~132 → timeStability 0 → candidate never clears the bar).
+    // Use a circular (vector) mean and wrapped deviations instead.
+    const toAngle = (h) => (h / 24) * 2 * Math.PI;
+    const sinSum = startHours.reduce((a, h) => a + Math.sin(toAngle(h)), 0);
+    const cosSum = startHours.reduce((a, h) => a + Math.cos(toAngle(h)), 0);
+    let meanHour = (Math.atan2(sinSum, cosSum) / (2 * Math.PI)) * 24;
+    if (meanHour < 0) meanHour += 24;
+    const circDiff = (h) => {
+      const d = Math.abs(h - meanHour);
+      return Math.min(d, 24 - d);
+    };
+    const variance = startHours.reduce((a, h) => a + circDiff(h) ** 2, 0) / startHours.length;
     out.push({
       apps: info.apps,
       count: info.occurrences.length,
-      startHour: Math.round(meanHour),
+      startHour: Math.round(meanHour) % 24,
       hourVariance: variance,
       occurrences: info.occurrences
     });

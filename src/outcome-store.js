@@ -2,6 +2,7 @@ import path from "node:path";
 import { appendJsonLine, ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { createId, nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { sanitizeForAudit } from "./redact.js";
 
 // Append-only JSONL log + atomic snapshot of recent outcomes.
 // Outcome kinds: agent-reply, tool-call, cron-fire, autopilot-fire, sent-message, specialist-action.
@@ -17,27 +18,31 @@ export class OutcomeStore {
     ensureDir(this.dir);
     const snap = readJsonFile(this.snapshotPath, { version: 1, outcomes: [] });
     this.outcomes = new Map();
-    for (const o of snap.outcomes ?? []) this.outcomes.set(o.id, o);
+    for (const o of snap.outcomes ?? []) {
+      const safe = sanitizeForAudit(o);
+      this.outcomes.set(safe.id, safe);
+    }
   }
 
   record(input) {
+    const safeInput = sanitizeForAudit(input ?? {});
     const outcome = {
-      id: input.id ?? createId("out"),
-      kind: input.kind,
-      refId: input.refId ?? null,
-      signalId: input.signalId ?? null,
-      sessionId: input.sessionId ?? null,
-      agentId: input.agentId ?? "main",
-      channel: input.channel ?? null,
-      scrutinyAction: input.scrutinyAction ?? null,
-      scrutinyDimensions: input.scrutinyDimensions ?? null,
-      toolCalls: input.toolCalls ?? [],
+      id: safeInput.id ?? createId("out"),
+      kind: safeInput.kind,
+      refId: safeInput.refId ?? null,
+      signalId: safeInput.signalId ?? null,
+      sessionId: safeInput.sessionId ?? null,
+      agentId: safeInput.agentId ?? "main",
+      channel: safeInput.channel ?? null,
+      scrutinyAction: safeInput.scrutinyAction ?? null,
+      scrutinyDimensions: safeInput.scrutinyDimensions ?? null,
+      toolCalls: safeInput.toolCalls ?? [],
       resolved: false,
       qualityScore: null,
       source: null,
-      at: input.at ?? nowIso(),
+      at: safeInput.at ?? nowIso(),
       resolvedAt: null,
-      metadata: input.metadata ?? {}
+      metadata: safeInput.metadata ?? {}
     };
     this.outcomes.set(outcome.id, outcome);
     appendJsonLine(this.eventsPath, { op: "record", outcome });
@@ -52,7 +57,7 @@ export class OutcomeStore {
     outcome.qualityScore = clampScore(qualityScore);
     outcome.source = source;
     outcome.resolvedAt = nowIso();
-    if (note) outcome.metadata = { ...outcome.metadata, resolutionNote: note };
+    if (note) outcome.metadata = { ...outcome.metadata, resolutionNote: sanitizeForAudit(note) };
     appendJsonLine(this.eventsPath, { op: "resolve", id, qualityScore: outcome.qualityScore, source, at: outcome.resolvedAt });
     if (this.onResolve) this.onResolve(outcome);
     this.persist();
@@ -237,11 +242,11 @@ export class OutcomeStore {
     const all = [...this.outcomes.values()];
     const pending = all.filter((o) => !o.resolved);
     const resolved = all.filter((o) => o.resolved).sort((a, b) => b.at.localeCompare(a.at)).slice(0, SNAPSHOT_LIMIT);
-    writeJsonAtomic(this.snapshotPath, {
+    writeJsonAtomic(this.snapshotPath, sanitizeForAudit({
       version: 1,
       updatedAt: nowIso(),
       outcomes: [...pending, ...resolved]
-    });
+    }));
     // Drop old resolved from memory
     if (all.length > SNAPSHOT_LIMIT * 1.5) {
       this.outcomes = new Map([...pending, ...resolved].map((o) => [o.id, o]));

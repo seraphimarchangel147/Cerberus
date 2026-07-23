@@ -7,10 +7,14 @@
 // http://macmini.tailnet:43298). OPENAGI_IMESSAGE_NODE_TOKEN authenticates.
 // Off by default — no node configured → no tool, so non-Mac mains are clean.
 
+import { redactKnownValues } from "../redact.js";
+import { secretRedactionSpellings } from "../credential-redaction.js";
+
 export function registerImessageSearchTool(runtime, { fetchImpl = globalThis.fetch } = {}) {
   const nodeUrl = (process.env.OPENAGI_IMESSAGE_NODE ?? "").replace(/\/$/, "");
   if (!nodeUrl) return { registered: false, reason: "OPENAGI_IMESSAGE_NODE not set" };
   const nodeToken = process.env.OPENAGI_IMESSAGE_NODE_TOKEN ?? null;
+  const redactValues = secretRedactionSpellings(nodeToken);
 
   runtime.tools.register({
     name: "search_imessages",
@@ -34,15 +38,20 @@ export function registerImessageSearchTool(runtime, { fetchImpl = globalThis.fet
           body: JSON.stringify({ query: args.query ?? "", handle: args.person ?? null, days: args.days ?? null, limit: args.limit ?? 20 })
         });
         const body = await res.json().catch(() => ({}));
-        if (!res.ok) return { error: body.error ?? `iMessage node returned ${res.status}` };
-        const results = (body.results ?? []).map((m) => ({
+        const safeBody = redactKnownValues(body, redactValues);
+        if (!res.ok) return { error: safeBody.error ?? `iMessage node returned ${res.status}` };
+        const results = (safeBody.results ?? []).map((m) => ({
           from: m.fromMe ? "me" : m.handle,
           at: m.date,
           text: m.text
         }));
         return { count: results.length, results };
       } catch (error) {
-        return { error: `couldn't reach the iMessage node at ${nodeUrl}: ${error.message}` };
+        const message = redactKnownValues(
+          error?.message ?? String(error),
+          redactValues
+        );
+        return { error: `couldn't reach the iMessage node at ${nodeUrl}: ${message}` };
       }
     }
   });

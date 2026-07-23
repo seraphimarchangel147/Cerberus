@@ -18,6 +18,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { assertSafeMcpServerName, mcpNamedFilePath } from "./mcp-name.js";
 
 const DEFAULT_SCOPE = "openid profile email offline_access";
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for the user to click through
@@ -25,7 +26,7 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for the user to click through
 export class McpOAuthClient {
   constructor(options = {}) {
     if (!options.resourceUrl) throw new Error("McpOAuthClient requires resourceUrl");
-    this.name = options.name ?? "mcp";
+    this.name = assertSafeMcpServerName(options.name ?? "mcp");
     this.resourceUrl = stripTrailingSlash(options.resourceUrl);
     // The scope we'd *prefer*. The scope actually requested is narrowed at
     // discovery time to what the server advertises as supported — servers that
@@ -36,7 +37,11 @@ export class McpOAuthClient {
     this.preferredScope = options.scope ?? DEFAULT_SCOPE;
     this.scopeExplicit = options.scope != null;
     this.dataDir = options.dataDir ?? resolveDataDir();
-    this.cachePath = path.join(this.dataDir, "mcp", "auth", `${this.name}.json`);
+    this.cachePath = mcpNamedFilePath(
+      path.join(this.dataDir, "mcp", "auth"),
+      this.name,
+      ".json"
+    );
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.printAuthUrlFn = options.printAuthUrlFn ?? defaultPrintAuthUrl;
     // Optional pre-registered client (for auth servers without dynamic
@@ -53,11 +58,38 @@ export class McpOAuthClient {
   }
 
   loadCache() {
-    return readJsonFile(this.cachePath, null);
+    let cache;
+    try {
+      cache = readJsonFile(this.cachePath, null);
+    } catch {
+      const error = new Error("MCP OAuth cache is unreadable.");
+      error.code = "MCP_OAUTH_CACHE_UNREADABLE";
+      throw error;
+    }
+    if (
+      cache?.client?.client_secret
+      && this.staticClient
+      && cache.client.client_id === this.staticClient.client_id
+    ) {
+      const sanitized = { ...cache, client: this.clientForCache(cache.client) };
+      this.saveCache(sanitized);
+      return sanitized;
+    }
+    return cache;
   }
 
   saveCache(state) {
-    writeJsonAtomic(this.cachePath, { ...state, updatedAt: nowIso() });
+    const cacheState = { ...state };
+    if (cacheState.client) cacheState.client = this.clientForCache(cacheState.client);
+    writeJsonAtomic(this.cachePath, { ...cacheState, updatedAt: nowIso() });
+  }
+
+  clientForCache(client) {
+    if (!client || !this.staticClient || client.client_id !== this.staticClient.client_id) {
+      return client;
+    }
+    const { client_secret: _secret, ...publicClient } = client;
+    return publicClient;
   }
 
   /**
@@ -69,7 +101,7 @@ export class McpOAuthClient {
     if (cache.access_token && !this.isExpired(cache)) {
       return cache.access_token;
     }
-    if (cache.refresh_token && cache.discovery && cache.client) {
+    if (cache.refresh_token && cache.discovery && (this.staticClient || cache.client)) {
       try {
         await this.refresh(cache);
         return this.loadCache().access_token;
@@ -196,12 +228,14 @@ export class McpOAuthClient {
    * Refresh access token using a stored refresh_token.
    */
   async refresh(cache) {
+    const client = this.staticClient ?? cache.client;
+    if (!client?.client_id) throw new Error("OAuth refresh is missing client credentials");
     const body = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: cache.refresh_token,
-      client_id: cache.client.client_id
+      client_id: client.client_id
     });
-    if (cache.client.client_secret) body.set("client_secret", cache.client.client_secret);
+    if (client.client_secret) body.set("client_secret", client.client_secret);
     const response = await fetch(cache.discovery.serverMeta.token_endpoint, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
@@ -209,7 +243,7 @@ export class McpOAuthClient {
     });
     const json = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(json?.error_description ?? `refresh failed (${response.status})`);
-    this.persistTokens({ tokens: json, discovery: cache.discovery, client: cache.client });
+    this.persistTokens({ tokens: json, discovery: cache.discovery, client });
   }
 
   persistTokens({ tokens, discovery, client }) {

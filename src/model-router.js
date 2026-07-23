@@ -21,6 +21,8 @@ export const TASK_PROFILES = {
   chat:      { tier: "base", label: "User chat",            why: "Real reasoning, user-facing replies — keep this on your best model." },
   autopilot: { tier: "base", label: "Autopilot task work", why: "Plans and executes real work with tools — needs the strong model." },
   observer:  { tier: "nano", label: "Proactive observer",  why: "Mostly 'suggest one thing or stay quiet', runs often — nano is plenty." },
+  review:    { tier: "nano", label: "Background review",    why: "Extracts a few structured memories or proposals after a turn — nano is plenty." },
+  goal:      { tier: "nano", label: "Goal completion judge", why: "Short yes/no completion checks after goal turns are bounded and frequent." },
   scrutiny:  { tier: "nano", label: "Scrutiny judges",     why: "Short act/ask/watch/ignore classification, very frequent — nano is plenty." },
   condense:  { tier: "mini", label: "Memory condensing",   why: "Summarize a cluster of notes into one — a mini model handles it." },
   mine:      { tier: "mini", label: "Session mining",      why: "Cluster intents out of a transcript — mini is enough." },

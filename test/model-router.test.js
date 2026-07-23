@@ -17,6 +17,7 @@ test("configured tiers route the recommended tasks to cheaper models", () => {
   const r = new ModelRouter({ envPrefix: "OPENAI", baseModel: "gpt-5", env });
   // nano-tier jobs
   assert.equal(r.resolve("observer"), "gpt-5-nano");
+  assert.equal(r.resolve("goal"), "gpt-5-nano");
   assert.equal(r.resolve("scrutiny"), "gpt-5-nano");
   // mini-tier jobs
   assert.equal(r.resolve("condense"), "gpt-5-mini");
