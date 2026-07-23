@@ -9,7 +9,7 @@ import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 import { expandContextReferences } from "./context-references.js";
-import { siblingNames } from "./legion-siblings.js";
+import { siblingNames, legionUserId, legionMember, LEGION_MEMBERS } from "./legion-siblings.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -1254,7 +1254,18 @@ export function formatLegionContextBlock(channelContext, env = process.env) {
     lines.push(`- You can message a sibling with send_message(channel:"sibling", target:"<name>", text:...). Known siblings: ${siblings.join(", ")}.`);
     lines.push("- To reach a specific Discord channel directly, use send_message(channel:\"discord\", target:\"<channelId>\", text:...).");
   }
-  lines.push("- If a task needs another agent (e.g. Seraphim runs the Hermes gateway), reach out over the sibling lane instead of saying you have no way to contact them.");
+  // MENTION DISCIPLINE — a plain-text "@Name" NEVER pings on Discord; siblings
+  // (esp. Ziz) only respond when they get a REAL mention. Always address a
+  // sibling with the raw <@userId> form. This is the exact miss that dropped
+  // Ziz↔Azazel bot-to-bot contact on 2026-07-23.
+  lines.push("- IMPORTANT: to actually ping a sibling you MUST use their raw Discord user id `<@id>` in the text — a plain `@Name` does not notify them. Roster (name → <@id> → where they run on the box):");
+  for (const [name, m] of Object.entries(LEGION_MEMBERS)) {
+    if (name === "azazel" || name === "creator") continue;
+    const where = m.home ? ` — runs at ${m.home}` : "";
+    lines.push(`    • ${name}: <@${m.userId}> — ${m.label}${where}`);
+  }
+  lines.push("- Off-Discord lane (works even if Discord is down): drop a JSON line in the shared Legion mailbox `~/.legion/mailbox/<sibling>.jsonl` (and read your own `~/.legion/mailbox/azazel.jsonl`). See `~/.legion/README.md` for the one-line protocol.");
+  lines.push("- If a task needs another agent (e.g. Seraphim runs the Hermes gateway, Ziz runs the Rust zerohermes harness), reach out over the sibling lane instead of saying you have no way to contact them.");
   return lines.join("\n");
 }
 

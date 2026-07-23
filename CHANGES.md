@@ -628,3 +628,16 @@ PROVIDER ROUTING COMPLETE
 API SERVER COMPLETE
 
 PARITY WAVE 3 PHASE 2 COMPLETE
+
+## 2026-07-23 — Legion sibling roster + bot-to-bot mention discipline (Seraphim)
+Root cause of Ziz↔Azazel plain-text "@Azazel" not pinging: Azazel's sibling
+table only had seraphim/azazel/home (no `ziz` target), and the Legion context
+block never told the model that a plain `@Name` doesn't notify — only a raw
+`<@id>` does. Fixes (src/legion-siblings.js, src/agent-host.js):
+- BUILTIN_SIBLINGS gains `ziz` (#ziz-chat 1488300124395540501).
+- New LEGION_MEMBERS registry + legionUserId()/legionMember() exports: every
+  family member's raw Discord user id + WSL home.
+- formatLegionContextBlock now (a) warns plain @Name doesn't ping and lists every
+  sibling as name → <@id> → where-they-run, and (b) advertises the off-Discord
+  fallback lane (~/.legion/mailbox/<name>.jsonl, see ~/.legion/README.md).
+- Tests: test/legion-siblings.test.js +4 cases. Both lanes 1088/1088 green.
