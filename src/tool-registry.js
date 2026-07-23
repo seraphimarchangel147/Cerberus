@@ -8,6 +8,7 @@ import {
   isToolSearchDeferrable,
   registerToolSearchTools
 } from "./tool-search.js";
+import { resolveSibling, siblingNames } from "./legion-siblings.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
@@ -992,19 +993,31 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "send_message",
-    description: "Proactively send a message to a user via a channel (telegram or local). Use during autopilot pulses or when you decide to reach out unprompted. Returns delivery status.",
+    description: "Proactively send a message via a channel. channel='discord' posts to a Discord channel id; channel='sibling' reaches another Legion agent by name (e.g. 'seraphim') — the message lands in that agent's Discord channel where they'll see it. channel='telegram' or 'local' as before. Use to reach out unprompted, hand off to a sibling agent, or answer a cross-agent question. Returns delivery status.",
     parameters: {
       type: "object",
       properties: {
-        channel: { type: "string", enum: ["telegram", "local"], description: "Channel to deliver via." },
-        target: { type: "string", description: "Channel target — chat id for Telegram." },
-        text: { type: "string", description: "Message body. Keep it short and useful." }
+        channel: { type: "string", enum: ["discord", "sibling", "telegram", "local"], description: "Delivery lane: 'discord' (target=channel id), 'sibling' (target=agent name like 'seraphim'), 'telegram' (target=chat id), or 'local'." },
+        target: { type: "string", description: "For 'sibling': the agent name (seraphim, home, …). For 'discord': the channel id. For 'telegram': the chat id." },
+        text: { type: "string", description: "Message body. Keep it short and useful. When messaging a sibling, sign it so they know it's from you." }
       },
       required: ["channel", "target", "text"],
       additionalProperties: false
     },
     handler: async (args) => {
       if (!runtime.channels?.deliver) throw new Error("Channels are not bound to runtime.");
+      // 'sibling' is a friendly alias that resolves an agent name to the
+      // Discord channel where that sibling listens, then delivers over Discord.
+      if (args.channel === "sibling") {
+        const dataDir = runtime.dataDir ?? null;
+        const channelId = resolveSibling(args.target, process.env, dataDir);
+        if (!channelId) {
+          throw new Error(
+            `Unknown sibling "${args.target}". Known siblings: ${siblingNames(process.env, dataDir).join(", ")}.`
+          );
+        }
+        return runtime.channels.deliver({ channel: "discord", target: channelId, text: args.text });
+      }
       return runtime.channels.deliver({ channel: args.channel, target: args.target, text: args.text });
     }
   });

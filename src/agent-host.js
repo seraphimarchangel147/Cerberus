@@ -9,6 +9,7 @@ import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 import { expandContextReferences } from "./context-references.js";
+import { siblingNames } from "./legion-siblings.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -29,7 +30,17 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "pause_goal",
   "resume_goal",
   "clear_goal",
-  "list_checkpoints"
+  "list_checkpoints",
+  // Even on a casual turn the agent must be able to reach out and to discover
+  // the rest of its toolset — otherwise it looks (to itself) like it has no
+  // send lane and no way to escalate, which is exactly the "I can't reach
+  // Seraphim / I only see 6 tools" failure. send_message covers Discord +
+  // sibling routing; searcmcp_tools lets it pull the full arsenal on demand.
+  // NOTE: do NOT list the tool_search/tool_describe/tool_call bridge names here
+  // — those are injected dynamically by the tool-search controller, and baking
+  // them in falsely trips toolSearchBridgesActive() on plain chat turns.
+  "send_message",
+  "searcmcp_tools"
 ]);
 export const DEFAULT_CHAT_MAX_ITERATIONS = 4;
 const TOOL_SEARCH_BRIDGE_NAME_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
@@ -557,7 +568,7 @@ export class AgentHost {
         images: Array.isArray(input.images) ? input.images : [],
         instructions: this.instructionsForAgent(agent),
         sessionMemorySnapshot,
-        turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice),
+        turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice, { channel, metadata: input.metadata ?? null }),
         tools,
         toolRegistry,
         context: modelContext,
@@ -980,7 +991,7 @@ Answer the user plainly. If a specialist was created, mention its name and scope
   // Per-turn [context] block prepended to the latest user message (see
   // buildTurnContext in model-provider.js for the provider-side fallback).
   // Carries everything that used to make the system prompt churn per turn.
-  turnContextForAgent(output, memoryHits = [], intuitions = [], ambientContext = null, screenContext = null, toolOverflowNotice = null) {
+  turnContextForAgent(output, memoryHits = [], intuitions = [], ambientContext = null, screenContext = null, toolOverflowNotice = null, channelContext = null) {
     const sections = [];
 
     sections.push(`Current decision: ${output.scrutiny.action}`);
@@ -1021,6 +1032,9 @@ Answer the user plainly. If a specialist was created, mention its name and scope
 
     const screenBlock = formatScreenContextBlock(screenContext);
     if (screenBlock) sections.push(screenBlock.trim());
+
+    const legionBlock = formatLegionContextBlock(channelContext);
+    if (legionBlock) sections.push(legionBlock);
 
     return `[context]\nPer-turn background assembled by the runtime — not typed by the user.\n${sections.join("\n")}\n[/context]`;
   }
@@ -1218,6 +1232,30 @@ export function formatScreenContextBlock(screenContext) {
     : (screenContext.app || "active window");
   const body = screenContext.text.slice(0, 4000);
   return `\nActive window the user is looking at right now (${where}):\n${body}\nGround your answer in this if it's relevant; don't quote it back verbatim.\n`;
+}
+
+// Tells the agent WHERE it is when a turn arrives over Discord: which server /
+// channel, that it's part of the Legion family, and that it CAN reach siblings.
+// Without this the agent has no idea it lives in a Discord server or that a
+// send lane to Seraphim exists. Returns "" for non-Discord turns. Pure +
+// exported for testing.
+export function formatLegionContextBlock(channelContext, env = process.env) {
+  if (!channelContext || channelContext.channel !== "discord") return "";
+  const meta = channelContext.metadata ?? {};
+  const lines = ["Legion / Discord context:"];
+  lines.push("- You are Azazel, a member of the Legion family of agents, active in a Discord server.");
+  if (meta.channelId) {
+    const scope = meta.guildId ? `channel ${meta.channelId} in server ${meta.guildId}` : `channel ${meta.channelId}`;
+    lines.push(`- This turn arrived in ${scope}.`);
+  }
+  let siblings = [];
+  try { siblings = siblingNames(env); } catch { siblings = []; }
+  if (siblings.length) {
+    lines.push(`- You can message a sibling with send_message(channel:"sibling", target:"<name>", text:...). Known siblings: ${siblings.join(", ")}.`);
+    lines.push("- To reach a specific Discord channel directly, use send_message(channel:\"discord\", target:\"<channelId>\", text:...).");
+  }
+  lines.push("- If a task needs another agent (e.g. Seraphim runs the Hermes gateway), reach out over the sibling lane instead of saying you have no way to contact them.");
+  return lines.join("\n");
 }
 
 // Maps a provider class to a short user-facing label. Avoids leaking

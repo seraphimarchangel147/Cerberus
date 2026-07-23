@@ -2,6 +2,17 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-23 — Discord/Legion awareness + sibling send lane (Seraphim)
+
+Fixes Azazel reporting "I only see ~6 tools" and "no lane to Seraphim from this seat."
+
+- **send_message now reaches Discord and siblings.** Widened the tool schema from `channel: [telegram, local]` to `[discord, sibling, telegram, local]`. `channel:"sibling"` resolves an agent NAME (e.g. `seraphim`) to the Discord channel where that sibling listens and delivers over Discord — the underlying `channels.deliver()` already routed Discord, the tool just never advertised it. Unknown sibling → actionable error listing known names (never a silent no-op).
+- **New `src/legion-siblings.js`** — the Legion routing table (builtin defaults for Legion's server: seraphim/azazel/home), overridable via `OPENAGI_LEGION_SIBLINGS` env (JSON) or `<dataDir>/legion-siblings.json`. Malformed override falls through to builtins, never breaks routing.
+- **Discord/Legion turn context.** Inbound Discord turns now inject a `formatLegionContextBlock` section telling the agent it's Azazel in a Discord server, which channel/server this turn arrived in, and that it CAN message siblings (with the exact tool call). Previously an inbound turn carried only `[author] text` — the agent had no idea it lived in Discord or that a send lane to Seraphim existed.
+- **Chat-core fast-lane no longer hides the send lane.** Added `send_message` + `searcmcp_tools` to `CHAT_CORE_TOOLS`, so even a casual/QA turn (which the conversational fast-lane trims to the core set) keeps a way to reach out and to discover the full toolset on demand. This is the direct cause of the "only 6 tools visible" report: the fast-lane allowlist WAS the 6 tools. (Bridge names tool_search/tool_describe/tool_call are intentionally NOT hardcoded — they're injected dynamically and would falsely trip toolSearchBridgesActive().)
+- **`runtime.dataDir`** now exposed on AbiRuntime so tool handlers can read per-agent config without threading subsystem options.
+- Regression: `test/legion-siblings.test.js` (9 cases: resolve case-insensitive/unknown/env-override/malformed, chat-core send lane present, context block fires only for discord + names channel/server/sibling lane + DM path). Both lanes 1084/1084 green. Homoglyph-clean.
+
 ## 2026-07-22 — Reversible cron job control from the agent loop (Seraphim)
 
 - Added `set_cron_job_enabled(id, enabled)` tool: turns a scheduled cron job OFF (pause, reversible — preserved with `nextRunAt=null`) or ON (resume, recomputes `nextRunAt`) via the existing `runtime.cron.enableJob()`. This closes the gap where the only in-loop control was the destructive `cancel_cron_job` — "turn it off" now means pause, not delete.

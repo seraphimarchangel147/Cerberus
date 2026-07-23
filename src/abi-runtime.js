@@ -229,6 +229,10 @@ export class AbiRuntime {
       ...(options.context ?? {})
     };
     this.integrations = options.integrations ?? new IntegrationRegistry();
+    // Expose the resolved data dir on the runtime so tool handlers (e.g.
+    // send_message's sibling routing) can read per-agent config files without
+    // reaching back through subsystem options.
+    this.dataDir = options.dataDir ?? options.mcpOptions?.dataDir ?? resolveDataDir();
     this.workflows = options.workflows ?? registerDefaultWorkflows(new WorkflowRegistry());
     this.memory = options.memory ?? new MemorySystem(options.memoryOptions);
     this.externalMemoryProvider = resolveExternalMemoryProvider(options);
