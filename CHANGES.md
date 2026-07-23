@@ -562,3 +562,13 @@ TOOL SEARCH COMPLETE
 - Added parallelism, isolation, redaction, failure, cancellation, real tool-loop, provider-construction, Discord restoration, hosted API, setup, and model-picker regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1008/1008 with no environment pinning.
 MOA COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: context references (Codex)
+
+- Added bounded inbound expansion for file and line-range references, deterministic folder trees, unstaged and staged diffs, capped commit history with patches, and SSRF-guarded URL text.
+- Kept raw user text authoritative for scrutiny, signals, memory, and transcripts while appending a clearly labeled untrusted context section only to the provider input after scrutiny.
+- Enforced workspace and home containment, direct-symlink rejection, realpath revalidation, sensitive-path and binary-file denial, bounded reads and subprocesses, graceful per-reference failures, and abort propagation.
+- Preserved byte-identical provider input when no reference is present and made invalid file ranges deliberately fall back to the full bounded file.
+- Added parser, file, folder, git, URL, cap, safety, abort, and AgentHost integration regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1023/1023 with no environment pinning.
+CONTEXT REFS COMPLETE

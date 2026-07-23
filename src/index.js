@@ -97,6 +97,16 @@ export {
   toolSchemaBytes
 } from "./tool-search.js";
 export {
+  CONTEXT_REFERENCE_FOLDER_MAX_DEPTH,
+  CONTEXT_REFERENCE_FOLDER_MAX_ENTRIES,
+  CONTEXT_REFERENCE_MAX_CHARS,
+  CONTEXT_REFERENCE_MAX_GIT_COMMITS,
+  CONTEXT_REFERENCE_MAX_REFS,
+  CONTEXT_REFERENCE_MAX_TOTAL_CHARS,
+  expandContextReferences,
+  parseContextReferences
+} from "./context-references.js";
+export {
   MODEL_PROVIDER_IDS,
   ModelRouter,
   TASK_PROFILES,

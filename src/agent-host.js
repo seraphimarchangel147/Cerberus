@@ -1,3 +1,4 @@
+import path from "node:path";
 import { InMemoryAgentStore } from "./agent-store.js";
 import { createModelProvider } from "./model-provider.js";
 import { createId, nowIso } from "./utils.js";
@@ -7,6 +8,7 @@ import { autoApproveEnabled } from "./tool-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
+import { expandContextReferences } from "./context-references.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -147,6 +149,11 @@ export class AgentHost {
       secrets: options.modelProviderOptions?.secrets ?? this.runtime.secrets,
       dataDir: options.modelProviderOptions?.dataDir ?? this.runtime.secrets?.dataDir
     };
+    this.workspaceDir = path.resolve(
+      options.workspaceDir
+      ?? this.runtime.checkpoints?.workspaceDir
+      ?? process.cwd()
+    );
     this.modelProvider = options.modelProvider ?? createModelProvider(modelProviderOptions);
     this.backgroundReviewer = options.backgroundReviewer ?? new BackgroundReviewer({
       runtime: this.runtime,
@@ -530,8 +537,12 @@ export class AgentHost {
 
     let modelResult;
     try {
+      const providerInput = await expandContextReferences(text, {
+        workspaceDir: this.workspaceDir,
+        signal: turnAbortController.signal
+      });
       modelResult = await turnProvider.generate({
-        input: text,
+        input: providerInput,
         agent,
         // Route by what the call IS, so model tiering applies: autonomous pulses
         // (autopilot/cron) are cheap "anything to do?" work; everything else is
