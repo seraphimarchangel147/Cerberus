@@ -107,6 +107,15 @@ export {
   parseContextReferences
 } from "./context-references.js";
 export {
+  DELIVERABLE_EXTENSION_MAP,
+  DELIVERABLE_MAX_FILES,
+  DELIVERABLE_MAX_FILE_BYTES,
+  DELIVERABLE_MAX_TOTAL_BYTES,
+  classifyDeliverablePath,
+  scanDeliverables,
+  stripDeliveredPaths
+} from "./deliverable.js";
+export {
   MODEL_PROVIDER_IDS,
   ModelRouter,
   TASK_PROFILES,

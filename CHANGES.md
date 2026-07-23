@@ -572,3 +572,13 @@ MOA COMPLETE
 - Added parser, file, folder, git, URL, cap, safety, abort, and AgentHost integration regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1023/1023 with no environment pinning.
 CONTEXT REFS COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: deliverable mode (Codex)
+
+- Added automatic outbound detection for the complete Hermes image, video, audio, document, data, presentation, archive, and web extension table, with native inline, voice, and file routing.
+- Added bounded regular-file loading, duplicate coalescing, symlink and sensitive-path rejection, native Windows and Unix absolute paths, home-relative paths, and exact success-only path removal.
+- Protected fenced and inline code samples, relative paths, remote URLs, missing files, oversized files, and every non-allowlisted source extension from automatic upload or message mutation.
+- Routed normal Discord turns, streamed final edits, Telegram replies, and generic Discord or Telegram outbound delivery through the shared mode while retaining failed-upload paths and redacting transport errors.
+- Added classifier, scanner, cap, safety, Discord, Telegram, streaming, pairing, failure, and channel-manager regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1038/1038 with no environment pinning.
+DELIVERABLE COMPLETE

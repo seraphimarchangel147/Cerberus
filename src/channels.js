@@ -1,9 +1,13 @@
-import { appendJsonLine, ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import { appendJsonLine, ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { TelegramPairing } from "./telegram-pairing.js";
 import { DiscordChannel } from "./discord-channel.js";
+import { scanDeliverables, stripDeliveredPaths } from "./deliverable.js";
+import { redactKnownValues } from "./redact.js";
+import { secretRedactionSpellings } from "./credential-redaction.js";
 
 export class ChannelManager {
   constructor(options = {}) {
@@ -49,8 +53,8 @@ export class ChannelManager {
     if (!channel || !text) throw new Error("deliver requires channel and text");
     appendJsonLine(this.eventsPath, { at: nowIso(), op: "deliver", channel, target, text: String(text).slice(0, 400) });
     let result;
-    if (channel === "telegram") result = await this.telegram.sendMessage(target, text);
-    else if (channel === "discord") result = await this.discord.sendMessage(target, text);
+    if (channel === "telegram") result = await this.telegram.deliverAgentReply(target, text);
+    else if (channel === "discord") result = await this.discord.deliverAgentReply(target, text);
     else if (channel === "local" || channel === "cron") {
       result = { delivered: false, reason: `channel ${channel} has no outbound transport (read from /sessions or stream /events)` };
     } else {
@@ -95,6 +99,8 @@ export class TelegramChannel {
     this.statePath = path.join(this.dir, "state.json");
     this.eventsPath = path.join(this.dir, "events.jsonl");
     this.pollTimer = null;
+    this.fetch = options.fetch ?? globalThis.fetch;
+    this.deliverableOptions = options.deliverableOptions ?? {};
     ensureDir(this.dir);
     this.state = readJsonFile(this.statePath, { offset: 0 });
     // Pairing security: only chats that completed "/pair <code>" may talk to
@@ -159,7 +165,7 @@ export class TelegramChannel {
     });
 
     if (this.token) {
-      await this.sendMessage(chatId, result.reply);
+      await this.deliverAgentReply(chatId, result.reply);
     }
 
     return result;
@@ -167,7 +173,7 @@ export class TelegramChannel {
 
   async sendMessage(chatId, text) {
     if (!this.token) throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
-    const response = await fetch(`https://api.telegram.org/bot${this.token}/sendMessage`, {
+    const response = await this.fetch(`https://api.telegram.org/bot${this.token}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -176,10 +182,90 @@ export class TelegramChannel {
       })
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
+    if (!response.ok || body?.ok === false) {
       throw new Error(body?.description ?? `Telegram send failed with ${response.status}`);
     }
     return body;
+  }
+
+  async deliverAgentReply(chatId, text) {
+    const original = String(text ?? "");
+    let candidates = [];
+    try {
+      candidates = await scanDeliverables(original, this.deliverableOptions);
+      if (!Array.isArray(candidates)) candidates = [];
+    } catch (error) {
+      this.logDeliverableFailure("scan", null, error);
+    }
+
+    const successfulCandidates = [];
+    const uploadResults = new Map();
+    for (const candidate of candidates) {
+      const key = deliverableIdentity(candidate);
+      if (uploadResults.has(key)) {
+        if (uploadResults.get(key)) successfulCandidates.push(candidate);
+        continue;
+      }
+      try {
+        await this.sendDeliverable(chatId, candidate);
+        uploadResults.set(key, true);
+        successfulCandidates.push(candidate);
+      } catch (error) {
+        uploadResults.set(key, false);
+        this.logDeliverableFailure("upload", candidate, error);
+      }
+    }
+
+    const stripped = successfulCandidates.length > 0
+      ? stripDeliveredPaths(original, successfulCandidates)
+      : original;
+    const cleaned = String(stripped ?? "").trim() || "Attached file.";
+    const message = await this.sendMessage(chatId, cleaned);
+    return {
+      text: cleaned,
+      candidates,
+      successfulCandidates,
+      message
+    };
+  }
+
+  async sendDeliverable(chatId, candidate) {
+    if (!this.token) throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
+    const delivery = telegramDeliverableRoute(candidate);
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append(
+      delivery.field,
+      new Blob(
+        [Buffer.isBuffer(candidate?.buffer) ? candidate.buffer : Buffer.from(candidate?.buffer ?? "")],
+        { type: candidate?.mimeType ?? "application/octet-stream" }
+      ),
+      candidate?.filename ?? "attachment"
+    );
+    const response = await this.fetch(
+      `https://api.telegram.org/bot${this.token}/${delivery.method}`,
+      { method: "POST", body: form }
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body?.ok === false) {
+      throw new Error(body?.description ?? `Telegram ${delivery.method} failed with ${response.status}`);
+    }
+    return body;
+  }
+
+  logDeliverableFailure(phase, candidate, error) {
+    const safeError = redactKnownValues(
+      error?.message ?? String(error),
+      secretRedactionSpellings(this.token)
+    );
+    appendJsonLine(this.eventsPath, {
+      at: nowIso(),
+      op: "deliverable-error",
+      phase,
+      category: candidate?.category ?? null,
+      delivery: candidate?.delivery ?? null,
+      error: String(safeError).replace(/[\r\n]+/gu, " ").slice(0, 300)
+    });
   }
 
   startPolling(intervalMs = Number.parseInt(process.env.TELEGRAM_POLL_INTERVAL_MS ?? "2500", 10)) {
@@ -220,4 +306,29 @@ export class TelegramChannel {
 
     return { updates: body.result?.length ?? 0 };
   }
+}
+
+function telegramDeliverableRoute(candidate) {
+  if (candidate?.category === "image") return { method: "sendPhoto", field: "photo" };
+  if (candidate?.category === "video") return { method: "sendVideo", field: "video" };
+  if (candidate?.category === "audio") return { method: "sendAudio", field: "audio" };
+  return { method: "sendDocument", field: "document" };
+}
+
+function deliverableIdentity(candidate) {
+  for (const key of [
+    "resolvedPath",
+    "absolutePath",
+    "canonicalPath",
+    "filePath",
+    "path"
+  ]) {
+    const value = candidate?.[key];
+    if (typeof value === "string" && value) return `path:${path.normalize(value)}`;
+  }
+  const buffer = Buffer.isBuffer(candidate?.buffer)
+    ? candidate.buffer
+    : Buffer.from(candidate?.buffer ?? "");
+  const digest = createHash("sha256").update(buffer).digest("hex");
+  return `content:${candidate?.filename ?? "file"}:${digest}`;
 }

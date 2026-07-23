@@ -13,6 +13,7 @@
 //   * guild messages require a mention (user OR role ping counts)
 //   * bot-authored messages only count when they mention us
 //   * DMs gated by the allowFrom id list
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { appendJsonLine, ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { nowIso } from "./utils.js";
@@ -20,8 +21,9 @@ import { resolveDataDir } from "./data-dir.js";
 import { DiscordCommands } from "./discord-commands.js";
 import { ANSI, COLORS, embed } from "./discord-embeds.js";
 import { approvePendingAction } from "./pending-actions.js";
-import { redactKnownValues } from "./redact.js";
+import { redactKnownValues, sanitizeForAudit } from "./redact.js";
 import { secretRedactionSpellings } from "./credential-redaction.js";
+import { scanDeliverables, stripDeliveredPaths } from "./deliverable.js";
 
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
@@ -113,6 +115,7 @@ export class DiscordChannel {
     this.presenceTimer = null;
     this.restFetch = options.fetch ?? globalThis.fetch;
     this.restSleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.deliverableOptions = options.deliverableOptions ?? {};
   }
 
   status() {
@@ -457,8 +460,10 @@ export class DiscordChannel {
       await status.finish(result);
       const replyText = String(result?.reply ?? "").trim();
       if (replyText && replyText !== "(no text)") {
-        const delivered = await replyStream.finish(replyText);
-        if (!delivered) await this.sendMessage(message.channel_id, replyText, message.id);
+        await this.deliverAgentReply(message.channel_id, replyText, {
+          replyToId: message.id,
+          replyStream
+        });
       } else {
         // Never end a pinged turn in silence — surface the actual stop reason.
         await replyStream.stop();
@@ -472,6 +477,81 @@ export class DiscordChannel {
     } finally {
       if (typingTimer) clearInterval(typingTimer);
     }
+  }
+
+  async deliverAgentReply(
+    channelId,
+    text,
+    { replyToId = null, replyStream = null } = {}
+  ) {
+    const original = String(text ?? "");
+    let candidates = [];
+    try {
+      candidates = await scanDeliverables(original, this.deliverableOptions);
+      if (!Array.isArray(candidates)) candidates = [];
+    } catch (error) {
+      this.logDeliverableFailure("scan", null, error);
+    }
+
+    const successfulCandidates = [];
+    const uploadResults = new Map();
+    for (const candidate of candidates) {
+      const key = deliverableIdentity(candidate);
+      if (uploadResults.has(key)) {
+        if (uploadResults.get(key)) successfulCandidates.push(candidate);
+        continue;
+      }
+      try {
+        await this.sendFile(
+          channelId,
+          candidate.buffer,
+          candidate.filename,
+          discordDeliverableOptions(candidate)
+        );
+        uploadResults.set(key, true);
+        successfulCandidates.push(candidate);
+      } catch (error) {
+        uploadResults.set(key, false);
+        this.logDeliverableFailure("upload", candidate, error);
+      }
+    }
+
+    const stripped = successfulCandidates.length > 0
+      ? stripDeliveredPaths(original, successfulCandidates)
+      : original;
+    const cleaned = String(stripped ?? "").trim() || "Attached file.";
+    if (replyStream) {
+      const streamed = await replyStream.finish(cleaned);
+      if (streamed) {
+        return {
+          text: cleaned,
+          candidates,
+          successfulCandidates,
+          streamed: true
+        };
+      }
+    }
+    await this.sendMessage(channelId, cleaned, replyToId);
+    return {
+      text: cleaned,
+      candidates,
+      successfulCandidates,
+      streamed: false
+    };
+  }
+
+  logDeliverableFailure(phase, candidate, error) {
+    const spellings = secretRedactionSpellings(this.token);
+    const safeError = sanitizeForAudit(
+      redactKnownValues(error?.message ?? String(error), spellings)
+    );
+    this.log({
+      op: "deliverable-error",
+      phase,
+      category: candidate?.category ?? null,
+      delivery: candidate?.delivery ?? null,
+      error: String(safeError).replace(/[\r\n]+/gu, " ").slice(0, 300)
+    });
   }
 
   async sendMessage(channelId, text, replyToId = null, extra = null) {
@@ -499,12 +579,31 @@ export class DiscordChannel {
   }
 
   // Attachment upload (charts). Node 22 fetch speaks multipart via FormData.
-  async sendFile(channelId, buffer, filename, { content = "", embeds = null } = {}) {
+  async sendFile(
+    channelId,
+    buffer,
+    filename,
+    {
+      content = "",
+      embeds = null,
+      delivery = "file",
+      category = "file",
+      mimeType = null
+    } = {}
+  ) {
     const payload = { content, attachments: [{ id: 0, filename }] };
-    if (embeds) payload.embeds = embeds;
+    if (embeds) {
+      payload.embeds = embeds;
+    } else if (delivery === "inline" && category === "image") {
+      payload.embeds = [{ image: { url: `attachment://${filename}` } }];
+    }
     const form = new FormData();
     form.append("payload_json", JSON.stringify(payload));
-    form.append("files[0]", new Blob([buffer]), filename);
+    form.append(
+      "files[0]",
+      new Blob([buffer], mimeType ? { type: mimeType } : undefined),
+      filename
+    );
     let response;
     try {
       response = await fetch(`${API}/channels/${channelId}/messages`, {
@@ -846,6 +945,34 @@ export class DiscordChannel {
 function splitIds(value) {
   if (Array.isArray(value)) return value.map(String);
   return String(value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function deliverableIdentity(candidate) {
+  for (const key of [
+    "resolvedPath",
+    "absolutePath",
+    "canonicalPath",
+    "filePath",
+    "path"
+  ]) {
+    const value = candidate?.[key];
+    if (typeof value === "string" && value) {
+      return `path:${path.normalize(value)}`;
+    }
+  }
+  const buffer = Buffer.isBuffer(candidate?.buffer)
+    ? candidate.buffer
+    : Buffer.from(candidate?.buffer ?? "");
+  const digest = createHash("sha256").update(buffer).digest("hex");
+  return `content:${candidate?.filename ?? "file"}:${digest}`;
+}
+
+function discordDeliverableOptions(candidate) {
+  return {
+    category: candidate?.category ?? "file",
+    delivery: candidate?.delivery ?? "file",
+    mimeType: candidate?.mimeType ?? null
+  };
 }
 
 // Vision plumbing: pull image attachments off an inbound Discord message and
