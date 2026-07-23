@@ -79,7 +79,10 @@ export function resolveChatMaxIterations(env = process.env) {
 }
 
 export function isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist = false }) {
-  const interactive = channel !== "autopilot" && channel !== "cron" && channel !== "subagent";
+  const interactive = channel !== "autopilot"
+    && channel !== "cron"
+    && channel !== "subagent"
+    && channel !== "batch";
   // The band gate is NOT the chat-vs-work separator — a plain factual question
   // ("what is the capital of France?") scores ~0.58 → verdict `act`, so keying on
   // {ignore, watch} left the fast lane inert in prod. The real separator is the

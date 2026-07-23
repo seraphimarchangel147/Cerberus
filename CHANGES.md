@@ -582,3 +582,13 @@ CONTEXT REFS COMPLETE
 - Added classifier, scanner, cap, safety, Discord, Telegram, streaming, pairing, failure, and channel-manager regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1038/1038 with no environment pinning.
 DELIVERABLE COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: batch processing (Codex)
+
+- Added the intentionally named `batcmcp_runner.mjs` JSONL batch runner with strict Hermes-compatible flags, bounded worker pools, configurable batch sizing, and isolated runtime, provider, workspace, and data directories per prompt.
+- Added ShareGPT trajectory export, tool-use and reasoning-coverage statistics, per-batch append-only records, atomic checkpoints and summaries, stable occurrence-aware item identities, and failure records safe for retry.
+- Made completed batch JSONL records the resume source of truth, preventing duplicates while retrying unfinished items even when a checkpoint is stale.
+- Kept batch sessions on the full AgentHost iteration path, honored the requested turn cap, and closed runtime SQLite and integration resources between items to control long-run memory use.
+- Added parser, dataset, distribution-listing, helper, three-prompt bounded-concurrency, resume, recovery, isolation, and real durable-runtime regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1045/1045 with no environment pinning.
+BATCH COMPLETE
