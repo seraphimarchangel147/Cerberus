@@ -13,6 +13,25 @@ const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 const TOOL_SEARCH_DISCOVERY_BRIDGES = new Set(["tool_search", "tool_describe"]);
+const CAPABILITY_FIELDS = new Set([
+  "domain",
+  "verbs",
+  "effect",
+  "idempotent",
+  "latency",
+  "cost",
+  "resources",
+  "requirements",
+  "examples",
+  "successCriteria",
+  "availability"
+]);
+const CAPABILITY_EFFECTS = new Set(["read", "write"]);
+const CAPABILITY_LATENCIES = new Set(["instant", "low", "medium", "high", "unknown"]);
+const CAPABILITY_COSTS = new Set(["none", "low", "medium", "high", "unknown"]);
+const CAPABILITY_AVAILABILITIES = new Set(["available", "conditional", "unavailable", "unknown"]);
+const CAPABILITY_MAX_EXAMPLES = 8;
+const CAPABILITY_MAX_EXAMPLE_BYTES = 8192;
 
 export class ToolRegistry {
   constructor(options = {}) {
@@ -28,6 +47,9 @@ export class ToolRegistry {
     if (!tool?.name) throw new Error("Tool requires a name.");
     if (typeof tool.handler !== "function") throw new Error(`Tool ${tool.name} requires a handler.`);
     const metadata = { ...(tool.metadata ?? {}) };
+    const source = normalizedToolSource(tool.source);
+    const needsConfirmation = Boolean(tool.needsConfirmation);
+    const sideEffects = tool.sideEffects !== false;
     const forwardInvocation = typeof tool.forwardInvocation === "function"
       ? tool.forwardInvocation
       : typeof metadata.forwardInvocation === "function"
@@ -38,7 +60,7 @@ export class ToolRegistry {
       name: tool.name,
       description: tool.description ?? "",
       parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
-      source: tool.source ?? "internal",
+      source,
       handler: tool.handler,
       // Synchronous bridge unwrapping happens before activity, hooks, gates,
       // approvals, and checkpoints. It is intentionally omitted from list()
@@ -49,7 +71,7 @@ export class ToolRegistry {
       preflight: typeof tool.preflight === "function" ? tool.preflight : null,
       // When true, invoke() queues a pending action and suspends until the
       // user approves, denies, or the bounded approval window expires.
-      needsConfirmation: Boolean(tool.needsConfirmation),
+      needsConfirmation,
       // Short human-readable summary used in the approval UI when the args
       // alone don't describe the action well. Optional fn(args) -> string.
       summarize: typeof tool.summarize === "function" ? tool.summarize : null,
@@ -59,8 +81,14 @@ export class ToolRegistry {
       // read-only. Scrutiny verdicts gate on this: 'watch' turns allow only
       // read-only tools; 'ask' turns divert side-effecting calls to the
       // approval queue.
-      sideEffects: tool.sideEffects !== false,
-      metadata
+      sideEffects,
+      metadata,
+      capability: normalizeToolCapability(tool.capability, {
+        toolName: tool.name,
+        source,
+        sideEffects,
+        needsConfirmation
+      })
     };
     this.tools.set(normalized.name, normalized);
     return normalized;
@@ -105,7 +133,7 @@ export class ToolRegistry {
   }
 
   list({ readOnly = false } = {}) {
-    const all = [...this.tools.values()].map(({ handler, preflight, forwardInvocation, ...rest }) => rest);
+    const all = [...this.tools.values()].map(publicToolDescriptor);
     return readOnly ? all.filter((tool) => !tool.sideEffects) : all;
   }
 
@@ -536,6 +564,315 @@ export class ToolRegistry {
       // Observer hooks are advisory and never alter a tool result.
     }
   }
+}
+
+function normalizedToolSource(value) {
+  const source = String(value ?? "internal").trim();
+  return source || "internal";
+}
+
+function normalizeToolCapability(input, {
+  toolName,
+  source,
+  sideEffects,
+  needsConfirmation
+}) {
+  if (input !== undefined && !isPlainRecord(input)) {
+    throw capabilityError(toolName, null, "must be a plain object.");
+  }
+  const supplied = input ?? {};
+  assertCapabilityDataProperties(supplied, toolName, "capability");
+  for (const field of Object.keys(supplied)) {
+    if (!CAPABILITY_FIELDS.has(field)) {
+      throw capabilityError(toolName, field, "is not a supported field.");
+    }
+  }
+
+  const expectedEffect = sideEffects ? "write" : "read";
+  const effect = supplied.effect === undefined
+    ? expectedEffect
+    : capabilityEnum(toolName, "effect", supplied.effect, CAPABILITY_EFFECTS);
+  if (effect !== expectedEffect) {
+    throw capabilityError(
+      toolName,
+      "effect",
+      `must be "${expectedEffect}" because sideEffects is ${sideEffects}.`
+    );
+  }
+  const declaredRequirements = supplied.requirements === undefined
+    ? []
+    : capabilityStringArray(toolName, "requirements", supplied.requirements, {
+        maxItems: 32,
+        maxLength: 256
+      });
+  const requirements = needsConfirmation
+    ? [...new Set([...declaredRequirements, "human_confirmation"])]
+    : declaredRequirements;
+
+  const capability = {
+    domain: supplied.domain === undefined
+      ? capabilityString(toolName, "domain", source, { maxLength: 128 })
+      : capabilityString(toolName, "domain", supplied.domain, { maxLength: 128 }),
+    verbs: supplied.verbs === undefined
+      ? []
+      : capabilityStringArray(toolName, "verbs", supplied.verbs, {
+          maxItems: 32,
+          maxLength: 64
+        }),
+    effect,
+    idempotent: supplied.idempotent === undefined
+      ? !sideEffects
+      : capabilityBoolean(toolName, "idempotent", supplied.idempotent),
+    latency: supplied.latency === undefined
+      ? (source === "internal" ? "low" : "unknown")
+      : capabilityEnum(toolName, "latency", supplied.latency, CAPABILITY_LATENCIES),
+    cost: supplied.cost === undefined
+      ? "unknown"
+      : capabilityEnum(toolName, "cost", supplied.cost, CAPABILITY_COSTS),
+    resources: supplied.resources === undefined
+      ? (source === "internal" ? [] : [source])
+      : capabilityStringArray(toolName, "resources", supplied.resources, {
+          maxItems: 32,
+          maxLength: 128
+        }),
+    requirements,
+    examples: supplied.examples === undefined
+      ? []
+      : capabilityExamples(toolName, supplied.examples),
+    successCriteria: supplied.successCriteria === undefined
+      ? []
+      : capabilityStringArray(toolName, "successCriteria", supplied.successCriteria, {
+          maxItems: 16,
+          maxLength: 512
+        }),
+    availability: supplied.availability === undefined
+      ? (source === "internal" ? "available" : "conditional")
+      : capabilityEnum(
+          toolName,
+          "availability",
+          supplied.availability,
+          CAPABILITY_AVAILABILITIES
+        )
+  };
+
+  // Capability metadata can reach prompts, HTTP surfaces, and durable
+  // telemetry. Apply the same key- and token-based masking as audit records
+  // before freezing it into the registry.
+  return deepFreeze(sanitizeForAudit(capability));
+}
+
+function capabilityString(toolName, field, value, { maxLength }) {
+  if (typeof value !== "string") {
+    throw capabilityError(toolName, field, "must be a string.");
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    throw capabilityError(toolName, field, "must be a non-empty string.");
+  }
+  if (normalized.length > maxLength) {
+    throw capabilityError(toolName, field, `must be at most ${maxLength} characters.`);
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(normalized)) {
+    throw capabilityError(toolName, field, "must not contain control characters.");
+  }
+  return normalized;
+}
+
+function capabilityBoolean(toolName, field, value) {
+  if (typeof value !== "boolean") {
+    throw capabilityError(toolName, field, "must be a boolean.");
+  }
+  return value;
+}
+
+function capabilityEnum(toolName, field, value, allowed) {
+  const normalized = capabilityString(toolName, field, value, { maxLength: 32 }).toLowerCase();
+  if (!allowed.has(normalized)) {
+    throw capabilityError(
+      toolName,
+      field,
+      `must be one of: ${[...allowed].join(", ")}.`
+    );
+  }
+  return normalized;
+}
+
+function capabilityStringArray(toolName, field, value, {
+  maxItems,
+  maxLength
+}) {
+  if (!Array.isArray(value)) {
+    throw capabilityError(toolName, field, "must be an array of strings.");
+  }
+  assertCapabilityDataProperties(value, toolName, `capability.${field}`);
+  if (value.length > maxItems) {
+    throw capabilityError(toolName, field, `must contain at most ${maxItems} items.`);
+  }
+  const normalized = value.map((item, index) => (
+    capabilityString(toolName, `${field}[${index}]`, item, { maxLength })
+  ));
+  return [...new Set(normalized)];
+}
+
+function capabilityExamples(toolName, value) {
+  if (!Array.isArray(value)) {
+    throw capabilityError(toolName, "examples", "must be an array of JSON-serializable values.");
+  }
+  assertCapabilityDataProperties(value, toolName, "capability.examples");
+  if (value.length > CAPABILITY_MAX_EXAMPLES) {
+    throw capabilityError(
+      toolName,
+      "examples",
+      `must contain at most ${CAPABILITY_MAX_EXAMPLES} items.`
+    );
+  }
+  const examples = value.map((example, index) => (
+    cloneCapabilityJson(example, toolName, `examples[${index}]`, new WeakSet())
+  ));
+  const encoded = JSON.stringify(examples);
+  if (Buffer.byteLength(encoded, "utf8") > CAPABILITY_MAX_EXAMPLE_BYTES) {
+    throw capabilityError(
+      toolName,
+      "examples",
+      `must encode to at most ${CAPABILITY_MAX_EXAMPLE_BYTES} bytes.`
+    );
+  }
+  return examples;
+}
+
+function cloneCapabilityJson(value, toolName, field, ancestors) {
+  if (
+    value === undefined
+    || typeof value === "function"
+    || typeof value === "symbol"
+    || typeof value === "bigint"
+  ) {
+    throw capabilityError(toolName, field, "must contain only JSON-serializable values.");
+  }
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw capabilityError(toolName, field, "must contain only finite numbers.");
+    }
+    return value;
+  }
+  if (!Array.isArray(value) && !isPlainRecord(value)) {
+    throw capabilityError(toolName, field, "must contain only plain JSON values.");
+  }
+  assertCapabilityDataProperties(value, toolName, `capability.${field}`);
+  if (ancestors.has(value)) {
+    throw capabilityError(toolName, field, "must not contain circular references.");
+  }
+
+  ancestors.add(value);
+  let clone;
+  if (Array.isArray(value)) {
+    clone = value.map((item, index) => (
+      cloneCapabilityJson(item, toolName, `${field}[${index}]`, ancestors)
+    ));
+  } else {
+    clone = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "__proto__") {
+        throw capabilityError(toolName, `${field}.${key}`, "is not an allowed example key.");
+      }
+      defineOwnData(
+        clone,
+        key,
+        cloneCapabilityJson(item, toolName, `${field}.${key}`, ancestors)
+      );
+    }
+  }
+  ancestors.delete(value);
+  return clone;
+}
+
+function capabilityError(toolName, field, message) {
+  const location = field ? `capability.${field}` : "capability";
+  return new TypeError(`Tool ${toolName} ${location} ${message}`);
+}
+
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function assertCapabilityDataProperties(value, toolName, location) {
+  if (!value || typeof value !== "object") return;
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+    if (key === "length") continue;
+    if (!Object.hasOwn(descriptor, "value")) {
+      const field = location === "capability"
+        ? key
+        : `${location.replace(/^capability\./u, "")}.${key}`;
+      throw capabilityError(toolName, field, "must not use getters or setters.");
+    }
+  }
+}
+
+function publicToolDescriptor(tool) {
+  const {
+    handler: _handler,
+    preflight: _preflight,
+    forwardInvocation: _forwardInvocation,
+    summarize: _summarize,
+    ...descriptor
+  } = tool;
+  return clonePublicValue(descriptor, new WeakSet());
+}
+
+function clonePublicValue(value, ancestors) {
+  if (
+    value === undefined
+    || typeof value === "function"
+    || typeof value === "symbol"
+    || typeof value === "bigint"
+  ) {
+    return undefined;
+  }
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== "object") return undefined;
+  if (ancestors.has(value)) return "[Circular]";
+
+  ancestors.add(value);
+  let clone;
+  if (Array.isArray(value)) {
+    clone = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !Object.hasOwn(descriptor, "value")) continue;
+      const safe = clonePublicValue(descriptor.value, ancestors);
+      if (safe !== undefined) clone.push(safe);
+    }
+  } else {
+    clone = {};
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+      if (!Object.hasOwn(descriptor, "value")) continue;
+      const safe = clonePublicValue(descriptor.value, ancestors);
+      if (safe !== undefined) defineOwnData(clone, key, safe);
+    }
+  }
+  ancestors.delete(value);
+  return clone;
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const item of Object.values(value)) deepFreeze(item);
+  return value;
+}
+
+function defineOwnData(target, key, value) {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true
+  });
 }
 
 function buildHookPayload({ name, args, context = {}, tool, sessionAllowed }) {

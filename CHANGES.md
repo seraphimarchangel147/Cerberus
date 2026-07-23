@@ -632,3 +632,12 @@ PARITY WAVE 3 PHASE 2 COMPLETE
 - Explicitly disabled provider-side storage for stateless OpenAI requests and replaced Anthropic thinking-only salvage with a bounded trace-free status.
 - Fixed atomic snapshot flushing on Windows by opening the owned temporary file with a writable handle.
 SAFE EFFICIENCY TELEMETRY COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: typed tool capabilities (Codex)
+
+- Added a normalized capability manifest for every registered tool covering domain, verbs, effect, idempotence, latency, cost, resources, requirements, examples, success criteria, and availability.
+- Derived conservative defaults from the existing source, side-effect, and confirmation policy while keeping `sideEffects` authoritative and provider schemas backward compatible.
+- Rejected malformed, executable, accessor-backed, circular, oversized, and policy-contradicting manifests with field-specific errors.
+- Redacted and deeply froze internal manifests; public registry listings now return detached JSON-safe descriptors without execution callbacks.
+- Added regressions for defaults, explicit normalization, redaction, confirmation, validation, immutability, callback isolation, and unchanged OpenAI/Anthropic schemas.
+TYPED TOOL CAPABILITIES COMPLETE
