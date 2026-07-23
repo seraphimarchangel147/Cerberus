@@ -25,6 +25,12 @@ const SYNTHETIC_CONTINUE = [
   "Use the accumulated tool results and conversation above.",
   "Do not repeat completed work; keep using tools if needed, then give the user a final answer."
 ].join(" ");
+const GOAL_JUDGE_INSTRUCTIONS = [
+  "You are a cheap goal-completion judge.",
+  "Decide whether the stated goal is fully satisfied by the latest assistant progress.",
+  "Return only JSON: {\"satisfied\":true|false,\"why\":\"short reason\"}."
+].join(" ");
+const GOAL_JUDGE_MAX_TOKENS = 256;
 
 class TurnDeadlineError extends Error {
   constructor() {
@@ -512,6 +518,143 @@ function appendAnthropicUserText(convo, text) {
   }
 }
 
+export function parseGoalJudgeVerdict(value) {
+  const text = String(value ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const parsed = safeParseJson(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const raw = parsed.satisfied;
+  const satisfied = typeof raw === "boolean"
+    ? raw
+    : typeof raw === "string" && /^(?:yes|true)$/i.test(raw.trim())
+      ? true
+      : typeof raw === "string" && /^(?:no|false)$/i.test(raw.trim())
+        ? false
+        : null;
+  if (satisfied === null) return null;
+  const why = String(parsed.why ?? "No reason supplied.").trim().slice(0, 1000);
+  return { satisfied, why: why || "No reason supplied." };
+}
+
+function goalJudgePrompt(goal, assistantText) {
+  return [
+    `Goal: ${goal.objective}`,
+    `Goal turn: ${goal.turns}/${goal.maxTurns}`,
+    "Latest assistant progress:",
+    String(assistantText ?? "").trim().slice(-12000) || "(no visible assistant text)"
+  ].join("\n\n");
+}
+
+function emitGoalEvent(context, event) {
+  try { context?.__onToolEvent?.({ phase: "goal", ...event }); } catch { /* advisory */ }
+}
+
+async function evaluateGoalTurn({ provider, context, assistantText, deadline, turnBudget, judge }) {
+  const store = context?.runtime?.goals;
+  const sessionId = context?.sessionId;
+  if (!store || !sessionId) return { handled: false, continue: false, stopReason: "completed" };
+  const initial = store.get(sessionId);
+  if (!initial || initial.status !== "active") {
+    return { handled: false, continue: false, stopReason: "completed" };
+  }
+
+  let advanced;
+  try {
+    advanced = store.incrementTurn(sessionId, initial.revision);
+  } catch {
+    return { handled: true, continue: false, stopReason: "goal-preempted" };
+  }
+
+  let verdict;
+  try {
+    verdict = await judge(advanced, assistantText, context, deadline, turnBudget);
+    if (!verdict) throw new Error("Goal judge returned an invalid verdict.");
+  } catch (error) {
+    try { store.pause(sessionId, `goal judge error: ${error?.message ?? String(error)}`, advanced.revision); } catch { /* stale state wins */ }
+    emitGoalEvent(context, { action: "stopped", reason: "judge-error" });
+    return { handled: true, continue: false, stopReason: "goal-judge-error" };
+  }
+
+  let judged;
+  try {
+    store.recordJudge(sessionId, verdict, advanced.revision);
+    judged = store.get(sessionId);
+  } catch {
+    emitGoalEvent(context, { action: "stopped", reason: "preempted" });
+    return { handled: true, continue: false, stopReason: "goal-preempted" };
+  }
+
+  if (verdict.satisfied) {
+    try {
+      store.complete(sessionId, verdict.why, judged.revision);
+      if (initial.goalId) context.runtime?.tasks?.updateGoal?.(initial.goalId, { status: "completed" });
+    } catch {
+      return { handled: true, continue: false, stopReason: "goal-preempted" };
+    }
+    emitGoalEvent(context, { action: "completed", why: verdict.why });
+    return { handled: true, continue: false, stopReason: "goal-satisfied" };
+  }
+
+  const latest = store.get(sessionId);
+  if (!latest || latest.status !== "active" || latest.revision !== judged.revision) {
+    emitGoalEvent(context, { action: "stopped", reason: "preempted" });
+    return { handled: true, continue: false, stopReason: "goal-preempted" };
+  }
+  if (latest.turns >= latest.maxTurns) {
+    try { store.pause(sessionId, "goal turn budget reached", latest.revision); } catch { /* stale state wins */ }
+    emitGoalEvent(context, { action: "stopped", reason: "turn-cap", turns: latest.turns });
+    return { handled: true, continue: false, stopReason: "goal-turn-cap" };
+  }
+
+  emitGoalEvent(context, { action: "continue", turns: latest.turns, maxTurns: latest.maxTurns, why: verdict.why });
+  return { handled: true, continue: true, stopReason: "completed", revision: latest.revision };
+}
+
+function pauseGoalForProviderCap(context, expectedRevision) {
+  try {
+    context?.runtime?.goals?.pause?.(context.sessionId, "provider iteration cap reached", expectedRevision);
+  } catch {
+    // A real user message or another control action owns the newer state.
+  }
+}
+
+function goalContinuationIsCurrent(context, expectedRevision) {
+  if (expectedRevision === null || expectedRevision === undefined) return true;
+  try {
+    const current = context?.runtime?.goals?.get?.(context.sessionId);
+    return current?.status === "active" && current.revision === expectedRevision;
+  } catch {
+    return false;
+  }
+}
+
+function activeGoalRevision(context) {
+  try {
+    const current = context?.runtime?.goals?.get?.(context.sessionId);
+    return current?.status === "active" ? current.revision : null;
+  } catch {
+    return null;
+  }
+}
+
+const GOAL_CONTROL_TOOLS = new Set([
+  "add_goal",
+  "pause_goal",
+  "resume_goal",
+  "clear_goal"
+]);
+
+function revisionAfterGoalControlTool(context, toolName, invocation, previousRevision) {
+  if (!GOAL_CONTROL_TOOLS.has(toolName) || !invocation?.ok) return previousRevision;
+  const result = invocation.result?.goalMode ?? invocation.result;
+  if (Number.isSafeInteger(result?.revision)) return result.revision;
+  try {
+    const current = context?.runtime?.goals?.get?.(context.sessionId);
+    return Number.isSafeInteger(current?.revision) ? current.revision : previousRevision;
+  } catch {
+    return previousRevision;
+  }
+}
+
 // Forced-final requests must not contain tool calls without matching results.
 // Providers reject that malformed transcript before the model can salvage the
 // turn, so synthesize errors only for calls the interrupted batch never closed.
@@ -802,6 +945,19 @@ export class OpenAIResponsesProvider {
     return this.model;
   }
 
+  async judgeGoal(goal, assistantText, context, deadline, turnBudget) {
+    checkRequestBudget(this, turnBudget);
+    const response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
+      model: this.resolveModel({ task: "goal" }),
+      max_output_tokens: GOAL_JUDGE_MAX_TOKENS,
+      instructions: GOAL_JUDGE_INSTRUCTIONS,
+      input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
+    }, context, { timeoutMs: remainingMs, turnBudget }), context);
+    const verdict = parseGoalJudgeVerdict(extractResponseText(response));
+    if (!verdict) throw new Error("Goal judge returned invalid JSON.");
+    return verdict;
+  }
+
   async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
@@ -851,8 +1007,13 @@ export class OpenAIResponsesProvider {
     let iterations = 0;
     let stopReason = "completed";
     let lastText = "";
+    let goalContinuationRevision = activeGoalRevision(context);
 
     iterationLoop: while (iterations < maxIterations) {
+      if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+        stopReason = "goal-preempted";
+        break;
+      }
       if (this.now() >= deadline) {
         stopReason = "turn-timeout";
         break;
@@ -891,7 +1052,31 @@ export class OpenAIResponsesProvider {
       const responseText = extractResponseText(response);
       if (responseText) lastText = responseText;
       const wantsContinuation = openAIWantsContinuation(response, calls);
-      if (!wantsContinuation) break;
+      if (!wantsContinuation) {
+        const goalDecision = await evaluateGoalTurn({
+          provider: this,
+          context,
+          assistantText: responseText,
+          deadline,
+          turnBudget,
+          judge: (goal, text, judgeContext, judgeDeadline, judgeBudget) => (
+            this.judgeGoal(goal, text, judgeContext, judgeDeadline, judgeBudget)
+          )
+        });
+        if (!goalDecision.continue) {
+          stopReason = goalDecision.stopReason;
+          break;
+        }
+        if (iterations >= maxIterations) {
+          pauseGoalForProviderCap(context, goalDecision.revision);
+          stopReason = "iteration-cap";
+          break;
+        }
+        goalContinuationRevision = goalDecision.revision;
+        appendOpenAIAssistantText(conversationInput, response);
+        appendOpenAIContinue(conversationInput);
+        continue;
+      }
 
       // Preserve any partial assistant prose before asking the model to resume.
       // This matters for Responses API `incomplete` results with no tool call.
@@ -911,6 +1096,10 @@ export class OpenAIResponsesProvider {
       }
 
       for (const call of calls) {
+        if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+          stopReason = "goal-preempted";
+          break iterationLoop;
+        }
         const parsedArgs = safeParseJson(call.arguments) ?? {};
         let invocation;
         try {
@@ -924,6 +1113,12 @@ export class OpenAIResponsesProvider {
           stopReason = "turn-timeout";
           break iterationLoop;
         }
+        goalContinuationRevision = revisionAfterGoalControlTool(
+          context,
+          call.name,
+          invocation,
+          goalContinuationRevision
+        );
         toolCalls.push({ name: call.name, arguments: parsedArgs, result: invocation });
         const result = invocation.ok ? invocation.result : { error: invocation.error };
         // A tool that returns a screenshot (computer_screenshot) carries the PNG
@@ -1088,6 +1283,19 @@ export class AnthropicProvider {
     return this.model;
   }
 
+  async judgeGoal(goal, assistantText, context, deadline, turnBudget) {
+    checkRequestBudget(this, turnBudget);
+    const response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
+      model: this.resolveModel({ task: "goal" }),
+      max_tokens: GOAL_JUDGE_MAX_TOKENS,
+      system: GOAL_JUDGE_INSTRUCTIONS,
+      messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
+    }, context, { timeoutMs: remainingMs, turnBudget }), context);
+    const verdict = parseGoalJudgeVerdict(extractAnthropicText(response));
+    if (!verdict) throw new Error("Goal judge returned invalid JSON.");
+    return verdict;
+  }
+
   async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
@@ -1141,8 +1349,13 @@ export class AnthropicProvider {
     let iterations = 0;
     let stopReason = "completed";
     let lastText = "";
+    let goalContinuationRevision = activeGoalRevision(context);
 
     iterationLoop: while (iterations < maxIterations) {
+      if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+        stopReason = "goal-preempted";
+        break;
+      }
       if (this.now() >= deadline) {
         stopReason = "turn-timeout";
         break;
@@ -1184,7 +1397,30 @@ export class AnthropicProvider {
       const responseText = extractAnthropicText(response);
       if (responseText) lastText = responseText;
       const wantsContinuation = anthropicWantsContinuation(response, toolUses);
-      if (!wantsContinuation) break;
+      if (!wantsContinuation) {
+        const goalDecision = await evaluateGoalTurn({
+          provider: this,
+          context,
+          assistantText: responseText,
+          deadline,
+          turnBudget,
+          judge: (goal, text, judgeContext, judgeDeadline, judgeBudget) => (
+            this.judgeGoal(goal, text, judgeContext, judgeDeadline, judgeBudget)
+          )
+        });
+        if (!goalDecision.continue) {
+          stopReason = goalDecision.stopReason;
+          break;
+        }
+        if (iterations >= maxIterations) {
+          pauseGoalForProviderCap(context, goalDecision.revision);
+          stopReason = "iteration-cap";
+          break;
+        }
+        goalContinuationRevision = goalDecision.revision;
+        appendAnthropicUserText(convo, SYNTHETIC_CONTINUE);
+        continue;
+      }
 
       const toolResults = [];
       // Keep completed results attached even if a later call in this same
@@ -1192,6 +1428,10 @@ export class AnthropicProvider {
       // that truly never ran instead of discarding successful tool work.
       if (toolUses.length > 0) convo.push({ role: "user", content: toolResults });
       for (const use of toolUses) {
+        if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+          stopReason = "goal-preempted";
+          break iterationLoop;
+        }
         let invocation;
         try {
           invocation = await withinTurn(this, deadline, () => (
@@ -1204,6 +1444,12 @@ export class AnthropicProvider {
           stopReason = "turn-timeout";
           break iterationLoop;
         }
+        goalContinuationRevision = revisionAfterGoalControlTool(
+          context,
+          use.name,
+          invocation,
+          goalContinuationRevision
+        );
         toolCalls.push({ name: use.name, arguments: use.input, result: invocation });
         toolResults.push({
           type: "tool_result",
@@ -1381,6 +1627,9 @@ Tools available to you (call them when useful):
 - list_cron_jobs — see every scheduled job and whether it is enabled
 - set_cron_job_enabled(id, enabled) — turn a scheduled job OFF (enabled=false, pauses it, reversible) or ON (enabled=true); accepts the job id or its name
 - cancel_cron_job(id) — permanently delete a scheduled job (irreversible; prefer set_cron_job_enabled to just pause one)
+- add_goal(title, description?, dueDate?, parentGoalId?) - create a tracked goal and activate persistent goal mode for this session
+- list_goals / link_task_to_goal - inspect goal rollups and attach tasks to a goal
+- goal_status / pause_goal / resume_goal / clear_goal - inspect or control this session's automatic goal loop
 - list_skills / use_skill / run_skill / restore_skill - discover, load, run, or restore named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
 - list_sessions — see recent conversations

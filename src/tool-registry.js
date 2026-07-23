@@ -1155,7 +1155,16 @@ export function registerCoreTools(registry, runtime) {
       required: ["title"],
       additionalProperties: false
     },
-    handler: async (args) => runtime.tasks.addGoal(args)
+    handler: async (args, context) => {
+      const goal = runtime.tasks.addGoal(args);
+      const sessionId = context?.sessionId;
+      if (!sessionId || typeof runtime.goals?.activate !== "function") return goal;
+      const objective = goal.description
+        ? `${goal.title}: ${goal.description}`
+        : goal.title;
+      const goalMode = runtime.goals.activate(sessionId, { goalId: goal.id, objective });
+      return { ...goal, goalMode };
+    }
   });
 
   registry.register({
@@ -1192,6 +1201,77 @@ export function registerCoreTools(registry, runtime) {
       additionalProperties: false
     },
     handler: async (args) => runtime.tasks.linkTaskToGoal(args.taskId, args.goalId)
+  });
+
+  registry.register({
+    name: "goal_status",
+    sideEffects: false,
+    description: "Show the persistent goal-mode state for this session, including status, turn budget, and the latest judge result.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "goal_status requires a session" };
+      if (typeof runtime.goals?.get !== "function") return { error: "goal store not available" };
+      const goal = runtime.goals.get(sessionId);
+      return goal ?? { sessionId, status: "none" };
+    }
+  });
+
+  registry.register({
+    name: "pause_goal",
+    description: "Pause automatic work on the active goal for this session without deleting its state.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Optional reason recorded in the goal audit trail." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "pause_goal requires a session" };
+      if (typeof runtime.goals?.pause !== "function") return { error: "goal store not available" };
+      return runtime.goals.pause(sessionId, args.reason ?? "paused-by-agent")
+        ?? { error: "no goal for this session" };
+    }
+  });
+
+  registry.register({
+    name: "resume_goal",
+    description: "Resume automatic work on the paused goal for this session, subject to its remaining turn budget.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Optional reason recorded in the goal audit trail." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "resume_goal requires a session" };
+      if (typeof runtime.goals?.resume !== "function") return { error: "goal store not available" };
+      return runtime.goals.resume(sessionId, args.reason ?? "resumed-by-agent")
+        ?? { error: "no goal for this session" };
+    }
+  });
+
+  registry.register({
+    name: "clear_goal",
+    description: "Clear goal mode for this session and stop automatic continuation. The persisted audit history is retained.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Optional reason recorded in the goal audit trail." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      const sessionId = context?.sessionId;
+      if (!sessionId) return { error: "clear_goal requires a session" };
+      if (typeof runtime.goals?.clear !== "function") return { error: "goal store not available" };
+      return runtime.goals.clear(sessionId, args.reason ?? "cleared-by-agent")
+        ?? { error: "no goal for this session" };
+    }
   });
 
   registry.register({

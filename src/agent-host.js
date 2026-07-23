@@ -21,14 +21,18 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "list_sessions",
   "schedule_message",
   "run_skill",
-  "list_skills"
+  "list_skills",
+  "goal_status",
+  "pause_goal",
+  "resume_goal",
+  "clear_goal"
 ]);
 export const DEFAULT_CHAT_MAX_ITERATIONS = 4;
 
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
 // from every ordinary question.
-export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
+export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|pause|resume|clear|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
 
 // Intentionally narrow, anchored phrases: consent should be explicit, not
 // inferred from a sentence that merely contains "yes" or "continue". The
@@ -163,6 +167,24 @@ export class AgentHost {
     const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
     const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
 
+    // A real inbound user message always wins over an automated goal loop.
+    // Discord also performs this at enqueue time so a queued message can stop
+    // an in-flight judge before same-session serialization reaches this point.
+    if (
+      !ephemeral
+      && input.goalContinuation !== true
+      && input.metadata?.authorBot !== true
+      && !["autopilot", "cron", "subagent"].includes(channel)
+    ) {
+      try {
+        if (this.runtime.goals?.get?.(sessionId)?.status === "active") {
+          this.runtime.goals.preempt(sessionId, "real user message");
+        }
+      } catch {
+        // Goal control is advisory to accepting a real user message.
+      }
+    }
+
     const detectedTask = detectTaskInChat(text);
 
     // Auto-task detection — if the user said "remind me to X" / "todo: X" /
@@ -278,6 +300,8 @@ export class AgentHost {
       try { input.onToolEvent({ phase: "verdict", action: verdict, score: output.scrutiny.score }); } catch { /* advisory */ }
     }
     const conversational = isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist });
+    const resumedGoalTurn = input.goalContinuation === true
+      && this.runtime.goals?.get?.(sessionId)?.status === "active";
     const toolRegistry = this.runtime.tools;
     // The fast lane trims schemas only. Side-effect and scope enforcement
     // below remains authoritative even for core tools advertised on a watch
@@ -404,7 +428,7 @@ export class AgentHost {
         toolRegistry,
         context: modelContext,
         onDelta: typeof input.onDelta === "function" ? input.onDelta : null,
-        maxIterations: conversational ? resolveChatMaxIterations() : input.maxIterations,
+        maxIterations: conversational && !resumedGoalTurn ? resolveChatMaxIterations() : input.maxIterations,
         maxTurnSeconds: input.maxTurnSeconds
       });
     } catch (error) {

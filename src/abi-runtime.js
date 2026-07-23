@@ -36,6 +36,7 @@ import { IMessageExtractor } from "./imessage-extractor.js";
 import { TaskSweep } from "./task-sweep.js";
 import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
+import { GoalStore } from "./goal-store.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
 import { ComputerUseLog } from "./computer-use-log.js";
@@ -203,6 +204,7 @@ export class AbiRuntime {
     // a compact summary into the observer's system prompt each pass.
     this.suggestionFeedback = options.suggestionFeedback ?? new SuggestionFeedback({ runtime: this, dataDir: options.dataDir });
     this.tasks = options.tasks ?? new TaskStore({ runtime: this, dataDir: options.dataDir, ...(options.taskStoreOptions ?? {}) });
+    this.goals = options.goals ?? new GoalStore({ dataDir: options.dataDir, ...(options.goalStoreOptions ?? {}) });
     // Periodic task-list hygiene: dedupe, re-home to the right queue, cancel
     // stale auto-extracted items, archive old terminal tasks.
     this.taskSweep = options.taskSweep ?? new TaskSweep({ runtime: this });

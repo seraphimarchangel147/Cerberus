@@ -65,6 +65,16 @@ export const COMMAND_DEFS = [
   { name: "observe", description: "Force a proactive-observer pulse now" },
   { name: "sessions", description: "Recent conversation sessions" },
   {
+    name: "goal",
+    description: "Inspect or control persistent goal mode for this conversation",
+    options: [
+      { type: 1, name: "status", description: "Show the current persistent goal" },
+      { type: 1, name: "pause", description: "Pause automatic goal continuation" },
+      { type: 1, name: "resume", description: "Resume a paused persistent goal" },
+      { type: 1, name: "clear", description: "Clear the current persistent goal" }
+    ]
+  },
+  {
     name: "schedule",
     description: "Schedule a prompt: one-shot delay, recurring interval, or daily time",
     options: [
@@ -150,6 +160,7 @@ export class DiscordCommands {
       case "plan": return this.cmdPlan(interaction);
       case "observe": return this.cmdObserve(interaction);
       case "sessions": return this.cmdSessions(interaction);
+      case "goal": return this.cmdGoal(interaction);
       case "schedule": return this.cmdSchedule(interaction, opts);
       case "jobs": return this.cmdJobs(interaction);
       case "help": return this.cmdHelp(interaction);
@@ -432,6 +443,96 @@ export class DiscordCommands {
     } catch (error) {
       return this.followUp(interaction, { content: `⚠ observer failed: ${error.message}` });
     }
+  }
+
+  goalSessionId(interaction) {
+    const userId = interaction.member?.user?.id ?? interaction.user?.id ?? "unknown";
+    return this.channel.sessionKeyFor({
+      guild_id: interaction.guild_id ?? null,
+      channel_id: interaction.channel_id,
+      author: { id: userId }
+    });
+  }
+
+  async cmdGoal(interaction) {
+    const goals = this.runtime?.goals;
+    if (!goals?.get) {
+      return this.respond(interaction, { content: "Goal mode is unavailable.", flags: EPHEMERAL });
+    }
+
+    const option = interaction.data?.options?.[0];
+    const action = option?.type === 1 ? option.name : "status";
+    const sessionId = this.goalSessionId(interaction);
+    const current = goals.get(sessionId);
+
+    if (action === "status") {
+      if (!current) return this.respond(interaction, { content: "No persistent goal is set for this conversation." });
+      const turns = Number.isFinite(current.turns) ? current.turns : 0;
+      const maxTurns = Number.isFinite(current.maxTurns) ? current.maxTurns : "?";
+      return this.respond(interaction, {
+        content: [
+          `Goal mode: **${current.status ?? "unknown"}**`,
+          `Objective: ${String(current.objective ?? "(not set)").slice(0, 1500)}`,
+          `Turns: ${turns}/${maxTurns}`
+        ].join("\n")
+      });
+    }
+
+    if (!current) {
+      return this.respond(interaction, { content: "No persistent goal is set for this conversation." });
+    }
+    if (action === "pause") {
+      goals.pause(sessionId);
+      return this.respond(interaction, { content: "Persistent goal paused." });
+    }
+    if (action === "resume") {
+      if (current.status !== "paused") {
+        const message = current.status === "active"
+          ? "Persistent goal is already active."
+          : `Persistent goal cannot resume from status ${current.status}.`;
+        return this.respond(interaction, { content: message });
+      }
+      const resumed = goals.resume(sessionId);
+      if (resumed && resumed.status !== "active") {
+        return this.respond(interaction, {
+          content: "Persistent goal cannot resume because its turn budget is exhausted. Clear it and create a new goal."
+        });
+      }
+      if (typeof this.channel.agentHost?.handleMessage !== "function" || !resumed) {
+        return this.respond(interaction, { content: "Persistent goal resumed." });
+      }
+      await this.defer(interaction);
+      try {
+        const userId = interaction.member?.user?.id ?? interaction.user?.id ?? "unknown";
+        const runContinuation = () => this.channel.agentHost.handleMessage({
+            channel: "discord",
+            from: userId,
+            agentId: "main",
+            sessionId,
+            text: `Continue the active persistent goal from saved progress. Objective: ${resumed.objective}`,
+            goalContinuation: true,
+            metadata: {
+              channelId: interaction.channel_id,
+              guildId: interaction.guild_id ?? null,
+              goalContinuation: true
+            }
+          });
+        const result = typeof this.channel.enqueueSessionTask === "function"
+          ? await this.channel.enqueueSessionTask(sessionId, runContinuation)
+          : await runContinuation();
+        const reply = String(result?.reply ?? "").trim();
+        return this.followUp(interaction, {
+          content: (reply || "Persistent goal resumed.").slice(0, 1900)
+        });
+      } catch (error) {
+        return this.followUp(interaction, { content: `Goal resume failed: ${error?.message ?? String(error)}`.slice(0, 1900) });
+      }
+    }
+    if (action === "clear") {
+      goals.clear(sessionId);
+      return this.respond(interaction, { content: "Persistent goal cleared." });
+    }
+    return this.respond(interaction, { content: `Unknown goal action: ${action}`, flags: EPHEMERAL });
   }
 
   async cmdSessions(interaction) {

@@ -328,6 +328,19 @@ export class DiscordChannel {
 
   enqueueTurn(message, cleaned) {
     const key = this.sessionKeyFor(message);
+    // This must happen before chaining onto the session lock. A real user
+    // message stops goal-mode continuation immediately, even when an earlier
+    // turn for the same session is still running.
+    if (!message.author?.bot) {
+      const goals = this.agentHost?.runtime?.goals;
+      try {
+        if (goals?.get?.(key)?.status === "active") {
+          goals.preempt?.(key, "discord-user-message");
+        }
+      } catch (error) {
+        this.log({ op: "goal-preempt-error", key, error: error?.message ?? String(error) });
+      }
+    }
     const previous = this.turnLocks.get(key) ?? Promise.resolve();
     // runTurn normally catches its own failures. This final boundary prevents
     // a failed error path from poisoning every later turn for the same key.
@@ -343,6 +356,17 @@ export class DiscordChannel {
     next.finally(() => {
       if (this.turnLocks.get(key) === next) this.turnLocks.delete(key);
     });
+    return next;
+  }
+
+  enqueueSessionTask(key, task) {
+    const previous = this.turnLocks.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(task);
+    this.turnLocks.set(key, next);
+    const cleanup = () => {
+      if (this.turnLocks.get(key) === next) this.turnLocks.delete(key);
+    };
+    next.then(cleanup, cleanup);
     return next;
   }
 
@@ -424,7 +448,8 @@ export class DiscordChannel {
           discordMessageId: message.id,
           channelId: message.channel_id,
           guildId: message.guild_id ?? null,
-          username: message.author?.username
+          username: message.author?.username,
+          authorBot: message.author?.bot === true
         }
       });
       await status.finish(result);

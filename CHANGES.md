@@ -442,3 +442,11 @@ DISCORD LANE PARITY WAVE 2 COMPLETE
 - Kept bundled, pinned, and human-created skills exempt; archives remain on disk, leave the default model surface, and can be reactivated with restore_skill.
 - Added an atomic per-run curator report, durable skill revision history for transitions and restores, boot-time cron wiring, and synthetic-time regression coverage.
 CURATOR LOOP COMPLETE
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: persistent goals loop (Codex)
+
+- Added durable per-session goal mode with JSONL journaling, atomic snapshots, monotonic revisions, turn budgets, and pause/resume/clear audit history.
+- Extended both provider iteration engines with a cheap-tier completion judge, synthetic auto-continuation, fail-open judge handling, completion propagation, and CAS-guarded user preemption.
+- Activated goal mode through add_goal, added four agent-facing control tools plus Discord /goal controls, and serialized resumed Discord work with normal message turns.
+- Added provider, persistence, routing, tool, slash-command, schema-lane, turn-cap, completion, and mid-turn preemption regressions.
+GOALS LOOP COMPLETE
