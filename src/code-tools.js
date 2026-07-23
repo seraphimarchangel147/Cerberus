@@ -23,6 +23,11 @@ import {
   addInternalCredentialFileRedactions,
   addSecretRedactionSpellings
 } from "./credential-redaction.js";
+import {
+  createLspClient,
+  filterNewDiagnostics,
+  formatLspDiagnostics
+} from "./lsp-client.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "..");
@@ -395,6 +400,32 @@ function decisionActor(context, fallback) {
 }
 
 // ── registration ─────────────────────────────────────────────────────
+async function captureLspBaseline(lspClient, filePath) {
+  try {
+    const diagnostics = await lspClient?.getDiagnostics?.(filePath);
+    return {
+      ok: Array.isArray(diagnostics),
+      diagnostics: Array.isArray(diagnostics) ? diagnostics : []
+    };
+  } catch {
+    return { ok: false, diagnostics: [] };
+  }
+}
+
+async function collectNewLspDiagnostics(lspClient, filePath, baseline, syntaxClean) {
+  if (!syntaxClean || !baseline.ok) return null;
+  try {
+    const diagnostics = await lspClient?.getDiagnostics?.(filePath);
+    if (!Array.isArray(diagnostics)) return null;
+    const introduced = filterNewDiagnostics(diagnostics, baseline.diagnostics);
+    return introduced.length > 0
+      ? formatLspDiagnostics(filePath, introduced)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function registerCodeTools(registry, runtime, options = {}) {
   const safetyOptions = {
     dataDir: runtime?.secrets?.dataDir
@@ -402,6 +433,9 @@ export function registerCodeTools(registry, runtime, options = {}) {
       ?? runtime?.dataDir
       ?? resolveDataDir()
   };
+  const lspClient = options.lspClient
+    ?? runtime?.lspClient
+    ?? createLspClient({ dataDir: safetyOptions.dataDir });
   registry.register({
     name: "code_read",
     description: "Read a file with line numbers. Returns a 4-hex content tag — REQUIRED by code_edit to prove you saw the current version. Re-read after any edit to get the fresh tag.",
@@ -543,6 +577,7 @@ export function registerCodeTools(registry, runtime, options = {}) {
         prevStart = e.start;
       }
       const next = lines.join("\n");
+      const lspBaseline = await captureLspBaseline(lspClient, abs);
       fs.writeFileSync(abs, next, "utf8");
       const newTag = mintTag(next);
       let lint = null;
@@ -550,8 +585,20 @@ export function registerCodeTools(registry, runtime, options = {}) {
         const r = await run(process.execPath, ["--check", abs]);
         lint = r.ok ? "ok" : (r.stderr || "syntax error");
       }
+      const lspDiagnostics = await collectNewLspDiagnostics(
+        lspClient,
+        abs,
+        lspBaseline,
+        lint === null || lint === "ok"
+      );
       appendChangelog("edit", abs, args.summary);
-      return { path: abs, tag: newTag, totalLines: lines.length, lint };
+      return {
+        path: abs,
+        tag: newTag,
+        totalLines: lines.length,
+        lint,
+        lsp_diagnostics: lspDiagnostics
+      };
     }
   });
 
@@ -578,14 +625,27 @@ export function registerCodeTools(registry, runtime, options = {}) {
       if (ghost) throw new Error(`Rejected: suspicious character ${ghost.codePoint} at line ${ghost.line} (homoglyph/zero-width).`);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       const existed = fs.existsSync(abs);
+      const lspBaseline = await captureLspBaseline(lspClient, abs);
       fs.writeFileSync(abs, args.content, "utf8");
       let lint = null;
       if (abs.endsWith(".js") || abs.endsWith(".mjs")) {
         const r = await run(process.execPath, ["--check", abs]);
         lint = r.ok ? "ok" : (r.stderr || "syntax error");
       }
+      const lspDiagnostics = await collectNewLspDiagnostics(
+        lspClient,
+        abs,
+        lspBaseline,
+        lint === null || lint === "ok"
+      );
       appendChangelog(existed ? "rewrite" : "create", abs, args.summary);
-      return { path: abs, tag: mintTag(args.content), created: !existed, lint };
+      return {
+        path: abs,
+        tag: mintTag(args.content),
+        created: !existed,
+        lint,
+        lsp_diagnostics: lspDiagnostics
+      };
     }
   });
 

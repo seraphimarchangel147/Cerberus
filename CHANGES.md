@@ -522,3 +522,12 @@ PARITY WAVE 3 PHASE 1 COMPLETE
 - Added store, registry, prompt, persistence, HTTP, CLI, dashboard-escaping, identity, dependency, and live tool-to-GET probe coverage.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 934/934 with no environment pinning.
 KANBAN COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: LSP diagnostics (Codex)
+
+- Added a git-workspace-only LSP client with built-in server discovery, optional repository configuration, Content-Length JSON-RPC transport, subprocess reuse, idle cleanup, and fail-open behavior for absent or unhealthy servers.
+- Extended anchored code edits and writes to capture pre-edit diagnostics, preserve syntax checking as the first post-edit gate, and return only newly introduced normalized diagnostics in the Hermes-compatible XML block.
+- Added an explicit OPENAGI_LSP kill switch through the setup allowlist, deterministic diagnostic filtering and formatting, and process-stub coverage without requiring a language server installation.
+- Added client, subprocess, configuration, workspace, code-tool integration, syntax-failure, and graceful-degradation regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 943/943 with no environment pinning.
+LSP COMPLETE
