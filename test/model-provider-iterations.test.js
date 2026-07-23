@@ -709,7 +709,7 @@ test("Anthropic attaches inbound images as base64 image blocks on the user turn"
   assert.ok(userTurn.content.some((b) => b.type === "text" && /what is this/.test(b.text)), "the caption text rides along");
 });
 
-test("Anthropic keeps plain-string content when no images are attached", async () => {
+test("Anthropic marks text-only turns with a rolling cache breakpoint", async () => {
   const provider = new AnthropicProvider({ apiKey: "test", maxIterations: 2 });
   let sent = null;
   provider.postMessages = async (body) => {
@@ -717,7 +717,12 @@ test("Anthropic keeps plain-string content when no images are attached", async (
     return { id: "m1", role: "assistant", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" };
   };
   await provider.generate({ input: "no image here", agent, toolRegistry: anthropicToolRegistry() });
-  assert.equal(typeof sent.messages.at(-1).content, "string");
+  const content = sent.messages.at(-1).content;
+  assert.deepEqual(content, [{
+    type: "text",
+    text: "no image here",
+    cache_control: { type: "ephemeral" }
+  }]);
 });
 
 test("OpenAI attaches inbound images as input_image blocks on the user turn", async () => {

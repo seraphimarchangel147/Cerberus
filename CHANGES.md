@@ -477,3 +477,12 @@ CHECKPOINTS COMPLETE
 - Added durable-agent session and turn lifecycle events, authenticated browser session resets, and gateway startup/shutdown events with shutdown flushing.
 - Proved the veto through the live HTTP gateway and added registry, tool-policy, lifecycle, shell-safety, mutation, timeout, and both-lane approval regressions.
 HOOKS COMPLETE
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: dual-threshold compression and caching (Codex)
+
+- Replaced silent 12-message truncation and unconditional character compaction with provider-local live-context compression: an actual-token 50% next-hop trigger and an independent 85% pre-request safety estimate.
+- Preserved recent turns and complete tool call/result pairs, kept durable transcripts immutable, and added bounded deterministic summaries without model-pressure language.
+- Added Anthropic static-system plus rolling three-message cache breakpoints on request clones; OpenAI requests remain marker-free.
+- Added runtime and session cache-identity warnings for model, provider, endpoint, or credential changes without logging secrets or placing warnings in prompts, and kept injected routers authoritative.
+- Added verified context-window maps and a wizard-allowlisted override, adaptive fail-closed sizing, protocol, boundary, force-answer, cache, and preemption regressions, plus live HTTP proof at the exact 50% boundary.
+COMPRESSION COMPLETE

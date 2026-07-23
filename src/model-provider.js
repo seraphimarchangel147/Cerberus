@@ -1,5 +1,14 @@
+import { createHash } from "node:crypto";
 import { ModelRouter } from "./model-router.js";
 import { defaultToolOutputStore } from "./tool-output-store.js";
+import {
+  CONTEXT_GATEWAY_RATIO,
+  compressLiveContext,
+  contextCompressionTrigger,
+  contextInputTokens,
+  estimateContextTokens,
+  markLiveContextSyntheticTurn
+} from "./memory-condenser.js";
 import { summarizeText } from "./utils.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
@@ -20,6 +29,12 @@ const MAX_PROVIDER_RETRY_DELAY_MS = 8000;
 const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 8000;
 const DEFAULT_CONTEXT_COMPACT_CHARS = 120000;
 const DEFAULT_CONTEXT_KEEP_RECENT_HOPS = 4;
+const DEFAULT_CONTEXT_DIGEST_CHARS = 4000;
+const DEFAULT_CONTEXT_ESTIMATE_CHARS_PER_TOKEN = 4;
+const MAX_CACHE_IDENTITY_SESSIONS = 1000;
+const RUNTIME_CACHE_IDENTITIES = new WeakMap();
+const UNKNOWN_CONTEXT_WINDOW_WARNINGS = new Set();
+const MIN_CONTEXT_DIGEST_CHARS = 40;
 const SYNTHETIC_CONTINUE = [
   "[system] Continue the same task now.",
   "Use the accumulated tool results and conversation above.",
@@ -243,6 +258,23 @@ function applyIterationSettings(provider, options) {
     options.contextKeepRecentHops ?? process.env.OPENAGI_CONTEXT_KEEP_RECENT_HOPS,
     DEFAULT_CONTEXT_KEEP_RECENT_HOPS
   );
+  const configuredContextWindow = options.contextWindowTokens
+    ?? process.env.OPENAGI_CONTEXT_WINDOW_TOKENS;
+  provider.contextWindowTokens = typeof configuredContextWindow === "function"
+    ? configuredContextWindow
+    : optionalPositiveNumber(configuredContextWindow);
+  provider.contextDigestChars = Math.min(
+    DEFAULT_CONTEXT_DIGEST_CHARS,
+    positiveInteger(options.contextDigestChars, DEFAULT_CONTEXT_DIGEST_CHARS),
+    provider.contextCompactChars
+  );
+  provider.contextEstimateCharsPerToken = positiveNumber(
+    options.contextEstimateCharsPerToken,
+    DEFAULT_CONTEXT_ESTIMATE_CHARS_PER_TOKEN
+  );
+  provider.cacheWarningLog = typeof options.cacheWarningLog === "function"
+    ? options.cacheWarningLog
+    : (message) => console.warn(message);
   provider.now = options.now ?? Date.now;
   // Keep this readable for integrations that inspect the old property. The
   // value now represents the whole-turn iteration cap.
@@ -501,20 +533,21 @@ function appendOpenAIAssistantText(conversationInput, response) {
 }
 
 function appendOpenAIContinue(conversationInput) {
-  conversationInput.push({
+  conversationInput.push(markLiveContextSyntheticTurn({
     role: "user",
     content: [{ type: "input_text", text: SYNTHETIC_CONTINUE }]
-  });
+  }));
 }
 
-function appendAnthropicUserText(convo, text) {
+function appendAnthropicUserText(convo, text, { synthetic = false } = {}) {
   const last = convo.at(-1);
   if (last?.role === "user" && Array.isArray(last.content)) {
     last.content.push({ type: "text", text });
   } else if (last?.role === "user" && typeof last.content === "string") {
     last.content = `${last.content}\n\n${text}`;
   } else {
-    convo.push({ role: "user", content: text });
+    const message = { role: "user", content: text };
+    convo.push(synthetic ? markLiveContextSyntheticTurn(message) : message);
   }
 }
 
@@ -805,12 +838,332 @@ function modelToolOutput(provider, context, value) {
   }).output;
 }
 
-function compactProviderConversation(provider, conversation, format) {
-  return compactConversation(conversation, {
-    format,
-    budgetChars: provider.contextCompactChars,
-    keepRecentHops: provider.contextKeepRecentHops
+export function resolveModelContextWindowTokens(model, { provider = "openai", configured = null } = {}) {
+  if (typeof configured === "function") {
+    const resolved = Number(configured(model, { provider }));
+    if (Number.isFinite(resolved) && resolved > 0) return Math.floor(resolved);
+  } else {
+    const resolved = Number(configured);
+    if (Number.isFinite(resolved) && resolved > 0) return Math.floor(resolved);
+  }
+
+  const name = String(model ?? "").toLowerCase();
+  // Keep this allowlist narrow: an unknown model returns null and produces an
+  // operational override warning instead of silently inventing a denominator.
+  if (/^kimi-k3(?:-|$)/.test(name)) return 1_000_000;
+  // Kimi Code's k3 defaults to its baseline 256K entitlement;
+  // higher plans opt into 1M with OPENAGI_CONTEXT_WINDOW_TOKENS.
+  if (["k3", "kimi-for-coding", "kimi-for-coding-highspeed"].includes(name)) return 262_144;
+  if (String(provider).toLowerCase() === "anthropic") {
+    if (/^claude-(?:sonnet-4-6|sonnet-5|opus-4-[678]|fable-5)(?:-|$)/.test(name)) return 1_000_000;
+    if (/^claude-haiku-4-5(?:-|$)/.test(name)) return 200_000;
+    if (/^claude-(?:opus|sonnet)-4-(?:[015](?:-|$)|20\d{6}(?:-|$))/.test(name)) return 200_000;
+    if (/^claude-3(?:-|$)/.test(name)) return 200_000;
+    return null;
+  }
+  if (/^gpt-5(?:\.[12])?-chat-latest(?:-|$)/.test(name)) return 128_000;
+  if (/^gpt-5\.4-(?:mini|nano)(?:-|$)/.test(name)) return 400_000;
+  if (/^gpt-5\.(?:4|5|6)(?:-|$)/.test(name)) return 1_050_000;
+  if (/^gpt-5(?:\.[12])?(?:-|$)/.test(name)) return 400_000;
+  if (/^gpt-4\.1(?:-|$)/.test(name)) return 1_047_576;
+  if (/^o[34](?:-|$)/.test(name)) return 200_000;
+  if (/^gpt-4o(?:-|$)/.test(name)) return 128_000;
+  return null;
+}
+
+function cloneProviderValue(value) {
+  if (!value || typeof value !== "object") return value;
+  const root = Array.isArray(value) ? [] : {};
+  const seen = new Map([[value, root]]);
+  const pending = [[value, root]];
+  while (pending.length > 0) {
+    const [source, target] = pending.pop();
+    for (const [key, item] of Object.entries(source)) {
+      if (!item || typeof item !== "object") {
+        target[key] = item;
+        continue;
+      }
+      if (seen.has(item)) {
+        target[key] = seen.get(item);
+        continue;
+      }
+      const clone = Array.isArray(item) ? [] : {};
+      seen.set(item, clone);
+      target[key] = clone;
+      pending.push([item, clone]);
+    }
+  }
+  return root;
+}
+
+function cloneWithoutCacheControl(value) {
+  const cloned = cloneProviderValue(value);
+  for (const message of Array.isArray(cloned) ? cloned : []) {
+    if (!message || typeof message !== "object") continue;
+    delete message.cache_control;
+    for (const block of Array.isArray(message.content) ? message.content : []) {
+      if (block && typeof block === "object") delete block.cache_control;
+    }
+  }
+  return cloned;
+}
+
+function cacheableAnthropicBlock(block) {
+  if (!block || typeof block !== "object") return false;
+  if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+  return ["document", "image", "tool_use", "tool_result"].includes(block.type);
+}
+
+// Anthropic permits four explicit cache breakpoints. The static system block
+// consumes one; rebuild the rolling three-message suffix on a request clone so
+// canonical history never accumulates markers between iterations.
+export function withAnthropicCacheBreakpoints(messages, { maxMessages = 3 } = {}) {
+  const cloned = cloneWithoutCacheControl(Array.isArray(messages) ? messages : []);
+  const limit = Math.max(0, Math.min(3, Number.isInteger(maxMessages) ? maxMessages : 3));
+  let marked = 0;
+  for (let index = cloned.length - 1; index >= 0 && marked < limit; index -= 1) {
+    const message = cloned[index];
+    if (!message || typeof message !== "object") continue;
+    if (typeof message.content === "string") {
+      if (!message.content.trim()) continue;
+      message.content = [{
+        type: "text",
+        text: message.content,
+        cache_control: { type: "ephemeral" }
+      }];
+      marked += 1;
+      continue;
+    }
+    if (!Array.isArray(message.content)) continue;
+    for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = message.content[blockIndex];
+      if (!cacheableAnthropicBlock(block)) continue;
+      message.content[blockIndex] = {
+        ...block,
+        cache_control: { type: "ephemeral" }
+      };
+      marked += 1;
+      break;
+    }
+  }
+  return cloned;
+}
+
+function cacheIdentityStore(owner) {
+  let store = RUNTIME_CACHE_IDENTITIES.get(owner);
+  if (!store) {
+    store = new Map();
+    RUNTIME_CACHE_IDENTITIES.set(owner, store);
+  }
+  return store;
+}
+
+export function trackPromptCacheIdentity(providerInstance, {
+  provider,
+  model,
+  baseUrl,
+  credential,
+  context = {}
+} = {}) {
+  const sessionId = String(context?.sessionId ?? "").trim();
+  const runtimeOwner = context?.runtime && typeof context.runtime === "object"
+    ? context.runtime
+    : providerInstance;
+  if (!sessionId || !runtimeOwner || typeof runtimeOwner !== "object") return false;
+
+  const credentialFingerprint = createHash("sha256")
+    .update(String(credential ?? ""))
+    .digest("hex");
+  const identity = JSON.stringify([
+    String(provider ?? ""),
+    String(baseUrl ?? ""),
+    String(model ?? ""),
+    credentialFingerprint
+  ]);
+  const store = cacheIdentityStore(runtimeOwner);
+  const previous = store.get(sessionId);
+  store.delete(sessionId);
+  store.set(sessionId, identity);
+  while (store.size > MAX_CACHE_IDENTITY_SESSIONS) {
+    store.delete(store.keys().next().value);
+  }
+  if (previous == null || previous === identity) return false;
+  try {
+    providerInstance?.cacheWarningLog?.(
+      "[model-cache] Prompt cache identity changed mid-session; a provider, model, endpoint, or credential swap makes the next request full-price."
+    );
+  } catch {
+    // Cache warnings are operational only and never enter model context.
+  }
+  return true;
+}
+
+function estimateProviderConversationTokens(providerInstance, conversation, {
+  format,
+  instructions,
+  tools,
+  model
+}) {
+  const requestMessages = format === "anthropic"
+    ? withAnthropicCacheBreakpoints(conversation)
+    : conversation;
+  const request = format === "anthropic"
+    ? {
+        model,
+        max_tokens: providerInstance.maxTokens,
+        system: instructions,
+        messages: requestMessages,
+        stream: true,
+        ...(tools.length > 0 ? { tools } : {})
+      }
+    : {
+        model,
+        instructions,
+        input: requestMessages,
+        ...(tools.length > 0 ? { tools } : {})
+      };
+  return estimateContextTokens(request, {
+    charsPerToken: providerInstance.contextEstimateCharsPerToken
   });
+}
+
+function warnUnknownContextWindow(providerInstance, model) {
+  const key = String(model ?? "unknown");
+  if (UNKNOWN_CONTEXT_WINDOW_WARNINGS.has(key)) return;
+  UNKNOWN_CONTEXT_WINDOW_WARNINGS.add(key);
+  try {
+    providerInstance.cacheWarningLog?.(
+      `[context-window] No verified context size for model "${key}". Set OPENAGI_CONTEXT_WINDOW_TOKENS; automatic 50%/85% compression is disabled.`
+    );
+  } catch {
+    // Operational warnings never enter the prompt or block a request.
+  }
+}
+
+function emitContextCompression(context, event) {
+  try {
+    const pending = context?.__onToolEvent?.({ phase: "context-compression", ...event });
+    if (pending && typeof pending.catch === "function") pending.catch(() => {});
+  } catch {
+    // Compression telemetry is advisory and never enters the prompt.
+  }
+}
+
+async function prepareProviderConversation(providerInstance, conversation, {
+  format,
+  instructions,
+  tools,
+  model,
+  usage = null,
+  context = {}
+}) {
+  const contextWindowTokens = resolveModelContextWindowTokens(model, {
+    provider: format,
+    configured: providerInstance.contextWindowTokens
+  });
+  if (!contextWindowTokens) {
+    warnUnknownContextWindow(providerInstance, model);
+    return {
+      triggered: false,
+      reason: null,
+      compressed: false,
+      requestAllowed: true,
+      contextWindowTokens: null
+    };
+  }
+
+  const actualInputTokens = contextInputTokens(usage, { provider: format });
+  const estimate = (candidate) => estimateProviderConversationTokens(providerInstance, candidate, {
+    format,
+    instructions,
+    tools,
+    model
+  });
+  const estimatedInputTokens = estimate(conversation);
+  const trigger = contextCompressionTrigger({
+    actualInputTokens,
+    estimatedInputTokens,
+    contextWindowTokens
+  });
+  if (!trigger.triggered) {
+    return {
+      ...trigger,
+      compressed: false,
+      requestAllowed: true,
+      estimatedInputTokens,
+      postCompressionEstimatedTokens: estimatedInputTokens
+    };
+  }
+
+  const safeTokenLimit = Math.max(0, Math.ceil(contextWindowTokens * CONTEXT_GATEWAY_RATIO) - 1);
+  const charsPerToken = providerInstance.contextEstimateCharsPerToken;
+  const sourceDigestChars = Math.max(MIN_CONTEXT_DIGEST_CHARS, providerInstance.contextDigestChars);
+  const tryCompression = async (maxDigestChars) => {
+    const result = await compressLiveContext(conversation, {
+      format,
+      keepRecentHops: providerInstance.contextKeepRecentHops,
+      maxDigestChars
+    });
+    return {
+      result,
+      estimatedTokens: result.compressed ? estimate(result.conversation) : estimatedInputTokens
+    };
+  };
+
+  let attempt = await tryCompression(sourceDigestChars);
+  if (attempt.result.compressed && attempt.estimatedTokens > safeTokenLimit) {
+    const excessChars = (attempt.estimatedTokens - safeTokenLimit) * charsPerToken;
+    const attemptedDigestChars = Math.max(
+      MIN_CONTEXT_DIGEST_CHARS,
+      String(attempt.result.marker ?? "").length
+    );
+    const reducedDigestChars = Math.max(
+      MIN_CONTEXT_DIGEST_CHARS,
+      Math.floor(attemptedDigestChars - excessChars)
+    );
+    if (reducedDigestChars < attemptedDigestChars && reducedDigestChars > MIN_CONTEXT_DIGEST_CHARS) {
+      attempt = await tryCompression(reducedDigestChars);
+    }
+  }
+  if ((!attempt.result.compressed || attempt.estimatedTokens > safeTokenLimit)
+    && sourceDigestChars > MIN_CONTEXT_DIGEST_CHARS) {
+    attempt = await tryCompression(MIN_CONTEXT_DIGEST_CHARS);
+  }
+
+  if (!attempt.result.compressed || attempt.estimatedTokens > safeTokenLimit) {
+    const requestAllowed = estimatedInputTokens <= safeTokenLimit;
+    if (!requestAllowed) {
+      emitContextCompression(context, {
+        reason: trigger.reason,
+        blocked: true,
+        estimatedInputTokens: attempt.estimatedTokens,
+        thresholdTokens: safeTokenLimit + 1
+      });
+    }
+    return {
+      ...trigger,
+      ...attempt.result,
+      requestAllowed,
+      estimatedInputTokens,
+      postCompressionEstimatedTokens: attempt.estimatedTokens
+    };
+  }
+
+  conversation.splice(0, conversation.length, ...attempt.result.conversation);
+  emitContextCompression(context, {
+    reason: trigger.reason,
+    summarizedItems: attempt.result.summarizedItems,
+    keptItems: attempt.result.keptItems,
+    estimatedInputTokens: attempt.estimatedTokens,
+    thresholdTokens: safeTokenLimit + 1
+  });
+  return {
+    ...trigger,
+    ...attempt.result,
+    requestAllowed: true,
+    estimatedInputTokens,
+    postCompressionEstimatedTokens: attempt.estimatedTokens
+  };
 }
 
 // The system prompt appended to the final "force an answer" call when a turn is
@@ -855,6 +1208,9 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
   }
   if (reason === "provider-error") {
     return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model provider remained unavailable after bounded retries. ${detail} Retry the turn when the provider recovers.${prior}`;
+  }
+  if (reason === "context-too-large") {
+    return `Turn stopped before sending an oversized model request because the recent verbatim context could not fit below the safety threshold. ${detail} Start a fresh session, reduce large attachments or tool outputs, or set OPENAGI_CONTEXT_WINDOW_TOKENS to the provider's verified limit.${prior}`;
   }
   return `Turn reached the iteration cap after ${iterations}/${maxIterations} iterations. ${detail} Raise OPENAGI_MAX_ITERATIONS if this task needs more steps.${prior}`;
 }
@@ -929,6 +1285,7 @@ export class OpenAIResponsesProvider {
     this.budgetGuard = options.budgetGuard ?? null;
     // Per-task model tiering. Defaults to base for everything until tier env
     // vars are set, so this is a no-op until the user opts in.
+    this.ownsRouter = !options.router;
     this.router = options.router ?? new ModelRouter({ envPrefix: "OPENAI", baseModel: this.model });
   }
 
@@ -940,6 +1297,7 @@ export class OpenAIResponsesProvider {
   // `task` (routed via the configured tiers), then a raw `tier`, else the base.
   resolveModel({ model, tier, task } = {}) {
     if (model) return model;
+    if (this.ownsRouter && this.router && "baseModel" in this.router) this.router.baseModel = this.model;
     if (task) return this.router.resolve(task);
     if (tier) return this.router.tierModel(tier);
     return this.model;
@@ -961,6 +1319,13 @@ export class OpenAIResponsesProvider {
   async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
+    trackPromptCacheIdentity(this, {
+      provider: "openai",
+      model,
+      baseUrl: this.baseUrl,
+      credential: this.apiKey,
+      context
+    });
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
 
@@ -985,13 +1350,12 @@ export class OpenAIResponsesProvider {
         }
       : { role: "user", content: finalText };
     const conversationInput = [
-      ...messages.slice(-12).map((message) => ({
+      ...messages.map((message) => ({
         role: message.role === "assistant" ? "assistant" : "user",
         content: message.content
       })),
       finalUserTurn
     ];
-    compactProviderConversation(this, conversationInput, "openai");
 
     const baseInstructions = instructions ?? buildDefaultInstructions({ agent });
     const toolList = tools.length > 0
@@ -1007,6 +1371,7 @@ export class OpenAIResponsesProvider {
     let iterations = 0;
     let stopReason = "completed";
     let lastText = "";
+    let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
 
     iterationLoop: while (iterations < maxIterations) {
@@ -1029,6 +1394,23 @@ export class OpenAIResponsesProvider {
       }
       iterations += 1;
       emitIteration(context, iterations, maxIterations);
+      const preparation = await prepareProviderConversation(this, conversationInput, {
+        format: "openai",
+        instructions: baseInstructions,
+        tools: toolList,
+        model,
+        usage: previousUsage,
+        context
+      });
+      previousUsage = null;
+      if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+        stopReason = "goal-preempted";
+        break;
+      }
+      if (!preparation.requestAllowed) {
+        stopReason = "context-too-large";
+        break;
+      }
       const body = {
         model,
         instructions: baseInstructions,
@@ -1048,6 +1430,7 @@ export class OpenAIResponsesProvider {
         break;
       }
 
+      previousUsage = response?.usage ?? null;
       const calls = extractFunctionCalls(response);
       const responseText = extractResponseText(response);
       if (responseText) lastText = responseText;
@@ -1149,8 +1532,6 @@ export class OpenAIResponsesProvider {
         }
       }
 
-      compactProviderConversation(this, conversationInput, "openai");
-
       if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
         break;
@@ -1175,13 +1556,28 @@ export class OpenAIResponsesProvider {
       conversationInput.at(-1).content[0].text = forceAnswerPrompt(stopReason, iterations, maxIterations);
       try {
         checkRequestBudget(this, turnBudget);
-        response = await this.postResponses({
-          model,
+        const preparation = await prepareProviderConversation(this, conversationInput, {
+          format: "openai",
           instructions: baseInstructions,
-          input: conversationInput
-        }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
-        const forced = extractResponseText(response);
-        if (forced) text = forced;
+          tools: [],
+          model,
+          usage: previousUsage,
+          context
+        });
+        previousUsage = null;
+        if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+          stopReason = "goal-preempted";
+        } else if (!preparation.requestAllowed) {
+          stopReason = "context-too-large";
+        } else {
+          response = await this.postResponses({
+            model,
+            instructions: baseInstructions,
+            input: conversationInput
+          }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
+          const forced = extractResponseText(response);
+          if (forced) text = forced;
+        }
       } catch (error) {
         // Best-effort: if the forced answer also fails, fall through to the
         // canned summary below — never rethrow and lose the turn.
@@ -1189,7 +1585,7 @@ export class OpenAIResponsesProvider {
       }
     }
 
-    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error")) {
+    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error" || stopReason === "context-too-large")) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
@@ -1269,6 +1665,7 @@ export class AnthropicProvider {
     this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
+    this.ownsRouter = !options.router;
     this.router = options.router ?? new ModelRouter({ envPrefix: "ANTHROPIC", baseModel: this.model });
   }
 
@@ -1278,6 +1675,7 @@ export class AnthropicProvider {
 
   resolveModel({ model, tier, task } = {}) {
     if (model) return model;
+    if (this.ownsRouter && this.router && "baseModel" in this.router) this.router.baseModel = this.model;
     if (task) return this.router.resolve(task);
     if (tier) return this.router.tierModel(tier);
     return this.model;
@@ -1299,6 +1697,13 @@ export class AnthropicProvider {
   async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
+    trackPromptCacheIdentity(this, {
+      provider: "anthropic",
+      model,
+      baseUrl: this.baseUrl,
+      credential: this.apiKey,
+      context
+    });
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
 
@@ -1334,13 +1739,12 @@ export class AnthropicProvider {
         ]
       : finalText;
     const convo = [
-      ...messages.slice(-12).map((m) => ({
+      ...messages.map((m) => ({
         role: m.role === "assistant" ? "assistant" : "user",
         content: m.content
       })),
       { role: "user", content: finalUserContent }
     ];
-    compactProviderConversation(this, convo, "anthropic");
 
     const toolCalls = [];
     const deadline = this.now() + (maxTurnSeconds * 1000);
@@ -1349,6 +1753,7 @@ export class AnthropicProvider {
     let iterations = 0;
     let stopReason = "completed";
     let lastText = "";
+    let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
 
     iterationLoop: while (iterations < maxIterations) {
@@ -1369,6 +1774,23 @@ export class AnthropicProvider {
       }
       iterations += 1;
       emitIteration(context, iterations, maxIterations);
+      const preparation = await prepareProviderConversation(this, convo, {
+        format: "anthropic",
+        instructions: system,
+        tools,
+        model,
+        usage: previousUsage,
+        context
+      });
+      previousUsage = null;
+      if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+        stopReason = "goal-preempted";
+        break;
+      }
+      if (!preparation.requestAllowed) {
+        stopReason = "context-too-large";
+        break;
+      }
       // Stream internally whenever stall detection is enabled, even if we're not
       // surfacing deltas to the user (onDelta): the token stream is the "is the
       // model still trying?" signal the stall watchdog needs. A slow-but-alive
@@ -1379,7 +1801,7 @@ export class AnthropicProvider {
           model,
           max_tokens: this.maxTokens,
           system,
-          messages: convo,
+          messages: withAnthropicCacheBreakpoints(convo),
           ...(wantStream ? { stream: true } : {}),
           ...(tools.length > 0 ? { tools } : {})
         }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
@@ -1391,6 +1813,7 @@ export class AnthropicProvider {
         break;
       }
 
+      previousUsage = response?.usage ?? null;
       convo.push({ role: "assistant", content: response.content ?? [] });
 
       const toolUses = (response.content ?? []).filter((c) => c.type === "tool_use");
@@ -1418,7 +1841,7 @@ export class AnthropicProvider {
           break;
         }
         goalContinuationRevision = goalDecision.revision;
-        appendAnthropicUserText(convo, SYNTHETIC_CONTINUE);
+        appendAnthropicUserText(convo, SYNTHETIC_CONTINUE, { synthetic: true });
         continue;
       }
 
@@ -1458,7 +1881,6 @@ export class AnthropicProvider {
           is_error: !invocation.ok
         });
       }
-      compactProviderConversation(this, convo, "anthropic");
       if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
         break;
@@ -1467,7 +1889,7 @@ export class AnthropicProvider {
       // A max_tokens/pause response has no tool result to carry the next turn,
       // while the former hop boundary does. Both receive the same resume nudge.
       if (toolUses.length === 0 || iterations % this.maxRequestHops === 0) {
-        appendAnthropicUserText(convo, SYNTHETIC_CONTINUE);
+        appendAnthropicUserText(convo, SYNTHETIC_CONTINUE, { synthetic: true });
       }
     }
 
@@ -1483,14 +1905,29 @@ export class AnthropicProvider {
       appendAnthropicUserText(convo, forceAnswerPrompt(stopReason, iterations, maxIterations));
       try {
         checkRequestBudget(this, turnBudget);
-        response = await this.postMessages({
+        const preparation = await prepareProviderConversation(this, convo, {
+          format: "anthropic",
+          instructions: system,
+          tools: [],
           model,
-          max_tokens: this.maxTokens,
-          system,
-          messages: convo
-        }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
-        const forced = extractAnthropicText(response);
-        if (forced) text = forced;
+          usage: previousUsage,
+          context
+        });
+        previousUsage = null;
+        if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
+          stopReason = "goal-preempted";
+        } else if (!preparation.requestAllowed) {
+          stopReason = "context-too-large";
+        } else {
+          response = await this.postMessages({
+            model,
+            max_tokens: this.maxTokens,
+            system,
+            messages: withAnthropicCacheBreakpoints(convo)
+          }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
+          const forced = extractAnthropicText(response);
+          if (forced) text = forced;
+        }
       } catch (error) {
         // The forced answer is best-effort. If IT also times out/stalls or the
         // budget is gone, fall through to the canned partial summary below —
@@ -1499,7 +1936,7 @@ export class AnthropicProvider {
       }
     }
 
-    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error")) {
+    if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error" || stopReason === "context-too-large")) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
     } else if (stopReason === "iteration-cap" && !text) {
       text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
