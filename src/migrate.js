@@ -4,6 +4,8 @@ import path from "node:path";
 import { readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { SecretsStore } from "./secrets-store.js";
+import { saveEnv, SETUP_FIELDS } from "./setup-wizard.js";
 
 // Migrator: import an existing OpenClaw or Hermes Agent install into OpenAGI —
 // persona/identity, memory, and the Telegram bot — so the agent moves over as
@@ -123,7 +125,14 @@ export function extract(source, dir) {
 // Write persona.md + Telegram env to the data dir, POST memories through the
 // daemon. `client` is a CliClient pointed at the target (local or remote main).
 // dryRun → returns the plan without changing anything.
-export async function applyMigration({ extracted, dataDir, client, dryRun = false, env = {} }) {
+export async function applyMigration({
+  extracted,
+  dataDir,
+  client,
+  dryRun = false,
+  env = process.env,
+  secretStore
+}) {
   const plan = { persona: Boolean(extracted.persona), memories: extracted.memories.length, telegram: extracted.telegram.length, agentName: extracted.agentName, applied: !dryRun };
   if (dryRun) return { ...plan, notes: extracted.notes };
 
@@ -133,15 +142,32 @@ export async function applyMigration({ extracted, dataDir, client, dryRun = fals
     fs.writeFileSync(path.join(dataDir, "persona.md"), extracted.persona + "\n", { mode: 0o600 });
   }
 
-  // 2. Telegram → <dataDir>/.env (first account only; long-poll for headless).
+  // 2. Telegram -> authoritative secrets store (first account only;
+  // long-poll for headless). The store maintains the compatible .env
+  // projection without letting it become a second source of truth.
   if (extracted.telegram[0]?.token) {
-    const envPath = path.join(dataDir, ".env");
-    let text = "";
-    try { text = fs.readFileSync(envPath, "utf8"); } catch { /* fresh */ }
-    if (!/^TELEGRAM_BOT_TOKEN=/m.test(text)) text += `${text.endsWith("\n") || !text ? "" : "\n"}TELEGRAM_BOT_TOKEN=${extracted.telegram[0].token}\n`;
-    if (!/^TELEGRAM_POLLING=/m.test(text)) text += "TELEGRAM_POLLING=1\n";
-    fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(envPath, text, { mode: 0o600 });
+    const secrets = secretStore ?? new SecretsStore({
+      dataDir,
+      allowlist: SETUP_FIELDS,
+      env
+    });
+    secrets.initialize({ decidedBy: `migration:${extracted.source}` });
+    const configured = new Set(secrets.listSecretNames({
+      decidedBy: `migration:${extracted.source}:list`
+    }));
+    const values = {};
+    if (!configured.has("TELEGRAM_BOT_TOKEN")) {
+      values.TELEGRAM_BOT_TOKEN = extracted.telegram[0].token;
+    }
+    if (!configured.has("TELEGRAM_POLLING")) values.TELEGRAM_POLLING = "1";
+    if (Object.keys(values).length > 0) {
+      saveEnv({
+        dataDir,
+        values,
+        store: secrets,
+        decidedBy: `migration:${extracted.source}`
+      });
+    }
   }
 
   // 3. memories → /memory/remember

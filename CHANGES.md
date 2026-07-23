@@ -503,3 +503,11 @@ MEMORY DETAILS COMPLETE
 - Added stable ASCII-safe identities, cached and retryable workspace and peer setup, cancellable bounded requests, schema-validated results, explicit correction supersession, minimal-reasoning queries, private bearer handling, and secret-safe failures.
 - Wired explicit runtime injection and OPENAGI_MEMORY_PROVIDER selection, wizard-allowlisted Honcho configuration, public exports, agent-facing memory guidance, and mock-backend coverage with no live-account dependency.
 HONCHO COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 1: Legion secrets manager (Codex)
+
+- Added an allowlisted secrets store with a private atomic snapshot, backward-compatible `.env` projection, masked metadata, a value-free JSONL audit trail, and cross-process mutation serialization.
+- Added authenticated HTTP and owner-only ephemeral Discord list/set/remove surfaces, hid existing setup credentials, installed HttpOnly setup sessions, and routed runtime configuration writes through one store.
+- Kept MCP, code, node, and direct-integration credential injection ephemeral and placeholder-only, with protected persistence paths, strict name and URL confinement, exact output/error/log redaction, and one-time legacy migration.
+- Added crash-consistent pairing, secret-safe atomic-write cleanup, and regressions for store/runtime/HTTP/Discord/MCP/subprocess/checkpoint/migration/boot/pairing boundaries in both approval lanes.
+SECRETS MANAGER COMPLETE

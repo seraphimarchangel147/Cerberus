@@ -1317,16 +1317,16 @@ test("McpRegistry persist: ${VAR} placeholder round-trips, raw key is rejected",
   assert.equal(onDisk.servers.stripe.apiKey, "${STRIPE_MCP_API_KEY}",
     "placeholder is preserved on disk, never the raw secret");
 
-  // A second registry constructed from the same configPath expands the
-  // placeholder against the current env when loadConfigFile runs.
+  // A second registry preserves the placeholder in memory too. Resolution is
+  // delayed until doConnect constructs the transport client.
   const r2 = new McpRegistry({
     dataDir: dir,
     configPath,
     permittedEnvKeys: new Set(["STRIPE_MCP_API_KEY"])
   });
   r2.loadConfigFile(configPath);
-  assert.equal(r2.servers.get("stripe").apiKey, "sk_test_round_trip",
-    "loaded registration expands ${VAR} from process.env");
+  assert.equal(r2.servers.get("stripe").apiKey, "${STRIPE_MCP_API_KEY}",
+    "loaded registration never places a raw secret in registry state");
 
   // Raw bearer is refused — would otherwise leak into mcp.json.
   assert.throws(
@@ -1337,7 +1337,7 @@ test("McpRegistry persist: ${VAR} placeholder round-trips, raw key is rejected",
       auth: "bearer",
       apiKey: "sk_live_real_secret_here"
     }),
-    /refusing to persist a literal apiKey/
+    /refusing a literal apiKey/
   );
 
   fs.rmSync(dir, { recursive: true });
@@ -1371,7 +1371,7 @@ test("McpRegistry allowEnvKey extends the in-memory permitted set", async () => 
     auth: "bearer",
     apiKey: "${POSTHOG_MCP_API_KEY}"
   });
-  assert.equal(ok.apiKey, "phx_test");
+  assert.equal(ok.apiKey, "${POSTHOG_MCP_API_KEY}");
 
   fs.rmSync(dir, { recursive: true });
   delete process.env.POSTHOG_MCP_API_KEY;
@@ -2221,7 +2221,7 @@ test("register_mcp_server.summarize: short stdio doesn't add ellipsis", async ()
   assert.match(summary, /server-filesystem/);
 });
 
-test("connect_catalog_mcp.summarize: with apiKey shows prefix to detect substitution", async () => {
+test("connect_catalog_mcp never accepts or summarizes a secret value", async () => {
   const { ToolRegistry, registerCoreTools } = await import("../src/tool-registry.js");
   const fakeRuntime = {
     memory: { remember: () => ({}), retrieve: () => [] },
@@ -2242,15 +2242,15 @@ test("connect_catalog_mcp.summarize: with apiKey shows prefix to detect substitu
 
   const tool = registry.get("connect_catalog_mcp");
   assert.ok(tool.summarize, "connect_catalog_mcp has summarize");
+  assert.equal(tool.parameters.properties.apiKey, undefined);
 
-  // Without apiKey — plain summary.
   const noKey = tool.summarize({ catalogId: "stripe" });
   assert.equal(noKey, "Connect MCP: stripe");
 
-  // With apiKey — first 8 chars shown so user can detect a substituted key.
-  const withKey = tool.summarize({ catalogId: "stripe", apiKey: "sk_live_realkey123" });
-  assert.match(withKey, /sk_live_/, "first 8 chars of key appear in summary");
-  assert.doesNotMatch(withKey, /realkey123/, "rest of key is not shown");
+  const canary = "sk_live_never_reach_the_model";
+  const withUnexpectedKey = tool.summarize({ catalogId: "stripe", apiKey: canary });
+  assert.equal(withUnexpectedKey, "Connect MCP: stripe");
+  assert.doesNotMatch(withUnexpectedKey, new RegExp(canary, "u"));
 });
 
 test("ToolRegistry.invoke: gated tool's summary persists through to pending action", async () => {
@@ -2397,8 +2397,9 @@ test("McpRegistry: stdio args get ${VAR} expansion (statsig mcp-remote bridge)",
     args: ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=${STATSIG_API_KEY}"]
   });
 
-  // Expanded form is what gets handed to the spawn — secret resolved.
-  assert.deepEqual(reg.args, ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=secret-statsig-key"]);
+  // Registry state keeps the placeholder. The client receives the resolved
+  // form only when doConnect constructs it.
+  assert.deepEqual(reg.args, ["-y", "mcp-remote", "https://api.statsig.com/v1/mcp", "--header", "statsig-api-key=${STATSIG_API_KEY}"]);
 
   // Persisted form keeps the placeholder so the secret never lands on disk.
   const onDisk = JSON.parse(fs.readFileSync(path.join(tmpDir, "mcp.json"), "utf8"));

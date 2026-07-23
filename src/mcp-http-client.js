@@ -14,21 +14,27 @@
 // "Authorize" so the user can re-run the auth flow.
 
 import { appendJsonLine, ensureDir } from "./file-utils.js";
-import path from "node:path";
 import { nowIso } from "./utils.js";
+import { redactKnownValues, safeRedactionMarker } from "./redact.js";
+import { assertSafeMcpServerName, mcpNamedFilePath } from "./mcp-name.js";
 
 const PROTOCOL_VERSION = "2025-03-26";
 
 export class McpHttpClient {
   constructor(options = {}) {
     if (!options.url) throw new Error("McpHttpClient requires url");
-    this.name = options.name ?? "mcp";
+    this.name = assertSafeMcpServerName(options.name ?? "mcp");
     this.url = options.url;
     this.staticHeaders = { ...(options.headers ?? {}) };
     this.bearerToken = options.bearerToken ?? null;
+    this.redactValues = new Set(options.redactValues ?? []);
+    if (this.bearerToken) this.redactValues.add(this.bearerToken);
     this.oauth = options.oauth ?? null;
     this.trustLevel = options.trustLevel ?? "untrusted";
     this.logDir = options.logDir;
+    this.logPath = this.logDir
+      ? mcpNamedFilePath(this.logDir, this.name, ".jsonl")
+      : null;
     this.timeoutMs = options.timeoutMs ?? 60000;
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? 5 * 60 * 1000;
     this.nextId = 1;
@@ -49,7 +55,9 @@ export class McpHttpClient {
       tools: this.tools.map((t) => t.name),
       serverInfo: this.serverInfo,
       lastError: this.lastError,
-      sessionId: this.sessionId
+      sessionId: this.sessionId == null
+        ? null
+        : safeRedactionMarker([String(this.sessionId)])
     };
   }
 
@@ -76,8 +84,11 @@ export class McpHttpClient {
       this.lastError = null;
       return { tools: this.tools, serverInfo: this.serverInfo };
     } catch (error) {
-      this.lastError = error.message;
-      throw error;
+      this.lastError = redactKnownValues(error.message, this.redactValues);
+      const safeError = new Error(this.lastError);
+      if (error?.code !== undefined) safeError.code = error.code;
+      if (error?.status !== undefined) safeError.status = error.status;
+      throw safeError;
     }
   }
 
@@ -114,11 +125,24 @@ export class McpHttpClient {
       ...this.staticHeaders
     };
     if (this.bearerToken) headers.authorization = `Bearer ${this.bearerToken}`;
+    let oauthToken = null;
     if (this.oauth) {
-      const token = await this.oauth.ensureToken({ interactive });
-      headers.authorization = `Bearer ${token}`;
+      try {
+        oauthToken = await this.oauth.ensureToken({ interactive });
+      } catch (error) {
+        const safeMessage = redactKnownValues(String(error?.message ?? error), this.redactValues);
+        const safeError = new Error(safeMessage);
+        if (error?.code !== undefined) safeError.code = error.code;
+        throw safeError;
+      }
+      headers.authorization = `Bearer ${oauthToken}`;
     }
     if (this.sessionId) headers["mcp-session-id"] = this.sessionId;
+    const requestSecrets = new Set(this.redactValues);
+    if (oauthToken) {
+      requestSecrets.add(oauthToken);
+      this.redactValues.add(oauthToken);
+    }
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -132,8 +156,11 @@ export class McpHttpClient {
       });
     } catch (error) {
       clearTimeout(timer);
-      this.log("error", { method: message.method, error: error.message });
-      throw error;
+      const safeMessage = redactKnownValues(String(error?.message ?? error), requestSecrets);
+      this.log("error", { method: message.method, error: safeMessage });
+      const safeError = new Error(safeMessage);
+      if (error?.code !== undefined) safeError.code = error.code;
+      throw safeError;
     }
     clearTimeout(timer);
 
@@ -156,8 +183,10 @@ export class McpHttpClient {
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      this.log("error", { method: message.method, status: response.status, body: body.slice(0, 500) });
-      const err = new Error(`HTTP ${response.status} from ${this.name}: ${body.slice(0, 200) || response.statusText}`);
+      const safeBody = redactKnownValues(body, requestSecrets);
+      this.log("error", { method: message.method, status: response.status, body: safeBody.slice(0, 500) });
+      const safeStatus = redactKnownValues(response.statusText ?? "", requestSecrets);
+      const err = new Error(`HTTP ${response.status} from ${this.name}: ${safeBody.slice(0, 200) || safeStatus}`);
       err.status = response.status;
       throw err;
     }
@@ -170,10 +199,10 @@ export class McpHttpClient {
 
     const ct = (response.headers.get("content-type") ?? "").toLowerCase();
     if (ct.includes("text/event-stream")) {
-      return this.readSseForResponse(response, message.id);
+      return this.readSseForResponse(response, message.id, requestSecrets);
     }
     const json = await response.json().catch(() => ({}));
-    return this.unwrap(json, message.id);
+    return this.unwrap(json, message.id, requestSecrets);
   }
 
   /**
@@ -181,7 +210,7 @@ export class McpHttpClient {
    * Server may interleave notifications; we route those to the log and keep
    * scanning until our id arrives or the stream ends.
    */
-  async readSseForResponse(response, expectedId) {
+  async readSseForResponse(response, expectedId, redactValues = this.redactValues) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
@@ -198,34 +227,42 @@ export class McpHttpClient {
         try {
           const msg = JSON.parse(data);
           if (msg.id != null && msg.id === expectedId) {
-            return this.unwrap(msg, expectedId);
+            return this.unwrap(msg, expectedId, redactValues);
           }
           // Any other message is a notification or unrelated response — log it.
-          this.log("notify", { msg });
+          this.log("notify", { msg: redactKnownValues(msg, redactValues) });
         } catch (err) {
-          this.log("error", { sseParse: err.message, raw: data.slice(0, 200) });
+          this.log("error", {
+            sseParse: redactKnownValues(err.message, redactValues),
+            raw: redactKnownValues(data, redactValues).slice(0, 200)
+          });
         }
       }
     }
     throw new Error(`SSE stream ended without a response for request ${expectedId}`);
   }
 
-  unwrap(json, expectedId) {
+  unwrap(json, expectedId, redactValues = this.redactValues) {
     if (json.error) {
-      const err = new Error(json.error.message ?? "MCP error");
-      err.code = json.error.code;
-      err.data = json.error.data;
+      const safeError = redactKnownValues(json.error, redactValues);
+      const err = new Error(safeError.message ?? "MCP error");
+      err.code = safeError.code;
+      err.data = safeError.data;
       throw err;
     }
     if (json.id != null && expectedId != null && json.id !== expectedId) {
       throw new Error(`MCP response id mismatch: expected ${expectedId}, got ${json.id}`);
     }
-    return json.result ?? null;
+    return redactKnownValues(json.result ?? null, redactValues);
   }
 
   log(op, payload) {
     if (!this.logDir) return;
-    appendJsonLine(path.join(this.logDir, `${this.name}.jsonl`), { at: nowIso(), op, ...payload });
+    appendJsonLine(this.logPath, {
+      at: nowIso(),
+      op,
+      ...redactKnownValues(payload, this.redactValues)
+    });
   }
 
   async close() {

@@ -14,10 +14,12 @@ const T = {
   // Interaction types
   APPLICATION_COMMAND: 2,
   MESSAGE_COMPONENT: 3,
+  MODAL_SUBMIT: 5,
   // Response types
   REPLY: 4,
   DEFERRED_REPLY: 5,
-  UPDATE_MESSAGE: 7
+  UPDATE_MESSAGE: 7,
+  MODAL: 9
 };
 
 import { bar, COLORS, embed } from "./discord-embeds.js";
@@ -98,6 +100,39 @@ export const COMMAND_DEFS = [
     name: "jobs",
     description: "List scheduled cron jobs (with cancel buttons)"
   },
+  {
+    name: "secrets",
+    description: "List, set, or remove configured secrets",
+    options: [
+      { type: 1, name: "list", description: "List masked secret previews" },
+      {
+        type: 1,
+        name: "set",
+        description: "Set a secret through a private modal",
+        options: [{
+          type: 3,
+          name: "name",
+          description: "Allowlisted environment variable name",
+          required: true,
+          min_length: 1,
+          max_length: 64
+        }]
+      },
+      {
+        type: 1,
+        name: "remove",
+        description: "Remove a configured secret",
+        options: [{
+          type: 3,
+          name: "name",
+          description: "Allowlisted environment variable name",
+          required: true,
+          min_length: 1,
+          max_length: 64
+        }]
+      }
+    ]
+  },
   { name: "help", description: "List available commands" }
 ];
 
@@ -149,6 +184,9 @@ export class DiscordCommands {
       if (interaction.type === T.MESSAGE_COMPONENT) {
         return await this.handleComponent(interaction, userId);
       }
+      if (interaction.type === T.MODAL_SUBMIT) {
+        return await this.handleModalSubmit(interaction, userId);
+      }
     } catch (error) {
       this.channel.log({ op: "interaction-error", error: error.message });
       return this.respond(interaction, { content: `⚠ ${error.message}`.slice(0, 500), flags: EPHEMERAL }).catch(() => {});
@@ -177,6 +215,7 @@ export class DiscordCommands {
       case "rollback": return this.cmdRollback(interaction, opts);
       case "schedule": return this.cmdSchedule(interaction, opts);
       case "jobs": return this.cmdJobs(interaction);
+      case "secrets": return this.cmdSecrets(interaction);
       case "help": return this.cmdHelp(interaction);
       default: return this.respond(interaction, { content: `Unknown command: ${name}`, flags: EPHEMERAL });
     }
@@ -186,7 +225,7 @@ export class DiscordCommands {
     const id = interaction.data?.custom_id ?? "";
     if (id === "provider-select") {
       const choice = interaction.data?.values?.[0];
-      const result = await this.switchProvider(choice);
+      const result = await this.switchProvider(choice, userId);
       return this.respond(interaction, { content: result, components: [] }, T.UPDATE_MESSAGE);
     }
     if (id.startsWith("pa-approve:") || id.startsWith("pa-deny:")) {
@@ -239,7 +278,180 @@ export class DiscordCommands {
     return this.respond(interaction, { content: `Unknown component: ${id}`, flags: EPHEMERAL });
   }
 
+  async handleModalSubmit(interaction, userId) {
+    const id = String(interaction.data?.custom_id ?? "");
+    if (!id.startsWith("secret-set:")) {
+      return this.respond(interaction, {
+        content: "Unknown modal submission.",
+        flags: EPHEMERAL
+      });
+    }
+    if (!this.secretOwnerAllowed(userId)) {
+      return this.respond(interaction, {
+        content: "Secrets commands require a configured Discord owner allowlist.",
+        flags: EPHEMERAL
+      });
+    }
+    const store = this.runtime?.secrets;
+    if (typeof store?.setSecret !== "function") {
+      return this.respond(interaction, {
+        content: "Secrets manager is unavailable.",
+        flags: EPHEMERAL
+      });
+    }
+    const name = id.slice("secret-set:".length);
+    const value = modalTextValue(interaction, "secret-value");
+    if (!value) {
+      return this.respond(interaction, {
+        content: "Secret value must not be blank.",
+        flags: EPHEMERAL
+      });
+    }
+    try {
+      const saved = store.setSecret(name, value, {
+        decidedBy: discordDecisionActor(userId)
+      });
+      const publicSecret = discordSecretMetadata(saved, name);
+      return this.respond(interaction, {
+        content: `Saved ${publicSecret.name} (${publicSecret.preview}).`,
+        flags: EPHEMERAL
+      });
+    } catch {
+      return this.respond(interaction, {
+        content: "Secret could not be saved. Check that the name is allowlisted.",
+        flags: EPHEMERAL
+      });
+    }
+  }
+
   // ── Commands ────────────────────────────────────────────────────────
+
+  secretOwnerAllowed(userId) {
+    const allow = this.channel.allowFrom ?? [];
+    return Boolean(userId && allow.length > 0 && allow.includes(userId));
+  }
+
+  async cmdSecrets(interaction) {
+    const userId = discordUserId(interaction);
+    if (!this.secretOwnerAllowed(userId)) {
+      return this.respond(interaction, {
+        content: "Secrets commands require a configured Discord owner allowlist.",
+        flags: EPHEMERAL
+      });
+    }
+    const store = this.runtime?.secrets;
+    const option = interaction.data?.options?.[0];
+    const action = option?.type === 1 ? option.name : "list";
+    const name = String(option?.options?.find((item) => item.name === "name")?.value ?? "").trim();
+    const decidedBy = discordDecisionActor(userId);
+
+    if (action === "list") {
+      if (typeof store?.listSecrets !== "function") {
+        return this.respond(interaction, {
+          content: "Secrets manager is unavailable.",
+          flags: EPHEMERAL
+        });
+      }
+      try {
+        const listed = store.listSecrets({ decidedBy })
+          .map((entry) => discordSecretMetadata(entry))
+          .filter((entry) => entry.name);
+        const lines = listed.length === 0
+          ? ["No configured secrets."]
+          : ["Configured secrets:", ...listed.map((item) => `- ${item.name}: ${item.preview}`)];
+        return this.respond(interaction, {
+          content: lines.join("\n").slice(0, 1900),
+          flags: EPHEMERAL
+        });
+      } catch {
+        return this.respond(interaction, {
+          content: "Secrets could not be listed.",
+          flags: EPHEMERAL
+        });
+      }
+    }
+
+    if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(name)) {
+      return this.respond(interaction, {
+        content: "Provide a valid allowlisted secret name.",
+        flags: EPHEMERAL
+      });
+    }
+    let allowed = null;
+    try {
+      allowed = typeof store?.listAllowedNames === "function"
+        ? store.listAllowedNames()
+        : null;
+    } catch {
+      return this.respond(interaction, {
+        content: "Secrets manager policy is unavailable.",
+        flags: EPHEMERAL
+      });
+    }
+    if (allowed && !allowed.includes(name)) {
+      return this.respond(interaction, {
+        content: "Secret name is not allowlisted.",
+        flags: EPHEMERAL
+      });
+    }
+
+    if (action === "set") {
+      if (typeof store?.setSecret !== "function") {
+        return this.respond(interaction, {
+          content: "Secrets manager is unavailable.",
+          flags: EPHEMERAL
+        });
+      }
+      return this.respond(interaction, {
+        custom_id: `secret-set:${name}`,
+        title: `Set ${name}`.slice(0, 45),
+        components: [{
+          type: 1,
+          components: [{
+            type: 4,
+            custom_id: "secret-value",
+            label: "Secret value",
+            style: 1,
+            min_length: 1,
+            max_length: 4000,
+            required: true
+          }]
+        }]
+      }, T.MODAL);
+    }
+
+    if (action === "remove") {
+      if (typeof store?.removeSecret !== "function") {
+        return this.respond(interaction, {
+          content: "Secrets manager is unavailable.",
+          flags: EPHEMERAL
+        });
+      }
+      if (name === "OPENAGI_AUTH_TOKEN") {
+        return this.respond(interaction, {
+          content: "The dashboard auth token cannot be removed while running. Set a replacement to rotate it.",
+          flags: EPHEMERAL
+        });
+      }
+      try {
+        const removed = store.removeSecret(name, { decidedBy });
+        return this.respond(interaction, {
+          content: removed ? `Removed ${name}.` : `${name} was not configured.`,
+          flags: EPHEMERAL
+        });
+      } catch {
+        return this.respond(interaction, {
+          content: "Secret could not be removed.",
+          flags: EPHEMERAL
+        });
+      }
+    }
+
+    return this.respond(interaction, {
+      content: `Unknown secrets action: ${action}`,
+      flags: EPHEMERAL
+    });
+  }
 
   async cmdStatus(interaction) {
     const host = this.channel.agentHost;
@@ -287,7 +499,7 @@ export class DiscordCommands {
     });
   }
 
-  async switchProvider(choice) {
+  async switchProvider(choice, userId = null) {
     if (!["auto", "anthropic", "openai"].includes(choice)) return `⚠ invalid choice: ${choice}`;
     process.env.OPENAGI_PROVIDER = choice;
     try {
@@ -300,7 +512,11 @@ export class DiscordCommands {
     }
     try {
       const { saveEnv } = await import("./setup-wizard.js");
-      saveEnv({ values: { OPENAGI_PROVIDER: choice } });
+      saveEnv({
+        values: { OPENAGI_PROVIDER: choice },
+        store: this.runtime?.secrets,
+        decidedBy: discordDecisionActor(userId)
+      });
     } catch { /* runtime-only */ }
     const p = this.channel.agentHost?.modelProvider;
     return `✅ Provider set to **${choice}** → active: **${p?.constructor?.name?.replace(/Provider$/, "")}** · model \`${p?.model ?? "?"}\`${p?.isConfigured?.() ? "" : " ⚠ NOT configured (missing key)"}`;
@@ -323,7 +539,11 @@ export class DiscordCommands {
     const envKey = provider.constructor?.name === "OpenAIResponsesProvider" ? "OPENAI_MODEL" : "ANTHROPIC_MODEL";
     try {
       const { saveEnv } = await import("./setup-wizard.js");
-      saveEnv({ values: { [envKey]: model } });
+      saveEnv({
+        values: { [envKey]: model },
+        store: this.runtime?.secrets,
+        decidedBy: discordDecisionActor(discordUserId(interaction))
+      });
     } catch { /* runtime-only */ }
     return this.respond(interaction, { content: `✅ Model set to \`${model}\` (persisted as ${envKey})` });
   }
@@ -345,7 +565,11 @@ export class DiscordCommands {
     const enable = mode === "on";
     try {
       const { saveEnv } = await import("./setup-wizard.js");
-      saveEnv({ values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" } });
+      saveEnv({
+        values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" },
+        store: this.runtime?.secrets,
+        decidedBy: discordDecisionActor(discordUserId(interaction))
+      });
     } catch { /* runtime-only if .env write fails */ }
     process.env.OPENAGI_AUTO_APPROVE = enable ? "1" : "0";
     // Mirror the HTTP toggle: broadcast on the runtime bus so the activity
@@ -860,6 +1084,39 @@ function compactCheckpointPreview(checkpoint, preview, maxChars) {
     .replace(/```/g, "'''")
     .trim()
     .slice(0, maxChars);
+}
+
+function discordUserId(interaction) {
+  return interaction.member?.user?.id ?? interaction.user?.id ?? null;
+}
+
+function discordDecisionActor(userId) {
+  const normalized = String(userId ?? "").trim();
+  return normalized ? `discord:${normalized}` : "discord:unknown";
+}
+
+function modalTextValue(interaction, customId) {
+  for (const row of interaction.data?.components ?? []) {
+    for (const component of row.components ?? []) {
+      if (component.custom_id === customId) return String(component.value ?? "").trim();
+    }
+  }
+  return "";
+}
+
+function discordSecretMetadata(entry, fallbackName = "") {
+  const name = fallbackName || (
+    typeof entry?.name === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(entry.name)
+      ? entry.name
+      : ""
+  );
+  const last4 = typeof entry?.last4 === "string" && entry.last4.length <= 4
+    ? entry.last4
+    : null;
+  return {
+    name,
+    preview: last4 ? `****${last4}` : "****"
+  };
 }
 
 function formatUptime(seconds) {

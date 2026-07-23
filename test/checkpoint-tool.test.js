@@ -119,6 +119,38 @@ test("a checkpoint capture failure blocks destructive dispatch", async () => {
   assert.equal(handlerCalls, 0, "a mutation must not run without its checkpoint");
 });
 
+test("a denied credential edit cannot copy bytes into checkpoint blobs", async (t) => {
+  const { dataDir, workspaceDir, store } = enabledStore(t);
+  const target = path.join(workspaceDir, ".env");
+  const canary = "checkpoint-secret-canary";
+  fs.writeFileSync(target, `OPENAI_API_KEY=${canary}\n`, "utf8");
+  let handlerCalls = 0;
+  const registry = new ToolRegistry();
+  registry.bindCheckpoints(store);
+  registerWriteTool(registry, async () => {
+    handlerCalls += 1;
+    return { written: true };
+  });
+
+  const result = await registry.invoke(
+    "code_write",
+    { path: target, content: "replacement" },
+    { sessionId: "session-secret", __turnId: "turn-secret" }
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /sensitive credential material/);
+  assert.equal(handlerCalls, 0);
+  assert.equal(fs.readFileSync(target, "utf8").includes(canary), true);
+  const checkpointDir = path.join(dataDir, "checkpoints");
+  const persisted = fs.readdirSync(checkpointDir, { recursive: true })
+    .filter((name) => fs.statSync(path.join(checkpointDir, name)).isFile())
+    .map((name) => fs.readFileSync(path.join(checkpointDir, name)))
+    .map((value) => value.toString("utf8"))
+    .join("\n");
+  assert.equal(persisted.includes(canary), false);
+});
+
 test("approval is resolved before checkpointing: queued calls capture nothing, confirmed calls do", async () => {
   const registry = new ToolRegistry();
   const queued = [];

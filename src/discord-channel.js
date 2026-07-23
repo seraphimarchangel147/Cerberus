@@ -20,6 +20,8 @@ import { resolveDataDir } from "./data-dir.js";
 import { DiscordCommands } from "./discord-commands.js";
 import { ANSI, COLORS, embed } from "./discord-embeds.js";
 import { approvePendingAction } from "./pending-actions.js";
+import { redactKnownValues } from "./redact.js";
+import { secretRedactionSpellings } from "./credential-redaction.js";
 
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
@@ -503,16 +505,27 @@ export class DiscordChannel {
     const form = new FormData();
     form.append("payload_json", JSON.stringify(payload));
     form.append("files[0]", new Blob([buffer]), filename);
-    const response = await fetch(`${API}/channels/${channelId}/messages`, {
-      method: "POST",
-      headers: { authorization: `Bot ${this.token}` },
-      body: form
-    });
+    let response;
+    try {
+      response = await fetch(`${API}/channels/${channelId}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bot ${this.token}` },
+        body: form
+      });
+    } catch (error) {
+      throw new Error(redactKnownValues(
+        error?.message ?? String(error),
+        secretRedactionSpellings(this.token)
+      ));
+    }
+    const json = redactKnownValues(
+      await response.json().catch(() => ({})),
+      secretRedactionSpellings(this.token)
+    );
     if (!response.ok) {
-      const json = await response.json().catch(() => ({}));
       throw new Error(json?.message ?? `Discord upload failed with ${response.status}`);
     }
-    return response.json();
+    return json;
   }
 
   // Spawn a public thread off a message (thread-per-task live traces).
@@ -785,14 +798,22 @@ export class DiscordChannel {
 
   async rest(pathname, { method = "GET", body } = {}) {
     for (let attempt = 1; attempt <= DISCORD_REST_MAX_ATTEMPTS; attempt += 1) {
-      const response = await (this.restFetch ?? globalThis.fetch)(`${API}${pathname}`, {
-        method,
-        headers: {
-          authorization: `Bot ${this.token}`,
-          ...(body ? { "content-type": "application/json" } : {})
-        },
-        ...(body ? { body: JSON.stringify(body) } : {})
-      });
+      let response;
+      try {
+        response = await (this.restFetch ?? globalThis.fetch)(`${API}${pathname}`, {
+          method,
+          headers: {
+            authorization: `Bot ${this.token}`,
+            ...(body ? { "content-type": "application/json" } : {})
+          },
+          ...(body ? { body: JSON.stringify(body) } : {})
+        });
+      } catch (error) {
+        throw new Error(redactKnownValues(
+          error?.message ?? String(error),
+          secretRedactionSpellings(this.token)
+        ));
+      }
       if (response.status === 429) {
         const data = await response.json().catch(() => ({}));
         if (attempt >= DISCORD_REST_MAX_ATTEMPTS) {
@@ -807,7 +828,10 @@ export class DiscordChannel {
         continue;
       }
       if (response.status === 204) return null;
-      const json = await response.json().catch(() => ({}));
+      const json = redactKnownValues(
+        await response.json().catch(() => ({})),
+        secretRedactionSpellings(this.token)
+      );
       if (!response.ok) throw new Error(json?.message ?? `Discord ${method} ${pathname} failed with ${response.status}`);
       return json;
     }

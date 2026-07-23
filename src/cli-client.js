@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveDataDir } from "./data-dir.js";
+import { writeJsonAtomic } from "./file-utils.js";
+import { SecretsStore } from "./secrets-store.js";
+import { SETUP_FIELDS } from "./setup-wizard.js";
+import { redactKnownValues } from "./redact.js";
+import { secretRedactionSpellings } from "./credential-redaction.js";
 
 // Client used by the `openagi` CLI to talk to a daemon — either the LOCAL one
 // (default) or a REMOTE "main" hub (e.g. OpenAGI running on a Distiller / Pi
@@ -11,32 +16,98 @@ import { resolveDataDir } from "./data-dir.js";
 // Target resolution precedence (first wins):
 //   1. explicit { remote, token } (CLI --remote / --token flags)
 //   2. env OPENAGI_REMOTE / OPENAGI_REMOTE_TOKEN
-//   3. <dataDir>/node.json  { "remote": "...", "token": "..." }  (saved pairing)
+//   3. <dataDir>/node.json remote metadata + SecretsStore OPENAGI_REMOTE_TOKEN
 //   4. local default: http://127.0.0.1:<PORT|43210> with OPENAGI_AUTH_TOKEN
 
 const DEFAULT_LOCAL_PORT = () => Number.parseInt(process.env.PORT ?? "43210", 10);
+const REMOTE_TOKEN_KEY = "OPENAGI_REMOTE_TOKEN";
 
 export function nodeConfigPath(dataDir = resolveDataDir()) {
   return path.join(dataDir, "node.json");
 }
 
 export function readNodeConfig(dataDir = resolveDataDir()) {
-  try {
-    return JSON.parse(fs.readFileSync(nodeConfigPath(dataDir), "utf8"));
-  } catch {
-    return null;
-  }
+  return readPairedTargetState(dataDir, {
+    decidedBy: "cli:node-config-read"
+  });
 }
 
 export function writeNodeConfig({ remote, token }, dataDir = resolveDataDir()) {
-  const file = nodeConfigPath(dataDir);
-  fs.mkdirSync(dataDir, { recursive: true }); // a fresh node has no ~/.openagi yet
-  fs.writeFileSync(file, JSON.stringify({ remote, token: token ?? null }, null, 2) + "\n", { mode: 0o600 });
-  return file;
+  const normalizedRemote = normalizePairingRemote(remote);
+  const normalizedToken = nonBlankToken(token);
+  const secrets = createPairingStore(dataDir);
+  return withStoreExclusiveLock(secrets, () => {
+    const previousConfig = readRawNodeConfig(dataDir);
+    const legacyToken = previousConfig?.remote
+      ? nonBlankToken(previousConfig.token)
+      : null;
+    secrets.initialize({
+      decidedBy: "cli:pair:init",
+      migrationValues: legacyToken
+        ? { [REMOTE_TOKEN_KEY]: legacyToken }
+        : {}
+    });
+    const previousToken = secrets.getSecret(REMOTE_TOKEN_KEY, {
+      decidedBy: "cli:pair:previous"
+    });
+    try {
+      // Cross-file crash consistency: remove the usable credential first,
+      // publish the new remote metadata second, and publish the replacement
+      // credential last. A process death at any boundary therefore leaves
+      // either a complete pair or metadata with no credential.
+      setPairingToken(secrets, null, {
+        decidedBy: "cli:pair:stage"
+      });
+      const file = writeNodeMetadata(normalizedRemote, dataDir);
+      if (normalizedToken) {
+        setPairingToken(secrets, normalizedToken, {
+          decidedBy: "cli:pair"
+        });
+      }
+      return file;
+    } catch {
+      restorePairingState(secrets, {
+        dataDir,
+        previousConfig,
+        previousToken,
+        decidedBy: "cli:pair:rollback"
+      });
+      throw new Error("Node pairing metadata could not be persisted safely.");
+    }
+  });
 }
 
 export function clearNodeConfig(dataDir = resolveDataDir()) {
-  try { fs.rmSync(nodeConfigPath(dataDir)); return true; } catch { return false; }
+  const secrets = createPairingStore(dataDir);
+  return withStoreExclusiveLock(secrets, () => {
+    const config = readRawNodeConfig(dataDir);
+    if (!config) return false;
+    const legacyToken = config.remote ? nonBlankToken(config.token) : null;
+    secrets.initialize({
+      decidedBy: "cli:unpair:init",
+      migrationValues: legacyToken
+        ? { [REMOTE_TOKEN_KEY]: legacyToken }
+        : {}
+    });
+    const previousToken = secrets.getSecret(REMOTE_TOKEN_KEY, {
+      decidedBy: "cli:unpair:previous"
+    });
+    try {
+      // Token-first removal makes an abrupt exit before metadata deletion
+      // unusable rather than binding a credential to stale metadata.
+      setPairingToken(secrets, null, { decidedBy: "cli:unpair" });
+      fs.rmSync(nodeConfigPath(dataDir));
+      return true;
+    } catch {
+      restorePairingState(secrets, {
+        dataDir,
+        previousConfig: config,
+        previousToken,
+        decidedBy: "cli:unpair:rollback"
+      });
+      throw new Error("Node pairing metadata could not be removed safely.");
+    }
+  });
 }
 
 // Normalize a host/url into a base URL. Accepts "distiller.local",
@@ -53,16 +124,33 @@ export function normalizeBase(target) {
 export function resolveTarget({ remote, token, dataDir = resolveDataDir() } = {}) {
   // 1. explicit flag
   if (remote) {
-    return { url: normalizeBase(remote), token: token ?? process.env.OPENAGI_REMOTE_TOKEN ?? null, source: "flag", remote: true };
+    return {
+      url: normalizeBase(remote),
+      token: resolveExplicitRemoteToken(token),
+      source: "flag",
+      remote: true
+    };
   }
   // 2. env
   if (process.env.OPENAGI_REMOTE) {
-    return { url: normalizeBase(process.env.OPENAGI_REMOTE), token: token ?? process.env.OPENAGI_REMOTE_TOKEN ?? null, source: "env", remote: true };
+    return {
+      url: normalizeBase(process.env.OPENAGI_REMOTE),
+      token: resolveExplicitRemoteToken(token),
+      source: "env",
+      remote: true
+    };
   }
   // 3. saved node pairing
-  const cfg = readNodeConfig(dataDir);
-  if (cfg?.remote) {
-    return { url: normalizeBase(cfg.remote), token: token ?? cfg.token ?? null, source: "node.json", remote: true };
+  const paired = readPairedTargetState(dataDir, {
+    decidedBy: "cli:resolve-node"
+  });
+  if (paired?.remote) {
+    return {
+      url: normalizeBase(paired.remote),
+      token: token ?? paired.token,
+      source: "node.json",
+      remote: true
+    };
   }
   // 4. local default. The token is usually only in <dataDir>/.env (the wizard
   // wrote it there, not into the CLI's environment) — peek it so `openagi
@@ -75,12 +163,216 @@ export function resolveTarget({ remote, token, dataDir = resolveDataDir() } = {}
   };
 }
 
-function peekEnvToken(dataDir) {
+function readRawNodeConfig(dataDir) {
+  try {
+    const file = nodeConfigPath(dataDir);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeNodeMetadata(remote, dataDir) {
+  const file = nodeConfigPath(dataDir);
+  assertSafeNodeConfigPath(file);
+  writeJsonAtomic(file, { remote: normalizePairingRemote(remote) }, 0o600);
+  return file;
+}
+
+export function reconcileLegacyNodePairing({
+  dataDir = resolveDataDir(),
+  store,
+  decidedBy = "cli:legacy-node-migration"
+} = {}) {
+  const secrets = store ?? createPairingStore(dataDir);
+  return withStoreExclusiveLock(secrets, () => {
+    const config = readRawNodeConfig(dataDir);
+    return reconcileLegacyNodePairingLocked(config, secrets, {
+      dataDir,
+      decidedBy
+    });
+  });
+}
+
+function reconcileLegacyNodePairingLocked(config, secrets, {
+  dataDir,
+  decidedBy
+}) {
+  const legacyToken = config?.remote ? nonBlankToken(config.token) : null;
+  const initialized = secrets.initialize({
+    decidedBy,
+    migrationValues: legacyToken
+      ? { [REMOTE_TOKEN_KEY]: legacyToken }
+      : {}
+  });
+  let token = null;
+  if (typeof secrets.getSecret === "function") {
+    token = secrets.getSecret(REMOTE_TOKEN_KEY, {
+      decidedBy: `${decidedBy}:access`
+    });
+  }
+  if (legacyToken) {
+    try {
+      writeNodeMetadata(config.remote, dataDir);
+    } catch {
+      throw new Error("Legacy node pairing token could not be migrated safely.");
+    }
+  }
+  return {
+    initialized,
+    token,
+    legacyTokenRemoved: Boolean(legacyToken)
+  };
+}
+
+function resolveExplicitRemoteToken(explicitToken) {
+  if (explicitToken !== undefined && explicitToken !== null) {
+    return nonBlankToken(explicitToken);
+  }
+  // A persisted pairing credential is scoped to the saved node.json target.
+  // A one-off --remote or OPENAGI_REMOTE selection must supply its own token
+  // explicitly (or through the caller's environment), otherwise an attacker-
+  // controlled host could receive the token for a different paired main.
+  return nonBlankToken(process.env[REMOTE_TOKEN_KEY]);
+}
+
+function readPairedTargetState(dataDir, { decidedBy }) {
+  const secrets = createPairingStore(dataDir);
+  try {
+    return withStoreExclusiveLock(secrets, () => {
+      const config = readRawNodeConfig(dataDir);
+      if (!config?.remote) return null;
+      const remote = normalizePairingRemote(config.remote);
+      const legacyToken = nonBlankToken(config.token);
+      const token = legacyToken
+        ? reconcileLegacyNodePairingLocked(config, secrets, {
+            dataDir,
+            decidedBy
+          }).token
+        : secrets.getSecret(REMOTE_TOKEN_KEY, { decidedBy });
+      return {
+        ...config,
+        remote,
+        token
+      };
+    });
+  } catch {
+    // Preserve usable remote metadata, but fail closed on credentials when
+    // either half of the pair cannot be read under the shared lock.
+    const config = readRawNodeConfig(dataDir);
+    try {
+      return config?.remote
+        ? { remote: normalizePairingRemote(config.remote), token: null }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function createPairingStore(dataDir) {
+  return new SecretsStore({
+    dataDir,
+    allowlist: SETUP_FIELDS,
+    // Pairing credentials are scoped to node.json's saved remote. Keeping
+    // store hydration out of the ambient process environment prevents a
+    // later one-off --remote target from inheriting the saved credential.
+    env: Object.create(null)
+  });
+}
+
+function withStoreExclusiveLock(store, operation) {
+  if (typeof store.withExclusiveLock === "function") {
+    return store.withExclusiveLock(operation);
+  }
+  return operation(store);
+}
+
+function setPairingToken(store, value, { decidedBy }) {
+  const normalized = nonBlankToken(value);
+  if (normalized) {
+    return store.setSecret(REMOTE_TOKEN_KEY, normalized, { decidedBy });
+  }
+  return store.removeSecret(REMOTE_TOKEN_KEY, { decidedBy });
+}
+
+function restorePairingState(store, {
+  dataDir,
+  previousConfig,
+  previousToken,
+  decidedBy
+}) {
+  let tokenNeutralized = false;
+  let metadataNeutralized = false;
+  try {
+    setPairingToken(store, null, {
+      decidedBy: `${decidedBy}:neutralize-token`
+    });
+    tokenNeutralized = true;
+  } catch { /* a later metadata removal still fails closed */ }
+  try {
+    fs.rmSync(nodeConfigPath(dataDir), { force: true });
+    metadataNeutralized = true;
+  } catch { /* a removed token still fails closed */ }
+  if (!tokenNeutralized || !metadataNeutralized) return false;
+
+  if (previousConfig?.remote) {
+    try {
+      writeNodeMetadata(previousConfig.remote, dataDir);
+    } catch {
+      // After successful neutralization, an atomic restore can only leave the
+      // previous metadata or no metadata. Restoring its matching token last
+      // remains safe in either case.
+    }
+  }
+  try {
+    setPairingToken(store, previousToken, {
+      decidedBy: `${decidedBy}:restore-token`
+    });
+  } catch {
+    // A thrown store mutation may have committed or may have done nothing.
+    // The only published metadata is the previous remote, so both outcomes
+    // are credential-safe.
+  }
+  return true;
+}
+
+function assertSafeNodeConfigPath(file) {
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error("Node pairing metadata path is unsafe.");
+  }
+}
+
+function nonBlankToken(value) {
+  if (value === undefined || value === null) return null;
+  return String(value).trim() || null;
+}
+
+function normalizePairingRemote(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    throw new TypeError("Node pairing requires a non-blank remote");
+  }
+  return normalizeBase(normalized);
+}
+
+function peekEnvToken(dataDir, key = "OPENAGI_AUTH_TOKEN") {
   try {
     for (const raw of fs.readFileSync(path.join(dataDir, ".env"), "utf8").split(/\r?\n/)) {
       const line = raw.trim();
-      if (line.startsWith("OPENAGI_AUTH_TOKEN=")) {
-        const v = line.slice("OPENAGI_AUTH_TOKEN=".length).trim().replace(/^['"]|['"]$/g, "");
+      const prefix = `${key}=`;
+      if (line.startsWith(prefix)) {
+        const v = line.slice(prefix.length).trim().replace(/^['"]|['"]$/g, "");
         return v || null;
       }
     }
@@ -103,6 +395,7 @@ export class CliClient {
 
   async request(method, route, body) {
     const url = this.target.url + route;
+    const redactValues = secretRedactionSpellings(this.target.token);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     try {
@@ -115,9 +408,22 @@ export class CliClient {
       const text = await res.text();
       let json = null;
       try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
-      return { ok: res.ok, status: res.status, json, text };
+      return {
+        ok: res.ok,
+        status: res.status,
+        json: redactKnownValues(json, redactValues),
+        text: redactKnownValues(text, redactValues)
+      };
     } catch (error) {
-      return { ok: false, status: 0, json: null, text: "", error: error.name === "AbortError" ? "timeout" : error.message };
+      return {
+        ok: false,
+        status: 0,
+        json: null,
+        text: "",
+        error: error.name === "AbortError"
+          ? "timeout"
+          : redactKnownValues(error?.message ?? String(error), redactValues)
+      };
     } finally {
       clearTimeout(timer);
     }

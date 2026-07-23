@@ -34,12 +34,21 @@ export function checkpointsEnabled(env = process.env) {
 export class CheckpointStore {
   constructor(options = {}) {
     const dataDir = options.dataDir ?? resolveDataDir();
+    this.dataDir = path.resolve(dataDir);
     this.dir = options.dir ?? path.join(dataDir, "checkpoints");
     this.blobsDir = path.join(this.dir, "blobs");
     this.indexPath = path.join(this.dir, "index.jsonl");
     this.snapshotPath = path.join(this.dir, "snapshot.json");
     this.workspaceDir = path.resolve(options.workspaceDir ?? DEFAULT_WORKSPACE);
     this.allowedRoots = uniquePaths(options.allowedRoots ?? [this.workspaceDir, dataDir, os.tmpdir()]);
+    this.protectedRoots = uniquePaths([
+      path.join(this.dataDir, "secrets"),
+      path.join(this.dataDir, "mcp", "auth"),
+      path.join(this.dataDir, "node.json"),
+      path.join(this.dataDir, "mcp.json"),
+      path.join(this.dataDir, "nodes", "cache.json"),
+      this.dir
+    ]);
     this.enabled = options.enabled ?? checkpointsEnabled();
     this.now = typeof options.now === "function" ? options.now : nowIso;
     this.idFactory = typeof options.idFactory === "function" ? options.idFactory : () => createId("cp");
@@ -199,6 +208,7 @@ export class CheckpointStore {
     let truncated = false;
 
     for (const target of targets) {
+      this._assertAllowed(target.path);
       const current = readCurrent(target.path);
       const status = previewStatus(target, current);
       let diff = "";
@@ -471,6 +481,17 @@ export class CheckpointStore {
       .some((root) => realTarget === root || realTarget.startsWith(root + path.sep));
     if (!lexical || !real) {
       throw new CheckpointTargetError(`Checkpoint target is outside allowed roots: ${target}`);
+    }
+    const protectedRoots = [
+      ...this.protectedRoots,
+      ...this.protectedRoots.map(resolveThroughExistingAncestor)
+    ];
+    if (
+      isSensitiveEnvPath(target)
+      || isSensitiveEnvPath(realTarget)
+      || protectedRoots.some((root) => pathsOverlap(target, root) || pathsOverlap(realTarget, root))
+    ) {
+      throw new CheckpointTargetError(`Checkpoint target contains sensitive credential material: ${target}`);
     }
   }
 
@@ -902,6 +923,19 @@ function resolveThroughExistingAncestor(value) {
   try { real = fs.realpathSync(probe); } catch { return target; }
   const tail = path.relative(probe, target);
   return path.resolve(real, tail);
+}
+
+function isSensitiveEnvPath(value) {
+  const name = path.basename(value);
+  return name.startsWith(".env") && name !== ".env.example";
+}
+
+function pathsOverlap(left, right) {
+  return (
+    left === right
+    || left.startsWith(right + path.sep)
+    || right.startsWith(left + path.sep)
+  );
 }
 
 function clone(value) {

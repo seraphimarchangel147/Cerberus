@@ -25,6 +25,7 @@ export class TunnelWatcher extends EventEmitter {
     this.dataDir = options.dataDir ?? resolveDataDir();
     this.logPath = options.logPath ?? path.join(this.dataDir, "tunnel.log");
     this.envPath = options.envPath ?? path.join(this.dataDir, ".env");
+    this.secretStore = options.secretStore ?? null;
     this.timer = null;
     this.lastUrl = process.env.OPENAGI_PUBLIC_URL ?? null;
     this.lastSize = 0;
@@ -75,6 +76,14 @@ export class TunnelWatcher extends EventEmitter {
   }
 
   applyUrl(url) {
+    if (typeof this.secretStore?.setSecret === "function") {
+      this.secretStore.setSecret("OPENAGI_PUBLIC_URL", url, {
+        decidedBy: "system:tunnel-watcher"
+      });
+      process.env.OPENAGI_PUBLIC_URL = url;
+      this.lastUrl = url;
+      return;
+    }
     process.env.OPENAGI_PUBLIC_URL = url;
     this.lastUrl = url;
     let text = "";

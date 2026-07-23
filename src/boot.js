@@ -3,6 +3,9 @@ import path from "node:path";
 import { createDurableRuntime, createHostedInterface } from "./index.js";
 import { loadEnvFile } from "./file-utils.js";
 import { resolveDataDir, _resetDataDirCache } from "./data-dir.js";
+import { SecretsStore } from "./secrets-store.js";
+import { SETUP_FIELDS } from "./setup-wizard.js";
+import { reconcileLegacyNodePairing } from "./cli-client.js";
 
 // Read a single var from an env file WITHOUT importing the rest of its keys.
 function peekEnvVar(file, key) {
@@ -30,14 +33,21 @@ function peekEnvVar(file, key) {
 // values in the canonical <dataDir>/.env, since loadEnvFile is first-wins. So:
 // peek only OPENAGI_DATA_DIR, resolve, load the canonical file (authoritative),
 // then let the cwd .env fill any remaining gaps.
-export function loadBootEnv() {
+export function loadBootEnv({ withProvenance = false } = {}) {
   const cwdDataDir = peekEnvVar(".env", "OPENAGI_DATA_DIR");
   if (cwdDataDir && !process.env.OPENAGI_DATA_DIR) process.env.OPENAGI_DATA_DIR = cwdDataDir;
   _resetDataDirCache();
   const dataDir = resolveDataDir();
   loadEnvFile(path.join(dataDir, ".env")); // canonical — authoritative (first-wins)
-  loadEnvFile(".env");                       // cwd .env fills only keys the canonical didn't set
-  return dataDir;
+  const beforeCwd = new Set(Object.keys(process.env));
+  loadEnvFile(".env");                     // cwd .env fills only keys the canonical didn't set
+  if (!withProvenance) return dataDir;
+  return {
+    dataDir,
+    cwdAppliedNames: new Set(
+      Object.keys(process.env).filter((name) => !beforeCwd.has(name))
+    )
+  };
 }
 
 // A misconfigured, unreachable, or reauth-needed MCP server rejects
@@ -161,9 +171,42 @@ export function installGracefulShutdown(app, {
 // the bearer token — but we warn so it's a deliberate choice.
 export async function startServer({ host, port } = {}) {
   installCrashGuards();
-  const dataDir = loadBootEnv();
+  const bootEnv = loadBootEnv({ withProvenance: true });
+  const dataDir = bootEnv.dataDir;
   const resolvedHost = host ?? process.env.HOST ?? "127.0.0.1";
   const resolvedPort = Number.parseInt(String(port ?? process.env.PORT ?? "43210"), 10);
+  // Reconcile the authoritative snapshot before evaluating the network bind.
+  // A stale hand-edited .env token must not pass this check and then disappear
+  // when createDurableRuntime initializes the secrets store.
+  const secrets = new SecretsStore({
+    dataDir,
+    allowlist: SETUP_FIELDS,
+    env: process.env
+  });
+  const { initialized } = reconcileLegacyNodePairing({
+    dataDir,
+    store: secrets,
+    decidedBy: "runtime:boot-bind-check"
+  });
+  const configuredNames = new Set(secrets.listSecretNames({
+    decidedBy: "runtime:boot-bind-check:list"
+  }));
+  const allowedNames = new Set(SETUP_FIELDS);
+  for (const name of bootEnv.cwdAppliedNames) {
+    if (!allowedNames.has(name) || configuredNames.has(name)) continue;
+    if (initialized.migrated) {
+      const value = String(process.env[name] ?? "").trim();
+      if (value) {
+        secrets.setSecret(name, value, {
+          decidedBy: "runtime:boot-cwd-migration"
+        });
+      }
+    } else {
+      // Once a snapshot exists, a cwd .env is not an alternate source of
+      // truth. In particular, it must not resurrect a removed auth token.
+      delete process.env[name];
+    }
+  }
 
   if ((resolvedHost === "0.0.0.0" || resolvedHost === "::") && !process.env.OPENAGI_AUTH_TOKEN) {
     // Fail closed (Tier-1 hardening, 2026-07): an unauthenticated daemon on
@@ -183,7 +226,7 @@ export async function startServer({ host, port } = {}) {
     }
   }
 
-  const runtime = createDurableRuntime({ dataDir });
+  const runtime = createDurableRuntime({ dataDir, secrets });
   const app = createHostedInterface(runtime, { host: resolvedHost, port: resolvedPort });
   const address = await app.listen();
   const shutdown = installGracefulShutdown(app);

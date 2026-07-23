@@ -1,7 +1,7 @@
 import { createId, nowIso, tokenOverlapScore } from "./utils.js";
-import { resolveDataDir } from "./data-dir.js";
 import { HookRegistry } from "./hook-registry.js";
 import { sanitizeForAudit } from "./redact.js";
+import { validateMcpServerSpec } from "./mcp-registry.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
@@ -25,6 +25,9 @@ export class ToolRegistry {
       parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
       source: tool.source ?? "internal",
       handler: tool.handler,
+      // Synchronous input validation that runs before observers, hooks,
+      // summaries, or durable approval records can see the arguments.
+      preflight: typeof tool.preflight === "function" ? tool.preflight : null,
       // When true, invoke() queues a pending action and suspends until the
       // user approves, denies, or the bounded approval window expires.
       needsConfirmation: Boolean(tool.needsConfirmation),
@@ -79,7 +82,7 @@ export class ToolRegistry {
   }
 
   list({ readOnly = false } = {}) {
-    const all = [...this.tools.values()].map(({ handler, ...rest }) => rest);
+    const all = [...this.tools.values()].map(({ handler, preflight, ...rest }) => rest);
     return readOnly ? all.filter((tool) => !tool.sideEffects) : all;
   }
 
@@ -179,6 +182,17 @@ export class ToolRegistry {
   // agent is doing in real time. context.__onToolEvent is advisory and
   // best-effort — a throwing observer must never break a tool call.
   async invoke(name, args, context = {}, internalToken = null) {
+    const tool = this.tools.get(name);
+    if (tool?.preflight) {
+      try {
+        const result = tool.preflight(args ?? {}, context);
+        if (result && typeof result.then === "function") {
+          throw new TypeError(`Tool ${name} preflight must be synchronous.`);
+        }
+      } catch (error) {
+        return { ok: false, error: error?.message ?? String(error) };
+      }
+    }
     const notify = typeof context?.__onToolEvent === "function" ? context.__onToolEvent : null;
     if (notify) {
       try { notify({ phase: "start", name, args }); } catch { /* observer must not break tools */ }
@@ -1158,8 +1172,9 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "register_mcp_server",
-    description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with static API key), http+oauth (URL with browser-based OAuth). After registering, the user typically needs to call connect_mcp_server. THIS REQUIRES USER APPROVAL — registering an MCP can mean spawning an arbitrary process or contacting an arbitrary host. Prefer connect_catalog_mcp when the server is already in the curated catalog.",
+    description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with a ${VAR} secret reference), http+oauth (URL with browser-based OAuth). Store credentials through the authenticated secrets surface first; never pass a literal secret to this tool. After registering, the user typically needs to call connect_mcp_server. THIS REQUIRES USER APPROVAL - registering an MCP can mean spawning an arbitrary process or contacting an arbitrary host. Prefer connect_catalog_mcp when the server is already in the curated catalog.",
     needsConfirmation: true,
+    preflight: (args) => preflightRegisterMcpServer(args),
     // Summary is what shows in the menu-bar notification and dashboard
     // approval card header. Critically include the fields that determine
     // whether the action is dangerous: the stdio command + first few args,
@@ -1178,7 +1193,11 @@ export function registerCoreTools(registry, runtime) {
         // http
         url: { type: "string", description: "http: MCP endpoint URL." },
         auth: { type: "string", enum: ["none", "bearer", "oauth"], description: "http: auth mode." },
-        apiKey: { type: "string", description: "http+bearer: API key. Use ${ENV_VAR} for env var expansion." },
+        apiKey: {
+          type: "string",
+          pattern: "^\\$\\{[A-Z_][A-Z0-9_]*\\}$",
+          description: "http+bearer: exact ${ENV_VAR} reference only. Add the value through /secrets or authenticated setup; never put the value here."
+        },
         clientId: { type: "string", description: "http+oauth: pre-registered client ID for servers without dynamic registration." },
         scope: { type: "string", description: "http+oauth: requested scopes." },
         trustLevel: { type: "string", enum: ["trusted", "untrusted"], description: "Default trusted." }
@@ -1408,7 +1427,11 @@ export function registerCoreTools(registry, runtime) {
       // Persist
       try {
         const { saveEnv } = await import("./setup-wizard.js");
-        saveEnv({ values: { OPENAGI_PROVIDER: args.preference } });
+        saveEnv({
+          values: { OPENAGI_PROVIDER: args.preference },
+          store: runtime.secrets,
+          decidedBy: "agent:set_provider"
+        });
       } catch { /* ignore */ }
       return {
         preference: args.preference,
@@ -1761,43 +1784,41 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "connect_catalog_mcp",
-    description: "One-click register an MCP server from the curated catalog by id. For bearer-auth entries (Stripe, PostHog, etc.), pass the user's API key via apiKey — it'll be persisted to .env under the entry's declared env var, then the MCP is registered with `${VAR}` indirection. For OAuth entries (Linear, Notion, GitHub), no key is needed; the OAuth handshake will surface in the dashboard's MCP tab. THIS REQUIRES USER APPROVAL — you'll get back {status:'awaiting_confirmation'} and the user must approve via the dashboard before the registration actually runs.",
+    description: "One-click register an MCP server from the curated catalog by id. Bearer credentials must already be stored through the authenticated /secrets, Discord modal, or setup surface; this tool never accepts or returns secret values. For OAuth entries (Linear, Notion, GitHub), the handshake will surface in the dashboard's MCP tab. THIS REQUIRES USER APPROVAL - the user must approve through the normal approval surface before registration runs.",
+    preflight: (args) => preflightConnectCatalogMcp(args),
     parameters: {
       type: "object",
       properties: {
-        catalogId: { type: "string", description: "Catalog entry id (see list_mcp_catalog)." },
-        apiKey: { type: "string", description: "Required for bearer-auth entries when their env var isn't already populated. Never invent — only pass a key the user has explicitly given you." }
+        catalogId: { type: "string", description: "Catalog entry id (see list_mcp_catalog)." }
       },
       required: ["catalogId"],
       additionalProperties: false
     },
     needsConfirmation: true,
-    // When apiKey is supplied, include a short prefix in the summary so
-    // the user can sanity-check that the agent is forwarding *their* key
-    // and not a substituted attacker key from prompt injection. Full key
-    // still appears in the args details for users who want to verify.
-    summarize: (args) => {
-      let label = `Connect MCP: ${args.catalogId}`;
-      if (args.apiKey) {
-        const prefix = String(args.apiKey).slice(0, 8);
-        label += ` (with key starting "${prefix}…")`;
-      }
-      return label;
-    },
-    handler: async (args) => {
+    summarize: (args) => `Connect MCP: ${args.catalogId}`,
+    handler: async (args, context) => {
       const { MCP_CATALOG } = await import("./mcp-catalog.js");
       const entry = MCP_CATALOG.find((e) => e.id === args.catalogId);
       if (!entry) throw new Error(`Catalog entry '${args.catalogId}' not found. Use list_mcp_catalog to see what's available.`);
       if (!entry.register) throw new Error(`Catalog entry '${entry.id}' has no register info (likely status=coming-soon).`);
       if (entry.register.auth === "bearer" && entry.apiKeyEnvVar) {
-        const incoming = typeof args.apiKey === "string" ? args.apiKey.trim() : "";
-        const existing = process.env[entry.apiKeyEnvVar] ?? "";
-        if (incoming) {
-          const { saveEnv } = await import("./setup-wizard.js");
-          const dataDir = resolveDataDir();
-          saveEnv({ dataDir, values: { [entry.apiKeyEnvVar]: incoming } });
-        } else if (!existing) {
-          throw new Error(`Catalog entry '${entry.id}' uses ${entry.apiKeyEnvVar} which isn't set. Ask the user for their key, then call this tool again with apiKey set.`);
+        const decidedBy = context?.agentId
+          ? `agent:${context.agentId}:connect_catalog_mcp`
+          : "agent:connect_catalog_mcp";
+        const hasSecretStore = typeof runtime.secrets?.listSecretNames === "function";
+        let storedNames;
+        try {
+          storedNames = hasSecretStore
+            ? runtime.secrets.listSecretNames({ decidedBy })
+            : [];
+        } catch {
+          throw new Error("Secret store unavailable for catalog connection.");
+        }
+        const configured = hasSecretStore
+          ? storedNames.includes(entry.apiKeyEnvVar)
+          : Boolean(process.env[entry.apiKeyEnvVar]);
+        if (!configured) {
+          throw new Error(`Catalog entry '${entry.id}' requires ${entry.apiKeyEnvVar}. Ask the user to add it through /secrets or setup, then retry without putting the value in chat.`);
         }
         runtime.mcp.allowEnvKey?.(entry.apiKeyEnvVar);
       }
@@ -1878,6 +1899,10 @@ function validateReplaceIds(value) {
 // user can't approve a hidden `docker run -v /:/host` based on the name
 // alone. Exported for testing.
 export function summarizeRegisterMcpServer(args = {}) {
+  // Direct callers must not turn this UI helper into a reflection surface.
+  // The invocation path runs the same validator even earlier, before any
+  // observer, hook, or pending-action journal receives the arguments.
+  validateMcpServerSpec(args);
   const transport = args.transport ?? (args.url ? "http" : args.command ? "stdio" : "config");
   const name = args.name ?? "(unnamed)";
   if (transport === "stdio") {
@@ -1891,4 +1916,55 @@ export function summarizeRegisterMcpServer(args = {}) {
     return `Register http MCP '${name}' → ${args.url ?? "(no url)"} (auth=${auth})`;
   }
   return `Register MCP '${name}' (${transport})`;
+}
+
+const REGISTER_MCP_SERVER_FIELDS = new Set([
+  "name",
+  "transport",
+  "command",
+  "args",
+  "url",
+  "auth",
+  "apiKey",
+  "clientId",
+  "scope",
+  "trustLevel"
+]);
+
+export function preflightRegisterMcpServer(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("Invalid MCP server registration request.");
+  }
+  if (Object.keys(args).some((key) => !REGISTER_MCP_SERVER_FIELDS.has(key))) {
+    throw new Error("Invalid MCP server registration request.");
+  }
+  if (
+    args.args !== undefined
+    && (!Array.isArray(args.args) || args.args.some((value) => typeof value !== "string"))
+  ) {
+    throw new Error("Invalid MCP server registration request.");
+  }
+  try {
+    validateMcpServerSpec(args);
+  } catch {
+    // This error crosses model/channel boundaries. Never include any supplied
+    // field value, even when the underlying validator has a useful local
+    // diagnostic.
+    throw new Error("Invalid MCP server registration request.");
+  }
+  return true;
+}
+
+export function preflightConnectCatalogMcp(args) {
+  if (
+    !args
+    || typeof args !== "object"
+    || Array.isArray(args)
+    || Object.keys(args).length !== 1
+    || !Object.hasOwn(args, "catalogId")
+    || typeof args.catalogId !== "string"
+  ) {
+    throw new Error("Invalid MCP catalog connection request.");
+  }
+  return true;
 }

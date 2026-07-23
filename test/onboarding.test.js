@@ -25,8 +25,10 @@ test("re-run wizard keeps the existing auth token instead of rotating it", () =>
       LINEAR_API_KEY: "lin_secret"
     }
   });
-  assert.match(html, /tok_existing_abc123/, "existing token shown + submitted unchanged");
-  assert.match(html, /existing<\/strong> dashboard token/, "copy explains it's the current token");
+  assert.doesNotMatch(html, /tok_existing_abc123/, "existing token is never returned in HTML");
+  assert.match(html, /existing<\/strong> dashboard token is saved but hidden/);
+  assert.match(html, /name="OPENAGI_AUTH_TOKEN" id="tokenInput" value=""/);
+  assert.match(html, /id="copyToken" disabled/);
   // Prefill: provider radio, model, budget.
   assert.match(html, /value="anthropic" checked/);
   assert.match(html, /value="claude-opus-4-8"/);
@@ -42,6 +44,8 @@ test("quick-save path exists after the auth step", () => {
   const html = renderWizard({ existingEnv: {} });
   assert.match(html, /Save now — set up the rest later/);
   assert.match(html, /minimum viable setup/);
+  assert.doesNotMatch(html, /document\.cookie|out\.innerHTML/);
+  assert.match(html, /out\.textContent/);
 });
 
 test("/health exposes firstRun for the Mac app", async () => {

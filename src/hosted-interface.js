@@ -21,7 +21,7 @@ import { inferToneScore } from "./outcome-store.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
 import { NodeRegistry, readOrCreateIdentity } from "./node-registry.js";
 import { readNodeConfig } from "./cli-client.js";
-import { sanitizeForAudit } from "./redact.js";
+import { redactKnownValues, sanitizeForAudit } from "./redact.js";
 import { approvePendingAction } from "./pending-actions.js";
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
@@ -167,6 +167,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // but on first run it bypasses the auth gate since no token exists yet.
       const setupActive = isFirstRun();
       const setupRoutes = pathname === "/setup" || pathname === "/setup/save" || pathname === "/setup/test";
+      const secretsRoute = pathname === "/secrets" || pathname.startsWith("/secrets/");
 
       if (setupActive && method === "GET" && pathname === "/") {
         res.writeHead(302, { Location: "/setup" });
@@ -189,7 +190,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const extraCookies = [];
       const setupBypass = setupActive && setupRoutes;
       if (!isPublicRoute(pathname) && !setupBypass) {
-        const auth = checkAuth(req, url, getAuthToken());
+        const authToken = getAuthToken();
+        // The rest of the local-only API retains its backwards-compatible
+        // auth-disabled mode. The secrets surface is different: it must never
+        // become anonymously reachable because OPENAGI_AUTH_TOKEN is absent.
+        const auth = secretsRoute && !authToken
+          ? { ok: false, reason: "OPENAGI_AUTH_TOKEN is required for the secrets API" }
+          : checkAuth(req, url, authToken);
         if (!auth.ok) {
           // Browsers (Accept: text/html) get the login form on ANY failed GET,
           // not just GET /. After sign-in, redirect back to the original path.
@@ -236,26 +243,106 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname === "/setup/save") {
         const body = await readJson(req);
-        const dataDir = resolveDataDir();
-        const result = saveEnv({ dataDir, values: body });
+        let result;
+        try {
+          result = saveEnv({
+            dataDir,
+            values: body,
+            store: runtime.secrets,
+            decidedBy: "http:/setup/save"
+          });
+        } catch {
+          return sendSecretsJson(res, 500, { error: "setup persistence failed" });
+        }
         try {
           const { createModelProvider } = await import("./model-provider.js");
           if (runtime.agentHost) {
             runtime.agentHost.modelProvider = createModelProvider({ budgetGuard: runtime.budget });
           }
         } catch { /* swallow */ }
-        return sendJson(res, 200, result);
+        if (process.env.OPENAGI_AUTH_TOKEN) {
+          res.setHeader("Set-Cookie", buildSetCookie(process.env.OPENAGI_AUTH_TOKEN));
+        }
+        return sendSecretsJson(res, 200, result);
       }
       if (method === "POST" && pathname === "/setup/test") {
         const body = await readJson(req);
-        if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
+        if (!channels) return sendSecretsJson(res, 503, { error: "agent-host-disabled" });
         try {
           // ephemeral: the connectivity test must not seed a session, task,
           // memory item, or outcome — it's plumbing, not conversation.
           const turn = await channels.handleLocalMessage({ text: body.text ?? "Say hi in one short sentence.", from: "setup", ephemeral: true });
-          return sendJson(res, 200, { reply: turn.reply, model: turn.model });
+          let safeTurn = { reply: turn.reply, model: turn.model };
+          if (runtime.secrets) {
+            const names = runtime.secrets.listSecretNames({
+              decidedBy: "http:/setup/test:list"
+            });
+            const values = runtime.secrets.exportEnv({
+              names,
+              decidedBy: "http:/setup/test:redact"
+            });
+            safeTurn = redactKnownValues(safeTurn, Object.values(values));
+          }
+          return sendSecretsJson(res, 200, safeTurn);
+        } catch {
+          return sendSecretsJson(res, 500, { error: "setup connectivity test failed" });
+        }
+      }
+
+      if (method === "GET" && pathname === "/secrets") {
+        if (!runtime.secrets?.listSecrets) {
+          return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
+        }
+        try {
+          const secrets = runtime.secrets
+            .listSecrets({ decidedBy: "http:GET:/secrets" })
+            .map((entry) => publicSecretMetadata(entry));
+          return sendSecretsJson(res, 200, { secrets });
+        } catch {
+          return sendSecretsJson(res, 500, { error: "secrets-unavailable" });
+        }
+      }
+      if (method === "POST" && pathname === "/secrets") {
+        if (!runtime.secrets?.setSecret) {
+          return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return sendSecretsJson(res, 400, { error: "valid JSON object required" });
+        }
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        if (!name || typeof body.value !== "string" || !body.value.trim()) {
+          return sendSecretsJson(res, 400, { error: "name and non-blank string value are required" });
+        }
+        try {
+          const stored = runtime.secrets.setSecret(name, body.value, {
+            decidedBy: "http:POST:/secrets"
+          });
+          return sendSecretsJson(res, 200, { secret: publicSecretMetadata(stored, name) });
         } catch (error) {
-          return sendJson(res, 500, { error: error.message });
+          return sendSecretsJson(res, 400, { error: publicSecretError(error) });
+        }
+      }
+      if (method === "DELETE" && pathname.match(/^\/secrets\/[^/]+$/)) {
+        if (!runtime.secrets?.removeSecret) {
+          return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
+        }
+        const name = decodeURIComponent(pathname.slice("/secrets/".length)).trim();
+        // Removing the live auth token would make checkAuth enter its legacy
+        // auth-disabled mode for every other route in this running process.
+        // Rotation via POST remains available; remote deletion does not.
+        if (name === "OPENAGI_AUTH_TOKEN") {
+          return sendSecretsJson(res, 409, {
+            error: "OPENAGI_AUTH_TOKEN cannot be removed through the secrets API; rotate it with POST /secrets"
+          });
+        }
+        try {
+          const removed = runtime.secrets.removeSecret(name, {
+            decidedBy: "http:DELETE:/secrets"
+          });
+          return sendSecretsJson(res, 200, { name, removed: Boolean(removed) });
+        } catch (error) {
+          return sendSecretsJson(res, 400, { error: publicSecretError(error) });
         }
       }
 
@@ -416,7 +503,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             });
           } finally { clearTimeout(timer); }
           if (!upstream.ok) throw new Error(`upstream ${upstream.status}`);
-          const upstreamJson = await upstream.json();
+          const upstreamJson = redactKnownValues(
+            await upstream.json(),
+            pairing.token ? [pairing.token] : []
+          );
           const cached = { ...upstreamJson, cachedAt: new Date().toISOString() };
           // Best-effort only: a fresh roster we already have in hand must
           // still be returned even if persisting it to disk fails (e.g. a
@@ -431,7 +521,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             cachedAt: cached.cachedAt
           });
         } catch {
-          const cached = readJsonFile(nodesCachePath, null);
+          const cached = redactKnownValues(
+            readJsonFile(nodesCachePath, null),
+            pairing.token ? [pairing.token] : []
+          );
+          if (cached) {
+            try { writeJsonAtomic(nodesCachePath, cached); } catch { /* best effort */ }
+          }
           return sendJson(res, 200, {
             self: { nodeId: identity.nodeId, name: identity.name, role: "node", version: PACKAGE_VERSION, pairedTo: pairing.remote },
             nodes: cached?.nodes ?? [],
@@ -448,10 +544,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, {
           ...status,
           publicUrl: pub,
-          // The URL to paste into BuildBetter's webhook config. Only useful
-          // once a public URL + webhook secret are set; secret goes in the
-          // query string so webhook UIs that only take a URL still work.
-          buildBetterWebhook: base && bbSecret ? `${base}/webhooks/buildbetter?secret=${encodeURIComponent(bbSecret)}` : null,
+          // Return the endpoint, never the credential-bearing query string.
+          // BuildBetter can send the saved value via its webhook-secret
+          // header, or the user can append it locally in BuildBetter's UI.
+          buildBetterWebhook: base ? `${base}/webhooks/buildbetter` : null,
           buildBetterWebhookReady: Boolean(base && bbSecret)
         });
       }
@@ -612,7 +708,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // Also persist to .env so it survives restart.
         try {
           const { saveEnv } = await import("./setup-wizard.js");
-          saveEnv({ values: { OPENAGI_PROVIDER: choice } });
+          saveEnv({
+            dataDir,
+            values: { OPENAGI_PROVIDER: choice },
+            store: runtime.secrets,
+            decidedBy: "http:/admin/provider"
+          });
         } catch { /* fall back to runtime-only */ }
         return sendJson(res, 200, {
           preference: choice,
@@ -807,11 +908,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // the MCP with `${VAR}` indirection — never with a literal.
         const body = await readJson(req).catch(() => ({}));
         const catalogId = body.catalogId;
-        if (!catalogId) return sendJson(res, 400, { error: "catalogId required" });
+        if (!catalogId) return sendSecretsJson(res, 400, { error: "catalogId required" });
         const { MCP_CATALOG } = await import("./mcp-catalog.js");
         const entry = MCP_CATALOG.find((e) => e.id === catalogId);
-        if (!entry) return sendJson(res, 404, { error: "not in catalog" });
-        if (!entry.register) return sendJson(res, 400, { error: "catalog entry has no register info" });
+        if (!entry) return sendSecretsJson(res, 404, { error: "not in catalog" });
+        if (!entry.register) {
+          return sendSecretsJson(res, 400, { error: "catalog entry has no register info" });
+        }
         try {
           // API-key path: any catalog entry that declares apiKeyEnvVar
           // needs that env var populated before we register, regardless
@@ -820,13 +923,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           // so we just need it on disk + in the registry's allowlist.
           if (entry.apiKeyEnvVar) {
             const incoming = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-            const existing = process.env[entry.apiKeyEnvVar] ?? "";
+            const existing = isStoredSecretConfigured(runtime.secrets, entry.apiKeyEnvVar, {
+              decidedBy: "http:/integrations/connect-mcp:credential-check"
+            });
             if (incoming) {
               const { saveEnv } = await import("./setup-wizard.js");
-              const dataDir = resolveDataDir();
-              saveEnv({ dataDir, values: { [entry.apiKeyEnvVar]: incoming } });
+              saveEnv({
+                dataDir,
+                values: { [entry.apiKeyEnvVar]: incoming },
+                store: runtime.secrets,
+                decidedBy: "http:/integrations/connect-mcp"
+              });
             } else if (!existing) {
-              return sendJson(res, 400, {
+              return sendSecretsJson(res, 400, {
                 error: `apiKey required (catalog entry '${entry.id}' uses ${entry.apiKeyEnvVar} which isn't set yet)`,
                 apiKeyEnvVar: entry.apiKeyEnvVar
               });
@@ -841,9 +950,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           if (runtime.mcp?.connect) {
             runtime.mcp.connect(server.name).catch(() => { /* OAuth path surfaces via SSE */ });
           }
-          return sendJson(res, 200, { name: server.name, transport: server.transport });
-        } catch (error) {
-          return sendJson(res, 400, { error: error.message });
+          return sendSecretsJson(res, 200, { name: server.name, transport: server.transport });
+        } catch {
+          return sendSecretsJson(res, 400, { error: "MCP connection setup rejected" });
         }
       }
       if (method === "GET" && pathname === "/pending-actions") {
@@ -960,7 +1069,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const body = await readJson(req).catch(() => ({}));
         const enable = Boolean(body.enable);
         const { saveEnv } = await import("./setup-wizard.js");
-        saveEnv({ dataDir: resolveDataDir(), values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" } });
+        try {
+          saveEnv({
+            dataDir,
+            values: { OPENAGI_AUTO_APPROVE: enable ? "1" : "0" },
+            store: runtime.secrets,
+            decidedBy: "http:/auto-approve"
+          });
+        } catch {
+          return sendJson(res, 500, { error: "configuration persistence failed" });
+        }
         process.env.OPENAGI_AUTO_APPROVE = enable ? "1" : "0";
         events.emit("auto-approve", { enabled: enable });
         return sendJson(res, 200, { enabled: enable });
@@ -987,17 +1105,31 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const enable = Boolean(body.enable);
         const { saveEnv } = await import("./setup-wizard.js");
         const { registerComputerUseTools, unregisterComputerUseTools } = await import("./integrations/computer-use.js");
-        const dataDir = resolveDataDir();
         // saveEnv writes only allowlisted keys; OPENAGI_COMPUTER_USE has
         // to be in WIZARD_FIELDS (added in this commit) for the write to
         // land in .env.
-        if (enable) {
-          saveEnv({ dataDir, values: { OPENAGI_COMPUTER_USE: "1" } });
-          process.env.OPENAGI_COMPUTER_USE = "1";
-        } else {
-          saveEnv({ dataDir, values: {}, clear: ["OPENAGI_COMPUTER_USE"] });
-          // saveEnv's clear path also strips process.env, but be explicit:
-          delete process.env.OPENAGI_COMPUTER_USE;
+        try {
+          if (enable) {
+            saveEnv({
+              dataDir,
+              values: { OPENAGI_COMPUTER_USE: "1" },
+              store: runtime.secrets,
+              decidedBy: "http:/computer-use/toggle"
+            });
+            process.env.OPENAGI_COMPUTER_USE = "1";
+          } else {
+            saveEnv({
+              dataDir,
+              values: {},
+              clear: ["OPENAGI_COMPUTER_USE"],
+              store: runtime.secrets,
+              decidedBy: "http:/computer-use/toggle"
+            });
+            // saveEnv's clear path also strips process.env, but be explicit:
+            delete process.env.OPENAGI_COMPUTER_USE;
+          }
+        } catch {
+          return sendJson(res, 500, { error: "configuration persistence failed" });
         }
         if (enable) {
           registerComputerUseTools(runtime.tools, runtime);
@@ -1190,6 +1322,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // the UI can say "this is the MCP version of an integration you also
         // have a non-MCP (API) path for above".
         const featuredIds = new Set(integrations.map((i) => i.id));
+        const storedSecretNames = configuredSecretNames(runtime.secrets, {
+          decidedBy: "http:/integrations/status:credential-check"
+        });
         const catalog = MCP_CATALOG
           .map((entry) => ({
             id: entry.id,
@@ -1200,7 +1335,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             status: entry.status,
             apiKeyEnvVar: entry.apiKeyEnvVar ?? null,
             apiKeyHelp: entry.apiKeyHelp ?? null,
-            apiKeyConfigured: entry.apiKeyEnvVar ? Boolean(process.env[entry.apiKeyEnvVar]) : true,
+            apiKeyConfigured: entry.apiKeyEnvVar
+              ? (storedSecretNames === null
+                  ? Boolean(process.env[entry.apiKeyEnvVar])
+                  : storedSecretNames.has(entry.apiKeyEnvVar))
+              : true,
             connectable: entry.status === "available" && Boolean(entry.register),
             configured: mcpInCatalog(entry.id),
             featured: featuredIds.has(entry.id)
@@ -1559,11 +1698,21 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 202, { name, status: "connecting" });
       }
       if (method === "POST" && pathname.match(/^\/mcp\/clear-auth\/[^/]+$/)) {
-        const name = decodeURIComponent(pathname.split("/")[3]);
+        const name = parseMcpServerName(pathname.split("/")[3]);
+        if (!name) {
+          return sendJson(res, 400, { error: "invalid MCP server name" });
+        }
         pendingOauth.delete(name);
         // Wipe cached OAuth tokens so the next connect starts a fresh flow.
         try {
-          const authPath = path.join(resolveDataDir(), "mcp", "auth", `${name}.json`);
+          const authDir = path.resolve(dataDir, "mcp", "auth");
+          const authPath = path.resolve(authDir, `${name}.json`);
+          if (path.dirname(authPath) !== authDir) {
+            return sendJson(res, 400, { error: "invalid MCP server name" });
+          }
+          if (fsSync.existsSync(authDir) && fsSync.lstatSync(authDir).isSymbolicLink()) {
+            return sendJson(res, 400, { error: "MCP auth storage is not a safe directory" });
+          }
           if (fsSync.existsSync(authPath)) fsSync.unlinkSync(authPath);
         } catch { /* ignore */ }
         return sendJson(res, 200, { ok: true });
@@ -1590,8 +1739,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname === "/mcp/register") {
         const body = await readJson(req);
-        const server = runtime.mcp.registerServer(body);
-        return sendJson(res, 200, server);
+        try {
+          const server = runtime.mcp.registerServer(body);
+          return sendJson(res, 200, {
+            name: server.name,
+            transport: server.transport
+          });
+        } catch {
+          // Registration errors can be derived from credential-bearing input.
+          // Keep the HTTP rejection useful without reflecting any raw field.
+          return sendJson(res, 400, { error: "MCP registration rejected" });
+        }
       }
 
       if (method === "POST" && pathname === "/tick") {
@@ -1732,7 +1890,11 @@ function handleSse(req, res, clients) {
 }
 
 function sendHtml(res, status, value, cookies = []) {
-  const headers = { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(value) };
+  const headers = {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(value),
+    "cache-control": "no-store"
+  };
   if (cookies.length) headers["Set-Cookie"] = cookies;
   res.writeHead(status, headers);
   res.end(value);
@@ -1771,6 +1933,77 @@ function sendJson(res, status, value) {
   const body = JSON.stringify(value, null, 2);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
   res.end(body);
+}
+
+function sendSecretsJson(res, status, value) {
+  res.setHeader("Cache-Control", "no-store");
+  return sendJson(res, status, value);
+}
+
+function parseMcpServerName(encoded) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(String(encoded ?? ""));
+  } catch {
+    return null;
+  }
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(decoded)
+    || /[ .]$/.test(decoded)
+  ) {
+    return null;
+  }
+  const stem = decoded.split(".")[0].toUpperCase();
+  return /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)
+    ? null
+    : decoded;
+}
+
+function publicSecretMetadata(entry, fallbackName = "") {
+  const name = fallbackName
+    ? String(fallbackName)
+    : (typeof entry?.name === "string" ? entry.name : "");
+  const last4 = typeof entry?.last4 === "string" && entry.last4.length <= 4
+    ? entry.last4
+    : null;
+  return {
+    name,
+    last4,
+    preview: last4 ? `****${last4}` : "****"
+  };
+}
+
+function publicSecretError(error) {
+  if (error instanceof TypeError && /^Unknown secret name:/.test(error.message)) {
+    return "unknown secret name";
+  }
+  return "secret operation rejected";
+}
+
+function configuredSecretNames(store, { decidedBy } = {}) {
+  if (!store) return null;
+  try {
+    if (typeof store.listSecretNames === "function") {
+      return new Set(store.listSecretNames({ decidedBy }));
+    }
+    if (typeof store.listSecrets === "function") {
+      return new Set(
+        store.listSecrets({ decidedBy })
+          .map((entry) => entry?.name)
+          .filter((name) => typeof name === "string")
+      );
+    }
+  } catch {
+    return new Set();
+  }
+  // A store exists, so process.env is not an acceptable fallback source.
+  return new Set();
+}
+
+function isStoredSecretConfigured(store, name, { decidedBy } = {}) {
+  const names = configuredSecretNames(store, { decidedBy });
+  if (names !== null) return names.has(name);
+  return Boolean(process.env[name]);
 }
 
 // Map an outreach action to the real action on the underlying source. Throws
@@ -3535,7 +3768,7 @@ function openMcpComposer() {
             <input class="ui-input" name="url" placeholder="https://mcp.example.com/mcp">
           </div>
           <div data-kind="http-bearer">
-            <label>API key (or \\\${ENV_VAR})</label>
+            <label>API key secret reference (exact \\\${ENV_VAR})</label>
             <input class="ui-input" name="apiKey" placeholder="\\\${MY_MCP_KEY}">
           </div>
           <div data-kind="http-oauth" style="margin-bottom: var(--space-3);">
@@ -3543,8 +3776,8 @@ function openMcpComposer() {
             <input class="ui-input" name="clientId" placeholder="\\\${OAUTH_CLIENT_ID} or literal">
           </div>
           <div data-kind="http-oauth">
-            <label>Client secret <span class="ui-meta">· optional, only for confidential clients</span></label>
-            <input class="ui-input" type="password" name="clientSecret" autocomplete="off">
+            <label>Client secret reference <span class="ui-meta">· optional exact \\\${ENV_VAR}; store the value through Secrets first</span></label>
+            <input class="ui-input" name="clientSecret" placeholder="\\\${MY_OAUTH_CLIENT_SECRET}" autocomplete="off">
           </div>
         </div>
 
@@ -3620,6 +3853,22 @@ function openMcpComposer() {
     if (kind === "stdio" && !body.command) { showOut("command is required for stdio", "err"); reset(); return; }
     if ((kind === "http-oauth" || kind === "http-bearer") && !body.url) { showOut("url is required for http", "err"); reset(); return; }
     if (kind === "http-bearer" && !body.apiKey) { showOut("apiKey is required for http+bearer", "err"); reset(); return; }
+    const isSecretReference = (value) => (
+      typeof value === "string"
+      && value.startsWith("$" + "{")
+      && value.endsWith("}")
+      && /^[A-Z_][A-Z0-9_]*$/.test(value.slice(2, -1))
+    );
+    if (body.apiKey && !isSecretReference(body.apiKey)) {
+      showOut("apiKey must be an exact \${ENV_VAR} secret reference", "err");
+      reset();
+      return;
+    }
+    if (body.clientSecret && !isSecretReference(body.clientSecret)) {
+      showOut("clientSecret must be an exact \${ENV_VAR} secret reference", "err");
+      reset();
+      return;
+    }
 
     const btn = $("registerSubmit");
     btn.disabled = true;
@@ -3812,8 +4061,8 @@ async function renderNodes() {
 
 async function renderChannels() {
   const ch = await fetchJson("/channels");
-  const bbWebhookLine = ch.buildBetterWebhook
-    ? \`<div class="desc" style="margin-top:6px;">BuildBetter webhook: <code>\${escapeHtml(ch.buildBetterWebhook)}</code> <span class="sub">— paste into BuildBetter to sync calls instantly</span></div>\`
+  const bbWebhookLine = ch.buildBetterWebhookReady
+    ? \`<div class="desc" style="margin-top:6px;">BuildBetter webhook endpoint: <code>\${escapeHtml(ch.buildBetterWebhook)}</code> <span class="sub">— authentication is configured. Send the saved secret as <code>X-BuildBetter-Webhook-Secret</code>, or append it as <code>?secret=...</code> in BuildBetter; the dashboard keeps it hidden.</span></div>\`
     : (ch.publicUrl ? \`<div class="desc" style="margin-top:6px;" class="sub">BuildBetter webhook: set <code>BUILDBETTER_WEBHOOK_SECRET</code> to enable instant call sync.</div>\` : "");
   const tunnelBlock = ch.publicUrl
     ? \`<div class="card"><div class="name">Public URL</div><div class="desc"><code>\${escapeHtml(ch.publicUrl)}</code></div>\${bbWebhookLine}</div>\`

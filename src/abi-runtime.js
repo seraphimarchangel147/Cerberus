@@ -28,6 +28,9 @@ import { registerTtsTool } from "./integrations/tts.js";
 import { registerImessageSearchTool } from "./integrations/imessage-search-tool.js";
 import { createEmbedder } from "./embeddings.js";
 import { McpRegistry } from "./mcp-registry.js";
+import { SecretsStore } from "./secrets-store.js";
+import { SETUP_FIELDS } from "./setup-wizard.js";
+import { reconcileLegacyNodePairing } from "./cli-client.js";
 import { MemoryCondenser } from "./memory-condenser.js";
 import { ObservationStore } from "./observation-store.js";
 import { buildAmbientDigest } from "./ambient-digest.js";
@@ -228,12 +231,24 @@ export class AbiRuntime {
     this.workflows = options.workflows ?? registerDefaultWorkflows(new WorkflowRegistry());
     this.memory = options.memory ?? new MemorySystem(options.memoryOptions);
     this.externalMemoryProvider = resolveExternalMemoryProvider(options);
+    const secretsDataDir = options.dataDir
+      ?? options.mcpOptions?.dataDir
+      ?? resolveDataDir();
+    this.secrets = options.secrets ?? new SecretsStore({
+      dataDir: secretsDataDir,
+      allowlist: SETUP_FIELDS,
+      env: options.env ?? process.env
+    });
     this.scrutiny = options.scrutiny ?? (options.scrutinyMode === "single"
       ? new DirectionalAdaptiveScrutiny(options.scrutinyOptions)
       : new ScrutinyPanel(options.scrutinyOptions));
     this.propagation = options.propagation ?? new PropagationController(options.propagationOptions);
     this.cron = options.cron ?? new CronScheduler();
-    this.mcp = options.mcp ?? new McpRegistry(options.mcpOptions ?? {});
+    this.mcp = options.mcp ?? new McpRegistry({
+      ...(options.mcpOptions ?? {}),
+      secretStore: this.secrets
+    });
+    this.mcp.bindSecretStore?.(this.secrets);
     this.hooks = options.hooks
       ?? options.tools?.hooks
       ?? new HookRegistry({ dataDir: options.dataDir, ...(options.hookOptions ?? {}) });
@@ -301,7 +316,11 @@ export class AbiRuntime {
       ...(options.scrutinyFitterOptions ?? {})
     });
     this.introspector = options.introspector ?? new Introspector({ runtime: this });
-    this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher(options.tunnelWatcherOptions ?? {});
+    this.tunnelWatcher = options.tunnelWatcher ?? new TunnelWatcher({
+      dataDir: options.dataDir,
+      secretStore: this.secrets,
+      ...(options.tunnelWatcherOptions ?? {})
+    });
     this.patternMiner = options.patternMiner ?? new PatternMiner({ runtime: this, dataDir: options.dataDir, ...(options.patternMinerOptions ?? {}) });
     this.sessionMiner = options.sessionMiner ?? new SessionMiner({ runtime: this, dataDir: options.dataDir, ...(options.sessionMinerOptions ?? {}) });
     this.imessageExtractor = options.imessageExtractor ?? new IMessageExtractor({ runtime: this, dataDir: options.dataDir });
@@ -1410,8 +1429,21 @@ export function createDefaultRuntime(options = {}) {
 export function createDurableRuntime(options = {}) {
   const dataDir = options.dataDir ?? resolveDataDir();
   const mcpLogDir = path.join(dataDir, "mcp", "logs");
+  const secrets = options.secrets ?? new SecretsStore({
+    dataDir,
+    allowlist: SETUP_FIELDS,
+    env: options.env ?? process.env
+  });
+  if (typeof secrets.initialize === "function") {
+    reconcileLegacyNodePairing({
+      dataDir,
+      store: secrets,
+      decidedBy: "runtime:boot"
+    });
+  }
   const runtime = createDefaultRuntime({
     ...options,
+    secrets,
     skillsDir: options.skillsDir ?? path.join(dataDir, "skills"),
     mcpOptions: {
       logDir: mcpLogDir,

@@ -31,6 +31,7 @@ export { FileBackedMemorySystem } from "./file-backed-memory-system.js";
 export { FileBackedPropagationController } from "./file-backed-propagation-controller.js";
 export { createAbiIntegration, IntegrationRegistry, normalizeSignal } from "./integration-registry.js";
 export { McpRegistry } from "./mcp-registry.js";
+export { createSecretsStore, SecretsStore } from "./secrets-store.js";
 export { PendingActionStore } from "./pending-actions.js";
 export { GoalStore } from "./goal-store.js";
 export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";

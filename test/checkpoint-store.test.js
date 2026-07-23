@@ -47,6 +47,71 @@ test("disabled checkpoints perform no filesystem reads or writes", (t) => {
   assert.equal(fs.existsSync(dir), false);
 });
 
+test("credential files and secret storage are rejected before blob capture", (t) => {
+  const { root, workspaceDir, dataDir, store } = fixture(t, {
+    allowedRoots: undefined
+  });
+  const envPath = path.join(workspaceDir, ".env");
+  const secretPath = path.join(dataDir, "secrets", "secrets.json");
+  const nodeConfigPath = path.join(dataDir, "node.json");
+  const mcpConfigPath = path.join(dataDir, "mcp.json");
+  const nodeCachePath = path.join(dataDir, "nodes", "cache.json");
+  fs.mkdirSync(path.dirname(secretPath), { recursive: true });
+  fs.mkdirSync(path.dirname(nodeCachePath), { recursive: true });
+  fs.writeFileSync(envPath, "API_KEY=checkpoint-canary\n", "utf8");
+  fs.writeFileSync(secretPath, "{\"secret\":\"checkpoint-canary\"}\n", "utf8");
+  fs.writeFileSync(nodeConfigPath, "{\"token\":\"checkpoint-canary\"}\n", "utf8");
+  fs.writeFileSync(mcpConfigPath, "{\"apiKey\":\"checkpoint-canary\"}\n", "utf8");
+  fs.writeFileSync(nodeCachePath, "{\"reflected\":\"checkpoint-canary\"}\n", "utf8");
+
+  assert.throws(
+    () => store.beforeToolCall({
+      toolName: "code_write",
+      args: { path: envPath },
+      context: { __turnId: "turn-env" }
+    }),
+    /sensitive credential material/
+  );
+  assert.throws(
+    () => store.beforeToolCall({
+      toolName: "code_write",
+      args: { path: path.join(workspaceDir, ".envrc") },
+      context: { __turnId: "turn-envrc" }
+    }),
+    /sensitive credential material/
+  );
+
+  const dataStore = new CheckpointStore({
+    dataDir,
+    workspaceDir: root,
+    allowedRoots: [root],
+    enabled: true
+  });
+  assert.throws(
+    () => dataStore.beforeToolCall({
+      toolName: "code_edit",
+      args: { path: secretPath },
+      context: { __turnId: "turn-secret" }
+    }),
+    /sensitive credential material/
+  );
+  for (const [target, turnId] of [
+    [nodeConfigPath, "turn-node-config"],
+    [mcpConfigPath, "turn-mcp-config"],
+    [nodeCachePath, "turn-node-cache"]
+  ]) {
+    assert.throws(
+      () => dataStore.beforeToolCall({
+        toolName: "code_edit",
+        args: { path: target },
+        context: { __turnId: turnId }
+      }),
+      /sensitive credential material/
+    );
+  }
+  assert.equal(fs.existsSync(path.join(dataDir, "checkpoints", "blobs")), false);
+});
+
 test("raw bytes, mode, JSONL index, and atomic snapshot survive reload", (t) => {
   const { dataDir, workspaceDir, store } = fixture(t);
   const target = path.join(workspaceDir, "binary.dat");

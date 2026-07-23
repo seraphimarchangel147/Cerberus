@@ -5,7 +5,14 @@ import { McpHttpClient } from "./mcp-http-client.js";
 import { McpOAuthClient } from "./mcp-oauth.js";
 import { ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { isCredentialEnvName, isCredentialHeaderName } from "./redact.js";
 import { assertSafePublicUrl } from "./url-guard.js";
+import { assertSafeMcpServerName, mcpNamedFilePath } from "./mcp-name.js";
+import {
+  addInternalCredentialFileRedactions,
+  addSecretRedactionSpellings,
+  isCredentialUrlParameter
+} from "./credential-redaction.js";
 
 // Whitelist of executables permitted as the `command` for stdio MCP servers.
 // Anything not in this set is rejected at registerServer() — closes the
@@ -40,6 +47,7 @@ export function allowedStdioCommands() {
 const mcpSeg = (s) => String(s).replace(/[^a-zA-Z0-9_]/g, "_");
 const mcpToolName = (server, tool) => `mcp_${mcpSeg(server)}_${mcpSeg(tool)}`;
 const mcpToolPrefix = (server) => `mcp_${mcpSeg(server)}_`;
+const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 
 export class McpRegistry {
   constructor(options = {}) {
@@ -51,12 +59,25 @@ export class McpRegistry {
     // Set by hosted-interface so OAuth-required surfaces in the dashboard SSE.
     this.onOauthRequired = options.onOauthRequired ?? null;
     this.connecting = new Map(); // name → Promise (in-flight connect)
-    // Allowlist of env-var names the user has opted into via .openagi/.env.
-    // Only these can flow into ${VAR} substitutions; references to anything
-    // else (AWS_*, GITHUB_TOKEN, etc.) throw at registerServer().
+    // Only explicitly permitted names can flow into ${VAR} substitutions.
+    // Legacy .env names, caller-provided names, and stored secret names are
+    // merged. Stored names are loaded lazily when a server is registered or
+    // connected so constructing the runtime never initializes secret files.
     this.permittedEnvKeys = options.permittedEnvKeys instanceof Set
       ? options.permittedEnvKeys
-      : new Set(loadDotenvKeys(this.dataDir));
+      : new Set();
+    this.dotenvEnvKeys = new Set(loadDotenvKeys(this.dataDir));
+    this.legacyEnvKeys = new Set(this.dotenvEnvKeys);
+    for (const name of this.legacyEnvKeys) this.permittedEnvKeys.add(name);
+    this.secretStore = options.secretStore ?? null;
+    this.secretEnvKeys = new Set();
+    this.filterManagedLegacyKeys();
+    this.stdioClientFactory = options.stdioClientFactory
+      ?? ((clientOptions) => new McpStdioClient(clientOptions));
+    this.httpClientFactory = options.httpClientFactory
+      ?? ((clientOptions) => new McpHttpClient(clientOptions));
+    this.oauthClientFactory = options.oauthClientFactory
+      ?? ((clientOptions) => new McpOAuthClient(clientOptions));
     // When set, registerServer() persists the current set of registrations
     // back to this path so they survive a daemon restart. loadConfigFile()
     // skips writing (the file is the source of truth, not the destination).
@@ -69,7 +90,121 @@ export class McpRegistry {
   /// registerServer call needs to expand `${STRIPE_MCP_API_KEY}` against it).
   allowEnvKey(name) {
     if (!name) return;
-    this.permittedEnvKeys.add(String(name));
+    const normalized = String(name);
+    if (!ENV_NAME_RE.test(normalized)) {
+      throw new TypeError(`Invalid MCP env name: ${normalized}`);
+    }
+    this.permittedEnvKeys.add(normalized);
+  }
+
+  bindSecretStore(secretStore) {
+    this.secretStore = secretStore ?? null;
+    this.secretEnvKeys = new Set();
+    this.legacyEnvKeys = new Set(this.dotenvEnvKeys);
+    this.filterManagedLegacyKeys();
+    return this;
+  }
+
+  filterManagedLegacyKeys() {
+    if (!this.secretStore) return;
+    let allowed;
+    try {
+      allowed = typeof this.secretStore.listAllowedNames === "function"
+        ? this.secretStore.listAllowedNames()
+        : this.secretStore.allowlist instanceof Set
+          ? [...this.secretStore.allowlist]
+          : [];
+    } catch {
+      throw new Error("MCP secret store unavailable.");
+    }
+    if (allowed && typeof allowed.then === "function") {
+      throw new TypeError("Secret store policy operations must be synchronous");
+    }
+    for (const name of allowed ?? []) this.legacyEnvKeys.delete(String(name));
+  }
+
+  refreshSecretEnvKeys({ decidedBy = "mcp-registry:list" } = {}) {
+    if (!this.secretStore) {
+      this.secretEnvKeys = new Set();
+      return this.secretEnvKeys;
+    }
+    let names;
+    try {
+      if (typeof this.secretStore.listSecretNames === "function") {
+        names = this.secretStore.listSecretNames({ decidedBy });
+      } else if (typeof this.secretStore.listSecrets === "function") {
+        names = this.secretStore.listSecrets({ decidedBy }).map((entry) => entry?.name);
+      } else {
+        throw new TypeError("Secret store must implement listSecretNames() or listSecrets()");
+      }
+    } catch {
+      throw new Error("MCP secret store unavailable.");
+    }
+    if (names && typeof names.then === "function") {
+      throw new TypeError("Secret store list operations must be synchronous");
+    }
+    this.secretEnvKeys = new Set(
+      [...(names ?? [])].map((name) => String(name ?? "")).filter(Boolean)
+    );
+    for (const name of this.secretEnvKeys) this.permittedEnvKeys.add(name);
+    return this.secretEnvKeys;
+  }
+
+  resolveServerSecrets(server, { decidedBy }) {
+    const storedNames = this.refreshSecretEnvKeys({
+      decidedBy: `${decidedBy}:list`
+    });
+    const referencedNames = collectPlaceholderNames([
+      ...(server.args ?? []),
+      ...Object.values(server.env ?? {}),
+      ...Object.values(server.headers ?? {}),
+      server.apiKey,
+      server.clientId,
+      server.clientSecret
+    ]);
+    for (const name of referencedNames) assertPermittedEnvKey(name, this.permittedEnvKeys);
+
+    // Resolve every configured value for output redaction, but inject only
+    // placeholders referenced by this server. This prevents a filesystem-like
+    // MCP from reflecting secrets.json or .env contents it read directly.
+    const storedValues = resolveStoredValues(this.secretStore, [...storedNames], { decidedBy });
+    const valueCache = new Map();
+    for (const name of referencedNames) {
+      if (storedNames.has(name)) {
+        const stored = Object.hasOwn(storedValues, name) ? storedValues[name] : null;
+        valueCache.set(name, stored ?? "");
+      } else if (!this.secretStore || this.legacyEnvKeys.has(name)) {
+        valueCache.set(name, process.env[name] ?? "");
+      } else {
+        valueCache.set(name, "");
+      }
+      if (String(valueCache.get(name) ?? "").length === 0) {
+        throw new Error(`Secret value unavailable for MCP placeholder: ${name}`);
+      }
+    }
+    const resolve = (value) => resolveValue(value, valueCache);
+    const redactValues = new Set();
+    for (const name of storedNames) {
+      if (Object.hasOwn(storedValues, name)) {
+        addSecretRedactionSpellings(redactValues, storedValues[name]);
+      }
+    }
+    for (const [name, value] of Object.entries(process.env)) {
+      if (isCredentialEnvName(name)) addSecretRedactionSpellings(redactValues, value);
+    }
+    for (const value of valueCache.values()) {
+      addSecretRedactionSpellings(redactValues, value);
+    }
+    addInternalCredentialFileRedactions(redactValues, this.dataDir);
+    return {
+      args: (server.args ?? []).map(resolve),
+      env: resolveEnv(server.env, resolve),
+      headers: resolveEnv(server.headers, resolve),
+      apiKey: resolve(server.apiKey),
+      clientId: resolve(server.clientId),
+      clientSecret: resolve(server.clientSecret),
+      redactValues
+    };
   }
 
   bindToolRegistry(toolRegistry) {
@@ -77,7 +212,16 @@ export class McpRegistry {
   }
 
   registerServer(server) {
-    if (!server?.name) throw new Error("MCP server requires a name.");
+    validateMcpServerSpec(server);
+    const canonicalName = server.name.toLowerCase();
+    if (
+      [...this.servers.keys()].some(
+        (name) => name !== server.name && name.toLowerCase() === canonicalName
+      )
+    ) {
+      throw new Error("MCP server name conflicts with an existing server.");
+    }
+    this.refreshSecretEnvKeys({ decidedBy: "mcp-registry:register" });
     let transport = server.transport;
     if (!transport) {
       if (server.url) transport = "http";
@@ -109,22 +253,20 @@ export class McpRegistry {
       transport,
       // stdio-specific
       command: server.command ?? null,
-      // Args go through ${VAR} expansion too — mcp-remote in particular
-      // takes "--header statsig-api-key=${STATSIG_API_KEY}" as a CLI arg,
-      // not env, so the substitution has to happen here. _persist still
-      // writes the un-expanded original so secrets stay in .env.
-      args: (server.args ?? []).map((a) => expandValue(a, allowed)),
-      env: expandEnv(server.env ?? {}, allowed),
+      // Preserve placeholders in registry state. They are validated here and
+      // resolved into a short-lived client configuration inside doConnect.
+      args: (server.args ?? []).map((a) => preserveValue(a, allowed)),
+      env: preserveEnv(server.env ?? {}, allowed),
       cwd: server.cwd ?? null,
       // http-specific
       url: server.url ?? null,
       auth: server.auth ?? (server.apiKey ? "bearer" : (server.url ? "oauth" : "none")),
-      apiKey: expandValue(server.apiKey ?? null, allowed),
-      headers: expandEnv(server.headers ?? {}, allowed),
+      apiKey: preserveValue(server.apiKey ?? null, allowed),
+      headers: preserveEnv(server.headers ?? {}, allowed),
       scope: server.scope,
       // OAuth pre-registered client (for servers without dynamic registration)
-      clientId: expandValue(server.clientId ?? null, allowed),
-      clientSecret: expandValue(server.clientSecret ?? null, allowed),
+      clientId: preserveValue(server.clientId ?? null, allowed),
+      clientSecret: preserveValue(server.clientSecret ?? null, allowed),
       resourceUrl: server.resourceUrl ?? null,
       // shared
       trustLevel: server.trustLevel ?? "untrusted",
@@ -296,18 +438,29 @@ export class McpRegistry {
    * same login the user already granted to that vendor's MCP server.
    */
   async silentTokenFor(name) {
-    let oauth = this.clients.get(name)?.oauth ?? null;
-    if (!oauth) {
-      const server = this.servers.get(name);
-      if (server?.auth !== "oauth" || !server.url) return null;
-      oauth = new McpOAuthClient({
-        name: server.name,
-        resourceUrl: server.resourceUrl ?? deriveResourceUrl(server.url),
-        scope: server.scope,
-        dataDir: this.dataDir
-      });
-    }
     try {
+      let oauth = this.clients.get(name)?.oauth ?? null;
+      if (!oauth) {
+        const server = this.servers.get(name);
+        if (server?.auth !== "oauth" || !server.url) return null;
+        const resolved = this.resolveServerSecrets({
+          ...server,
+          args: [],
+          env: {},
+          headers: {},
+          apiKey: null
+        }, {
+          decidedBy: `mcp:${name}:silent-token`
+        });
+        oauth = this.oauthClientFactory({
+          name: server.name,
+          resourceUrl: server.resourceUrl ?? deriveResourceUrl(server.url),
+          scope: server.scope,
+          dataDir: this.dataDir,
+          clientId: resolved.clientId,
+          clientSecret: resolved.clientSecret
+        });
+      }
       return await oauth.ensureToken({ interactive: false });
     } catch {
       return null;
@@ -321,7 +474,10 @@ export class McpRegistry {
    */
   hasOAuthToken(name) {
     try {
-      const cache = readJsonFile(path.join(this.dataDir, "mcp", "auth", `${name}.json`), null);
+      const cache = readJsonFile(
+        mcpNamedFilePath(path.join(this.dataDir, "mcp", "auth"), name, ".json"),
+        null
+      );
       if (!cache) return false;
       // Mirror what ensureToken({interactive:false}) can actually do: a
       // refresh_token can always mint a fresh access token silently, but a
@@ -342,19 +498,25 @@ export class McpRegistry {
     if (!server.enabled) throw new Error(`MCP server ${name} is disabled.`);
 
     let client = this.clients.get(name);
+    let createdClient = false;
     if (!client) {
+      const resolved = this.resolveServerSecrets(server, {
+        decidedBy: `mcp:${name}:connect`
+      });
       if (server.transport === "stdio") {
         if (!server.command) {
           throw new Error(`MCP server '${name}' is stdio but has no command — set 'command' (and 'args') so it can be spawned.`);
         }
-        client = new McpStdioClient({
+        client = this.stdioClientFactory({
           name: server.name,
           command: server.command,
-          args: server.args,
-          env: server.env,
+          args: resolved.args,
+          displayArgs: server.args,
+          env: resolved.env,
           cwd: server.cwd,
           trustLevel: server.trustLevel,
-          logDir: this.logDir
+          logDir: this.logDir,
+          redactValues: resolved.redactValues
         });
       } else if (server.transport === "http") {
         if (!server.url) throw new Error(`MCP server '${name}' is http but has no url.`);
@@ -369,37 +531,47 @@ export class McpRegistry {
               "──────────────────────────────────────────────────────────────────\n";
             try { process.stderr.write(banner); } catch { /* ignore */ }
           };
-          oauth = new McpOAuthClient({
+          oauth = this.oauthClientFactory({
             name: server.name,
             resourceUrl: server.resourceUrl ?? deriveResourceUrl(server.url),
             scope: server.scope,
             dataDir: this.dataDir,
-            clientId: server.clientId,
-            clientSecret: server.clientSecret,
+            clientId: resolved.clientId,
+            clientSecret: resolved.clientSecret,
             printAuthUrlFn: onAuthUrl
           });
         } else if (server.auth === "bearer") {
-          if (!server.apiKey) throw new Error(`MCP server '${name}' has auth=bearer but no apiKey.`);
-          bearerToken = server.apiKey;
+          if (!resolved.apiKey) throw new Error(`MCP server '${name}' has auth=bearer but no apiKey.`);
+          bearerToken = resolved.apiKey;
         }
-        client = new McpHttpClient({
+        client = this.httpClientFactory({
           name: server.name,
           url: server.url,
-          headers: server.headers,
+          headers: resolved.headers,
           bearerToken,
           oauth,
           trustLevel: server.trustLevel,
-          logDir: this.logDir
+          logDir: this.logDir,
+          redactValues: resolved.redactValues
         });
       } else {
         throw new Error(`MCP server '${name}' has unsupported transport '${server.transport}'. Use 'stdio' (with command) or 'http' (with url).`);
       }
       this.clients.set(name, client);
+      createdClient = true;
     }
     // silent → never open a browser for OAuth; fail fast if a token isn't cached.
-    await client.connect({ interactive: !silent });
+    try {
+      await client.connect({ interactive: !silent });
+    } catch (error) {
+      if (createdClient && this.clients.get(name) === client) {
+        this.clients.delete(name);
+        try { await client.close?.(); } catch { /* best effort */ }
+      }
+      throw error;
+    }
     this.exposeAsTools(server.name);
-    return client.status();
+    return publicClientStatus(client, server);
   }
 
   async connectAll({ silent = false } = {}) {
@@ -472,36 +644,325 @@ export class McpRegistry {
   }
 }
 
-// Resolve "${ENV_VAR}" placeholders so config can reference secrets without
-// embedding them in the file. Only env-vars that the user has opted into via
-// .openagi/.env are eligible — references to host env vars outside that set
-// (e.g. AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN) throw, preventing exfiltration
-// through an MCP server's auth header.
-function expandValue(value, allowedKeys) {
+// Validate "${ENV_VAR}" placeholders without expanding them. Registry state,
+// persisted config, and status surfaces retain the indirection; doConnect is
+// the only boundary that receives resolved values.
+function preserveValue(value, allowedKeys) {
   if (typeof value !== "string") return value;
-  return value.replace(/\$\{([A-Z0-9_]+)\}/gi, (_, key) => {
-    if (allowedKeys && !allowedKeys.has(key)) {
-      throw new Error(
-        `${key} is not in the env allowlist. Add it to .openagi/.env to reference it from MCP config.`
-      );
+  const matcher = /\$\{([^}]*)\}/g;
+  let match;
+  while ((match = matcher.exec(value)) !== null) {
+    const name = match[1];
+    if (!ENV_NAME_RE.test(name)) {
+      throw new Error(`Invalid MCP env placeholder: \${${name}}`);
     }
-    return process.env[key] ?? "";
-  });
+    assertPermittedEnvKey(name, allowedKeys);
+  }
+  return value;
+}
+
+function assertPermittedEnvKey(name, allowedKeys) {
+  if (allowedKeys && allowedKeys.has(name)) return;
+  throw new Error(
+    `${name} is not in the env allowlist. Add it through the secrets manager or .openagi/.env before referencing it from MCP config.`
+  );
 }
 
 // Strict-shape predicate: the apiKey field is either entirely a `${VAR}`
-// placeholder (which expandValue will substitute at register time) or empty.
-// Anything else is a literal bearer that we refuse to persist.
+// placeholder or empty. Anything else is a literal bearer that we refuse to
+// retain in registry state or persist.
 function looksLikeEnvPlaceholder(value) {
   if (value == null || value === "") return true;
   if (typeof value !== "string") return false;
-  return /^\$\{[A-Z0-9_]+\}$/i.test(value.trim());
+  return /^\$\{[A-Z_][A-Z0-9_]*\}$/.test(value);
 }
 
-function expandEnv(obj, allowedKeys) {
+function looksLikeCredentialHeaderPlaceholder(value) {
+  if (looksLikeEnvPlaceholder(value)) return true;
+  if (typeof value !== "string") return false;
+  return /^[A-Za-z][A-Za-z0-9._-]* \$\{[A-Z_][A-Z0-9_]*\}$/.test(value);
+}
+
+// Pure, side-effect-free validation shared by the registry and the
+// register_mcp_server tool's pre-approval boundary. Store lookups and
+// placeholder expansion deliberately remain outside this function.
+export function validateMcpServerSpec(server) {
+  if (!server?.name) throw new Error("MCP server requires a name.");
+  assertSafeMcpServerName(server.name);
+  assertMcpUrlContainsNoCredentials(server.url);
+  assertMcpUrlContainsNoCredentials(server.resourceUrl);
+  if (
+    server.args !== undefined
+    && (!Array.isArray(server.args) || server.args.some((value) => typeof value !== "string"))
+  ) {
+    throw new TypeError("MCP args must be an array of strings.");
+  }
+  assertPlainMcpMap(server.env, "env");
+  assertPlainMcpMap(server.headers, "headers");
+  if (server.apiKey != null && !looksLikeEnvPlaceholder(server.apiKey)) {
+    throw new Error(
+      "MCP refusing a literal apiKey; credentials must use an exact secret placeholder."
+    );
+  }
+  if (server.clientSecret != null && !looksLikeEnvPlaceholder(server.clientSecret)) {
+    throw new Error(
+      "MCP refusing a literal clientSecret; credentials must use an exact secret placeholder."
+    );
+  }
+  validateCredentialMap(server.env, {
+    kind: "env",
+    isCredentialName: isCredentialEnvName,
+    acceptsValue: looksLikeEnvPlaceholder
+  });
+  validateCredentialMap(server.headers, {
+    kind: "header",
+    isCredentialName: isCredentialHeaderName,
+    acceptsValue: looksLikeCredentialHeaderPlaceholder
+  });
+  validateCredentialArgs(server.args);
+  return server;
+}
+
+function assertPlainMcpMap(value, label) {
+  if (value === null || value === undefined) return;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`MCP ${label} must be a plain object.`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`MCP ${label} must be a plain object.`);
+  }
+  if (
+    Object.values(value).some(
+      (item) => item !== null && item !== undefined && typeof item !== "string"
+    )
+  ) {
+    throw new TypeError(`MCP ${label} values must be strings.`);
+  }
+}
+
+function assertMcpUrlContainsNoCredentials(value) {
+  if (value === null || value === undefined || value === "") return;
+  if (typeof value !== "string") throw new Error("Invalid MCP URL.");
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("Invalid MCP URL.");
+  }
+  assertParsedMcpUrlContainsNoCredentials(parsed);
+}
+
+function assertParsedMcpUrlContainsNoCredentials(parsed) {
+  if (parsed.username || parsed.password) {
+    throw new Error("MCP URLs must not contain embedded credentials.");
+  }
+  for (const name of parsed.searchParams.keys()) {
+    if (isCredentialUrlParameter(name)) {
+      throw new Error("MCP URLs must not contain credential query parameters.");
+    }
+  }
+}
+
+function assertMcpArgumentContainsNoCredentialUrl(value) {
+  const candidates = [value];
+  const inline = /^(?:--[A-Za-z][A-Za-z0-9_-]*|-H)(?:=|\s+)([\s\S]+)$/.exec(value);
+  if (inline) candidates.push(inline[1]);
+  for (const candidate of candidates) {
+    let parsed;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      continue;
+    }
+    assertParsedMcpUrlContainsNoCredentials(parsed);
+  }
+}
+
+function validateCredentialMap(values, {
+  kind,
+  isCredentialName,
+  acceptsValue
+}) {
+  for (const [name, value] of Object.entries(values ?? {})) {
+    if (!isCredentialName(name) || acceptsValue(value)) continue;
+    // Never interpolate the rejected value: this error can cross HTTP and
+    // model boundaries, so even the diagnostic must be safe to reflect.
+    throw new Error(
+      `MCP ${kind} field '${name}' is credential-shaped and must use a secret placeholder.`
+    );
+  }
+}
+
+const CREDENTIAL_ARG_FLAG = /^--(?:api[-_]?key|token|bearer[-_]?token|access[-_]?token|auth[-_]?token|service[-_]?key|webhook[-_]?secret|account[-_]?sid|credentials?|secret|client[-_]?(?:secret|id)|password|passcode|private[-_]?key|access[-_]?key(?:[-_]?id)?)$/i;
+const AUTHORIZATION_ARG_FLAG = /^--(?:authorization|proxy[-_]?authorization)$/i;
+const HEADER_ARG_FLAG = /^(?:--header|-H)$/;
+
+function validateCredentialArgs(values) {
+  const args = [...(values ?? [])];
+  for (let index = 0; index < args.length; index += 1) {
+    const raw = args[index];
+    if (typeof raw !== "string") continue;
+    assertMcpArgumentContainsNoCredentialUrl(raw);
+    const parsed = splitFlagValue(raw);
+    if (!parsed) continue;
+
+    if (CREDENTIAL_ARG_FLAG.test(parsed.flag)) {
+      const { value, consumedNext } = argCredentialValue(args, index, parsed);
+      if (!looksLikeRequiredEnvPlaceholder(value)) {
+        throw new Error(
+          `MCP argument '${parsed.flag}' is credential-shaped and must use a secret placeholder.`
+        );
+      }
+      if (consumedNext) index += 1;
+      continue;
+    }
+
+    if (AUTHORIZATION_ARG_FLAG.test(parsed.flag)) {
+      const { value, consumedNext } = argCredentialValue(args, index, parsed);
+      if (!looksLikeRequiredCredentialHeaderPlaceholder(value)) {
+        throw new Error(
+          `MCP argument '${parsed.flag}' is credential-shaped and must use a secret placeholder.`
+        );
+      }
+      if (consumedNext) index += 1;
+      continue;
+    }
+
+    if (HEADER_ARG_FLAG.test(parsed.flag)) {
+      const { value, consumedNext } = argCredentialValue(args, index, parsed);
+      validateHeaderArgument(value, parsed.flag);
+      if (consumedNext) index += 1;
+    }
+  }
+}
+
+function splitFlagValue(raw) {
+  const match = /^(--[A-Za-z][A-Za-z0-9_-]*|-H)(?:=|\s+)?([\s\S]*)$/.exec(raw);
+  if (!match) return null;
+  const hasInlineValue = raw.length > match[1].length;
+  return {
+    flag: match[1],
+    inlineValue: hasInlineValue ? match[2] : null
+  };
+}
+
+function argCredentialValue(args, index, parsed) {
+  if (parsed.inlineValue !== null) {
+    return { value: parsed.inlineValue, consumedNext: false };
+  }
+  return {
+    value: args[index + 1],
+    consumedNext: index + 1 < args.length
+  };
+}
+
+function validateHeaderArgument(value, flag) {
+  if (typeof value !== "string" || value.startsWith("-")) {
+    throw new Error(
+      `MCP argument '${flag}' requires a header value.`
+    );
+  }
+  const colon = value.indexOf(":");
+  if (colon >= 0) {
+    const name = value.slice(0, colon).trim();
+    const headerValue = value.slice(colon + 1).trim();
+    if (
+      isCredentialHeaderName(name)
+      && !looksLikeRequiredCredentialHeaderPlaceholder(headerValue)
+    ) {
+      throw new Error(
+        `MCP argument '${flag}' contains a credential-shaped header that must use a secret placeholder.`
+      );
+    }
+    return;
+  }
+  // Some CLIs accept the Authorization value directly after --header.
+  if (
+    /^(?:Bearer|Basic|Token)\s+/i.test(value)
+    && !looksLikeRequiredCredentialHeaderPlaceholder(value)
+  ) {
+    throw new Error(
+      `MCP argument '${flag}' contains a credential-shaped header that must use a secret placeholder.`
+    );
+  }
+}
+
+function looksLikeRequiredEnvPlaceholder(value) {
+  return typeof value === "string"
+    && /^\$\{[A-Z_][A-Z0-9_]*\}$/.test(value);
+}
+
+function looksLikeRequiredCredentialHeaderPlaceholder(value) {
+  return looksLikeRequiredEnvPlaceholder(value)
+    || (
+      typeof value === "string"
+      && /^[A-Za-z][A-Za-z0-9._-]* \$\{[A-Z_][A-Z0-9_]*\}$/.test(value)
+    );
+}
+
+function preserveEnv(obj, allowedKeys) {
   const out = {};
-  for (const [k, v] of Object.entries(obj ?? {})) out[k] = expandValue(v, allowedKeys);
+  for (const [key, value] of Object.entries(obj ?? {})) {
+    out[key] = preserveValue(value, allowedKeys);
+  }
   return out;
+}
+
+function collectPlaceholderNames(values) {
+  const names = new Set();
+  for (const value of values ?? []) {
+    if (typeof value !== "string") continue;
+    const matcher = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
+    let match;
+    while ((match = matcher.exec(value)) !== null) names.add(match[1]);
+  }
+  return names;
+}
+
+function resolveStoredValues(secretStore, names, { decidedBy }) {
+  if (!secretStore || names.length === 0) return {};
+  let values;
+  try {
+    if (typeof secretStore.exportEnv === "function") {
+      values = secretStore.exportEnv({ names, decidedBy });
+    } else if (typeof secretStore.getSecret === "function") {
+      values = Object.fromEntries(
+        names.map((name) => [name, secretStore.getSecret(name, { decidedBy })])
+      );
+    } else {
+      throw new TypeError("Secret store must implement exportEnv() or getSecret()");
+    }
+  } catch {
+    throw new Error("MCP secret store unavailable.");
+  }
+  if (values && typeof values.then === "function") {
+    throw new TypeError("Secret store access operations must be synchronous");
+  }
+  if (!values || typeof values !== "object" || Array.isArray(values)) {
+    throw new TypeError("Secret store exportEnv() must return an object");
+  }
+  return values;
+}
+
+function resolveValue(value, valueCache) {
+  if (typeof value !== "string") return value;
+  return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_, name) => {
+    if (!valueCache.has(name)) throw new Error(`Unresolved MCP secret placeholder: ${name}`);
+    return valueCache.get(name);
+  });
+}
+
+function resolveEnv(obj, resolve) {
+  const out = {};
+  for (const [key, value] of Object.entries(obj ?? {})) out[key] = resolve(value);
+  return out;
+}
+
+function publicClientStatus(client, server) {
+  const status = client.status();
+  if (server.transport !== "stdio") return status;
+  return { ...status, args: [...(server.args ?? [])] };
 }
 
 // Read keys out of .openagi/.env so registerServer knows what may be expanded.

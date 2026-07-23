@@ -74,6 +74,9 @@ test("applyMigration writes persona.md + telegram env and POSTs memories", async
   const env = fs.readFileSync(path.join(dataDir, ".env"), "utf8");
   assert.match(env, /TELEGRAM_BOT_TOKEN=123:ABC/);
   assert.match(env, /TELEGRAM_POLLING=1/);
+  const snapshot = fs.readFileSync(path.join(dataDir, "secrets", "secrets.json"), "utf8");
+  assert.match(snapshot, /TELEGRAM_BOT_TOKEN/);
+  assert.match(snapshot, /123:ABC/);
 
   fs.rmSync(src, { recursive: true });
   fs.rmSync(dataDir, { recursive: true });
