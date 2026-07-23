@@ -6,6 +6,12 @@ import {
 } from "./credential-pool.js";
 import { MoaProvider, normalizeMoaModelSpec } from "./moa-provider.js";
 import { ModelRouter } from "./model-router.js";
+import {
+  applyProviderRouting,
+  isProviderRoutingEndpoint,
+  loadProviderRoutingConfig,
+  normalizeProviderRouting
+} from "./provider-routing.js";
 import { defaultToolOutputStore } from "./tool-output-store.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 import {
@@ -1449,6 +1455,7 @@ export class OpenAIResponsesProvider {
     this.apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
     this.model = options.model ?? process.env.OPENAI_MODEL ?? "gpt-5";
     this.baseUrl = options.baseUrl ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+    this.providerRouting = normalizeProviderRouting(options.providerRouting);
     this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
@@ -1849,7 +1856,11 @@ export class OpenAIResponsesProvider {
               "content-type": "application/json",
               authorization: `Bearer ${credential}`
             },
-            body: JSON.stringify(body)
+            body: JSON.stringify(providerRoutedBody(
+              body,
+              this.baseUrl,
+              this.providerRouting
+            ))
           })
         }
       );
@@ -1887,6 +1898,7 @@ export class AnthropicProvider {
     this.apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
     this.model = options.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
     this.baseUrl = options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com/v1";
+    this.providerRouting = normalizeProviderRouting(options.providerRouting);
     this.version = options.version ?? "2023-06-01";
     this.maxTokens = options.maxTokens ?? (Number(process.env.OPENAGI_MAX_TOKENS) || 8192);
     this.timeoutMs = resolveRequestTimeoutMs(options);
@@ -2299,7 +2311,11 @@ export class AnthropicProvider {
               method: "POST",
               signal: controller.signal,
               headers,
-              body: JSON.stringify(body)
+              body: JSON.stringify(providerRoutedBody(
+                body,
+                this.baseUrl,
+                this.providerRouting
+              ))
             });
           }
         }
@@ -2346,13 +2362,36 @@ function credentialPoolsForOptions(options = {}) {
   });
 }
 
-function constructDirectProvider(providerName, model, options, credentialPools, budgetGuard) {
+function providerRoutedBody(body, baseUrl, routing) {
+  if (!routing || !isProviderRoutingEndpoint(baseUrl)) return body;
+  return applyProviderRouting(body, { baseUrl, routing });
+}
+
+function loadedProviderRouting(options = {}) {
+  return loadProviderRoutingConfig({
+    ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
+    env: options.env ?? process.env,
+    ...(Object.hasOwn(options, "providerRouting")
+      ? { providerRouting: options.providerRouting }
+      : {})
+  });
+}
+
+function constructDirectProvider(
+  providerName,
+  model,
+  options,
+  credentialPools,
+  budgetGuard,
+  providerRouting
+) {
   const normalized = String(providerName ?? "").trim().toLowerCase();
   if (normalized === "anthropic") {
     return new AnthropicProvider({
       ...(options.anthropic ?? {}),
       ...(model ? { model } : {}),
       budgetGuard,
+      providerRouting,
       credentialPool: options.anthropic?.credentialPool ?? credentialPools.get("anthropic")
     });
   }
@@ -2361,6 +2400,7 @@ function constructDirectProvider(providerName, model, options, credentialPools, 
       ...(options.openai ?? {}),
       ...(model ? { model } : {}),
       budgetGuard,
+      providerRouting,
       credentialPool: options.openai?.credentialPool ?? credentialPools.get("openai")
     });
   }
@@ -2374,6 +2414,9 @@ export function createDirectModelProviderFactory(options = {}, shared = {}) {
   const budgetGuard = shared.budgetGuard ?? options.budgetGuard ?? null;
   const credentialPools = shared.credentialPoolRegistry
     ?? credentialPoolsForOptions(options);
+  const providerRouting = Object.hasOwn(shared, "providerRouting")
+    ? normalizeProviderRouting(shared.providerRouting)
+    : loadedProviderRouting(options);
   return (spec = {}) => {
     const normalizedSpec = normalizeMoaModelSpec(spec, "MoA direct model");
     const provider = constructDirectProvider(
@@ -2381,7 +2424,8 @@ export function createDirectModelProviderFactory(options = {}, shared = {}) {
       normalizedSpec.model,
       options,
       credentialPools,
-      budgetGuard
+      budgetGuard,
+      providerRouting
     );
     if (!provider.isConfigured()) {
       throw new Error(`MoA model provider ${normalizedSpec.provider} is not configured.`);
@@ -2394,19 +2438,22 @@ export function createModelProvider(options = {}) {
   if (options.forceDeterministic === true) return new DeterministicModelProvider();
   const budgetGuard = options.budgetGuard ?? null;
   const credentialPools = credentialPoolsForOptions(options);
+  const providerRouting = loadedProviderRouting(options);
   const anthropic = constructDirectProvider(
     "anthropic",
     null,
     options,
     credentialPools,
-    budgetGuard
+    budgetGuard,
+    providerRouting
   );
   const openai = constructDirectProvider(
     "openai",
     null,
     options,
     credentialPools,
-    budgetGuard
+    budgetGuard,
+    providerRouting
   );
 
   const withFallback = (primary, fallback) => {
@@ -2427,7 +2474,8 @@ export function createModelProvider(options = {}) {
     const providerFactory = moaOptions.providerFactory
       ?? createDirectModelProviderFactory(options, {
         budgetGuard,
-        credentialPoolRegistry: credentialPools
+        credentialPoolRegistry: credentialPools,
+        providerRouting
       });
     const preset = moaOptions.preset
       ?? moaOptions.model

@@ -76,6 +76,16 @@ export {
   validateMoaPresets
 } from "./moa-provider.js";
 export {
+  PROVIDER_ROUTING_DATA_COLLECTION_VALUES,
+  PROVIDER_ROUTING_MAX_LIST_ENTRIES,
+  PROVIDER_ROUTING_MAX_SLUG_LENGTH,
+  PROVIDER_ROUTING_SORT_VALUES,
+  applyProviderRouting,
+  isProviderRoutingEndpoint,
+  loadProviderRoutingConfig,
+  normalizeProviderRouting
+} from "./provider-routing.js";
+export {
   CredentialLease,
   CredentialPool,
   CredentialPoolExhaustedError,

@@ -592,3 +592,13 @@ DELIVERABLE COMPLETE
 - Added parser, dataset, distribution-listing, helper, three-prompt bounded-concurrency, resume, recovery, isolation, and real durable-runtime regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1045/1045 with no environment pinning.
 BATCH COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: provider routing (Codex)
+
+- Added strict provider-routing configuration with price, throughput, and latency sorting; ordered only, ignore, and order lists; parameter support requirements; and data-collection policy.
+- Loaded routing deterministically from explicit options, setup-wizard environment JSON, or the data-directory config snapshot, with empty explicit configuration disabling inherited policy.
+- Attached a normalized top-level provider block only for official HTTPS OpenRouter and Nous Portal endpoints while leaving native OpenAI, Anthropic, Kimi, custom, and lookalike hosts byte-equivalent.
+- Carried one immutable routing policy through primary, fallback, standalone direct, and default MoA provider construction without replacing injected model routers or custom MoA factories.
+- Added public exports, setup allowlisting and escaped inputs for routing and provider base URLs, plus normalization, precedence, endpoint, serialization, non-mutation, fallback, and MoA regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1060/1060 with no environment pinning.
+PROVIDER ROUTING COMPLETE

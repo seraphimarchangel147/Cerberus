@@ -13,8 +13,9 @@ import { SecretsStore } from "./secrets-store.js";
 const WIZARD_FIELDS = [
   "OPENAGI_PROVIDER",
   "OPENAGI_MOA_PRESET",
-  "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
-  "OPENAI_API_KEY", "OPENAI_MODEL",
+  "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL",
+  "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
+  "OPENAGI_PROVIDER_ROUTING",
   "OPENAGI_AUTH_TOKEN",
   "DISCORD_BOT_TOKEN",
   "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
@@ -261,6 +262,8 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
       <input type="password" name="ANTHROPIC_API_KEY" placeholder="sk-ant-…" autocomplete="off">
       <label style="margin-top:8px;">Model</label>
       <input type="text" name="ANTHROPIC_MODEL" value="${val("ANTHROPIC_MODEL", "claude-sonnet-4-6")}">
+      <label style="margin-top:8px;">Base URL <span class="sub">optional direct or router-compatible endpoint</span></label>
+      <input type="url" name="ANTHROPIC_BASE_URL" value="${val("ANTHROPIC_BASE_URL")}" placeholder="https://api.anthropic.com/v1" autocomplete="off">
 
       <h3 style="margin-top:14px;">OpenAI / ChatGPT key</h3>
       <p>Get one at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com</a>. Works with Zero Data Retention orgs.</p>
@@ -268,6 +271,19 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
       <input type="password" name="OPENAI_API_KEY" placeholder="sk-proj-…" autocomplete="off">
       <label style="margin-top:8px;">Model</label>
       <input type="text" name="OPENAI_MODEL" value="${val("OPENAI_MODEL", "gpt-5")}">
+
+      <label style="margin-top:8px;">Base URL <span class="sub">optional direct or router-compatible endpoint</span></label>
+      <input type="url" name="OPENAI_BASE_URL" value="${val("OPENAI_BASE_URL")}" placeholder="https://api.openai.com/v1" autocomplete="off">
+
+      <details style="margin-top:14px;">
+        <summary>Provider routing for OpenRouter or Nous Portal <span class="sub">optional</span></summary>
+        <div style="padding-top:10px;">
+          <p class="sub">JSON sent only to supported router-style endpoints. Direct OpenAI, Anthropic, Kimi, and custom endpoints ignore this block.</p>
+          <label>OPENAGI_PROVIDER_ROUTING</label>
+          <textarea name="OPENAGI_PROVIDER_ROUTING" rows="5" spellcheck="false" autocomplete="off" placeholder='{"sort":"latency","only":["anthropic"],"require_parameters":true,"data_collection":"deny"}'>${val("OPENAGI_PROVIDER_ROUTING")}</textarea>
+          <p class="sub">Supported keys: <code>sort</code>, <code>only</code>, <code>ignore</code>, <code>order</code>, <code>require_parameters</code>, and <code>data_collection</code>.</p>
+        </div>
+      </details>
     </div>
 
     <div class="step">
