@@ -6,6 +6,7 @@ import {
 } from "./credential-pool.js";
 import { ModelRouter } from "./model-router.js";
 import { defaultToolOutputStore } from "./tool-output-store.js";
+import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 import {
   CONTEXT_GATEWAY_RATIO,
   compressLiveContext,
@@ -1954,14 +1955,22 @@ export class AnthropicProvider {
     }
 
     const advertisedTools = Array.isArray(context.__advertisedTools) ? context.__advertisedTools : null;
-    let tools = advertisedTools
-      ? (toolRegistry?.toAnthropicTools?.({ only: advertisedTools }) ?? [])
-      : context.__scrutinyPolicy === "none"
-        ? []
-        : (toolRegistry?.toAnthropicTools?.({ readOnly: context.__scrutinyPolicy === "read-only" }) ?? []);
-    if (Array.isArray(context.__allowedTools)) {
-      const allowed = new Set(context.__allowedTools);
-      tools = tools.filter((tool) => allowed.has(tool.name));
+    const allowedTools = Array.isArray(context.__allowedTools) ? context.__allowedTools : null;
+    const scopedTools = advertisedTools && allowedTools
+      ? advertisedTools.filter((name) => allowedTools.includes(name))
+      : advertisedTools ?? allowedTools;
+    const suppressTools = context.__scrutinyPolicy === "none" && advertisedTools === null;
+    let tools = suppressTools
+      ? []
+      : scopedTools
+      ? (toolRegistry?.toAnthropicTools?.({
+          only: scopedTools,
+          readOnly: context.__scrutinyPolicy === "read-only"
+        }) ?? [])
+      : (toolRegistry?.toAnthropicTools?.({ readOnly: context.__scrutinyPolicy === "read-only" }) ?? []);
+    if (resolveToolSearchMode(toolRegistry?.toolSearchController?.env ?? process.env) === "off") {
+      const bridgeNames = new Set(TOOL_SEARCH_BRIDGE_NAMES);
+      tools = tools.filter((tool) => !bridgeNames.has(tool.name));
     }
     // The system block is STATIC (persona + standing instructions) so this
     // cache_control prefix is byte-identical every turn and actually hits.
@@ -2392,6 +2401,9 @@ Tools available to you (call them when useful):
 - kanban_link(parentId, childId) - make a child depend on a parent task
 - list_skills / use_skill / run_skill / restore_skill - discover, load, run, or restore named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
+- tool_search(query, limit?) - search deferred MCP and non-core plugin tools without loading their full schemas
+- tool_describe(name) - inspect the full schema for one deferred tool before calling it
+- tool_call(name, arguments) - invoke a deferred tool by its real name through the normal policy and approval gates
 - list_sessions — see recent conversations
 
 Guidelines:

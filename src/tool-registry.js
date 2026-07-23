@@ -2,10 +2,16 @@ import { createId, nowIso, tokenOverlapScore } from "./utils.js";
 import { HookRegistry } from "./hook-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { validateMcpServerSpec } from "./mcp-registry.js";
+import {
+  ToolSearchController,
+  isToolSearchDeferrable,
+  registerToolSearchTools
+} from "./tool-search.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
+const TOOL_SEARCH_DISCOVERY_BRIDGES = new Set(["tool_search", "tool_describe"]);
 
 export class ToolRegistry {
   constructor(options = {}) {
@@ -14,17 +20,29 @@ export class ToolRegistry {
     // Keeping it in memory guarantees a daemon restart clears every allowance.
     this.sessionAllows = new Set();
     this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
+    this.toolSearchController = options.toolSearchController ?? null;
   }
 
   register(tool) {
     if (!tool?.name) throw new Error("Tool requires a name.");
     if (typeof tool.handler !== "function") throw new Error(`Tool ${tool.name} requires a handler.`);
+    const metadata = { ...(tool.metadata ?? {}) };
+    const forwardInvocation = typeof tool.forwardInvocation === "function"
+      ? tool.forwardInvocation
+      : typeof metadata.forwardInvocation === "function"
+        ? metadata.forwardInvocation
+        : null;
+    delete metadata.forwardInvocation;
     const normalized = {
       name: tool.name,
       description: tool.description ?? "",
       parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
       source: tool.source ?? "internal",
       handler: tool.handler,
+      // Synchronous bridge unwrapping happens before activity, hooks, gates,
+      // approvals, and checkpoints. It is intentionally omitted from list()
+      // so executable functions never leak into model schema serialization.
+      forwardInvocation,
       // Synchronous input validation that runs before observers, hooks,
       // summaries, or durable approval records can see the arguments.
       preflight: typeof tool.preflight === "function" ? tool.preflight : null,
@@ -41,7 +59,7 @@ export class ToolRegistry {
       // read-only tools; 'ask' turns divert side-effecting calls to the
       // approval queue.
       sideEffects: tool.sideEffects !== false,
-      metadata: tool.metadata ?? {}
+      metadata
     };
     this.tools.set(normalized.name, normalized);
     return normalized;
@@ -57,6 +75,10 @@ export class ToolRegistry {
 
   bindHooks(hooks) {
     this.hooks = hooks ?? new HookRegistry({ loadConfig: false });
+  }
+
+  bindToolSearch(controller) {
+    this.toolSearchController = controller ?? null;
   }
 
   allowForSession(sessionId, toolName) {
@@ -82,7 +104,7 @@ export class ToolRegistry {
   }
 
   list({ readOnly = false } = {}) {
-    const all = [...this.tools.values()].map(({ handler, preflight, ...rest }) => rest);
+    const all = [...this.tools.values()].map(({ handler, preflight, forwardInvocation, ...rest }) => rest);
     return readOnly ? all.filter((tool) => !tool.sideEffects) : all;
   }
 
@@ -99,9 +121,15 @@ export class ToolRegistry {
     // `only` narrows what the model sees; it never removes tools from the
     // registry or changes invoke-time policy. Leaving it unset preserves the
     // existing hot path byte-for-byte at the API boundary.
-    const all = Array.isArray(options.only)
+    const narrowed = Array.isArray(options.only)
       ? listed.filter((tool) => options.only.includes(tool.name))
       : listed;
+    const all = this.toolSearchController?.shapeModelTools
+      ? this.toolSearchController.shapeModelTools(narrowed, {
+          ...options,
+          context: options.context ?? {}
+        })
+      : narrowed;
     const max = Number(process.env.OPENAGI_MAX_MODEL_TOOLS) || 128;
     if (all.length <= max) {
       this._lastToolOverflow = null;
@@ -183,6 +211,41 @@ export class ToolRegistry {
   // best-effort — a throwing observer must never break a tool call.
   async invoke(name, args, context = {}, internalToken = null) {
     const tool = this.tools.get(name);
+    const forwardInvocation = tool?.forwardInvocation;
+    if (typeof forwardInvocation === "function") {
+      let forwarded;
+      try {
+        forwarded = forwardInvocation(args ?? {}, context);
+        if (forwarded && typeof forwarded.then === "function") {
+          throw new TypeError(`Tool ${name} forwarding must be synchronous.`);
+        }
+      } catch (error) {
+        return { ok: false, error: error?.message ?? String(error) };
+      }
+      if (forwarded?.error) {
+        return { ok: false, error: String(forwarded.error) };
+      }
+      const targetName = String(forwarded?.name ?? "").trim();
+      const targetArgs = forwarded?.args;
+      const target = this.tools.get(targetName);
+      if (
+        !targetName
+        || targetName === name
+        || !target
+        || typeof target.forwardInvocation === "function"
+        || !isToolSearchDeferrable(target)
+      ) {
+        return { ok: false, error: `Tool ${targetName || "(missing)"} is not available through tool_call.` };
+      }
+      if (!targetArgs || typeof targetArgs !== "object" || Array.isArray(targetArgs)) {
+        return { ok: false, error: "tool_call arguments must resolve to an object." };
+      }
+      // Unwrap before the bridge emits activity or crosses any policy rail.
+      // The real tool name now traverses scope, scrutiny, hooks, approvals,
+      // checkpoints, dispatch, post hooks, and activity exactly once. Reset
+      // the internal hook token so a bridge can never smuggle a prior pass.
+      return this.invoke(targetName, targetArgs, context, null);
+    }
     if (tool?.preflight) {
       try {
         const result = tool.preflight(args ?? {}, context);
@@ -316,7 +379,14 @@ export class ToolRegistry {
     // Specialist bounds: a propagated specialist may only call tools inside
     // its allowlist (its scoped MCP tools + the core set agent-host grants).
     // Same advisory-list / enforced-gate split as the scrutiny policies.
-    if (Array.isArray(context?.__allowedTools) && !context.__allowedTools.includes(name)) {
+    if (
+      Array.isArray(context?.__allowedTools)
+      && !context.__allowedTools.includes(name)
+      && !(
+        TOOL_SEARCH_DISCOVERY_BRIDGES.has(name)
+        && tool.metadata?.toolSearch === "core"
+      )
+    ) {
       return {
         ok: false,
         error: `Tool ${name} is outside this specialist's bounded scope. Recommend the user take this to the main agent.`
@@ -651,6 +721,10 @@ export function autoApproveEnabled() {
 }
 
 export function registerCoreTools(registry, runtime) {
+  const toolSearch = registry.toolSearchController ?? new ToolSearchController({ registry });
+  registry.bindToolSearch(toolSearch);
+  registerToolSearchTools(registry, { controller: toolSearch });
+
   registry.register({
     name: "read_tool_output",
     description: "Read a chunk of a large tool result that was elided from model context. Pass the ref shown in the truncation marker and increase offset to continue.",

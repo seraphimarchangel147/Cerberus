@@ -69,6 +69,17 @@ export {
   createCredentialPoolRegistry,
   loadCredentialPoolConfig
 } from "./credential-pool.js";
+export {
+  DEFAULT_TOOL_SEARCH_THRESHOLD_BYTES,
+  TOOL_SEARCH_BRIDGE_NAMES,
+  ToolSearchController,
+  calculateToolSchemaBytes,
+  isToolSearchDeferrable,
+  rankToolSearch,
+  registerToolSearchTools,
+  resolveToolSearchMode,
+  toolSchemaBytes
+} from "./tool-search.js";
 export { ModelRouter, TASK_PROFILES, TIERS, renderModelPlan } from "./model-router.js";
 export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";

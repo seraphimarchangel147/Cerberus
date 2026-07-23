@@ -6,6 +6,7 @@ import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZ
 import { autoApproveEnabled } from "./tool-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
+import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -29,6 +30,7 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "list_checkpoints"
 ]);
 export const DEFAULT_CHAT_MAX_ITERATIONS = 4;
+const TOOL_SEARCH_BRIDGE_NAME_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
 const DEFAULT_BACKGROUND_REVIEW_SNAPSHOT_WAIT_MS = 5000;
 const DEFAULT_BACKGROUND_REVIEW_FLUSH_MS = 60_000;
 const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
@@ -36,7 +38,7 @@ const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
 // from every ordinary question.
-export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|rollback|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|pause|resume|clear|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
+export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|use|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|rollback|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|pause|resume|clear|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
 
 // Intentionally narrow, anchored phrases: consent should be explicit, not
 // inferred from a sentence that merely contains "yes" or "continue". The
@@ -50,6 +52,16 @@ export const CONSENT_PHRASE_PATTERNS = Object.freeze([
 
 const STOP_OR_DELAY_RE = /\b(?:stop|wait|hold on|pause|cancel|not yet|do not|don't|never mind)\b/iu;
 const CHAT_AUTHOR_PREFIX_RE = /^\[[^\]\r\n]{1,100}\]\s*/u;
+
+export function toolSearchBridgesActive(tools, env = process.env) {
+  if (resolveToolSearchMode(env) === "off") return false;
+  const names = new Set(
+    (Array.isArray(tools) ? tools : [])
+      .map((tool) => String(tool?.name ?? ""))
+      .filter((name) => TOOL_SEARCH_BRIDGE_NAME_SET.has(name))
+  );
+  return TOOL_SEARCH_BRIDGE_NAMES.every((name) => names.has(name));
+}
 
 function normalizedDirectReply(value) {
   return String(value ?? "").trim().replace(CHAT_AUTHOR_PREFIX_RE, "").trim();
@@ -377,6 +389,23 @@ export class AgentHost {
     const resumedGoalTurn = input.goalContinuation === true
       && this.runtime.goals?.get?.(sessionId)?.status === "active";
     const toolRegistry = this.runtime.tools;
+
+    // Specialist bounds: a bounded specialist sees (and may invoke) only its
+    // scoped allowlist + the core set every specialist needs. Without this,
+    // "bounded" was advisory prompt text and any specialist could call any
+    // tool in the system.
+    const requestedAllowedToolNames = Array.isArray(input.allowedTools)
+      ? [...new Set(input.allowedTools.filter((name) => typeof name === "string" && name))]
+      : null;
+    let allowedToolNames = requestedAllowedToolNames;
+    if (isSpecialist) {
+      const scoped = agent.metadata?.specialist?.allowedTools ?? [];
+      const specialistAllowed = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
+      allowedToolNames = requestedAllowedToolNames
+        ? specialistAllowed.filter((name) => requestedAllowedToolNames.includes(name))
+        : specialistAllowed;
+    }
+
     // The fast lane trims schemas only. Side-effect and scope enforcement
     // below remains authoritative even for core tools advertised on a watch
     // or ignore turn.
@@ -397,24 +426,21 @@ export class AgentHost {
       ? null
       : toolRegistry?.modelToolOverflowNotice?.() ?? null;
 
-    // Specialist bounds: a bounded specialist sees (and may invoke) only its
-    // scoped allowlist + the core set every specialist needs. Without this,
-    // "bounded" was advisory prompt text and any specialist could call any
-    // tool in the system.
-    const requestedAllowedToolNames = Array.isArray(input.allowedTools)
-      ? [...new Set(input.allowedTools.filter((name) => typeof name === "string" && name))]
-      : null;
-    let allowedToolNames = requestedAllowedToolNames;
-    if (isSpecialist) {
-      const scoped = agent.metadata?.specialist?.allowedTools ?? [];
-      const specialistAllowed = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
-      allowedToolNames = requestedAllowedToolNames
-        ? specialistAllowed.filter((name) => requestedAllowedToolNames.includes(name))
-        : specialistAllowed;
-    }
     if (allowedToolNames) {
-      tools = tools.filter((tool) => allowedToolNames.includes(tool.name));
+      const scopedNames = conversational && !chatCoreUnavailable
+        ? CHAT_CORE_TOOLS.filter((name) => allowedToolNames.includes(name))
+        : allowedToolNames;
+      tools = toolPolicy === "none" && !conversational
+        ? []
+        : (toolRegistry?.toOpenAITools?.({
+            only: scopedNames,
+            readOnly: toolPolicy === "read-only"
+          }) ?? []);
     }
+    const toolSearchActive = toolSearchBridgesActive(
+      tools,
+      toolRegistry?.toolSearchController?.env ?? process.env
+    );
 
     // Lava intuition (C2): top principles from the vector store inserted into
     // the prompt as soft hints — distinct from explicit memoryHits.
@@ -487,6 +513,7 @@ export class AgentHost {
       // Provider-side schema shaping only; ToolRegistry.invoke deliberately
       // does not read this field.
       __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
+      __toolSearchActive: toolSearchActive,
       __memoryScope: memoryScope,
       __turnId: turnId,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,

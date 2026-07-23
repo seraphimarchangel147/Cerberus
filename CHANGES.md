@@ -542,3 +542,13 @@ LSP COMPLETE
 - Added strategy, status, cooldown, refresh, redaction, config, cache-identity, auth-header, fallback, no-replay, setup, and provider regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 963/963 with no environment pinning.
 CRED POOLS COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: Tool Search (Codex)
+
+- Added progressive disclosure for MCP and non-core plugin schemas with auto, on, and off modes, an exact schema-byte threshold, explicit only/defer controls, and concurrency-safe per-call catalog planning.
+- Registered and documented tool_search, tool_describe, and tool_call while keeping built-in, code, web, memory, and fixed skill tools on the direct core surface.
+- Unwrapped tool_call before lifecycle dispatch so the real deferred tool name alone traverses scope, scrutiny, veto hooks, catastrophic policy, approvals, checkpoints, post hooks, and activity events.
+- Preserved deferred discovery for bounded specialists and read-only turns without expanding their allowed scope, and kept conversational core-only turns bridge-free.
+- Added controller, ranking, schema-budget, OpenAI, Anthropic, scope, veto, activity, checkpoint, setup, prompt, cap, and fast-lane regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 983/983 with no environment pinning.
+TOOL SEARCH COMPLETE
