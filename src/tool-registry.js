@@ -2,10 +2,17 @@ import { createId, nowIso, tokenOverlapScore } from "./utils.js";
 import { HookRegistry } from "./hook-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { validateMcpServerSpec } from "./mcp-registry.js";
+import { MODEL_PROVIDER_IDS, isModelProviderId } from "./model-router.js";
+import {
+  ToolSearchController,
+  isToolSearchDeferrable,
+  registerToolSearchTools
+} from "./tool-search.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
+const TOOL_SEARCH_DISCOVERY_BRIDGES = new Set(["tool_search", "tool_describe"]);
 
 export class ToolRegistry {
   constructor(options = {}) {
@@ -14,17 +21,29 @@ export class ToolRegistry {
     // Keeping it in memory guarantees a daemon restart clears every allowance.
     this.sessionAllows = new Set();
     this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
+    this.toolSearchController = options.toolSearchController ?? null;
   }
 
   register(tool) {
     if (!tool?.name) throw new Error("Tool requires a name.");
     if (typeof tool.handler !== "function") throw new Error(`Tool ${tool.name} requires a handler.`);
+    const metadata = { ...(tool.metadata ?? {}) };
+    const forwardInvocation = typeof tool.forwardInvocation === "function"
+      ? tool.forwardInvocation
+      : typeof metadata.forwardInvocation === "function"
+        ? metadata.forwardInvocation
+        : null;
+    delete metadata.forwardInvocation;
     const normalized = {
       name: tool.name,
       description: tool.description ?? "",
       parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
       source: tool.source ?? "internal",
       handler: tool.handler,
+      // Synchronous bridge unwrapping happens before activity, hooks, gates,
+      // approvals, and checkpoints. It is intentionally omitted from list()
+      // so executable functions never leak into model schema serialization.
+      forwardInvocation,
       // Synchronous input validation that runs before observers, hooks,
       // summaries, or durable approval records can see the arguments.
       preflight: typeof tool.preflight === "function" ? tool.preflight : null,
@@ -41,7 +60,7 @@ export class ToolRegistry {
       // read-only tools; 'ask' turns divert side-effecting calls to the
       // approval queue.
       sideEffects: tool.sideEffects !== false,
-      metadata: tool.metadata ?? {}
+      metadata
     };
     this.tools.set(normalized.name, normalized);
     return normalized;
@@ -57,6 +76,10 @@ export class ToolRegistry {
 
   bindHooks(hooks) {
     this.hooks = hooks ?? new HookRegistry({ loadConfig: false });
+  }
+
+  bindToolSearch(controller) {
+    this.toolSearchController = controller ?? null;
   }
 
   allowForSession(sessionId, toolName) {
@@ -82,7 +105,7 @@ export class ToolRegistry {
   }
 
   list({ readOnly = false } = {}) {
-    const all = [...this.tools.values()].map(({ handler, preflight, ...rest }) => rest);
+    const all = [...this.tools.values()].map(({ handler, preflight, forwardInvocation, ...rest }) => rest);
     return readOnly ? all.filter((tool) => !tool.sideEffects) : all;
   }
 
@@ -99,9 +122,15 @@ export class ToolRegistry {
     // `only` narrows what the model sees; it never removes tools from the
     // registry or changes invoke-time policy. Leaving it unset preserves the
     // existing hot path byte-for-byte at the API boundary.
-    const all = Array.isArray(options.only)
+    const narrowed = Array.isArray(options.only)
       ? listed.filter((tool) => options.only.includes(tool.name))
       : listed;
+    const all = this.toolSearchController?.shapeModelTools
+      ? this.toolSearchController.shapeModelTools(narrowed, {
+          ...options,
+          context: options.context ?? {}
+        })
+      : narrowed;
     const max = Number(process.env.OPENAGI_MAX_MODEL_TOOLS) || 128;
     if (all.length <= max) {
       this._lastToolOverflow = null;
@@ -183,6 +212,41 @@ export class ToolRegistry {
   // best-effort — a throwing observer must never break a tool call.
   async invoke(name, args, context = {}, internalToken = null) {
     const tool = this.tools.get(name);
+    const forwardInvocation = tool?.forwardInvocation;
+    if (typeof forwardInvocation === "function") {
+      let forwarded;
+      try {
+        forwarded = forwardInvocation(args ?? {}, context);
+        if (forwarded && typeof forwarded.then === "function") {
+          throw new TypeError(`Tool ${name} forwarding must be synchronous.`);
+        }
+      } catch (error) {
+        return { ok: false, error: error?.message ?? String(error) };
+      }
+      if (forwarded?.error) {
+        return { ok: false, error: String(forwarded.error) };
+      }
+      const targetName = String(forwarded?.name ?? "").trim();
+      const targetArgs = forwarded?.args;
+      const target = this.tools.get(targetName);
+      if (
+        !targetName
+        || targetName === name
+        || !target
+        || typeof target.forwardInvocation === "function"
+        || !isToolSearchDeferrable(target)
+      ) {
+        return { ok: false, error: `Tool ${targetName || "(missing)"} is not available through tool_call.` };
+      }
+      if (!targetArgs || typeof targetArgs !== "object" || Array.isArray(targetArgs)) {
+        return { ok: false, error: "tool_call arguments must resolve to an object." };
+      }
+      // Unwrap before the bridge emits activity or crosses any policy rail.
+      // The real tool name now traverses scope, scrutiny, hooks, approvals,
+      // checkpoints, dispatch, post hooks, and activity exactly once. Reset
+      // the internal hook token so a bridge can never smuggle a prior pass.
+      return this.invoke(targetName, targetArgs, context, null);
+    }
     if (tool?.preflight) {
       try {
         const result = tool.preflight(args ?? {}, context);
@@ -316,7 +380,14 @@ export class ToolRegistry {
     // Specialist bounds: a propagated specialist may only call tools inside
     // its allowlist (its scoped MCP tools + the core set agent-host grants).
     // Same advisory-list / enforced-gate split as the scrutiny policies.
-    if (Array.isArray(context?.__allowedTools) && !context.__allowedTools.includes(name)) {
+    if (
+      Array.isArray(context?.__allowedTools)
+      && !context.__allowedTools.includes(name)
+      && !(
+        TOOL_SEARCH_DISCOVERY_BRIDGES.has(name)
+        && tool.metadata?.toolSearch === "core"
+      )
+    ) {
       return {
         ok: false,
         error: `Tool ${name} is outside this specialist's bounded scope. Recommend the user take this to the main agent.`
@@ -651,6 +722,10 @@ export function autoApproveEnabled() {
 }
 
 export function registerCoreTools(registry, runtime) {
+  const toolSearch = registry.toolSearchController ?? new ToolSearchController({ registry });
+  registry.bindToolSearch(toolSearch);
+  registerToolSearchTools(registry, { controller: toolSearch });
+
   registry.register({
     name: "read_tool_output",
     description: "Read a chunk of a large tool result that was elided from model context. Pass the ref shown in the truncation marker and increase offset to continue.",
@@ -1409,20 +1484,30 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "set_provider",
-    description: "Switch the primary model provider live. 'auto' picks whichever has a key (Anthropic preferred), 'anthropic' forces Claude, 'openai' forces ChatGPT/GPT-5. Use this if the user wants to switch models mid-conversation or you detect repeated failures with the current one.",
+    description: "Switch the primary model provider live. 'auto' picks a configured direct provider, while 'anthropic', 'openai', and 'moa' select that provider explicitly. MoA uses OPENAGI_MOA_PRESET. Use this if the user wants to switch models mid-conversation or you detect repeated failures with the current one.",
     parameters: {
       type: "object",
       properties: {
-        preference: { type: "string", enum: ["auto", "anthropic", "openai"] }
+        preference: { type: "string", enum: ["auto", ...MODEL_PROVIDER_IDS] }
       },
       required: ["preference"],
       additionalProperties: false
     },
     handler: async (args) => {
-      process.env.OPENAGI_PROVIDER = args.preference;
+      if (!isModelProviderId(args.preference, { includeAuto: true })) {
+        throw new Error(`Invalid model provider: ${args.preference}`);
+      }
       const { createModelProvider } = await import("./model-provider.js");
+      const nextProvider = createModelProvider({
+        preferred: args.preference,
+        moa: { preset: process.env.OPENAGI_MOA_PRESET },
+        budgetGuard: runtime.budget,
+        secrets: runtime.secrets,
+        dataDir: runtime.secrets?.dataDir
+      });
+      process.env.OPENAGI_PROVIDER = args.preference;
       if (runtime.agentHost) {
-        runtime.agentHost.modelProvider = createModelProvider({ budgetGuard: runtime.budget });
+        runtime.agentHost.modelProvider = nextProvider;
       }
       // Persist
       try {
@@ -1442,6 +1527,217 @@ export function registerCoreTools(registry, runtime) {
   });
 
   // ─── Tasks (user todo list + agent queue) ──────────────────────────────
+
+  // Kanban is the local multi-agent coordination board. Every mutation
+  // remains inside the normal registry path so scrutiny, hooks, approvals,
+  // checkpoints, and activity observers see the real tool name.
+
+  registry.register({
+    name: "kanban_show",
+    sideEffects: false,
+    description: "Show one local Kanban task with blockers, comments, run attempts, handoffs, links, and timestamps.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Kanban task id." }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId }) => {
+      if (!runtime.kanban?.getTask) throw new Error("Kanban store is unavailable.");
+      const task = await runtime.kanban.getTask(taskId);
+      if (!task) throw new Error(`Unknown Kanban task: ${taskId}`);
+      return task;
+    }
+  });
+
+  registry.register({
+    name: "kanban_list",
+    sideEffects: false,
+    description: "List local Kanban boards and tasks. Filter by board, status, or assignee.",
+    parameters: {
+      type: "object",
+      properties: {
+        board: { type: "string", description: "Optional board id." },
+        status: {
+          type: "string",
+          enum: ["backlog", "in-progress", "blocked", "review", "done"]
+        },
+        assignee: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 500 }
+      },
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      if (!runtime.kanban?.boardView) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.boardView(args);
+    }
+  });
+
+  registry.register({
+    name: "kanban_create",
+    description: "Create a task on the local multi-agent Kanban board. Assign it now when the intended worker is known; parent task ids become blockers.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short task title." },
+        body: { type: "string", description: "Optional detailed task body." },
+        board: { type: "string", description: "ASCII board id. Defaults to 'default'." },
+        boardName: { type: "string", description: "Display name when creating a new board." },
+        assignee: { type: "string", description: "Agent or worker name." },
+        status: {
+          type: "string",
+          enum: ["backlog", "in-progress", "blocked", "review", "done"]
+        },
+        blockedBy: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 100,
+          description: "Parent task ids that must finish before this task can complete."
+        },
+        reason: { type: "string", description: "Optional initial blocking reason." }
+      },
+      required: ["title"],
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (!runtime.kanban?.createTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.createTask(args, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_complete",
+    description: "Complete a Kanban task and write its structured completion handoff. Tasks with unresolved blockers cannot complete.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        summary: { type: "string", description: "What was delivered or learned." },
+        handoffTo: { type: "string", description: "Optional next owner or reviewer." },
+        metadata: {
+          type: "object",
+          description: "Optional structured handoff metadata.",
+          additionalProperties: true
+        }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, ...input }, context) => {
+      if (!runtime.kanban?.completeTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.completeTask(taskId, input, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_block",
+    description: "Move a Kanban task to blocked. Optionally record parent task ids and a reason.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        blockedBy: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 100
+        },
+        reason: { type: "string" }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, ...input }, context) => {
+      if (!runtime.kanban?.blockTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.blockTask(taskId, input, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_unblock",
+    description: "Remove a Kanban task's blocking state. Pass blockerId to remove one dependency; omit it to clear every blocker.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        blockerId: { type: "string" }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, blockerId }, context) => {
+      if (!runtime.kanban?.unblockTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.unblockTask(taskId, { blockerId }, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_comment",
+    description: "Add a comment to a Kanban task. The author is derived from the trusted agent identity.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        body: { type: "string" }
+      },
+      required: ["taskId", "body"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, body }, context) => {
+      if (!runtime.kanban?.commentTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.commentTask(taskId, body, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_heartbeat",
+    description: "Claim a Kanban task or update a worker run. state='start' appends a new attempt; later heartbeats update that run by runId.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        runId: { type: "string" },
+        state: {
+          type: "string",
+          enum: ["start", "heartbeat", "review", "succeeded", "failed"]
+        },
+        assignee: { type: "string" },
+        reason: { type: "string" },
+        detail: {
+          description: "Short string or structured liveness/progress detail.",
+          anyOf: [
+            { type: "string" },
+            { type: "object", additionalProperties: true }
+          ]
+        }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, ...input }, context) => {
+      if (!runtime.kanban?.heartbeatTask) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.heartbeatTask(taskId, input, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_link",
+    description: "Link a parent Kanban task to a child dependency. The child stays blocked until every parent task is done.",
+    parameters: {
+      type: "object",
+      properties: {
+        parentId: { type: "string", description: "Task that must finish first." },
+        childId: { type: "string", description: "Task that depends on the parent." }
+      },
+      required: ["parentId", "childId"],
+      additionalProperties: false
+    },
+    handler: async ({ parentId, childId }, context) => {
+      if (!runtime.kanban?.linkTasks) throw new Error("Kanban store is unavailable.");
+      return runtime.kanban.linkTasks(parentId, childId, context);
+    }
+  });
 
   registry.register({
     name: "add_task",

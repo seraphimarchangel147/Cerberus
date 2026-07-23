@@ -12,8 +12,13 @@ import { SecretsStore } from "./secrets-store.js";
 
 const WIZARD_FIELDS = [
   "OPENAGI_PROVIDER",
-  "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
-  "OPENAI_API_KEY", "OPENAI_MODEL",
+  "OPENAGI_MOA_PRESET",
+  "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL",
+  "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
+  "OPENAGI_PROVIDER_ROUTING",
+  "API_SERVER_ENABLED", "API_SERVER_KEY", "API_SERVER_PORT",
+  "SUBSCRIPTION_PROXY_ENABLED", "SUBSCRIPTION_PROXY_PORT",
+  "SUBSCRIPTION_PROXY_UPSTREAM_URL", "SUBSCRIPTION_PROXY_SECRET_NAME",
   "OPENAGI_AUTH_TOKEN",
   "DISCORD_BOT_TOKEN",
   "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
@@ -37,6 +42,7 @@ const WIZARD_FIELDS = [
   "OPENAGI_CHAT_MAX_ITERATIONS",
   "OPENAGI_GOAL_MAX_TURNS",
   "OPENAGI_CHECKPOINTS",
+  "OPENAGI_LSP",
   "OPENAGI_CURATOR_STALE_DAYS", "OPENAGI_CURATOR_ARCHIVE_DAYS",
   "OPENAGI_BACKGROUND_REVIEW",
   "OPENAGI_MEMORY_PROVIDER",
@@ -44,6 +50,8 @@ const WIZARD_FIELDS = [
   "OPENAGI_REQUEST_TIMEOUT_MS",
   "OPENAGI_STALL_TIMEOUT_MS", "OPENAGI_FORCE_ANSWER_MS",
   "OPENAGI_PROVIDER_MAX_RETRIES", "OPENAGI_PROVIDER_RETRY_BASE_MS",
+  "OPENAGI_CREDENTIAL_POOLS",
+  "OPENAGI_TOOL_SEARCH",
   "OPENAGI_APPROVAL_TIMEOUT_MS",
   "OPENAGI_MAX_TOOL_OUTPUT_CHARS", "OPENAGI_CONTEXT_COMPACT_CHARS", "OPENAGI_CONTEXT_KEEP_RECENT_HOPS",
   "OPENAGI_CONTEXT_WINDOW_TOKENS",
@@ -156,6 +164,9 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
   // without us echoing the secret back into the page.
   const saved = (key) => (existingEnv[key] ? ' <span class="pill">✓ saved — blank keeps it</span>' : "");
   const providerChecked = (p) => ((existingEnv.OPENAGI_PROVIDER ?? "auto") === p ? "checked" : "");
+  const selected = (key, expected, fallback = "") => (
+    String(existingEnv[key] ?? fallback) === expected ? "selected" : ""
+  );
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -245,7 +256,11 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
         <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="auto" ${providerChecked("auto")}> Auto · use whichever has a key (Anthropic preferred)</label>
         <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="anthropic" ${providerChecked("anthropic")}> Anthropic · Claude Sonnet 4.6</label>
         <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="openai" ${providerChecked("openai")}> OpenAI · ChatGPT (GPT-5)</label>
+        <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="moa" ${providerChecked("moa")}> Mixture of Agents preset</label>
       </div>
+
+      <label style="margin-top:8px;">MoA preset</label>
+      <input type="text" name="OPENAGI_MOA_PRESET" value="${val("OPENAGI_MOA_PRESET", "default")}">
 
       <h3 style="margin-top:14px;">Anthropic key</h3>
       <p>Get one at <a href="https://console.anthropic.com/" target="_blank" rel="noopener">console.anthropic.com</a>.</p>
@@ -253,6 +268,8 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
       <input type="password" name="ANTHROPIC_API_KEY" placeholder="sk-ant-…" autocomplete="off">
       <label style="margin-top:8px;">Model</label>
       <input type="text" name="ANTHROPIC_MODEL" value="${val("ANTHROPIC_MODEL", "claude-sonnet-4-6")}">
+      <label style="margin-top:8px;">Base URL <span class="sub">optional direct or router-compatible endpoint</span></label>
+      <input type="url" name="ANTHROPIC_BASE_URL" value="${val("ANTHROPIC_BASE_URL")}" placeholder="https://api.anthropic.com/v1" autocomplete="off">
 
       <h3 style="margin-top:14px;">OpenAI / ChatGPT key</h3>
       <p>Get one at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com</a>. Works with Zero Data Retention orgs.</p>
@@ -260,6 +277,19 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
       <input type="password" name="OPENAI_API_KEY" placeholder="sk-proj-…" autocomplete="off">
       <label style="margin-top:8px;">Model</label>
       <input type="text" name="OPENAI_MODEL" value="${val("OPENAI_MODEL", "gpt-5")}">
+
+      <label style="margin-top:8px;">Base URL <span class="sub">optional direct or router-compatible endpoint</span></label>
+      <input type="url" name="OPENAI_BASE_URL" value="${val("OPENAI_BASE_URL")}" placeholder="https://api.openai.com/v1" autocomplete="off">
+
+      <details style="margin-top:14px;">
+        <summary>Provider routing for OpenRouter or Nous Portal <span class="sub">optional</span></summary>
+        <div style="padding-top:10px;">
+          <p class="sub">JSON sent only to supported router-style endpoints. Direct OpenAI, Anthropic, Kimi, and custom endpoints ignore this block.</p>
+          <label>OPENAGI_PROVIDER_ROUTING</label>
+          <textarea name="OPENAGI_PROVIDER_ROUTING" rows="5" spellcheck="false" autocomplete="off" placeholder='{"sort":"latency","only":["anthropic"],"require_parameters":true,"data_collection":"deny"}'>${val("OPENAGI_PROVIDER_ROUTING")}</textarea>
+          <p class="sub">Supported keys: <code>sort</code>, <code>only</code>, <code>ignore</code>, <code>order</code>, <code>require_parameters</code>, and <code>data_collection</code>.</p>
+        </div>
+      </details>
     </div>
 
     <div class="step">
@@ -388,6 +418,40 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
       <p>Then run <code>npm run tunnel</code> in another terminal and paste the URL it prints below.</p>
       <label>OPENAGI_PUBLIC_URL <span class="sub">leave blank to skip</span></label>
       <input type="text" name="OPENAGI_PUBLIC_URL" placeholder="https://abcd.trycloudflare.com" value="${val("OPENAGI_PUBLIC_URL")}">
+
+      <details style="margin-top:14px;">
+        <summary>OpenAI-compatible API server <span class="sub">optional</span></summary>
+        <div style="padding-top:10px;" class="grid">
+          <p class="sub">Expose a local OpenAI-compatible endpoint that runs full agent turns with tools, memory, and skills.</p>
+          <label>API_SERVER_ENABLED</label>
+          <select name="API_SERVER_ENABLED">
+            <option value="false" ${selected("API_SERVER_ENABLED", "false", "false")}>Disabled</option>
+            <option value="true" ${selected("API_SERVER_ENABLED", "true", "false")}>Enabled</option>
+          </select>
+          <label>API_SERVER_PORT</label>
+          <input type="number" name="API_SERVER_PORT" value="${val("API_SERVER_PORT", "8642")}" min="1" max="65535">
+          <label>API_SERVER_KEY${saved("API_SERVER_KEY")}</label>
+          <input type="password" name="API_SERVER_KEY" autocomplete="off" placeholder="a long random bearer key">
+        </div>
+      </details>
+
+      <details style="margin-top:8px;">
+        <summary>Subscription proxy <span class="sub">optional, local raw passthrough</span></summary>
+        <div style="padding-top:10px;" class="grid">
+          <p class="sub">Forward requests to a managed provider using a credential from the secrets store. Keep this listener local and trusted.</p>
+          <label>SUBSCRIPTION_PROXY_ENABLED</label>
+          <select name="SUBSCRIPTION_PROXY_ENABLED">
+            <option value="false" ${selected("SUBSCRIPTION_PROXY_ENABLED", "false", "false")}>Disabled</option>
+            <option value="true" ${selected("SUBSCRIPTION_PROXY_ENABLED", "true", "false")}>Enabled</option>
+          </select>
+          <label>SUBSCRIPTION_PROXY_PORT</label>
+          <input type="number" name="SUBSCRIPTION_PROXY_PORT" value="${val("SUBSCRIPTION_PROXY_PORT", "8645")}" min="1" max="65535">
+          <label>SUBSCRIPTION_PROXY_UPSTREAM_URL</label>
+          <input type="url" name="SUBSCRIPTION_PROXY_UPSTREAM_URL" value="${val("SUBSCRIPTION_PROXY_UPSTREAM_URL")}" placeholder="https://api.openai.com">
+          <label>SUBSCRIPTION_PROXY_SECRET_NAME</label>
+          <input type="text" name="SUBSCRIPTION_PROXY_SECRET_NAME" value="${val("SUBSCRIPTION_PROXY_SECRET_NAME", "OPENAI_API_KEY")}" autocomplete="off">
+        </div>
+      </details>
     </div>
 
     <div class="step">

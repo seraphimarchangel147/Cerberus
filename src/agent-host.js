@@ -1,3 +1,4 @@
+import path from "node:path";
 import { InMemoryAgentStore } from "./agent-store.js";
 import { createModelProvider } from "./model-provider.js";
 import { createId, nowIso } from "./utils.js";
@@ -6,6 +7,8 @@ import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZ
 import { autoApproveEnabled } from "./tool-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
+import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
+import { expandContextReferences } from "./context-references.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -29,6 +32,7 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "list_checkpoints"
 ]);
 export const DEFAULT_CHAT_MAX_ITERATIONS = 4;
+const TOOL_SEARCH_BRIDGE_NAME_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
 const DEFAULT_BACKGROUND_REVIEW_SNAPSHOT_WAIT_MS = 5000;
 const DEFAULT_BACKGROUND_REVIEW_FLUSH_MS = 60_000;
 const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
@@ -36,7 +40,7 @@ const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
 // from every ordinary question.
-export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|rollback|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|pause|resume|clear|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
+export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|use|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|rollback|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|pause|resume|clear|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
 
 // Intentionally narrow, anchored phrases: consent should be explicit, not
 // inferred from a sentence that merely contains "yes" or "continue". The
@@ -50,6 +54,16 @@ export const CONSENT_PHRASE_PATTERNS = Object.freeze([
 
 const STOP_OR_DELAY_RE = /\b(?:stop|wait|hold on|pause|cancel|not yet|do not|don't|never mind)\b/iu;
 const CHAT_AUTHOR_PREFIX_RE = /^\[[^\]\r\n]{1,100}\]\s*/u;
+
+export function toolSearchBridgesActive(tools, env = process.env) {
+  if (resolveToolSearchMode(env) === "off") return false;
+  const names = new Set(
+    (Array.isArray(tools) ? tools : [])
+      .map((tool) => String(tool?.name ?? ""))
+      .filter((name) => TOOL_SEARCH_BRIDGE_NAME_SET.has(name))
+  );
+  return TOOL_SEARCH_BRIDGE_NAMES.every((name) => names.has(name));
+}
 
 function normalizedDirectReply(value) {
   return String(value ?? "").trim().replace(CHAT_AUTHOR_PREFIX_RE, "").trim();
@@ -65,7 +79,10 @@ export function resolveChatMaxIterations(env = process.env) {
 }
 
 export function isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist = false }) {
-  const interactive = channel !== "autopilot" && channel !== "cron" && channel !== "subagent";
+  const interactive = channel !== "autopilot"
+    && channel !== "cron"
+    && channel !== "subagent"
+    && channel !== "batch";
   // The band gate is NOT the chat-vs-work separator — a plain factual question
   // ("what is the capital of France?") scores ~0.58 → verdict `act`, so keying on
   // {ignore, watch} left the fast lane inert in prod. The real separator is the
@@ -130,7 +147,17 @@ export class AgentHost {
     this.runtime = options.runtime;
     if (!this.runtime) throw new Error("AgentHost requires a runtime.");
     this.store = options.store ?? new InMemoryAgentStore(options.storeOptions);
-    this.modelProvider = options.modelProvider ?? createModelProvider(options.modelProviderOptions);
+    const modelProviderOptions = {
+      ...(options.modelProviderOptions ?? {}),
+      secrets: options.modelProviderOptions?.secrets ?? this.runtime.secrets,
+      dataDir: options.modelProviderOptions?.dataDir ?? this.runtime.secrets?.dataDir
+    };
+    this.workspaceDir = path.resolve(
+      options.workspaceDir
+      ?? this.runtime.checkpoints?.workspaceDir
+      ?? process.cwd()
+    );
+    this.modelProvider = options.modelProvider ?? createModelProvider(modelProviderOptions);
     this.backgroundReviewer = options.backgroundReviewer ?? new BackgroundReviewer({
       runtime: this.runtime,
       modelProvider: this.modelProvider
@@ -185,6 +212,10 @@ export class AgentHost {
     let agentId = input.agentId ?? "main";
     const text = String(input.text ?? input.message ?? "").trim();
     if (!text) throw new Error("Message text is required.");
+    const turnProvider = input.modelProviderOverride ?? this.modelProvider;
+    if (!turnProvider || typeof turnProvider.generate !== "function") {
+      throw new Error("A model provider with generate() is required.");
+    }
     // Ephemeral turns (setup-wizard "say hi" test) must leave no trace:
     // no session in the dashboard list, no auto-task, no memory write,
     // no outcome — they're a connectivity check, not a conversation.
@@ -372,6 +403,23 @@ export class AgentHost {
     const resumedGoalTurn = input.goalContinuation === true
       && this.runtime.goals?.get?.(sessionId)?.status === "active";
     const toolRegistry = this.runtime.tools;
+
+    // Specialist bounds: a bounded specialist sees (and may invoke) only its
+    // scoped allowlist + the core set every specialist needs. Without this,
+    // "bounded" was advisory prompt text and any specialist could call any
+    // tool in the system.
+    const requestedAllowedToolNames = Array.isArray(input.allowedTools)
+      ? [...new Set(input.allowedTools.filter((name) => typeof name === "string" && name))]
+      : null;
+    let allowedToolNames = requestedAllowedToolNames;
+    if (isSpecialist) {
+      const scoped = agent.metadata?.specialist?.allowedTools ?? [];
+      const specialistAllowed = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
+      allowedToolNames = requestedAllowedToolNames
+        ? specialistAllowed.filter((name) => requestedAllowedToolNames.includes(name))
+        : specialistAllowed;
+    }
+
     // The fast lane trims schemas only. Side-effect and scope enforcement
     // below remains authoritative even for core tools advertised on a watch
     // or ignore turn.
@@ -392,24 +440,21 @@ export class AgentHost {
       ? null
       : toolRegistry?.modelToolOverflowNotice?.() ?? null;
 
-    // Specialist bounds: a bounded specialist sees (and may invoke) only its
-    // scoped allowlist + the core set every specialist needs. Without this,
-    // "bounded" was advisory prompt text and any specialist could call any
-    // tool in the system.
-    const requestedAllowedToolNames = Array.isArray(input.allowedTools)
-      ? [...new Set(input.allowedTools.filter((name) => typeof name === "string" && name))]
-      : null;
-    let allowedToolNames = requestedAllowedToolNames;
-    if (isSpecialist) {
-      const scoped = agent.metadata?.specialist?.allowedTools ?? [];
-      const specialistAllowed = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
-      allowedToolNames = requestedAllowedToolNames
-        ? specialistAllowed.filter((name) => requestedAllowedToolNames.includes(name))
-        : specialistAllowed;
-    }
     if (allowedToolNames) {
-      tools = tools.filter((tool) => allowedToolNames.includes(tool.name));
+      const scopedNames = conversational && !chatCoreUnavailable
+        ? CHAT_CORE_TOOLS.filter((name) => allowedToolNames.includes(name))
+        : allowedToolNames;
+      tools = toolPolicy === "none" && !conversational
+        ? []
+        : (toolRegistry?.toOpenAITools?.({
+            only: scopedNames,
+            readOnly: toolPolicy === "read-only"
+          }) ?? []);
     }
+    const toolSearchActive = toolSearchBridgesActive(
+      tools,
+      toolRegistry?.toolSearchController?.env ?? process.env
+    );
 
     // Lava intuition (C2): top principles from the vector store inserted into
     // the prompt as soft hints — distinct from explicit memoryHits.
@@ -482,6 +527,7 @@ export class AgentHost {
       // Provider-side schema shaping only; ToolRegistry.invoke deliberately
       // does not read this field.
       __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
+      __toolSearchActive: toolSearchActive,
       __memoryScope: memoryScope,
       __turnId: turnId,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,
@@ -494,8 +540,12 @@ export class AgentHost {
 
     let modelResult;
     try {
-      modelResult = await this.modelProvider.generate({
-        input: text,
+      const providerInput = await expandContextReferences(text, {
+        workspaceDir: this.workspaceDir,
+        signal: turnAbortController.signal
+      });
+      modelResult = await turnProvider.generate({
+        input: providerInput,
         agent,
         // Route by what the call IS, so model tiering applies: autonomous pulses
         // (autopilot/cron) are cheap "anything to do?" work; everything else is
@@ -631,7 +681,7 @@ export class AgentHost {
       model: {
         provider: modelResult.provider,
         model: modelResult.model,
-        configured: this.modelProvider.isConfigured(),
+        configured: turnProvider.isConfigured?.() ?? true,
         iterations: modelResult.iterations ?? null,
         maxIterations: modelResult.maxIterations ?? null,
         stopReason: modelResult.stopReason ?? null
@@ -1175,6 +1225,8 @@ export function formatScreenContextBlock(screenContext) {
 // dashboard header.
 function friendlyProviderLabel(provider) {
   if (!provider) return "—";
+  const providerId = String(provider.provider ?? provider.name ?? "").toLowerCase();
+  if (providerId === "moa" || provider.constructor?.name === "MoaProvider") return "MoA";
   const cls = provider.constructor?.name ?? "";
   if (cls === "AnthropicProvider") return "Anthropic";
   if (cls === "OpenAIResponsesProvider") return "OpenAI";

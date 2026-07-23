@@ -513,3 +513,105 @@ HONCHO COMPLETE
 SECRETS MANAGER COMPLETE
 
 PARITY WAVE 3 PHASE 1 COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: Kanban board (Codex)
+
+- Added a local SQLite multi-board Kanban store with blocker-safe lifecycle transitions, trusted process identities, per-attempt runs, comments, dependency links, structured handoffs, gateway notifications, a JSONL journal, and an atomic snapshot.
+- Registered and documented all nine agent tools, plus authenticated HTTP, CLI, dashboard, SSE, and Discord activity surfaces over the same store.
+- Enforced cross-board and cyclic-link rejection, immutable terminal tasks and runs, worker-owned heartbeats, completed-parent unblocking, and status-change audit events.
+- Added store, registry, prompt, persistence, HTTP, CLI, dashboard-escaping, identity, dependency, and live tool-to-GET probe coverage.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 934/934 with no environment pinning.
+KANBAN COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: LSP diagnostics (Codex)
+
+- Added a git-workspace-only LSP client with built-in server discovery, optional repository configuration, Content-Length JSON-RPC transport, subprocess reuse, idle cleanup, and fail-open behavior for absent or unhealthy servers.
+- Extended anchored code edits and writes to capture pre-edit diagnostics, preserve syntax checking as the first post-edit gate, and return only newly introduced normalized diagnostics in the Hermes-compatible XML block.
+- Added an explicit OPENAGI_LSP kill switch through the setup allowlist, deterministic diagnostic filtering and formatting, and process-stub coverage without requiring a language server installation.
+- Added client, subprocess, configuration, workspace, code-tool integration, syntax-failure, and graceful-degradation regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 943/943 with no environment pinning.
+LSP COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: credential pools (Codex)
+
+- Added same-provider API-key and OAuth credential pools with round-robin, least-used, fill-first, and random selection over secret-name references resolved through the Phase 1 secrets store.
+- Added sticky per-turn leases and exact recovery rules: plan-limit 429 rotates immediately, transient 429 retries once on the same key, 402 applies a durable 24-hour cooldown, and OAuth 401 refreshes before rotating.
+- Persisted secret-free pool state through atomic snapshots and JSONL events, auto-discovered existing provider keys as one-key pools, and kept live provider credential changes backward compatible.
+- Added first-hop-only native provider fallback after pool exhaustion while preventing fallback replay after a successful model hop or tool side effect.
+- Credential rotation intentionally resets the provider prompt cache, so the next request is a full-price re-read; this trades cache cost for keeping the session alive.
+- Added strategy, status, cooldown, refresh, redaction, config, cache-identity, auth-header, fallback, no-replay, setup, and provider regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 963/963 with no environment pinning.
+CRED POOLS COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: Tool Search (Codex)
+
+- Added progressive disclosure for MCP and non-core plugin schemas with auto, on, and off modes, an exact schema-byte threshold, explicit only/defer controls, and concurrency-safe per-call catalog planning.
+- Registered and documented tool_search, tool_describe, and tool_call while keeping built-in, code, web, memory, and fixed skill tools on the direct core surface.
+- Unwrapped tool_call before lifecycle dispatch so the real deferred tool name alone traverses scope, scrutiny, veto hooks, catastrophic policy, approvals, checkpoints, post hooks, and activity events.
+- Preserved deferred discovery for bounded specialists and read-only turns without expanding their allowed scope, and kept conversational core-only turns bridge-free.
+- Added controller, ranking, schema-budget, OpenAI, Anthropic, scope, veto, activity, checkpoint, setup, prompt, cap, and fast-lane regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 983/983 with no environment pinning.
+TOOL SEARCH COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: Mixture of Agents (Codex)
+
+- Added the virtual `moa` provider with named data-directory presets, parallel and isolated reference analyses, bounded untrusted-context injection, and a direct aggregator that retains the normal iteration and tool loop.
+- Added credential-aware direct provider construction, exact per-role model overrides, recursion rejection, provider routing metadata, explicit-only selection, and native-provider auto behavior unchanged.
+- Added permanent model selection plus a serialized one-shot Discord `/moa` turn that uses a provider override without mutating the shared host provider, including failure-safe restoration.
+- Added setup, hosted administration, CLI, live provider-tool, and public export surfaces with the new preset environment field allowlisted through the setup wizard.
+- Added parallelism, isolation, redaction, failure, cancellation, real tool-loop, provider-construction, Discord restoration, hosted API, setup, and model-picker regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1008/1008 with no environment pinning.
+MOA COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: context references (Codex)
+
+- Added bounded inbound expansion for file and line-range references, deterministic folder trees, unstaged and staged diffs, capped commit history with patches, and SSRF-guarded URL text.
+- Kept raw user text authoritative for scrutiny, signals, memory, and transcripts while appending a clearly labeled untrusted context section only to the provider input after scrutiny.
+- Enforced workspace and home containment, direct-symlink rejection, realpath revalidation, sensitive-path and binary-file denial, bounded reads and subprocesses, graceful per-reference failures, and abort propagation.
+- Preserved byte-identical provider input when no reference is present and made invalid file ranges deliberately fall back to the full bounded file.
+- Added parser, file, folder, git, URL, cap, safety, abort, and AgentHost integration regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1023/1023 with no environment pinning.
+CONTEXT REFS COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: deliverable mode (Codex)
+
+- Added automatic outbound detection for the complete Hermes image, video, audio, document, data, presentation, archive, and web extension table, with native inline, voice, and file routing.
+- Added bounded regular-file loading, duplicate coalescing, symlink and sensitive-path rejection, native Windows and Unix absolute paths, home-relative paths, and exact success-only path removal.
+- Protected fenced and inline code samples, relative paths, remote URLs, missing files, oversized files, and every non-allowlisted source extension from automatic upload or message mutation.
+- Routed normal Discord turns, streamed final edits, Telegram replies, and generic Discord or Telegram outbound delivery through the shared mode while retaining failed-upload paths and redacting transport errors.
+- Added classifier, scanner, cap, safety, Discord, Telegram, streaming, pairing, failure, and channel-manager regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1038/1038 with no environment pinning.
+DELIVERABLE COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: batch processing (Codex)
+
+- Added the intentionally named `batcmcp_runner.mjs` JSONL batch runner with strict Hermes-compatible flags, bounded worker pools, configurable batch sizing, and isolated runtime, provider, workspace, and data directories per prompt.
+- Added ShareGPT trajectory export, tool-use and reasoning-coverage statistics, per-batch append-only records, atomic checkpoints and summaries, stable occurrence-aware item identities, and failure records safe for retry.
+- Made completed batch JSONL records the resume source of truth, preventing duplicates while retrying unfinished items even when a checkpoint is stale.
+- Kept batch sessions on the full AgentHost iteration path, honored the requested turn cap, and closed runtime SQLite and integration resources between items to control long-run memory use.
+- Added parser, dataset, distribution-listing, helper, three-prompt bounded-concurrency, resume, recovery, isolation, and real durable-runtime regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1045/1045 with no environment pinning.
+BATCH COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: provider routing (Codex)
+
+- Added strict provider-routing configuration with price, throughput, and latency sorting; ordered only, ignore, and order lists; parameter support requirements; and data-collection policy.
+- Loaded routing deterministically from explicit options, setup-wizard environment JSON, or the data-directory config snapshot, with empty explicit configuration disabling inherited policy.
+- Attached a normalized top-level provider block only for official HTTPS OpenRouter and Nous Portal endpoints while leaving native OpenAI, Anthropic, Kimi, custom, and lookalike hosts byte-equivalent.
+- Carried one immutable routing policy through primary, fallback, standalone direct, and default MoA provider construction without replacing injected model routers or custom MoA factories.
+- Added public exports, setup allowlisting and escaped inputs for routing and provider base URLs, plus normalization, precedence, endpoint, serialization, non-mutation, fallback, and MoA regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1060/1060 with no environment pinning.
+PROVIDER ROUTING COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: subscription proxy and API server (Codex)
+
+- Added a loopback OpenAI-compatible chat-completions server that runs unique ephemeral full AgentHost turns with tools, memory, skills, bounded request bodies, timing-safe bearer authentication, abort propagation, and OpenAI-shaped responses and errors.
+- Added streaming completion chunks with visible sanitized tool state, provider text deltas, final fallback text, finish reasons, and a terminal DONE event without exposing tool inputs, outputs, error details, or credentials.
+- Added a loopback raw subscription proxy that accepts any nonblank client bearer, resolves the configured managed credential from SecretsStore for every request, replaces inbound credential headers, and preserves method, path, query, bytes, status, and safe response headers without following redirects.
+- Added fixed-upstream and header-injection validation, hop-by-hop and connection-nominated header stripping, bounded proxy bodies, secret-safe failures, provider-derived upstream and authentication settings, and partial-listener rollback.
+- Wired flag-gated capability startup into the daemon's all-or-nothing boot and idempotent graceful shutdown, exported the public construction contract, and allowlisted escaped setup fields while never rendering the saved API server key.
+- Added API shape, authentication, streaming, proxy substitution, raw forwarding, redirect, redaction, setup, lifecycle, rollback, and both-policy regressions; a live curl probe through a real AgentHost returned a valid chat completion.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1075/1075 with no environment pinning.
+API SERVER COMPLETE
+
+PARITY WAVE 3 PHASE 2 COMPLETE

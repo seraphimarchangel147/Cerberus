@@ -43,6 +43,9 @@ function parseArgs(argv) {
     else if (a === "--trigger") flags.trigger = argv[++i];
     else if (a === "--days") flags.days = argv[++i];
     else if (a === "--limit") flags.limit = argv[++i];
+    else if (a === "--board") flags.board = argv[++i];
+    else if (a === "--assignee") flags.assignee = argv[++i];
+    else if (a === "--body") flags.body = argv[++i];
     else if (a === "-h" || a === "--help") flags.help = true;
     else positional.push(a);
   }
@@ -318,6 +321,67 @@ async function cmdTick(flags) {
   return res.ok ? 0 : 1;
 }
 
+async function cmdKanban(positional, flags) {
+  const { client } = makeClient(flags);
+  const action = positional[0] ?? "list";
+  let response;
+  if (action === "create") {
+    const title = positional.slice(1).join(" ").trim();
+    if (!title) {
+      console.error(c(RED, "usage: openagi kanban create <title> [--body text] [--board id] [--assignee name]"));
+      return 1;
+    }
+    response = await client.createKanban({
+      title,
+      ...(flags.body ? { body: flags.body } : {}),
+      ...(flags.board ? { board: flags.board } : {}),
+      ...(flags.assignee ? { assignee: flags.assignee } : {})
+    });
+  } else if (action === "list") {
+    response = await client.kanban({
+      board: flags.board,
+      assignee: flags.assignee,
+      limit: flags.limit
+    });
+  } else {
+    const id = action === "show" ? positional[1] : action;
+    if (!id) {
+      console.error(c(RED, "usage: openagi kanban show <task-id>"));
+      return 1;
+    }
+    response = await client.kanbanTask(id);
+  }
+
+  if (flags.json) {
+    console.log(JSON.stringify(response.json ?? { error: response.error ?? response.status }, null, 2));
+    return response.ok ? 0 : 1;
+  }
+  if (!response.ok) {
+    console.error(c(RED, `error: ${response.json?.error ?? response.error ?? "HTTP " + response.status}`));
+    return 1;
+  }
+  if (action === "create") {
+    console.log(c(GREEN, `created ${response.json.id}`) + ` ${response.json.title}`);
+    return 0;
+  }
+  if (action !== "list") {
+    const task = response.json;
+    console.log(`${c(BOLD, task.title)} ${c(DIM, task.id)}`);
+    console.log(`  ${task.board} / ${task.status}${task.assignee ? ` / ${task.assignee}` : ""}`);
+    if (task.body) console.log(`  ${task.body}`);
+    return 0;
+  }
+  const tasks = response.json?.tasks ?? [];
+  if (tasks.length === 0) {
+    console.log(c(DIM, "no Kanban tasks"));
+    return 0;
+  }
+  for (const task of tasks) {
+    console.log(`${task.status.padEnd(11)} ${task.id} ${task.title}${task.assignee ? ` [${task.assignee}]` : ""}`);
+  }
+  return 0;
+}
+
 // Show the model tiering plan: base model + which jobs run on cheaper tiers,
 // with recommendations for what to set. Reads the same env the daemon uses.
 async function cmdModels(flags) {
@@ -325,8 +389,24 @@ async function cmdModels(flags) {
   loadBootEnv();
   const { createModelProvider, renderModelPlan } = await import("../src/index.js");
   const provider = createModelProvider();
+  const providerId = String(provider?.provider ?? provider?.name ?? "").toLowerCase();
+  if (providerId === "moa" || provider?.constructor?.name === "MoaProvider") {
+    const models = typeof provider.availableModels === "function"
+      ? provider.availableModels()
+      : [];
+    if (flags.json) {
+      console.log(JSON.stringify({ provider: "moa", models }, null, 2));
+      return 0;
+    }
+    console.log(`${c(BOLD, "Mixture of Agents presets")} (${provider.model ?? "no active preset"})`);
+    for (const model of models) {
+      const name = typeof model === "string" ? model : model?.id ?? model?.name ?? model?.model;
+      if (name) console.log(`  ${name === provider.model ? "*" : "-"} ${name}`);
+    }
+    return 0;
+  }
   if (!provider.router) {
-    console.log(c(DIM, "No LLM provider configured (deterministic mode). Set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable tiering."));
+    console.log(c(DIM, "No LLM provider configured (deterministic mode). Configure Anthropic, OpenAI, or a MoA preset."));
     return 0;
   }
   const providerName = provider.constructor.name === "AnthropicProvider" ? "anthropic" : "openai";
@@ -358,6 +438,10 @@ ${c(BOLD, "Use it (local, or a remote main):")}
                               from the snapshot (backs up first)
   openagi tick                fire a scheduler tick
   openagi models              show the model tiering plan + savings tips
+  openagi kanban [list]       list local multi-agent Kanban work
+  openagi kanban <task-id>    show one Kanban task
+  openagi kanban create <title> [--body T] [--board B] [--assignee A]
+                              create coordinated work
 
 ${c(BOLD, "Turn this device into a node of a remote main:")}
   openagi pair <main-url> [--token T]    save the main as this device's target
@@ -404,6 +488,7 @@ async function main() {
       case "computer-server": return await cmdComputerServer(flags);
       case "tick": return await cmdTick(flags);
       case "models": return await cmdModels(flags);
+      case "kanban": return await cmdKanban(positional, flags);
       default:
         console.error(c(RED, `unknown command: ${cmd}`));
         printHelp();

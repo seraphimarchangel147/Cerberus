@@ -25,6 +25,7 @@ const T = {
 import { bar, COLORS, embed } from "./discord-embeds.js";
 import { renderChart } from "./discord-chart.js";
 import { approvePendingAction } from "./pending-actions.js";
+import { isModelProviderId } from "./model-router.js";
 
 const EPHEMERAL = 64;
 
@@ -35,7 +36,28 @@ export const COMMAND_DEFS = [
   {
     name: "model",
     description: "Show or set the active model id",
-    options: [{ type: 3, name: "name", description: "Model id (e.g. kimi-k3, claude-sonnet-4-6). Omit to show current.", required: false }]
+    options: [
+      { type: 3, name: "name", description: "Model id or MoA preset. Omit to show current.", required: false },
+      {
+        type: 3,
+        name: "provider",
+        description: "Provider for this permanent selection.",
+        required: false,
+        choices: [
+          { name: "Anthropic", value: "anthropic" },
+          { name: "OpenAI", value: "openai" },
+          { name: "Mixture of Agents", value: "moa" }
+        ]
+      }
+    ]
+  },
+  {
+    name: "moa",
+    description: "Run one prompt through a Mixture of Agents preset",
+    options: [
+      { type: 3, name: "prompt", description: "Prompt to run through the preset.", required: true },
+      { type: 3, name: "preset", description: "Preset name. Uses the configured default when omitted.", required: false }
+    ]
   },
   { name: "pending", description: "Actions awaiting approval (approve/deny buttons)" },
   {
@@ -137,8 +159,9 @@ export const COMMAND_DEFS = [
 ];
 
 export class DiscordCommands {
-  constructor(channel) {
+  constructor(channel, options = {}) {
     this.channel = channel; // DiscordChannel — rest(), log(), agentHost, allowFrom
+    this.providerFactory = options.providerFactory ?? channel.providerFactory ?? null;
     this.registered = false;
     this.rollbackConfirmations = new Map();
     this.rollbackConfirmationSeq = 0;
@@ -200,6 +223,7 @@ export class DiscordCommands {
       case "status": return this.cmdStatus(interaction);
       case "provider": return this.cmdProvider(interaction);
       case "model": return this.cmdModel(interaction, opts);
+      case "moa": return this.cmdMoa(interaction, opts);
       case "pending": return this.cmdPending(interaction);
       case "autoapprove": return this.cmdAutoApprove(interaction, opts);
       case "tasks": return this.cmdTasks(interaction, opts);
@@ -467,7 +491,7 @@ export class DiscordCommands {
         title: "🐺 Azazel — openAGI status",
         color,
         fields: [
-          { name: "Provider", value: `**${provider?.constructor?.name?.replace(/Provider$/, "") ?? "?"}** ${configured ? "✅" : "❌ not configured"}`, inline: true },
+          { name: "Provider", value: `**${providerLabel(provider)}** ${configured ? "configured" : "not configured"}`, inline: true },
           { name: "Model", value: `\`${provider?.model ?? "?"}\``, inline: true },
           { name: "Preference", value: `\`${process.env.OPENAGI_PROVIDER ?? "auto"}\``, inline: true },
           { name: "Discord", value: channels?.discord?.connected ? `🟢 ${channels.discord.user ?? "connected"}` : "🔴 down", inline: true },
@@ -479,16 +503,30 @@ export class DiscordCommands {
     });
   }
 
+  async createProvider(options = {}) {
+    if (typeof this.providerFactory === "function") {
+      return this.providerFactory(options);
+    }
+    const { createModelProvider } = await import("./model-provider.js");
+    return createModelProvider(options);
+  }
+
   async cmdProvider(interaction) {
     const current = process.env.OPENAGI_PROVIDER ?? "auto";
     const available = {
       anthropic: Boolean(process.env.ANTHROPIC_API_KEY),
-      openai: Boolean(process.env.OPENAI_API_KEY)
+      openai: Boolean(process.env.OPENAI_API_KEY),
+      moa: Boolean(process.env.OPENAGI_MOA_PRESET)
     };
     const options = [
       { label: "auto (anthropic → openai → deterministic)", value: "auto", default: current === "auto" },
       { label: `anthropic${available.anthropic ? "" : " (no key!)"}`, value: "anthropic", default: current === "anthropic" },
-      { label: `openai${available.openai ? "" : " (no key!)"}`, value: "openai", default: current === "openai" }
+      { label: `openai${available.openai ? "" : " (no key!)"}`, value: "openai", default: current === "openai" },
+      {
+        label: `moa${available.moa ? ` (${process.env.OPENAGI_MOA_PRESET})` : " (choose a preset with /model)"}`,
+        value: "moa",
+        default: current === "moa"
+      }
     ];
     return this.respond(interaction, {
       content: `Current provider preference: **${current}** · model: \`${this.channel.agentHost?.modelProvider?.model ?? "?"}\`\nPick a provider:`,
@@ -500,16 +538,24 @@ export class DiscordCommands {
   }
 
   async switchProvider(choice, userId = null) {
-    if (!["auto", "anthropic", "openai"].includes(choice)) return `⚠ invalid choice: ${choice}`;
-    process.env.OPENAGI_PROVIDER = choice;
+    if (!isModelProviderId(choice, { includeAuto: true })) return `Invalid choice: ${choice}`;
+    let nextProvider;
     try {
-      const { createModelProvider } = await import("./model-provider.js");
-      if (this.channel.agentHost) {
-        this.channel.agentHost.modelProvider = createModelProvider({ budgetGuard: this.runtime?.budget ?? null });
+      nextProvider = await this.createProvider({
+        preferred: choice,
+        moa: { preset: process.env.OPENAGI_MOA_PRESET },
+        budgetGuard: this.runtime?.budget ?? null,
+        secrets: this.runtime?.secrets,
+        dataDir: this.runtime?.secrets?.dataDir
+      });
+      if (choice === "moa" && !isMoaProvider(nextProvider)) {
+        return "No valid MoA preset is configured; use /model with provider:moa first.";
       }
     } catch (error) {
       return `⚠ provider rebuild failed: ${error.message}`;
     }
+    process.env.OPENAGI_PROVIDER = choice;
+    if (this.channel.agentHost) this.channel.agentHost.modelProvider = nextProvider;
     try {
       const { saveEnv } = await import("./setup-wizard.js");
       saveEnv({
@@ -523,29 +569,139 @@ export class DiscordCommands {
   }
 
   async cmdModel(interaction, opts) {
-    const provider = this.channel.agentHost?.modelProvider;
+    const host = this.channel.agentHost;
+    const provider = host?.modelProvider;
+    const providerChoice = String(opts?.provider ?? "").trim().toLowerCase();
+    if (providerChoice && !isModelProviderId(providerChoice)) {
+      return this.respond(interaction, {
+        content: `Invalid provider: ${providerChoice}`,
+        flags: EPHEMERAL
+      });
+    }
     if (!opts.name) {
       return this.respond(interaction, {
-        content: `Active model: \`${provider?.model ?? "?"}\` on **${provider?.constructor?.name?.replace(/Provider$/, "") ?? "?"}**\nSet with \`/model name:<id>\``
+        content: `Active model: \`${provider?.model ?? "?"}\` on **${providerLabel(provider)}**\nSet with \`/model name:<id>\`; select a mixture with \`provider:moa\`.`
       });
     }
     const model = String(opts.name).trim();
     if (!/^[\w.\-:/]{2,80}$/.test(model)) {
-      return this.respond(interaction, { content: `⚠ that doesn't look like a model id`, flags: EPHEMERAL });
+      return this.respond(interaction, { content: "That does not look like a model id or preset.", flags: EPHEMERAL });
     }
-    if (!provider) return this.respond(interaction, { content: "⚠ no model provider active", flags: EPHEMERAL });
-    provider.model = model;
-    // Persist so it survives restart, matching whichever provider is live.
-    const envKey = provider.constructor?.name === "OpenAIResponsesProvider" ? "OPENAI_MODEL" : "ANTHROPIC_MODEL";
+    if (!provider && !providerChoice) {
+      return this.respond(interaction, { content: "No model provider is active.", flags: EPHEMERAL });
+    }
+
+    let nextProvider = provider;
+    let envKey;
+    const values = {};
+    try {
+      if (providerChoice) {
+        nextProvider = await this.createProvider({
+          preferred: providerChoice,
+          moa: { preset: model },
+          budgetGuard: this.runtime?.budget ?? null,
+          secrets: this.runtime?.secrets,
+          dataDir: this.runtime?.secrets?.dataDir
+        });
+      }
+
+      if (providerChoice === "moa" || (!providerChoice && isMoaProvider(nextProvider))) {
+        if (!isMoaProvider(nextProvider)) {
+          throw new Error(`MoA preset not found: ${model}`);
+        }
+        const available = providerModelNames(nextProvider);
+        if (available.length > 0 && !available.includes(model)) {
+          throw new Error(`MoA preset not found: ${model}`);
+        }
+        nextProvider.setPreset?.(model);
+        envKey = "OPENAGI_MOA_PRESET";
+        values.OPENAGI_PROVIDER = "moa";
+      } else {
+        nextProvider.model = model;
+        envKey = providerChoice === "openai" || providerLabel(nextProvider) === "OpenAI"
+          ? "OPENAI_MODEL"
+          : "ANTHROPIC_MODEL";
+        if (providerChoice) values.OPENAGI_PROVIDER = providerChoice;
+      }
+      values[envKey] = model;
+    } catch (error) {
+      return this.respond(interaction, {
+        content: `Model selection failed: ${error?.message ?? String(error)}`.slice(0, 500),
+        flags: EPHEMERAL
+      });
+    }
+
+    for (const [name, value] of Object.entries(values)) process.env[name] = value;
+    if (host) host.modelProvider = nextProvider;
     try {
       const { saveEnv } = await import("./setup-wizard.js");
       saveEnv({
-        values: { [envKey]: model },
+        values,
         store: this.runtime?.secrets,
         decidedBy: discordDecisionActor(discordUserId(interaction))
       });
     } catch { /* runtime-only */ }
-    return this.respond(interaction, { content: `✅ Model set to \`${model}\` (persisted as ${envKey})` });
+    return this.respond(interaction, {
+      content: `Model set to \`${model}\` on **${providerLabel(nextProvider)}** (persisted as ${envKey}).`
+    });
+  }
+
+  async cmdMoa(interaction, opts = {}) {
+    const prompt = String(opts.prompt ?? "").trim();
+    const preset = String(opts.preset ?? process.env.OPENAGI_MOA_PRESET ?? "").trim();
+    if (!prompt) {
+      return this.respond(interaction, { content: "A prompt is required.", flags: EPHEMERAL });
+    }
+    if (preset && !/^[\w.\-:/]{2,80}$/.test(preset)) {
+      return this.respond(interaction, { content: "That does not look like a MoA preset.", flags: EPHEMERAL });
+    }
+    const host = this.channel.agentHost;
+    if (typeof host?.handleMessage !== "function") {
+      return this.respond(interaction, { content: "The agent host is unavailable.", flags: EPHEMERAL });
+    }
+
+    await this.defer(interaction);
+    try {
+      const override = await this.createProvider({
+        preferred: "moa",
+        moa: { preset: preset || undefined },
+        budgetGuard: this.runtime?.budget ?? null,
+        secrets: this.runtime?.secrets,
+        dataDir: this.runtime?.secrets?.dataDir
+      });
+      if (!isMoaProvider(override)) {
+        throw new Error(`MoA preset not found: ${preset || "(default)"}`);
+      }
+      const available = providerModelNames(override);
+      if (preset && available.length > 0 && !available.includes(preset)) {
+        throw new Error(`MoA preset not found: ${preset}`);
+      }
+
+      const userId = discordUserId(interaction) ?? "unknown";
+      const sessionId = this.goalSessionId(interaction);
+      const runTurn = () => host.handleMessage({
+        channel: "discord",
+        from: userId,
+        agentId: "main",
+        sessionId,
+        text: prompt,
+        modelProviderOverride: override,
+        metadata: {
+          channelId: interaction.channel_id,
+          guildId: interaction.guild_id ?? null,
+          oneShotMoa: true
+        }
+      });
+      const result = typeof this.channel.enqueueSessionTask === "function"
+        ? await this.channel.enqueueSessionTask(sessionId, runTurn)
+        : await runTurn();
+      const reply = String(result?.reply ?? "").trim() || "MoA turn completed without text.";
+      return this.followUp(interaction, { content: reply.slice(0, 1900) });
+    } catch (error) {
+      return this.followUp(interaction, {
+        content: `MoA turn failed: ${error?.message ?? String(error)}`.slice(0, 1900)
+      });
+    }
   }
 
   async cmdAutoApprove(interaction, opts) {
@@ -1084,6 +1240,33 @@ function compactCheckpointPreview(checkpoint, preview, maxChars) {
     .replace(/```/g, "'''")
     .trim()
     .slice(0, maxChars);
+}
+
+function isMoaProvider(provider) {
+  const id = String(provider?.provider ?? provider?.name ?? "").trim().toLowerCase();
+  return id === "moa" || provider?.constructor?.name === "MoaProvider";
+}
+
+function providerLabel(provider) {
+  if (isMoaProvider(provider)) return "MoA";
+  const name = provider?.constructor?.name ?? "";
+  if (name === "AnthropicProvider") return "Anthropic";
+  if (name === "OpenAIResponsesProvider") return "OpenAI";
+  return name.replace(/Provider$/, "") || "Unknown";
+}
+
+function providerModelNames(provider) {
+  if (typeof provider?.availableModels !== "function") return [];
+  const available = provider.availableModels();
+  if (!Array.isArray(available)) return [];
+  return available
+    .map((item) => (
+      typeof item === "string"
+        ? item
+        : item?.id ?? item?.name ?? item?.model ?? item?.preset
+    ))
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
 }
 
 function discordUserId(interaction) {

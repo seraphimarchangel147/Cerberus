@@ -44,6 +44,7 @@ import { TaskSweep } from "./task-sweep.js";
 import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
 import { GoalStore } from "./goal-store.js";
+import { KanbanStore } from "./kanban-store.js";
 import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
@@ -331,6 +332,11 @@ export class AbiRuntime {
     this.suggestionFeedback = options.suggestionFeedback ?? new SuggestionFeedback({ runtime: this, dataDir: options.dataDir });
     this.tasks = options.tasks ?? new TaskStore({ runtime: this, dataDir: options.dataDir, ...(options.taskStoreOptions ?? {}) });
     this.goals = options.goals ?? new GoalStore({ dataDir: options.dataDir, ...(options.goalStoreOptions ?? {}) });
+    this.kanban = options.kanban ?? new KanbanStore({
+      runtime: this,
+      dataDir: options.dataDir,
+      ...(options.kanbanOptions ?? {})
+    });
     // Periodic task-list hygiene: dedupe, re-home to the right queue, cancel
     // stale auto-extracted items, archive old terminal tasks.
     this.taskSweep = options.taskSweep ?? new TaskSweep({ runtime: this });
