@@ -69,6 +69,12 @@ test("OpenAI goal loop auto-continues once, uses the cheap model, then completes
       judgeRequests += 1;
       return {
         id: `judge-${judgeRequests}`,
+        usage: {
+          input_tokens: 3,
+          output_tokens: 1,
+          total_tokens: 4,
+          input_tokens_details: { cached_tokens: 0 }
+        },
         output_text: JSON.stringify(judgeRequests === 1
           ? { satisfied: false, why: "second step remains" }
           : { satisfied: true, why: "both steps are complete" }),
@@ -78,6 +84,12 @@ test("OpenAI goal loop auto-continues once, uses the cheap model, then completes
     mainRequests += 1;
     return {
       id: `main-${mainRequests}`,
+      usage: {
+        input_tokens: 10,
+        output_tokens: 2,
+        total_tokens: 12,
+        input_tokens_details: { cached_tokens: 1 }
+      },
       output_text: mainRequests === 1 ? "Finished step one." : "Finished step two.",
       output: []
     };
@@ -99,8 +111,16 @@ test("OpenAI goal loop auto-continues once, uses the cheap model, then completes
   assert.ok(judgeBodies.every((body) => (
     body.model === "cheap-model"
     && body.max_output_tokens === 256
+    && body.store === false
     && !("tools" in body)
   )));
+  assert.ok(sent.every((body) => body.store === false));
+  assert.deepEqual(result.usage, {
+    input_tokens: 26,
+    output_tokens: 6,
+    total_tokens: 32,
+    input_tokens_details: { cached_tokens: 2 }
+  });
   const secondMain = sent.filter((body) => !String(body.instructions).includes("goal-completion judge"))[1];
   assert.match(JSON.stringify(secondMain.input), /Finished step one/);
   assert.match(JSON.stringify(secondMain.input), /Continue the same task/);
@@ -128,6 +148,7 @@ test("Anthropic goal loop reuses synthetic continuation and completes", async (t
       return {
         id: `judge-${judgeRequests}`,
         stop_reason: "end_turn",
+        usage: { input_tokens: 3, output_tokens: 1, cache_read_input_tokens: 0 },
         content: [{
           type: "text",
           text: JSON.stringify(judgeRequests === 1
@@ -140,6 +161,7 @@ test("Anthropic goal loop reuses synthetic continuation and completes", async (t
     return {
       id: `main-${mainRequests}`,
       stop_reason: "end_turn",
+      usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 1 },
       content: [{ type: "text", text: mainRequests === 1 ? "First stage done." : "Second stage done." }]
     };
   };
@@ -149,6 +171,11 @@ test("Anthropic goal loop reuses synthetic continuation and completes", async (t
   assert.equal(result.stopReason, "goal-satisfied");
   assert.equal(mainRequests, 2);
   assert.equal(judgeRequests, 2);
+  assert.deepEqual(result.usage, {
+    input_tokens: 26,
+    output_tokens: 6,
+    cache_read_input_tokens: 2
+  });
   const judges = sent.filter((body) => typeof body.system === "string");
   assert.ok(judges.every((body) => body.model === "small-model" && !("tools" in body)));
   const secondMain = sent.filter((body) => Array.isArray(body.system))[1];

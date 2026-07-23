@@ -622,3 +622,13 @@ PARITY WAVE 3 PHASE 2 COMPLETE
 - Made AgentHost keep the raw current message in durable session history while passing providers only prior messages plus one separately expanded current turn.
 - Preserved repeated identical user turns, context-reference expansion, image forwarding, and ephemeral behavior without content-based deduplication.
 - Added first-turn, multi-turn, repeated-text, ephemeral, context-reference, and image request-boundary regressions in both approval lanes.
+
+## 2026-07-23 - Agent workspace upgrades: safe efficiency telemetry (Codex)
+
+- Added content-free request-shape telemetry for prior-message bytes, one current turn, image count, instruction bytes, and visible/deferred tool-catalog weight.
+- Aggregated provider usage across normal hops, goal judges, and forced answers; exposed it through AgentHost and the API server path without persisting prompts, arguments, results, credentials, or reasoning.
+- Corrected OpenAI cached-token accounting so cached input is not also billed at the full input rate, while preserving Anthropic's additive cache semantics.
+- Added provider, cache, request, schema, compression, latency, stop-reason, and deduplicated tool-outcome analytics; legacy ledger rows remain readable.
+- Explicitly disabled provider-side storage for stateless OpenAI requests and replaced Anthropic thinking-only salvage with a bounded trace-free status.
+- Fixed atomic snapshot flushing on Windows by opening the owned temporary file with a writable handle.
+SAFE EFFICIENCY TELEMETRY COMPLETE

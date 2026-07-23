@@ -39,12 +39,18 @@ function makeHarness(options = {}) {
       requests.push({
         input: request.input,
         messages: request.messages.map(({ role, content }) => ({ role, content })),
-        images: request.images.map((image) => ({ ...image }))
+        images: request.images.map((image) => ({ ...image })),
+        requestShape: { ...request.context.__requestShape }
       });
       return {
         provider: "fixture",
         model: "fixture-model",
         id: `response_provider_request_${sequence}`,
+        usage: {
+          input_tokens: 100 + sequence,
+          output_tokens: 20 + sequence,
+          input_tokens_details: { cached_tokens: 10 }
+        },
         text: `Fixture reply ${sequence}.`,
         toolCalls: [],
         iterations: 1,
@@ -71,7 +77,7 @@ test("AgentHost sends a first turn exactly once while persisting the raw user me
   const sessionId = "provider-request-first-turn";
   const current = "Explain canonical provider request assembly.";
 
-  await host.handleMessage({
+  const result = await host.handleMessage({
     channel: "local",
     from: "creator",
     sessionId,
@@ -82,6 +88,25 @@ test("AgentHost sends a first turn exactly once while persisting the raw user me
   assert.equal(requests.length, 1);
   assert.equal(requests[0].input, current);
   assert.deepEqual(requests[0].messages, []);
+  assert.deepEqual(requests[0].requestShape, {
+    historyMessageCount: 0,
+    historyBytes: 2,
+    currentTurnCount: 1,
+    currentInputBytes: Buffer.byteLength(current),
+    imageCount: 0,
+    instructionBytes: requests[0].requestShape.instructionBytes,
+    visibleToolCount: requests[0].requestShape.visibleToolCount,
+    visibleSchemaBytes: requests[0].requestShape.visibleSchemaBytes,
+    deferredToolCount: requests[0].requestShape.deferredToolCount,
+    deferredSchemaBytes: requests[0].requestShape.deferredSchemaBytes
+  });
+  assert.ok(requests[0].requestShape.instructionBytes > 0);
+  assert.equal(result.model.id, "response_provider_request_1");
+  assert.deepEqual(result.model.usage, {
+    input_tokens: 101,
+    output_tokens: 21,
+    input_tokens_details: { cached_tokens: 10 }
+  });
   assert.deepEqual(durableMessages(store, sessionId), [
     { role: "user", content: current },
     { role: "assistant", content: "Fixture reply 1." }
@@ -113,6 +138,8 @@ test("AgentHost sends only prior persisted messages on a later turn", async () =
     { role: "user", content: "First durable turn." },
     { role: "assistant", content: "Fixture reply 1." }
   ]);
+  assert.equal(requests[1].requestShape.historyMessageCount, 2);
+  assert.ok(requests[1].requestShape.historyBytes > requests[0].requestShape.historyBytes);
   assert.deepEqual(durableMessages(store, sessionId), [
     { role: "user", content: "First durable turn." },
     { role: "assistant", content: "Fixture reply 1." },

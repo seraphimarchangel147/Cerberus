@@ -94,6 +94,54 @@ export function providerHistoryBeforeCurrentTurn(messages, currentMessageId) {
   return messages.slice(0, lastIndex);
 }
 
+function jsonUtf8Bytes(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+  } catch {
+    return 0;
+  }
+}
+
+function requestShapeTelemetry({
+  history,
+  currentInput,
+  images,
+  instructions,
+  visibleTools,
+  toolRegistry,
+  allowedToolNames,
+  readOnly,
+  toolsEligible
+}) {
+  const visible = Array.isArray(visibleTools) ? visibleTools : [];
+  const visibleNames = new Set(visible.map((tool) => tool?.name).filter(Boolean));
+  const allowed = Array.isArray(allowedToolNames)
+    ? new Set(allowedToolNames)
+    : null;
+  const eligible = toolsEligible && typeof toolRegistry?.list === "function"
+    ? toolRegistry.list({ readOnly }).filter((tool) => !allowed || allowed.has(tool.name))
+    : [];
+  const deferred = eligible.filter((tool) => !visibleNames.has(tool.name));
+  const deferredSchemas = deferred.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters
+  }));
+  return Object.freeze({
+    historyMessageCount: Array.isArray(history) ? history.length : 0,
+    historyBytes: jsonUtf8Bytes(history),
+    currentTurnCount: 1,
+    currentInputBytes: Buffer.byteLength(String(currentInput ?? ""), "utf8"),
+    imageCount: Array.isArray(images) ? images.length : 0,
+    instructionBytes: Buffer.byteLength(String(instructions ?? ""), "utf8"),
+    visibleToolCount: visible.length,
+    visibleSchemaBytes: jsonUtf8Bytes(visible),
+    deferredToolCount: deferred.length,
+    deferredSchemaBytes: jsonUtf8Bytes(deferredSchemas)
+  });
+}
+
 export function isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist = false }) {
   const interactive = channel !== "autopilot"
     && channel !== "cron"
@@ -577,6 +625,19 @@ export class AgentHost {
         workspaceDir: this.workspaceDir,
         signal: turnAbortController.signal
       });
+      const providerInstructions = this.instructionsForAgent(agent);
+      const providerImages = Array.isArray(input.images) ? input.images : [];
+      modelContext.__requestShape = requestShapeTelemetry({
+        history: providerHistory,
+        currentInput: providerInput,
+        images: providerImages,
+        instructions: providerInstructions,
+        visibleTools: tools,
+        toolRegistry,
+        allowedToolNames,
+        readOnly: toolPolicy === "read-only",
+        toolsEligible: toolPolicy !== "none" || conversational
+      });
       modelResult = await turnProvider.generate({
         input: providerInput,
         agent,
@@ -590,8 +651,8 @@ export class AgentHost {
         // reference expansion. Provider history must contain only earlier
         // turns or both paid paths serialize the current user content twice.
         messages: providerHistory,
-        images: Array.isArray(input.images) ? input.images : [],
-        instructions: this.instructionsForAgent(agent),
+        images: providerImages,
+        instructions: providerInstructions,
         sessionMemorySnapshot,
         turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice),
         tools,
@@ -650,6 +711,8 @@ export class AgentHost {
             provider: modelResult.provider,
             model: modelResult.model,
             responseId: modelResult.id,
+            usage: modelResult.usage ?? null,
+            requestShape: modelContext.__requestShape,
             iterations: modelResult.iterations ?? null,
             maxIterations: modelResult.maxIterations ?? null,
             stopReason: modelResult.stopReason ?? null,
@@ -715,8 +778,10 @@ export class AgentHost {
       reply: modelResult.text,
       toolCalls: (modelResult.toolCalls ?? []).map((c) => ({ name: c.name, ok: c.result?.ok ?? false })),
       model: {
+        id: modelResult.id ?? null,
         provider: modelResult.provider,
         model: modelResult.model,
+        usage: modelResult.usage ?? null,
         configured: turnProvider.isConfigured?.() ?? true,
         iterations: modelResult.iterations ?? null,
         maxIterations: modelResult.maxIterations ?? null,

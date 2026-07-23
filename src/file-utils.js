@@ -33,7 +33,9 @@ export function writeTextAtomic(filePath, data, mode = 0o600) {
   let committed = false;
   try {
     fs.writeFileSync(tempPath, data, { mode });
-    const fd = fs.openSync(tempPath, "r");
+    // Windows requires a writable handle for FlushFileBuffers, which is what
+    // fsyncSync uses. The temporary file is ours and was just written.
+    const fd = fs.openSync(tempPath, "r+");
     try {
       fs.fsyncSync(fd);
     } finally {

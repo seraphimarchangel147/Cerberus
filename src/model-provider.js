@@ -46,6 +46,7 @@ const DEFAULT_CONTEXT_DIGEST_CHARS = 4000;
 const DEFAULT_CONTEXT_ESTIMATE_CHARS_PER_TOKEN = 4;
 const MAX_CACHE_IDENTITY_SESSIONS = 1000;
 const RUNTIME_CACHE_IDENTITIES = new WeakMap();
+const RUNTIME_TOOL_OUTCOME_IDS = new WeakMap();
 const UNKNOWN_CONTEXT_WINDOW_WARNINGS = new Set();
 const MIN_CONTEXT_DIGEST_CHARS = 40;
 const SYNTHETIC_CONTINUE = [
@@ -560,6 +561,155 @@ function checkRequestBudget(provider, turnBudget) {
 function recordTurnSpend(turnBudget, record) {
   const added = Number(record?.added);
   if (Number.isFinite(added) && added > 0) turnBudget.spentUsd += added;
+}
+
+function createProviderUsageAccumulator() {
+  return { calls: 0, usage: {} };
+}
+
+function addProviderUsage(accumulator, usage) {
+  if (!accumulator || !usage || typeof usage !== "object" || Array.isArray(usage)) return;
+  accumulator.calls += 1;
+  mergeProviderUsage(accumulator.usage, usage);
+}
+
+function mergeProviderUsage(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const previous = Number(target[key]);
+      target[key] = (Number.isFinite(previous) ? previous : 0) + value;
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const nested = target[key] && typeof target[key] === "object" && !Array.isArray(target[key])
+      ? target[key]
+      : {};
+    target[key] = nested;
+    mergeProviderUsage(nested, value);
+  }
+}
+
+function finalizedProviderUsage(accumulator) {
+  return accumulator?.calls > 0 ? accumulator.usage : null;
+}
+
+function serializedByteLength(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return 0;
+  }
+}
+
+function nonnegativeMetric(...values) {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+  }
+  return 0;
+}
+
+function openAIToolOutputFailed(output) {
+  if (typeof output !== "string") {
+    return Boolean(output && typeof output === "object" && Object.hasOwn(output, "error"));
+  }
+  try {
+    const parsed = JSON.parse(output);
+    return Boolean(parsed && typeof parsed === "object" && Object.hasOwn(parsed, "error"));
+  } catch {
+    return /^\s*\{\s*"error"\s*:/u.test(output);
+  }
+}
+
+function toolOutcomeSeenSet(context, format) {
+  if (!context || typeof context !== "object") return null;
+  let byFormat = RUNTIME_TOOL_OUTCOME_IDS.get(context);
+  if (!byFormat) {
+    byFormat = new Map();
+    RUNTIME_TOOL_OUTCOME_IDS.set(context, byFormat);
+  }
+  let seen = byFormat.get(format);
+  if (!seen) {
+    seen = new Set();
+    byFormat.set(format, seen);
+  }
+  return seen;
+}
+
+function requestToolOutcomeCounts(body, format, seen = null) {
+  let toolSuccessCount = 0;
+  let toolFailureCount = 0;
+  if (format === "anthropic") {
+    for (const message of Array.isArray(body?.messages) ? body.messages : []) {
+      for (const block of Array.isArray(message?.content) ? message.content : []) {
+        if (block?.type !== "tool_result") continue;
+        const id = String(block.tool_use_id ?? "").trim();
+        if (seen && id && seen.has(id)) continue;
+        if (seen && id) seen.add(id);
+        if (block.is_error === true) toolFailureCount += 1;
+        else toolSuccessCount += 1;
+      }
+    }
+    return { toolSuccessCount, toolFailureCount };
+  }
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    if (item?.type !== "function_call_output") continue;
+    const id = String(item.call_id ?? "").trim();
+    if (seen && id && seen.has(id)) continue;
+    if (seen && id) seen.add(id);
+    if (openAIToolOutputFailed(item.output)) toolFailureCount += 1;
+    else toolSuccessCount += 1;
+  }
+  return { toolSuccessCount, toolFailureCount };
+}
+
+function providerRequestEfficiency({
+  body,
+  context,
+  serializedBody,
+  latencyMs,
+  compression,
+  response,
+  format
+}) {
+  const declared = context?.__requestShape && typeof context.__requestShape === "object"
+    ? context.__requestShape
+    : {};
+  const visibleTools = Array.isArray(body?.tools) ? body.tools : [];
+  const rawStopReason = format === "anthropic" ? response?.stop_reason : response?.status;
+  const stopReason = ["end_turn", "completed"].includes(rawStopReason)
+    ? "completed"
+    : rawStopReason === "error" || rawStopReason === "failed"
+      ? "provider-error"
+      : null;
+  const toolOutcomes = requestToolOutcomeCounts(
+    body,
+    format,
+    toolOutcomeSeenSet(context, format)
+  );
+  return {
+    provider: format,
+    requestBytes: Buffer.byteLength(serializedBody, "utf8"),
+    toolCount: Math.max(
+      visibleTools.length,
+      nonnegativeMetric(declared.toolCount, declared.totalToolCount)
+    ),
+    visibleToolCount: visibleTools.length,
+    toolSchemaBytes: visibleTools.length > 0 ? serializedByteLength(visibleTools) : 0,
+    visibleSchemaBytes: visibleTools.length > 0 ? serializedByteLength(visibleTools) : 0,
+    deferredToolCount: nonnegativeMetric(
+      declared.deferredToolCount,
+      declared.deferredCount
+    ),
+    deferredSchemaBytes: nonnegativeMetric(
+      declared.deferredSchemaBytes,
+      declared.deferredToolSchemaBytes
+    ),
+    compression: compression?.compressed === true,
+    latencyMs: nonnegativeMetric(latencyMs),
+    stopReason,
+    ...toolOutcomes
+  };
 }
 
 function openAIWantsContinuation(response, calls) {
@@ -1483,14 +1633,16 @@ export class OpenAIResponsesProvider {
     return this.model;
   }
 
-  async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null) {
+  async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null, usageAccumulator = null) {
     checkRequestBudget(this, turnBudget);
     const response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
       model: this.resolveModel({ task: "goal" }),
       max_output_tokens: GOAL_JUDGE_MAX_TOKENS,
+      store: false,
       instructions: GOAL_JUDGE_INSTRUCTIONS,
       input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
     }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
+    addProviderUsage(usageAccumulator, response?.usage);
     const verdict = parseGoalJudgeVerdict(extractResponseText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
     return verdict;
@@ -1502,6 +1654,7 @@ export class OpenAIResponsesProvider {
     if (!this.isConfigured()) throw new Error("OPENAI_API_KEY is not configured.");
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
+    const usageAccumulator = createProviderUsageAccumulator();
     let credentialState;
     try {
       credentialState = initialCredentialState(this, { model, context });
@@ -1522,7 +1675,8 @@ export class OpenAIResponsesProvider {
         toolCalls: [],
         iterations: 0,
         maxIterations,
-        stopReason: "provider-error"
+        stopReason: "provider-error",
+        usage: null
       };
     }
 
@@ -1614,6 +1768,7 @@ export class OpenAIResponsesProvider {
       }
       const body = {
         model,
+        store: false,
         instructions: baseInstructions,
         input: conversationInput
       };
@@ -1624,7 +1779,8 @@ export class OpenAIResponsesProvider {
           this.postResponses(body, context, {
             timeoutMs: remainingMs,
             turnBudget,
-            credentialRequest: credentialState.request
+            credentialRequest: credentialState.request,
+            compression: preparation
           })
         ), context);
       } catch (error) {
@@ -1644,6 +1800,7 @@ export class OpenAIResponsesProvider {
       }
 
       successfulModelHops += 1;
+      addProviderUsage(usageAccumulator, response?.usage);
       previousUsage = response?.usage ?? null;
       const calls = extractFunctionCalls(response);
       const responseText = extractResponseText(response);
@@ -1663,7 +1820,8 @@ export class OpenAIResponsesProvider {
               judgeContext,
               judgeDeadline,
               judgeBudget,
-              credentialState.request
+              credentialState.request,
+              usageAccumulator
             )
           )
         });
@@ -1793,13 +1951,16 @@ export class OpenAIResponsesProvider {
         } else {
           response = await this.postResponses({
             model,
+            store: false,
             instructions: baseInstructions,
             input: conversationInput
           }, context, {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
-            credentialRequest: credentialState.request
+            credentialRequest: credentialState.request,
+            compression: preparation
           });
+          addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractResponseText(response);
           if (forced) text = forced;
         }
@@ -1826,7 +1987,8 @@ export class OpenAIResponsesProvider {
       toolCalls,
       iterations,
       maxIterations,
-      stopReason
+      stopReason,
+      usage: finalizedProviderUsage(usageAccumulator)
     };
   }
 
@@ -1841,6 +2003,9 @@ export class OpenAIResponsesProvider {
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    const routedBody = providerRoutedBody(body, this.baseUrl, this.providerRouting);
+    const serializedBody = JSON.stringify(routedBody);
+    const startedAt = this.now();
     try {
       const response = await requestWithProviderCredential(
         this,
@@ -1856,22 +2021,32 @@ export class OpenAIResponsesProvider {
               "content-type": "application/json",
               authorization: `Bearer ${credential}`
             },
-            body: JSON.stringify(providerRoutedBody(
-              body,
-              this.baseUrl,
-              this.providerRouting
-            ))
+            body: serializedBody
           })
         }
       );
       const json = await response.json().catch(() => ({}));
+      const latencyMs = Math.max(0, this.now() - startedAt);
       const callTools = (json.output ?? []).filter((item) => item.type === "function_call").map((item) => item.name);
+      const efficiency = providerRequestEfficiency({
+        body,
+        context,
+        serializedBody,
+        latencyMs,
+        compression: options.compression,
+        response: json,
+        format: "openai"
+      });
       const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
+        provider: "openai",
         channel: context.channel,
         agentId: context.agentId,
         sessionId: context.sessionId,
         from: context.from,
-        tools: callTools
+        tools: callTools,
+        toolSuccessCount: efficiency.toolSuccessCount,
+        toolFailureCount: efficiency.toolFailureCount,
+        efficiency
       });
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
       return json;
@@ -1924,7 +2099,7 @@ export class AnthropicProvider {
     return this.model;
   }
 
-  async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null) {
+  async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null, usageAccumulator = null) {
     checkRequestBudget(this, turnBudget);
     const response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
       model: this.resolveModel({ task: "goal" }),
@@ -1932,6 +2107,7 @@ export class AnthropicProvider {
       system: GOAL_JUDGE_INSTRUCTIONS,
       messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
     }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
+    addProviderUsage(usageAccumulator, response?.usage);
     const verdict = parseGoalJudgeVerdict(extractAnthropicText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
     return verdict;
@@ -1943,6 +2119,7 @@ export class AnthropicProvider {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
+    const usageAccumulator = createProviderUsageAccumulator();
     let credentialState;
     try {
       credentialState = initialCredentialState(this, { model, context });
@@ -1963,7 +2140,8 @@ export class AnthropicProvider {
         toolCalls: [],
         iterations: 0,
         maxIterations,
-        stopReason: "provider-error"
+        stopReason: "provider-error",
+        usage: null
       };
     }
 
@@ -2080,7 +2258,8 @@ export class AnthropicProvider {
           timeoutMs: remainingMs,
           turnBudget,
           onDelta,
-          credentialRequest: credentialState.request
+          credentialRequest: credentialState.request,
+          compression: preparation
         }), context);
       } catch (error) {
         if (isCredentialPoolExhausted(error) && successfulModelHops === 0 && toolCalls.length === 0) {
@@ -2099,6 +2278,7 @@ export class AnthropicProvider {
       }
 
       successfulModelHops += 1;
+      addProviderUsage(usageAccumulator, response?.usage);
       previousUsage = response?.usage ?? null;
       convo.push({ role: "assistant", content: response.content ?? [] });
 
@@ -2120,7 +2300,8 @@ export class AnthropicProvider {
               judgeContext,
               judgeDeadline,
               judgeBudget,
-              credentialState.request
+              credentialState.request,
+              usageAccumulator
             )
           )
         });
@@ -2220,8 +2401,10 @@ export class AnthropicProvider {
           }, context, {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
-            credentialRequest: credentialState.request
+            credentialRequest: credentialState.request,
+            compression: preparation
           });
+          addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractAnthropicText(response);
           if (forced) text = forced;
         }
@@ -2241,27 +2424,23 @@ export class AnthropicProvider {
       text = extractAnthropicText(response);
     }
 
-    // Last-resort salvage: a reasoning model that hit max_tokens mid-think
-    // returns only `thinking` blocks. Surface a trimmed slice of the trace
-    // rather than the "(no text)" placeholder.
-    const salvage = !text
-      ? (response?.content ?? [])
-          .filter((c) => c.type === "thinking" && typeof c.thinking === "string")
-          .map((c) => c.thinking)
-          .join("\n")
-          .trim()
-          .slice(0, 1500)
-      : "";
+    const thinkingOnly = !text && (response?.content ?? []).some(
+      (block) => block?.type === "thinking" && typeof block.thinking === "string"
+    );
+    const emptyReply = thinkingOnly
+      ? "Reply truncated before the model produced user-facing text. Retry the request or raise OPENAGI_MAX_TOKENS."
+      : "(no text)";
 
     return {
       provider: "anthropic",
       model,
       id: response?.id,
-      text: text || (salvage ? `⚠ Reply truncated mid-reasoning (max_tokens). Reasoning trace excerpt:\n${salvage}` : "(no text)"),
+      text: text || emptyReply,
       toolCalls,
       iterations,
       maxIterations,
-      stopReason
+      stopReason,
+      usage: finalizedProviderUsage(usageAccumulator)
     };
   }
 
@@ -2292,6 +2471,9 @@ export class AnthropicProvider {
     const onActivity = stallMs > 0
       ? () => { clearTimeout(timer); timer = armStallTimeout(); }
       : undefined;
+    const routedBody = providerRoutedBody(body, this.baseUrl, this.providerRouting);
+    const serializedBody = JSON.stringify(routedBody);
+    const startedAt = this.now();
     try {
       const response = await requestWithProviderCredential(
         this,
@@ -2311,11 +2493,7 @@ export class AnthropicProvider {
               method: "POST",
               signal: controller.signal,
               headers,
-              body: JSON.stringify(providerRoutedBody(
-                body,
-                this.baseUrl,
-                this.providerRouting
-              ))
+              body: serializedBody
             });
           }
         }
@@ -2324,13 +2502,27 @@ export class AnthropicProvider {
       const json = streaming && /text\/event-stream/i.test(contentType)
         ? await readAnthropicEventStream(response, { onDelta: options.onDelta, onActivity })
         : await response.json().catch(() => ({}));
+      const latencyMs = Math.max(0, this.now() - startedAt);
       const callTools = (json.content ?? []).filter((b) => b.type === "tool_use").map((b) => b.name);
+      const efficiency = providerRequestEfficiency({
+        body,
+        context,
+        serializedBody,
+        latencyMs,
+        compression: options.compression,
+        response: json,
+        format: "anthropic"
+      });
       const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
+        provider: "anthropic",
         channel: context.channel,
         agentId: context.agentId,
         sessionId: context.sessionId,
         from: context.from,
-        tools: callTools
+        tools: callTools,
+        toolSuccessCount: efficiency.toolSuccessCount,
+        toolFailureCount: efficiency.toolFailureCount,
+        efficiency
       });
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
       return json;

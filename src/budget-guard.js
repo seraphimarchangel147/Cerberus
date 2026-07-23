@@ -87,6 +87,7 @@ export class BudgetGuard {
     try {
       this.ledger?.record({
         at: nowIso(),
+        provider: meta.provider ?? null,
         model,
         tokens,
         usd,
@@ -94,7 +95,21 @@ export class BudgetGuard {
         agentId: meta.agentId ?? null,
         sessionId: meta.sessionId ?? null,
         from: meta.from ?? null,
-        tools: Array.isArray(meta.tools) ? meta.tools : []
+        tools: Array.isArray(meta.tools) ? meta.tools : [],
+        efficiency: meta.efficiency ?? {
+          requestBytes: meta.requestBytes,
+          toolCount: meta.toolCount,
+          toolSuccessCount: meta.toolSuccessCount,
+          toolFailureCount: meta.toolFailureCount,
+          toolSchemaBytes: meta.toolSchemaBytes,
+          visibleSchemaBytes: meta.visibleSchemaBytes,
+          deferredSchemaBytes: meta.deferredSchemaBytes,
+          visibleToolCount: meta.visibleToolCount,
+          deferredToolCount: meta.deferredToolCount,
+          compression: meta.compression,
+          stopReason: meta.stopReason,
+          latencyMs: meta.latencyMs
+        }
       });
     } catch { /* ledger is best-effort; never break a reply over it */ }
 
@@ -121,10 +136,41 @@ export class BudgetGuard {
 }
 
 function normalizeUsage(usage) {
+  const totalInput = nonnegativeNumber(usage.input_tokens ?? usage.prompt_tokens);
+  const output = nonnegativeNumber(usage.output_tokens ?? usage.completion_tokens);
+  const hasAnthropicCacheFields =
+    Object.hasOwn(usage, "cache_read_input_tokens")
+    || Object.hasOwn(usage, "cache_creation_input_tokens");
+
+  // Anthropic reports uncached input and cache read/write tokens as separate,
+  // additive fields. Do not subtract those values from input_tokens.
+  if (hasAnthropicCacheFields) {
+    return {
+      input: totalInput,
+      output,
+      cacheRead: nonnegativeNumber(usage.cache_read_input_tokens),
+      cacheWrite: nonnegativeNumber(usage.cache_creation_input_tokens)
+    };
+  }
+
+  // OpenAI Responses (input_tokens_details) and Chat Completions
+  // (prompt_tokens_details) include cached tokens inside the total input
+  // count. Split the total into mutually-exclusive uncached and cached
+  // buckets so cached tokens are not charged once at full input price and
+  // again at the cache-read price.
+  const cacheRead = nonnegativeNumber(
+    usage.input_tokens_details?.cached_tokens
+    ?? usage.prompt_tokens_details?.cached_tokens
+  );
   return {
-    input: usage.input_tokens ?? usage.prompt_tokens ?? 0,
-    output: usage.output_tokens ?? usage.completion_tokens ?? 0,
-    cacheRead: usage.cache_read_input_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0,
-    cacheWrite: usage.cache_creation_input_tokens ?? 0
+    input: Math.max(totalInput - cacheRead, 0),
+    output,
+    cacheRead,
+    cacheWrite: 0
   };
+}
+
+function nonnegativeNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }

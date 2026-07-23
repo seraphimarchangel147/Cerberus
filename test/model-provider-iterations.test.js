@@ -291,6 +291,236 @@ test("Anthropic resumes a max_tokens response with its partial text intact", asy
 for (const spec of [
   {
     name: "OpenAI",
+    make: () => new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 1 }),
+    registry: openAIToolRegistry,
+    stub(provider, sent) {
+      provider.postResponses = async (body) => {
+        sent.push(structuredClone(body));
+        if (body.tools) {
+          return {
+            id: "openai-tool",
+            usage: {
+              input_tokens: 10,
+              output_tokens: 2,
+              total_tokens: 12,
+              input_tokens_details: { cached_tokens: 4 }
+            },
+            output: [{ type: "function_call", call_id: "call-1", name: "step", arguments: "{}" }]
+          };
+        }
+        return {
+          id: "openai-force",
+          usage: {
+            input_tokens: 6,
+            output_tokens: 3,
+            total_tokens: 9,
+            input_tokens_details: { cached_tokens: 1 }
+          },
+          output_text: "OpenAI forced answer.",
+          output: []
+        };
+      };
+    },
+    expectedUsage: {
+      input_tokens: 16,
+      output_tokens: 5,
+      total_tokens: 21,
+      input_tokens_details: { cached_tokens: 5 }
+    }
+  },
+  {
+    name: "Anthropic",
+    make: () => new AnthropicProvider({ apiKey: "test-key", maxIterations: 1 }),
+    registry: anthropicToolRegistry,
+    stub(provider, sent) {
+      provider.postMessages = async (body) => {
+        sent.push(structuredClone(body));
+        if (body.tools) {
+          return {
+            id: "anthropic-tool",
+            stop_reason: "tool_use",
+            usage: {
+              input_tokens: 10,
+              output_tokens: 2,
+              cache_read_input_tokens: 4,
+              cache_creation: { ephemeral_5m_input_tokens: 1 }
+            },
+            content: [{ type: "tool_use", id: "tool-1", name: "step", input: {} }]
+          };
+        }
+        return {
+          id: "anthropic-force",
+          stop_reason: "end_turn",
+          usage: {
+            input_tokens: 6,
+            output_tokens: 3,
+            cache_read_input_tokens: 1,
+            cache_creation: { ephemeral_5m_input_tokens: 2 }
+          },
+          content: [{ type: "text", text: "Anthropic forced answer." }]
+        };
+      };
+    },
+    expectedUsage: {
+      input_tokens: 16,
+      output_tokens: 5,
+      cache_read_input_tokens: 5,
+      cache_creation: { ephemeral_5m_input_tokens: 3 }
+    }
+  }
+]) {
+  test(`${spec.name} aggregates main-hop and force-answer usage exactly once`, async () => {
+    const provider = spec.make();
+    const sent = [];
+    spec.stub(provider, sent);
+
+    const result = await provider.generate({
+      input: "run one tool then answer",
+      agent,
+      toolRegistry: spec.registry()
+    });
+
+    assert.equal(result.stopReason, "iteration-cap");
+    assert.equal(sent.length, 2);
+    assert.deepEqual(result.usage, spec.expectedUsage);
+    if (spec.name === "OpenAI") {
+      assert.ok(sent.every((body) => body.store === false), "main and force-answer requests are explicitly stateless");
+    }
+  });
+}
+
+test("Anthropic never exposes thinking-only content in its fallback reply", async () => {
+  const secretThinking = "private chain of thought sentinel";
+  const provider = new AnthropicProvider({ apiKey: "test-key", maxIterations: 1 });
+  provider.postMessages = async () => ({
+    id: "thinking-only",
+    stop_reason: "end_turn",
+    usage: { input_tokens: 2, output_tokens: 7 },
+    content: [{ type: "thinking", thinking: secretThinking }]
+  });
+
+  const result = await provider.generate({ input: "answer safely", agent });
+
+  assert.match(result.text, /truncated before the model produced user-facing text/i);
+  assert.doesNotMatch(result.text, new RegExp(secretThinking, "i"));
+  assert.deepEqual(result.usage, { input_tokens: 2, output_tokens: 7 });
+});
+
+test("provider budget records receive content-free request efficiency metrics", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const shape = {
+    toolCount: 7,
+    deferredToolCount: 6,
+    deferredSchemaBytes: 321
+  };
+
+  for (const spec of [
+    {
+      make: (budgetGuard, now) => new OpenAIResponsesProvider({
+        apiKey: "test-key",
+        budgetGuard,
+        now
+      }),
+      body: {
+        model: "gpt-5",
+        store: false,
+        input: [
+          { type: "function_call_output", call_id: "prior-ok", output: '{"ok":true}' },
+          { type: "function_call_output", call_id: "prior-failed", output: '{"error":"failed"}' },
+          { role: "user", content: "hello" }
+        ],
+        tools: [{ type: "function", name: "step", parameters: { type: "object" } }]
+      },
+      post: (provider, body, context, options) => provider.postResponses(body, context, options),
+      response: {
+        status: "completed",
+        usage: { input_tokens: 4, output_tokens: 2 },
+        output: [{ type: "function_call", name: "step", call_id: "call-1", arguments: "{}" }]
+      }
+    },
+    {
+      make: (budgetGuard, now) => new AnthropicProvider({
+        apiKey: "test-key",
+        budgetGuard,
+        now,
+        stallTimeoutMs: 0
+      }),
+      body: {
+        model: "claude-sonnet-4-6",
+        max_tokens: 64,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "prior-ok", content: "ok", is_error: false },
+            { type: "tool_result", tool_use_id: "prior-failed", content: "failed", is_error: true },
+            { type: "text", text: "hello" }
+          ]
+        }],
+        tools: [{ name: "step", input_schema: { type: "object" } }]
+      },
+      post: (provider, body, context, options) => provider.postMessages(body, context, options),
+      response: {
+        stop_reason: "end_turn",
+        usage: { input_tokens: 4, output_tokens: 2 },
+        content: [{ type: "tool_use", name: "step", id: "tool-1", input: {} }]
+      }
+    }
+  ]) {
+    let clock = 100;
+    const recorded = [];
+    const budgetGuard = {
+      record(_usage, _model, meta) {
+        recorded.push(meta);
+        return { added: 0 };
+      }
+    };
+    const provider = spec.make(budgetGuard, () => clock);
+    globalThis.fetch = async () => {
+      clock += 37;
+      return {
+        ok: true,
+        headers: { get: () => "application/json" },
+        json: async () => structuredClone(spec.response)
+      };
+    };
+    const requestContext = {
+      channel: "test",
+      __requestShape: shape
+    };
+
+    await spec.post(provider, spec.body, requestContext, {
+      compression: { compressed: true }
+    });
+    await spec.post(provider, spec.body, requestContext, {
+      compression: { compressed: true }
+    });
+
+    const firstRecord = recorded[0];
+    assert.deepEqual(firstRecord.tools, ["step"]);
+    assert.equal(firstRecord.provider, spec.body.model.startsWith("claude") ? "anthropic" : "openai");
+    assert.equal(firstRecord.toolSuccessCount, 1);
+    assert.equal(firstRecord.toolFailureCount, 1);
+    assert.equal(firstRecord.efficiency.requestBytes, Buffer.byteLength(JSON.stringify(spec.body), "utf8"));
+    assert.equal(firstRecord.efficiency.provider, firstRecord.provider);
+    assert.equal(firstRecord.efficiency.toolCount, 7);
+    assert.equal(firstRecord.efficiency.visibleToolCount, 1);
+    assert.equal(firstRecord.efficiency.deferredToolCount, 6);
+    assert.equal(firstRecord.efficiency.deferredSchemaBytes, 321);
+    assert.equal(firstRecord.efficiency.compression, true);
+    assert.equal(firstRecord.efficiency.latencyMs, 37);
+    assert.equal(firstRecord.efficiency.stopReason, "completed");
+    assert.equal(firstRecord.efficiency.toolSuccessCount, 1);
+    assert.equal(firstRecord.efficiency.toolFailureCount, 1);
+    assert.ok(firstRecord.efficiency.toolSchemaBytes > 0);
+    assert.equal(recorded[1].toolSuccessCount, 0, "replayed full-history tool results are not double-counted");
+    assert.equal(recorded[1].toolFailureCount, 0, "replayed full-history tool errors are not double-counted");
+  }
+});
+
+for (const spec of [
+  {
+    name: "OpenAI",
     make: (budgetGuard) => new OpenAIResponsesProvider({
       apiKey: "test-key",
       maxIterations: 6,
