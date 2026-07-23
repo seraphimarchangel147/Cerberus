@@ -173,4 +173,14 @@ export function createDailyAdaptationReviewJob(input = {}) {
   };
 }
 
+export function createDailySkillCuratorJob(input = {}) {
+  return {
+    id: "daily-skill-curator",
+    name: "Daily skill curator",
+    enabled: true,
+    task: "skill-curator",
+    dailyAt: input.dailyAt ?? "03:45"
+  };
+}
+
 export const createDailyPersonaResearchJob = createDailyAdaptationReviewJob;

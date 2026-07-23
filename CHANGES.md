@@ -435,3 +435,10 @@ ALL PARITY PHASES COMPLETE
 SELFQA + FASTLANE PHASE COMPLETE
 
 DISCORD LANE PARITY WAVE 2 COMPLETE
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: curator loop (Codex)
+
+- Added a daily skill curator that ages agent-created skills from active to stale after 30 unused days and archives them after 90, with wizard-allowlisted threshold overrides.
+- Kept bundled, pinned, and human-created skills exempt; archives remain on disk, leave the default model surface, and can be reactivated with restore_skill.
+- Added an atomic per-run curator report, durable skill revision history for transitions and restores, boot-time cron wiring, and synthetic-time regression coverage.
+CURATOR LOOP COMPLETE

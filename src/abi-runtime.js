@@ -2,7 +2,7 @@ import path from "node:path";
 import { resolveDataDir } from "./data-dir.js";
 import { AgentHost } from "./agent-host.js";
 import { FileBackedAgentStore } from "./agent-store.js";
-import { CronScheduler, createDailyAdaptationReviewJob } from "./cron-scheduler.js";
+import { CronScheduler, createDailyAdaptationReviewJob, createDailySkillCuratorJob } from "./cron-scheduler.js";
 import { DirectionalAdaptiveScrutiny } from "./directional-adaptive-scrutiny.js";
 import { FileBackedCronScheduler } from "./file-backed-cron-scheduler.js";
 import { FileBackedMemorySystem } from "./file-backed-memory-system.js";
@@ -251,6 +251,7 @@ export class AbiRuntime {
         task: "condense",
         dailyAt: "03:30"
       });
+      this.cron.addJob(createDailySkillCuratorJob());
       // Cadence is env-tunable: autopilot pulses carry a large prompt, so on a
       // metered model the interval is the single biggest cost lever. Default
       // 30 min; set OPENAGI_AUTOPILOT_INTERVAL_MIN to slow it (e.g. 120 = 2h).
@@ -692,6 +693,10 @@ export class AbiRuntime {
       }
       if (job.task === "condense") {
         return this.condenser.condense({ now });
+      }
+      if (job.task === "skill-curator") {
+        if (!this.skills?.curate) return { skipped: true, reason: "skills disabled" };
+        return this.skills.curate({ now });
       }
       if (job.task === "self-update") {
         const { applyUpdate } = await import("./self-update.js");

@@ -18,6 +18,26 @@ const MAX_SKILL_FILE_BYTES = MAX_SKILL_BODY_BYTES + (64 * 1024);
 const MAX_SKILL_SLUG_LENGTH = 64;
 const SKILL_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PATH_LIKE_UNICODE_RE = /[\u2024\u2044\u2215\u29f8\u29f9\ufe52\uff0e\uff0f\uff3c]/u;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const SKILL_STATES = new Set(["active", "stale", "archived"]);
+
+export const DEFAULT_CURATOR_STALE_DAYS = 30;
+export const DEFAULT_CURATOR_ARCHIVE_DAYS = 90;
+
+export function resolveCuratorThresholds(env = process.env) {
+  const staleDays = positiveDays(env.OPENAGI_CURATOR_STALE_DAYS, DEFAULT_CURATOR_STALE_DAYS);
+  const archiveDays = positiveDays(env.OPENAGI_CURATOR_ARCHIVE_DAYS, DEFAULT_CURATOR_ARCHIVE_DAYS);
+  return { staleDays, archiveDays: Math.max(staleDays, archiveDays) };
+}
+
+export function classifySkillAge({ state = "active", ageDays, staleDays, archiveDays }) {
+  const current = normalizeSkillState(state);
+  if (current === "archived") return "archived";
+  if (!Number.isFinite(ageDays) || ageDays < 0) return current;
+  if (ageDays >= archiveDays) return "archived";
+  if (ageDays >= staleDays) return "stale";
+  return "active";
+}
 
 export class SkillRegistry {
   constructor(options = {}) {
@@ -33,6 +53,7 @@ export class SkillRegistry {
     // and when did he last improve them?"
     this.editLogPath = path.join(this.dataDir, "skill-edits.jsonl");
     this.usageLogPath = path.join(this.dataDir, "skill-usage.jsonl");
+    this.curatorReportPath = options.curatorReportPath ?? path.join(this.dataDir, "curator", "REPORT.md");
     this.usage = loadUsage(this.usageLogPath);
     if (options.autoLoad !== false) this.reload();
   }
@@ -185,6 +206,7 @@ export class SkillRegistry {
       description: skill.description,
       category: skill.category,
       pinned: skill.pinned,
+      state: skill.state,
       bundled: skill.bundled ?? false,
       createdBy: skill.createdBy,
       createdAt: skill.createdAt,
@@ -325,6 +347,90 @@ export class SkillRegistry {
     return { skill: name, deleted: true, trash: dest };
   }
 
+  restoreSkill(name, by = "agent", now = new Date()) {
+    const skill = this.mustGet(name);
+    const restoredAt = validDate(now, "restore time").toISOString();
+    const text = fs.readFileSync(skill.path, "utf8");
+    const next = updateFrontmatter(text, { state: "active", curatorRestoredAt: restoredAt });
+    writeTextAtomic(skill.path, next);
+    appendSkillRevision(skill.dir, {
+      skill: name,
+      action: "restored",
+      by,
+      before: text,
+      after: next
+    });
+    this.logEdit({ skill: name, action: "restored", by });
+    this.reload();
+    return { skill: name, state: "active", restoredAt };
+  }
+
+  curate(options = {}) {
+    const now = validDate(options.now ?? new Date(), "curator time");
+    const configured = resolveCuratorThresholds(options.env ?? process.env);
+    const staleDays = options.staleDays === undefined
+      ? configured.staleDays
+      : positiveDays(options.staleDays, null);
+    const archiveDays = options.archiveDays === undefined
+      ? configured.archiveDays
+      : positiveDays(options.archiveDays, null);
+    if (staleDays === null || archiveDays === null || archiveDays < staleDays) {
+      throw new Error("Curator thresholds must be positive days with archiveDays >= staleDays");
+    }
+
+    // Other processes can append telemetry after this registry was created.
+    this.usage = loadUsage(this.usageLogPath);
+    const rows = [];
+    let changed = 0;
+    for (const skill of this.skills.values()) {
+      const before = normalizeSkillState(skill.state);
+      const activityAt = latestActivityAt(skill, this.usage.get(skill.name));
+      const ageDays = activityAt ? Math.max(0, (now.getTime() - activityAt.getTime()) / DAY_MS) : null;
+      let after = before;
+      let result = "unchanged";
+
+      if (skill.bundled) {
+        result = "exempt: bundled";
+      } else if (skill.pinned) {
+        result = "exempt: pinned";
+      } else if (!isAgentCreated(skill)) {
+        result = "exempt: not agent-created";
+      } else if (!activityAt) {
+        result = "exempt: no activity timestamp";
+      } else {
+        after = classifySkillAge({ state: before, ageDays, staleDays, archiveDays });
+        if (after !== before) {
+          const text = fs.readFileSync(skill.path, "utf8");
+          const next = updateFrontmatter(text, { state: after });
+          writeTextAtomic(skill.path, next);
+          appendSkillRevision(skill.dir, {
+            skill: skill.name,
+            action: `curator-${after}`,
+            by: "skill-curator",
+            before: text,
+            after: next,
+            metadata: { ageDays, staleDays, archiveDays }
+          });
+          this.logEdit({ skill: skill.name, action: `curator-${after}`, by: "skill-curator" });
+          changed += 1;
+          result = "transitioned";
+        }
+      }
+
+      rows.push({
+        name: skill.name,
+        before,
+        after,
+        ageDays: ageDays === null ? null : Math.floor(ageDays),
+        result
+      });
+    }
+
+    if (changed > 0) this.reload();
+    writeTextAtomic(this.curatorReportPath, renderCuratorReport({ now, staleDays, archiveDays, rows, changed }));
+    return { at: now.toISOString(), staleDays, archiveDays, changed, rows, reportPath: this.curatorReportPath };
+  }
+
   // MARK: — model-facing tools
 
   /**
@@ -340,6 +446,7 @@ export class SkillRegistry {
     }
     if (process.env.OPENAGI_SKILLS_AS_TOOLS === "1") {
       for (const skill of this.skills.values()) {
+        if (skill.state === "archived") continue;
         const toolName = `skill_${skill.name.replaceAll("-", "_")}`;
         toolRegistry.register({
           name: toolName,
@@ -364,11 +471,19 @@ export class SkillRegistry {
       sideEffects: false,
       source: "skill",
       description: "List all available skills with name, description, category, and usage stats. Cheap — call this to discover what procedural knowledge exists before improvising.",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
-      handler: () => this.list().map(({ name, description, category, pinned, stats }) => ({
-        name, description, category, pinned,
-        runs: stats.runs, views: stats.views, avgScore: stats.avgScore, lastUsedAt: stats.lastUsedAt
-      }))
+      parameters: {
+        type: "object",
+        properties: {
+          include_archived: { type: "boolean", description: "Include archived skills so one can be restored." }
+        },
+        additionalProperties: false
+      },
+      handler: (args = {}) => this.list()
+        .filter((skill) => args.include_archived === true || skill.state !== "archived")
+        .map(({ name, description, category, pinned, state, stats }) => ({
+          name, description, category, pinned, state,
+          runs: stats.runs, views: stats.views, avgScore: stats.avgScore, lastUsedAt: stats.lastUsedAt
+        }))
     });
 
     toolRegistry.register({
@@ -385,7 +500,13 @@ export class SkillRegistry {
         required: ["name"],
         additionalProperties: false
       },
-      handler: (args) => this.view(args.name, args.file ?? null)
+      handler: (args) => {
+        const skill = this.mustGet(args.name);
+        if (skill.state === "archived") {
+          throw new Error(`Skill '${args.name}' is archived; call restore_skill before using it.`);
+        }
+        return this.view(args.name, args.file ?? null);
+      }
     });
 
     toolRegistry.register({
@@ -476,10 +597,26 @@ export class SkillRegistry {
       },
       handler: (args, context) => this.setPinned(args.name, args.pinned !== false, context?.agentId ?? "agent")
     });
+
+    toolRegistry.register({
+      name: "restore_skill",
+      source: "skill",
+      description: "Restore a stale or archived skill to active use without losing its files or history.",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "Skill name to restore." } },
+        required: ["name"],
+        additionalProperties: false
+      },
+      handler: (args, context) => this.restoreSkill(args.name, context?.agentId ?? "agent")
+    });
   }
 
   async run(name, { input = "", args = {} } = {}, context = {}) {
     const skill = this.mustGet(name);
+    if (skill.state === "archived") {
+      throw new Error(`Skill '${name}' is archived; call restore_skill before using it.`);
+    }
     this.recordUse(name, "run");
     const rendered = renderTemplate(skill.body, { input, args });
     const provider = this.runtime?.agentHost?.modelProvider;
@@ -662,6 +799,8 @@ function parseSkill(filePath, dir) {
     parameters: meta.parameters ?? null,
     category: meta.category ?? null,
     pinned: meta.pinned === true || meta.pinned === "true",
+    state: normalizeSkillState(meta.state),
+    curatorRestoredAt: meta.curatorRestoredAt ?? null,
     allowedTools: normalizeAllowedTools(meta.allowed_tools),
     // Story 2: lineage back to the proactive-suggestion that birthed
     // this skill (set by skill-materialize.js when the user accepts
@@ -887,4 +1026,53 @@ function safeLstat(p) {
   } catch {
     return null;
   }
+}
+
+function positiveDays(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function validDate(value, label) {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error(`Invalid ${label}`);
+  return date;
+}
+
+function normalizeSkillState(value) {
+  const state = String(value ?? "active").toLowerCase();
+  return SKILL_STATES.has(state) ? state : "active";
+}
+
+function latestActivityAt(skill, usage) {
+  const candidates = [usage?.lastUsedAt, skill.curatorRestoredAt, skill.createdAt]
+    .map((value) => {
+      if (!value) return null;
+      const date = new Date(value);
+      return Number.isFinite(date.getTime()) ? date : null;
+    })
+    .filter(Boolean);
+  if (candidates.length === 0) return null;
+  return new Date(Math.max(...candidates.map((date) => date.getTime())));
+}
+
+function isAgentCreated(skill) {
+  if (typeof skill.createdBy !== "string" || !skill.createdBy.trim()) return false;
+  return !["user", "human", "dashboard"].includes(skill.createdBy.trim().toLowerCase());
+}
+
+function renderCuratorReport({ now, staleDays, archiveDays, rows, changed }) {
+  return [
+    "# Skill curator report",
+    "",
+    `Generated: ${now.toISOString()}`,
+    `Thresholds: stale after ${staleDays} days; archived after ${archiveDays} days.`,
+    `Skills checked: ${rows.length}; transitions: ${changed}.`,
+    "",
+    "| Skill | Before | After | Age (days) | Result |",
+    "| --- | --- | --- | ---: | --- |",
+    ...rows.map((row) => `| ${row.name} | ${row.before} | ${row.after} | ${row.ageDays ?? "n/a"} | ${row.result} |`),
+    ""
+  ].join("\n");
 }

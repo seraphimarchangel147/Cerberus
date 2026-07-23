@@ -273,7 +273,7 @@ test("skills loader exposes bundled skills via fixed-cost tools", () => {
   assert.ok(names.includes("recap"), "expected 'recap' skill bundled");
   const toolNames = runtime.tools.list().map((t) => t.name);
   // Hermes-style tool economy: constant surface instead of one tool per skill.
-  for (const t of ["list_skills", "use_skill", "run_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill"]) {
+  for (const t of ["list_skills", "use_skill", "run_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill", "restore_skill"]) {
     assert.ok(toolNames.includes(t), `expected ${t} tool`);
   }
   assert.ok(!toolNames.some((n) => n.startsWith("skill_")), "per-skill skill_* tools should be off by default (OPENAGI_SKILLS_AS_TOOLS=1 re-enables)");

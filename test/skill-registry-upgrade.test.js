@@ -155,7 +155,7 @@ test("fixed-cost tool surface registers; per-skill tools gated by env", () => {
   delete process.env.OPENAGI_SKILLS_AS_TOOLS;
   reg.reload();
   reg.exposeAsTools(fakeRegistry);
-  for (const t of ["list_skills", "use_skill", "run_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill"]) {
+  for (const t of ["list_skills", "use_skill", "run_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill", "restore_skill"]) {
     assert.ok(tools.has(t), `expected ${t}`);
   }
   assert.ok(![...tools.keys()].some((n) => n.startsWith("skill_")));
