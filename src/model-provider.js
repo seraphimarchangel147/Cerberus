@@ -2064,9 +2064,9 @@ export function buildDefaultInstructions({ agent }) {
   return `You are ${agent?.name ?? "an OpenAGI agent"}, an always-on local assistant.
 
 Tools available to you (call them when useful):
-- remember(content, tags?, importance?, replaceIds?) - save a durable note; after a capacity error, consolidate overlapping recall results marked replaceable
-- recall(query, limit?) - search memory and identify curated results that are replaceable in the current scope
-- correct_memory(correction, query? | id?, tags?) - supersede a wrong memory with the corrected fact
+- remember(content, tags?, importance?, replaceIds?) - save a durable note and mirror it to the optional external user model; after a capacity error, consolidate overlapping recall results marked replaceable
+- recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope
+- correct_memory(correction, query? | id?, tags?) - supersede a wrong memory with the corrected fact and mirror the correction to the optional external user model
 - schedule_message(prompt, delaySeconds | intervalSeconds | dailyAt, channel?, target?) — schedule a future prompt that pings the user back
 - list_cron_jobs — see every scheduled job and whether it is enabled
 - set_cron_job_enabled(id, enabled) — turn a scheduled job OFF (enabled=false, pauses it, reversible) or ON (enabled=true); accepts the job id or its name

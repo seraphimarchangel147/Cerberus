@@ -4,6 +4,8 @@ import { HookRegistry } from "./hook-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
+const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
+const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 
 export class ToolRegistry {
   constructor(options = {}) {
@@ -492,6 +494,140 @@ function appendApprovalNote(result, approval) {
   return { value: result ?? null, approvalNote };
 }
 
+function externalMemoryIdentity(context = {}) {
+  const channel = identityPart(context?.channel, "agent");
+  const owner = identityPart(
+    context?.from ?? context?.userId ?? context?.agentId,
+    "default"
+  );
+  return {
+    userId: `${channel}:${owner}`,
+    observerId: identityPart(context?.agentId, "main")
+  };
+}
+
+async function invokeExternalMemory(provider, method, args, upstreamSignal = null) {
+  if (!provider) {
+    return {
+      enabled: false,
+      value: null,
+      status: null
+    };
+  }
+
+  const providerName = externalMemoryProviderName(provider);
+  if (typeof provider[method] !== "function") {
+    return {
+      enabled: true,
+      value: null,
+      status: {
+        status: "error",
+        provider: providerName,
+        error: `External memory provider does not implement ${method}.`
+      }
+    };
+  }
+
+  const configuredTimeout = Number(provider.timeoutMs);
+  const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? Math.min(Math.floor(configuredTimeout), EXTERNAL_MEMORY_MAX_TIMEOUT_MS)
+    : EXTERNAL_MEMORY_TIMEOUT_MS;
+  const timeoutCode = "EXTERNAL_MEMORY_TIMEOUT";
+  const cancelledCode = "EXTERNAL_MEMORY_CANCELLED";
+  const controller = new AbortController();
+  if (upstreamSignal?.aborted) {
+    return {
+      enabled: true,
+      value: null,
+      status: {
+        status: "cancelled",
+        provider: providerName,
+        error: "External memory request was cancelled."
+      }
+    };
+  }
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const error = new Error(`External memory request timed out after ${timeoutMs}ms.`);
+      error.code = timeoutCode;
+      reject(error);
+    }, timeoutMs);
+  });
+  let onUpstreamAbort;
+  const cancelled = upstreamSignal
+    ? new Promise((_, reject) => {
+      onUpstreamAbort = () => {
+        controller.abort(upstreamSignal.reason);
+        const error = new Error("External memory request was cancelled.");
+        error.code = cancelledCode;
+        reject(error);
+      };
+      upstreamSignal.addEventListener("abort", onUpstreamAbort, { once: true });
+    })
+    : null;
+
+  try {
+    const requests = [
+      Promise.resolve().then(() => provider[method]({
+        ...args,
+        signal: controller.signal
+      })),
+      timeout
+    ];
+    if (cancelled) requests.push(cancelled);
+    const value = await Promise.race(requests);
+    return {
+      enabled: true,
+      value,
+      status: {
+        status: "ok",
+        provider: externalMemoryProviderName(provider, value)
+      }
+    };
+  } catch (error) {
+    const timedOut = error?.code === timeoutCode;
+    const cancelledRequest = error?.code === cancelledCode;
+    return {
+      enabled: true,
+      value: null,
+      status: {
+        status: timedOut ? "timeout" : cancelledRequest ? "cancelled" : "error",
+        provider: providerName,
+        error: timedOut
+          ? `External memory request timed out after ${timeoutMs}ms.`
+          : cancelledRequest
+            ? "External memory request was cancelled."
+            : "External memory provider request failed."
+      }
+    };
+  } finally {
+    clearTimeout(timer);
+    if (onUpstreamAbort) {
+      upstreamSignal.removeEventListener("abort", onUpstreamAbort);
+    }
+  }
+}
+
+function identityPart(value, fallback) {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function externalMemoryProviderName(provider, result = null) {
+  const name = result?.provider ?? provider?.provider ?? provider?.name ?? "external";
+  const safe = String(sanitizeForAudit(String(name))).trim();
+  return /^[A-Za-z0-9._-]{1,64}$/.test(safe) ? safe : "external";
+}
+
+function externalUserModelValue(result) {
+  if (result == null) return null;
+  if (typeof result !== "object") return result;
+  return result.answer ?? result.model ?? result.userModel ?? null;
+}
+
 // Auto-approve gate check. Reads process.env each call (not cached) so the
 // /auto-approve toggle endpoint can flip it live without a restart.
 // DEFAULT ON: anything except an explicit "0"/"false"/"off" means enabled.
@@ -523,7 +659,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "remember",
-    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
+    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. The built-in memory is always written first and, when configured, the fact is also mirrored to the external user model. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
     parameters: {
       type: "object",
       properties: {
@@ -574,11 +710,30 @@ export function registerCoreTools(registry, runtime) {
           replaceIds
         }
       );
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "setUserModel",
+        {
+          ...externalMemoryIdentity(context),
+          content: item.content,
+          metadata: {
+            type: "memory",
+            action: "remember",
+            tags: item.tags ?? [],
+            importance,
+            localMemoryId: item.id,
+            scope,
+            sessionId: context.sessionId ?? null
+          }
+        },
+        context?.__abortSignal
+      );
       return {
         id: item.id,
         tier: item.tier,
         content: item.content,
-        replaced: item.metadata?.replaces ?? []
+        replaced: item.metadata?.replaces ?? [],
+        ...(external.enabled ? { externalMemory: external.status } : {})
       };
     }
   });
@@ -586,7 +741,7 @@ export function registerCoreTools(registry, runtime) {
   registry.register({
     name: "recall",
     sideEffects: false,
-    description: "Search memory for items related to a query. Returns relevant items plus curated/replaceable flags; only replaceable IDs are valid in remember.replaceIds.",
+    description: "Search built-in memory for items related to a query and, when configured, query the external cross-session user model too. Local items are always returned even if the external provider is unavailable. Only replaceable IDs are valid in remember.replaceIds.",
     parameters: {
       type: "object",
       properties: {
@@ -601,8 +756,15 @@ export function registerCoreTools(registry, runtime) {
         ? context.__memoryScope
         : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
       const effectiveScope = scope ?? "main";
-      const hits = runtime.memory.retrieve(String(args.query ?? ""), { limit: args.limit ?? 5, scope });
-      return {
+      const query = String(args.query ?? "");
+      const hits = runtime.memory.retrieve(query, { limit: args.limit ?? 5, scope });
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "queryUserModel",
+        { ...externalMemoryIdentity(context), query },
+        context?.__abortSignal
+      );
+      const response = {
         count: hits.length,
         items: hits.map(({ item, score }) => ({
           id: item.id,
@@ -622,12 +784,20 @@ export function registerCoreTools(registry, runtime) {
           locked: Boolean(item.locked)
         }))
       };
+      if (!external.enabled) return response;
+      return {
+        ...response,
+        externalUserModel: external.status.status === "ok"
+          ? externalUserModelValue(external.value)
+          : null,
+        externalMemory: external.status
+      };
     }
   });
 
   registry.register({
     name: "correct_memory",
-    description: "Replace a stored memory that turned out to be WRONG. Hides the stale version from all future recall and locks in the corrected fact so the mistake never repeats. Use when the user corrects something previously stored or stated (a time, name, decision, preference) — do NOT just call remember with a second conflicting fact.",
+    description: "Replace a stored memory that turned out to be WRONG. The built-in correction commits first and, when configured, the corrected fact is mirrored to the external user model. Hides the stale version from all future recall and locks in the corrected fact so the mistake never repeats. Use when the user corrects something previously stored or stated (a time, name, decision, preference) - do NOT just call remember with a second conflicting fact.",
     parameters: {
       type: "object",
       properties: {
@@ -653,12 +823,31 @@ export function registerCoreTools(registry, runtime) {
         source: "correct-memory-tool",
         metadata: { agentId: context.agentId, sessionId: context.sessionId }
       });
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "setUserModel",
+        {
+          ...externalMemoryIdentity(context),
+          content: result.item.content,
+          metadata: {
+            type: "memory",
+            action: "correct",
+            tags: result.item.tags ?? [],
+            localMemoryId: result.item.id,
+            supersededIds: result.superseded.map((item) => item.id),
+            scope,
+            sessionId: context.sessionId ?? null
+          }
+        },
+        context?.__abortSignal
+      );
       return {
         id: result.item.id,
         tier: result.item.tier,
         content: result.item.content,
         supersededCount: result.superseded.length,
-        superseded: result.superseded.map((item) => ({ id: item.id, content: item.content.slice(0, 120) }))
+        superseded: result.superseded.map((item) => ({ id: item.id, content: item.content.slice(0, 120) })),
+        ...(external.enabled ? { externalMemory: external.status } : {})
       };
     }
   });

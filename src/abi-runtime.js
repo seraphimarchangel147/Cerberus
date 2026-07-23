@@ -11,6 +11,10 @@ import { createAbiIntegration, IntegrationRegistry } from "./integration-registr
 import { fileURLToPath } from "node:url";
 import { BudgetGuard } from "./budget-guard.js";
 import { registerRizeIntegration } from "./integrations/rize.js";
+import {
+  assertExternalMemoryProvider,
+  createExternalMemoryProvider
+} from "./integrations/honcho-provider.js";
 import { registerLinearTaskSource } from "./integrations/linear-tasks.js";
 import { registerInboxWatcher } from "./integrations/inbox-watcher.js";
 import { registerIMessagePoller } from "./integrations/imessage-poller.js";
@@ -157,6 +161,58 @@ function nextSundayMorning(hour = 5) {
   return d;
 }
 
+export function resolveExternalMemoryProvider(options = {}) {
+  const env = options.env ?? process.env;
+  const warning = typeof options.externalMemoryWarningLog === "function"
+    ? options.externalMemoryWarningLog
+    : typeof options.externalMemoryWarning === "function"
+      ? options.externalMemoryWarning
+      : console.warn;
+  const hasExplicitProvider = options.externalMemoryProvider !== undefined;
+  let selected = "";
+
+  try {
+    if (hasExplicitProvider) {
+      if (options.externalMemoryProvider === null) return null;
+      assertExternalMemoryProvider(options.externalMemoryProvider);
+      return options.externalMemoryProvider;
+    }
+    selected = String(env.OPENAGI_MEMORY_PROVIDER ?? "").trim().toLowerCase();
+
+    // Built-in memory remains the default. External memory is additive and
+    // activates only when the operator explicitly selects Honcho.
+    if (!selected || ["builtin", "built-in", "none"].includes(selected)) return null;
+    if (selected !== "honcho") {
+      throw new Error("unknown provider selection");
+    }
+
+    const provider = createExternalMemoryProvider({
+      provider: selected,
+      env,
+      fetchImpl: options.externalMemoryFetch ?? globalThis.fetch,
+      logger: options.externalMemoryLogger
+    });
+    if (!provider) throw new Error("provider factory returned no provider");
+    assertExternalMemoryProvider(provider);
+    return provider;
+  } catch {
+    const source = hasExplicitProvider
+      ? "explicit provider"
+      : selected === "honcho" ? "honcho" : "configuration";
+    const reason = hasExplicitProvider
+      ? "invalid provider contract"
+      : selected === "honcho"
+        ? "invalid or incomplete Honcho configuration"
+        : "unknown provider selection";
+    try {
+      warning(`[openagi] external memory disabled (${source}): ${reason}`);
+    } catch {
+      // Diagnostics must never turn an optional provider into a boot failure.
+    }
+    return null;
+  }
+}
+
 export class AbiRuntime {
   constructor(options = {}) {
     this.context = {
@@ -171,6 +227,7 @@ export class AbiRuntime {
     this.integrations = options.integrations ?? new IntegrationRegistry();
     this.workflows = options.workflows ?? registerDefaultWorkflows(new WorkflowRegistry());
     this.memory = options.memory ?? new MemorySystem(options.memoryOptions);
+    this.externalMemoryProvider = resolveExternalMemoryProvider(options);
     this.scrutiny = options.scrutiny ?? (options.scrutinyMode === "single"
       ? new DirectionalAdaptiveScrutiny(options.scrutinyOptions)
       : new ScrutinyPanel(options.scrutinyOptions));

@@ -1,4 +1,9 @@
-export { AbiRuntime, createDefaultRuntime, createDurableRuntime } from "./abi-runtime.js";
+export {
+  AbiRuntime,
+  createDefaultRuntime,
+  createDurableRuntime,
+  resolveExternalMemoryProvider
+} from "./abi-runtime.js";
 export { AgentHost } from "./agent-host.js";
 export { BudgetGuard } from "./budget-guard.js";
 export {
@@ -11,6 +16,12 @@ export {
 export { cosine, createEmbedder, HashBagEmbedder, OpenAIEmbedder } from "./embeddings.js";
 export { VectorStore } from "./vector-store.js";
 export { RizeClient, registerRizeIntegration } from "./integrations/rize.js";
+export {
+  assertExternalMemoryProvider,
+  createExternalMemoryProvider,
+  HonchoMemoryProvider,
+  isExternalMemoryProvider
+} from "./integrations/honcho-provider.js";
 export { FileBackedAgentStore, InMemoryAgentStore } from "./agent-store.js";
 export { ChannelManager, TelegramChannel } from "./channels.js";
 export { CronScheduler, createDailyAdaptationReviewJob, createDailyPersonaResearchJob } from "./cron-scheduler.js";

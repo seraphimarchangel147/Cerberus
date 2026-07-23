@@ -495,3 +495,11 @@ COMPRESSION COMPLETE
 - Kept specialist snapshots consistent with inherited main memory, made correction persistence atomic, and exposed curated and replaceable recall metadata so capacity errors are actionable.
 - Added exact-boundary, JSONL and snapshot immutability, provider cache, host restart, correction, lifecycle, HTTP validation, graceful shutdown, and both-policy regression coverage.
 MEMORY DETAILS COMPLETE
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: Honcho external memory provider (Codex)
+
+- Added a provider-neutral get/set/query user-model contract and an opt-in Honcho v3 adapter alongside the authoritative built-in memory system.
+- Mirrored successful local remembers and corrections through direct Honcho conclusions, and augmented recall with representation-backed dialectic queries while preserving exact built-in-only behavior when disabled.
+- Added stable ASCII-safe identities, cached and retryable workspace and peer setup, cancellable bounded requests, schema-validated results, explicit correction supersession, minimal-reasoning queries, private bearer handling, and secret-safe failures.
+- Wired explicit runtime injection and OPENAGI_MEMORY_PROVIDER selection, wizard-allowlisted Honcho configuration, public exports, agent-facing memory guidance, and mock-backend coverage with no live-account dependency.
+HONCHO COMPLETE
