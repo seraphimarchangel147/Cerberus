@@ -450,3 +450,12 @@ CURATOR LOOP COMPLETE
 - Activated goal mode through add_goal, added four agent-facing control tools plus Discord /goal controls, and serialized resumed Discord work with normal message turns.
 - Added provider, persistence, routing, tool, slash-command, schema-lane, turn-cap, completion, and mid-turn preemption regressions.
 GOALS LOOP COMPLETE
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: cron control verification (Codex)
+
+- Re-verified reversible cron enable/disable and destructive cancellation by job ID or name through the existing agent tools.
+- Added durable provider/model snapshots for scheduled jobs, one-time legacy backfill, deliberate repinning on replacement, and fail-closed prompt/autopilot skips when the global default changes.
+- Added structured mismatch alerts through runtime events, dashboard SSE, Discord activity, console diagnostics, and the durable outreach feed.
+- Suppressed delivery only when the complete trimmed scheduled reply is exactly [SILENT], while preserving the assistant output in the durable session transcript.
+- Added pinning, persistence, replacement, alert, toggle, exact-marker, near-miss, and transcript-audit regressions.
+CRON CONTROL VERIFIED

@@ -73,6 +73,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("cron-catchup", (data) => broadcast("cron-catchup", data));
   events.on("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
   events.on("cron-interrupted", (data) => broadcast("cron-interrupted", data));
+  events.on("cron-model-mismatch", (data) => broadcast("cron-model-mismatch", data));
   events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
   events.on("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
   events.on("task-updated", (data) => broadcast("task-updated", data));

@@ -60,6 +60,14 @@ const MAP = {
     summary: `The daemon died while this job was running${d.startedAt ? ` (started ${d.startedAt})` : ""}. It will fire again on its normal schedule.`,
     needsDecision: false,
     actions: ["dismiss"]
+  }),
+  "cron-model-mismatch": (d) => ({
+    type: "suggestion",
+    sourceRef: { kind: "cron-job", id: d.jobId ?? "unknown" },
+    title: `Scheduled job skipped: ${d.jobName ?? (d.jobId ?? "unknown")}`,
+    summary: `Pinned model ${d.expected?.provider ?? "?"}/${d.expected?.model ?? "?"} no longer matches the current default ${d.current?.provider ?? "?"}/${d.current?.model ?? "?"}. Recreate the job to accept the new model.`,
+    needsDecision: false,
+    actions: ["dismiss"]
   })
 };
 

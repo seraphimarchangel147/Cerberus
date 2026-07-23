@@ -2,7 +2,7 @@ import path from "node:path";
 import { resolveDataDir } from "./data-dir.js";
 import { AgentHost } from "./agent-host.js";
 import { FileBackedAgentStore } from "./agent-store.js";
-import { CronScheduler, createDailyAdaptationReviewJob, createDailySkillCuratorJob } from "./cron-scheduler.js";
+import { CronScheduler, createDailyAdaptationReviewJob, createDailySkillCuratorJob, modelProviderIdentity } from "./cron-scheduler.js";
 import { DirectionalAdaptiveScrutiny } from "./directional-adaptive-scrutiny.js";
 import { FileBackedCronScheduler } from "./file-backed-cron-scheduler.js";
 import { FileBackedMemorySystem } from "./file-backed-memory-system.js";
@@ -106,6 +106,38 @@ No generalities. Cite specific session ids, job names, specialist ids.`;
 // raised scrutiny act threshold (0.68 -> 0.85) so the agent must clear a
 // much higher bar before acting unprompted during its own self-review turn.
 const HARSH_REVIEW_SCRUTINY_OVERRIDES = { act: 0.85 };
+
+export function isSilentCronOutput(value) {
+  return String(value ?? "").trim() === "[SILENT]";
+}
+
+function guardCronModelPin(runtime, job) {
+  if (typeof runtime.cron?.checkModelPin !== "function") return null;
+  const check = runtime.cron.checkModelPin(job);
+  if (check.ok) return null;
+  const alert = {
+    at: nowIso(),
+    jobId: job?.id ?? null,
+    jobName: job?.name ?? "Scheduled job",
+    sessionId: job?.input?.sessionId ?? null,
+    reason: check.reason,
+    expected: check.expected,
+    current: check.current
+  };
+  console.warn(
+    `[openagi] skipped cron job ${alert.jobId ?? "unknown"}: ${check.reason}; `
+    + `pinned ${check.expected?.provider ?? "?"}/${check.expected?.model ?? "?"}, `
+    + `current ${check.current?.provider ?? "?"}/${check.current?.model ?? "?"}`
+  );
+  runtime.events?.emit?.("cron-model-mismatch", alert);
+  return {
+    skipped: true,
+    reason: check.reason,
+    expected: check.expected,
+    current: check.current,
+    alert
+  };
+}
 
 function nextSundayEvening() {
   const d = new Date();
@@ -1103,6 +1135,8 @@ export class AbiRuntime {
 
   async runAutopilot(job) {
     if (!this.agentHost) return { skipped: true, reason: "agent-host-disabled" };
+    const pinFailure = guardCronModelPin(this, job);
+    if (pinFailure) return pinFailure;
     // Cheap gate (no tokens): a queue-draining pulse must NOT spend a base-model
     // call when there's nothing committed to do. Jobs opt in via
     // input.requireQueuedWork; scheduled review prompts (weekly-harsh-review)
@@ -1175,6 +1209,8 @@ export class AbiRuntime {
 
   async runScheduledPrompt(job) {
     if (!this.agentHost) return { skipped: true, reason: "agent-host-disabled" };
+    const pinFailure = guardCronModelPin(this, job);
+    if (pinFailure) return pinFailure;
     const input = job.input ?? {};
     const result = await this.agentHost.handleMessage({
       channel: input.channel ?? "cron",
@@ -1185,7 +1221,9 @@ export class AbiRuntime {
       metadata: { scheduledJobId: job.id, scheduledJobName: job.name },
       origin: "cron"
     });
-    if (this.channels && input.channel && input.target) {
+    if (isSilentCronOutput(result.reply)) {
+      result.deliverySuppressed = "silent-output";
+    } else if (this.channels && input.channel && input.target) {
       try {
         await this.channels.deliver({
           channel: input.channel,
@@ -1201,6 +1239,10 @@ export class AbiRuntime {
       this.cron.removeJob(job.id);
     }
     return result;
+  }
+
+  guardCronModelPin(job) {
+    return guardCronModelPin(this, job);
   }
 
   reconcilePrincipleVectors() {
@@ -1263,6 +1305,10 @@ export function createDefaultRuntime(options = {}) {
         modelProvider: options.modelProvider,
         modelProviderOptions: { ...(options.modelProviderOptions ?? {}), budgetGuard: runtime.budget }
       });
+    runtime.cron.bindModelResolver?.(
+      () => modelProviderIdentity(runtime.agentHost?.modelProvider),
+      { backfill: true }
+    );
   }
   // First boot / backfill: when the session index is empty (missing DB, or a
   // DB file created empty), seed it from the transcripts already on disk.

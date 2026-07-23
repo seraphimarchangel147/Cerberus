@@ -769,6 +769,11 @@ export class DiscordChannel {
     events.on("self-update", (d) => {
       post(`🔄 **Self-update** ${d.from ?? "?"} → ${d.to ?? "?"}`);
     });
+    events.on("cron-model-mismatch", (d) => {
+      const expected = `${d.expected?.provider ?? "?"}/${d.expected?.model ?? "?"}`;
+      const current = `${d.current?.provider ?? "?"}/${d.current?.model ?? "?"}`;
+      post(`Scheduled job skipped: ${d.jobName ?? d.jobId ?? "unknown"}\nPinned model: \`${expected}\`; current: \`${current}\``, d);
+    });
     events.on("task-reminder", (d) => {
       post(`🗒️ **${d.title ?? "Task"}**${d.body ? `\n${String(d.body).slice(0, 200)}` : ""}`);
     });
