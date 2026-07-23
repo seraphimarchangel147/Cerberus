@@ -1,13 +1,17 @@
 import { createId, nowIso, tokenOverlapScore } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
-import { isCatastrophicToolCall } from "./catastrophic-policy.js";
+import { HookRegistry } from "./hook-registry.js";
+import { sanitizeForAudit } from "./redact.js";
+
+const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 
 export class ToolRegistry {
-  constructor() {
+  constructor(options = {}) {
     this.tools = new Map();
     // Hermes's "always" choice is intentionally bounded to one live session.
     // Keeping it in memory guarantees a daemon restart clears every allowance.
     this.sessionAllows = new Set();
+    this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
   }
 
   register(tool) {
@@ -44,6 +48,10 @@ export class ToolRegistry {
 
   bindCheckpoints(checkpoints) {
     this.checkpoints = checkpoints;
+  }
+
+  bindHooks(hooks) {
+    this.hooks = hooks ?? new HookRegistry({ loadConfig: false });
   }
 
   allowForSession(sessionId, toolName) {
@@ -168,12 +176,17 @@ export class ToolRegistry {
   // notifications so channels (Discord live status) can render what the
   // agent is doing in real time. context.__onToolEvent is advisory and
   // best-effort — a throwing observer must never break a tool call.
-  async invoke(name, args, context = {}) {
+  async invoke(name, args, context = {}, internalToken = null) {
     const notify = typeof context?.__onToolEvent === "function" ? context.__onToolEvent : null;
     if (notify) {
       try { notify({ phase: "start", name, args }); } catch { /* observer must not break tools */ }
     }
-    const outcome = await this._invokeGated(name, args, context);
+    const outcome = await this._invokeGated(
+      name,
+      args,
+      context,
+      internalToken === PRE_TOOL_HOOKS_PASSED
+    );
     if (notify) {
       try {
         notify({
@@ -188,7 +201,7 @@ export class ToolRegistry {
     return outcome;
   }
 
-  async _suspendForApproval(action, name, args, context) {
+  async _suspendForApproval(action, name, args, context, { preToolHooksPassed = false } = {}) {
     // Lightweight store doubles used by embedders may only implement the old
     // queue API. Preserve that contract while the real store provides the
     // Hermes-style suspend/resume rail.
@@ -234,15 +247,20 @@ export class ToolRegistry {
         this.pendingActions.complete?.(action.id, { result: null, error });
         return { ok: false, error };
       }
-      const invokeResult = await this.invoke(name, args, {
-        ...(context ?? {}),
-        __confirmed: true,
-        __approval: {
-          description: action.reason ?? "flagged as dangerous",
-          via: decision.approvedVia ?? "pending-action",
-          decider: decision.decider ?? decision.decidedBy ?? "user"
-        }
-      });
+      const invokeResult = await this.invoke(
+        name,
+        args,
+        {
+          ...(context ?? {}),
+          __confirmed: true,
+          __approval: {
+            description: action.reason ?? "flagged as dangerous",
+            via: decision.approvedVia ?? "pending-action",
+            decider: decision.decider ?? decision.decidedBy ?? "user"
+          }
+        },
+        preToolHooksPassed ? PRE_TOOL_HOOKS_PASSED : null
+      );
       this.pendingActions.complete?.(action.id, {
         result: invokeResult.ok ? invokeResult.result : null,
         error: invokeResult.ok ? null : invokeResult.error
@@ -274,7 +292,7 @@ export class ToolRegistry {
     };
   }
 
-  async _invokeGated(name, args, context = {}) {
+  async _invokeGated(name, args, context = {}, preToolHooksPassed = false) {
     const tool = this.tools.get(name);
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
@@ -308,27 +326,47 @@ export class ToolRegistry {
         error: `Tool ${name} is blocked this turn: scrutiny verdict 'watch' permits read-only tools only.`
       };
     }
-    // Catastrophic calls are the deliberately tiny exception to hands-free
-    // mode. They must reach a human even when auto-approve is enabled; an
-    // explicit __confirmed flag from an approval path is the only bypass.
     const sessionAllowed = this.isAllowedForSession(context?.sessionId, name);
-    const catastrophic = isCatastrophicToolCall({ toolName: name, args });
-    if (catastrophic.catastrophic && !context?.__confirmed && !sessionAllowed) {
-      if (!this.pendingActions) {
-        return { ok: false, error: `Catastrophic tool call requires human approval: ${catastrophic.reason}` };
+    if (!preToolHooksPassed) {
+      let hookDecision = { action: "allow" };
+      try {
+        hookDecision = await this.hooks?.beforeToolCall?.(
+          buildHookPayload({ name, args, context, tool, sessionAllowed })
+        ) ?? hookDecision;
+      } catch (error) {
+        console.warn(`[hooks] pre_tool_call registry failed open: ${error?.message ?? String(error)}`);
       }
-      const baseSummary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
-      const summary = `${baseSummary ?? `Run ${name}`} [CATASTROPHIC: ${catastrophic.reason}]`;
-      const action = this.pendingActions.enqueue({
-        toolName: name,
-        args,
-        context,
-        summary,
-        reason: catastrophic.reason,
-        severity: "catastrophic"
-      });
-      return this._suspendForApproval(action, name, args, context);
+      if (hookDecision?.action === "block") {
+        if (isTrustedCatastrophicBlock(hookDecision)) {
+          const reason = hookDecision.reason ?? hookDecision.message ?? "catastrophic policy veto";
+          if (!this.pendingActions) {
+            return { ok: false, error: `Catastrophic tool call requires human approval: ${reason}` };
+          }
+          const baseSummary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
+          const summary = `${baseSummary ?? `Run ${name}`} [CATASTROPHIC: ${reason}]`;
+          const action = this.pendingActions.enqueue({
+            toolName: name,
+            args,
+            context,
+            summary,
+            reason,
+            severity: "catastrophic"
+          });
+          return this._suspendForApproval(action, name, args, context);
+        }
+        const error = hookDecision.message ?? `Tool ${name} was blocked by a pre_tool_call hook.`;
+        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+          ok: false,
+          error,
+          blocked: true,
+          dispatched: false,
+          blockedBy: hookDecision.blockedBy ?? null
+        });
+        return { ok: false, error };
+      }
+      preToolHooksPassed = true;
     }
+
     // Confirmation gate. When set, divert the call into the pending-action
     // queue UNLESS context.__confirmed is true (which the approve endpoint
     // sets after a human OKs the action). Scrutiny 'ask' turns extend this
@@ -350,7 +388,12 @@ export class ToolRegistry {
           summary,
           reason: context.__reason ?? null
         });
-        const invokeResult = await this.invoke(name, args, { ...(context ?? {}), __confirmed: true });
+        const invokeResult = await this.invoke(
+          name,
+          args,
+          { ...(context ?? {}), __confirmed: true },
+          PRE_TOOL_HOOKS_PASSED
+        );
         this.pendingActions.decide?.(action.id, {
           decision: "approve",
           decidedBy: "auto-approve",
@@ -366,20 +409,69 @@ export class ToolRegistry {
         summary,
         reason: context.__reason ?? null
       });
-      return this._suspendForApproval(action, name, args, context);
+      return this._suspendForApproval(action, name, args, context, { preToolHooksPassed });
     }
+    const startedAt = Date.now();
+    let dispatched = false;
     try {
       await this.checkpoints?.beforeToolCall?.({
         toolName: name,
         args: args ?? {},
         context
       });
+      dispatched = true;
       const result = await tool.handler(args ?? {}, context);
+      this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+        ok: true,
+        result,
+        dispatched,
+        durationMs: Date.now() - startedAt
+      });
       return { ok: true, result: appendApprovalNote(result, context?.__approval) };
     } catch (error) {
+      this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+        ok: false,
+        error: error.message ?? String(error),
+        dispatched,
+        durationMs: Date.now() - startedAt
+      });
       return { ok: false, error: error.message ?? String(error) };
     }
   }
+
+  _notifyPostToolCall(base, outcome) {
+    try {
+      this.hooks?.notify?.("post_tool_call", {
+        ...buildHookPayload(base),
+        ...sanitizeForAudit(outcome)
+      });
+    } catch {
+      // Observer hooks are advisory and never alter a tool result.
+    }
+  }
+}
+
+function buildHookPayload({ name, args, context = {}, tool, sessionAllowed }) {
+  return {
+    toolName: name,
+    args: sanitizeForAudit(args ?? {}),
+    sessionId: context?.sessionId ?? null,
+    turnId: context?.__turnId ?? context?.turnId ?? null,
+    agentId: context?.agentId ?? null,
+    channel: context?.channel ?? null,
+    from: context?.from ?? null,
+    cwd: args?.cwd ?? null,
+    sideEffects: tool?.sideEffects !== false,
+    needsConfirmation: Boolean(tool?.needsConfirmation),
+    confirmed: context?.__confirmed === true,
+    sessionAllowed: Boolean(sessionAllowed)
+  };
+}
+
+function isTrustedCatastrophicBlock(decision) {
+  return decision?.blockedBy === "catastrophic-policy"
+    && decision?.blockedTier === "gateway"
+    && decision?.builtin === true;
 }
 
 function safeSummarize(fn, args) {

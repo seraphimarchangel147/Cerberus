@@ -468,3 +468,12 @@ CRON CONTROL VERIFIED
 - Kept approval and catastrophic gates ahead of capture, blocked ambiguous or unsafe targets before dispatch, and preserved turn identity across suspended approvals and multi-tool iterations.
 - Added store, registry, AgentHost, persistence, shell parsing, integrity, containment, prompt, setup, and Discord confirmation regressions in both approval lanes.
 CHECKPOINTS COMPLETE
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: event hooks with veto (Codex)
+
+- Generalized the catastrophic policy into the immutable first gateway hook in a three-tier gateway, plugin, and shell hook registry with deterministic first-block semantics.
+- Added bounded fail-open hook execution, non-blocking serialized lifecycle observers, frozen redacted payloads, wildcard events, and allowlisted JSON-over-stdio shell hooks with a scrubbed environment.
+- Wired pre/post tool events around actual dispatch while preserving catastrophic human approval, ordinary confirmation, scrutiny, session allowances, and approval replay without duplicate hook calls.
+- Added durable-agent session and turn lifecycle events, authenticated browser session resets, and gateway startup/shutdown events with shutdown flushing.
+- Proved the veto through the live HTTP gateway and added registry, tool-policy, lifecycle, shell-safety, mutation, timeout, and both-lane approval regressions.
+HOOKS COMPLETE

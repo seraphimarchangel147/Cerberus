@@ -22,6 +22,15 @@ const ALLOWED_STDIO_COMMANDS = new Set([
   "cua-driver"
 ]);
 
+export function isAllowedStdioCommand(command) {
+  const leaf = String(command ?? "").trim().split(/[\\/]/).pop();
+  return ALLOWED_STDIO_COMMANDS.has(leaf);
+}
+
+export function allowedStdioCommands() {
+  return [...ALLOWED_STDIO_COMMANDS];
+}
+
 // MCP tools are exposed to the model as `mcp_<server>_<tool>`, and that name
 // must match OpenAI's tool-name rule ^[a-zA-Z0-9_-]+$. BOTH segments can carry
 // spaces/punctuation (e.g. a server literally named "BB Staging"), so sanitize
@@ -80,11 +89,10 @@ export class McpRegistry {
     if (transport === "stdio") {
       const cmd = server.command;
       if (!cmd) throw new Error("stdio MCP server requires a `command`.");
-      const cmdLeaf = String(cmd).trim().split("/").pop();
-      if (!ALLOWED_STDIO_COMMANDS.has(cmdLeaf)) {
+      if (!isAllowedStdioCommand(cmd)) {
         throw new Error(
           `stdio command "${cmd}" is not in the allowlist. ` +
-          `Permitted: ${[...ALLOWED_STDIO_COMMANDS].join(", ")}.`
+          `Permitted: ${allowedStdioCommands().join(", ")}.`
         );
       }
     }

@@ -136,9 +136,35 @@ export class AgentHost {
       console.warn(`[openagi] background review failed: ${error?.message ?? String(error)}`);
     });
     this.lastBackgroundReview = null;
+    this.activeHookSessions = new Set();
   }
 
   async handleMessage(input) {
+    if (input?.ephemeral === true) return this._handleMessage(input, null);
+    const lifecycle = { agentStarted: false, startedAt: Date.now(), result: null, error: null };
+    try {
+      lifecycle.result = await this._handleMessage(input, lifecycle);
+      return lifecycle.result;
+    } catch (error) {
+      lifecycle.error = error;
+      throw error;
+    } finally {
+      if (lifecycle.agentStarted) {
+        this._notifyHook("agent:end", {
+          ...lifecycle.base,
+          completed: lifecycle.error == null,
+          interrupted: Boolean(input?.abortSignal?.aborted || lifecycle.error?.name === "AbortError"),
+          response: lifecycle.result?.reply ?? null,
+          error: lifecycle.error?.message ?? null,
+          iterations: lifecycle.result?.model?.iterations ?? null,
+          stopReason: lifecycle.result?.model?.stopReason ?? null,
+          durationMs: Math.max(0, Date.now() - lifecycle.startedAt)
+        });
+      }
+    }
+  }
+
+  async _handleMessage(input, lifecycle = null) {
     const channel = input.channel ?? "local";
     const from = input.from ?? "user";
     let agentId = input.agentId ?? "main";
@@ -213,6 +239,26 @@ export class AgentHost {
           from,
           metadata: input.metadata ?? {}
         });
+
+    if (lifecycle) {
+      lifecycle.base = {
+        channel,
+        platform: channel,
+        userId: from,
+        sessionId,
+        sessionKey: sessionId,
+        turnId,
+        agentId,
+        message: text
+      };
+      this.activeHookSessions.add(sessionId);
+      if (sessionBefore.messages.length === 1) {
+        this._notifyHook("session:start", lifecycle.base);
+      }
+      this._notifyHook("session:message", { ...lifecycle.base, role: "user", content: text });
+      lifecycle.agentStarted = true;
+      this._notifyHook("agent:start", lifecycle.base);
+    }
 
     // Incremental session indexing (search_sessions): every persisted message
     // is added to the FTS index as it lands. Best-effort — an indexing failure
@@ -380,6 +426,19 @@ export class AgentHost {
     if (inputAbortSignal?.aborted) onInputAbort();
     else inputAbortSignal?.addEventListener?.("abort", onInputAbort, { once: true });
     const parsedSpawnDepth = Number(input.spawnDepth);
+    const forwardToolEvent = (event) => {
+      if (typeof input.onToolEvent === "function") {
+        try { input.onToolEvent(event); } catch { /* advisory */ }
+      }
+      if (lifecycle && event?.phase === "iteration") {
+        this._notifyHook("agent:step", {
+          ...lifecycle.base,
+          iteration: event.n ?? null,
+          maxIterations: event.max ?? null,
+          toolNames: []
+        });
+      }
+    };
     const modelContext = {
       channel,
       from,
@@ -409,7 +468,7 @@ export class AgentHost {
       __turnAbortController: turnAbortController,
       // Live-progress observer: channels (Discord) pass a callback so the
       // user can watch tool activity in real time. Best-effort, advisory.
-      __onToolEvent: typeof input.onToolEvent === "function" ? input.onToolEvent : null
+      __onToolEvent: lifecycle || typeof input.onToolEvent === "function" ? forwardToolEvent : null
     };
 
     let modelResult;
@@ -502,6 +561,14 @@ export class AgentHost {
       this.runtime.sessionIndex.indexMessage(sessionId, agentId, sessionAfter.messages.at(-1)).catch(() => {});
     }
 
+    if (lifecycle) {
+      this._notifyHook("session:message", {
+        ...lifecycle.base,
+        role: "assistant",
+        content: modelResult.text
+      });
+    }
+
     if (!ephemeral) {
       this.runtime.memory.remember(
         {
@@ -561,6 +628,34 @@ export class AgentHost {
       conversational,
       output
     };
+  }
+
+  resetSession(options = {}) {
+    const input = typeof options === "string" ? { sessionId: options } : options;
+    const previousSessionId = String(input.sessionId ?? "").trim();
+    if (!previousSessionId) throw new Error("resetSession requires sessionId");
+    const sessionId = String(input.nextSessionId ?? createId("session"));
+    const base = {
+      channel: input.channel ?? "local",
+      platform: input.channel ?? "local",
+      userId: input.from ?? "user",
+      agentId: input.agentId ?? "main"
+    };
+    this._notifyHook("session:end", { ...base, sessionId: previousSessionId, reason: "reset" });
+    this.activeHookSessions.delete(previousSessionId);
+    this._notifyHook("session:reset", { ...base, previousSessionId, sessionId });
+    return { previousSessionId, sessionId };
+  }
+
+  endActiveHookSessions(reason = "gateway-close") {
+    for (const sessionId of this.activeHookSessions) {
+      this._notifyHook("session:end", { sessionId, reason });
+    }
+    this.activeHookSessions.clear();
+  }
+
+  _notifyHook(event, payload) {
+    try { this.runtime.hooks?.notify?.(event, sanitizeForAudit(payload)); } catch { /* hooks are advisory */ }
   }
 
   queueBackgroundReview(turn) {

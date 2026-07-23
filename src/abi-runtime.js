@@ -38,6 +38,7 @@ import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
 import { GoalStore } from "./goal-store.js";
 import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
+import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
 import { ComputerUseLog } from "./computer-use-log.js";
@@ -176,7 +177,11 @@ export class AbiRuntime {
     this.propagation = options.propagation ?? new PropagationController(options.propagationOptions);
     this.cron = options.cron ?? new CronScheduler();
     this.mcp = options.mcp ?? new McpRegistry(options.mcpOptions ?? {});
-    this.tools = options.tools ?? new ToolRegistry();
+    this.hooks = options.hooks
+      ?? options.tools?.hooks
+      ?? new HookRegistry({ dataDir: options.dataDir, ...(options.hookOptions ?? {}) });
+    this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks });
+    this.tools.bindHooks?.(this.hooks);
     this.mcp.bindToolRegistry(this.tools);
     const checkpointOptIn = options.checkpointOptions?.enabled
       ?? checkpointsEnabled(options.env ?? process.env);

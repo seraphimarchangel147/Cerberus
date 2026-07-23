@@ -43,6 +43,29 @@ export function isCatastrophicToolCall({ toolName, args } = {}) {
   return safe();
 }
 
+export function createCatastrophicPreToolHook() {
+  return Object.freeze({
+    name: "catastrophic-policy",
+    event: "pre_tool_call",
+    tier: "gateway",
+    immutable: true,
+    handler(payload = {}) {
+      if (payload.confirmed === true || payload.sessionAllowed === true) {
+        return { action: "allow" };
+      }
+      const classified = isCatastrophicToolCall(payload);
+      if (!classified.catastrophic) return { action: "allow" };
+      return {
+        action: "block",
+        code: "catastrophic",
+        approvalRequired: true,
+        reason: classified.reason,
+        message: `Catastrophic tool call requires human approval: ${classified.reason}`
+      };
+    }
+  });
+}
+
 function normalizeCommand(command) {
   let value = typeof command === "string" ? command.trim() : "";
   // Models commonly send the literal bash wrapper even though code_shell adds

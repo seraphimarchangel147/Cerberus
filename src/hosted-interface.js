@@ -154,6 +154,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
   let tickerHandle = null;
   let heartbeatHandle = null;
+  let gatewayStarted = false;
   const tickerMs = options.tickerMs ?? Number.parseInt(process.env.OPENAGI_TICKER_MS ?? "10000", 10);
 
   const server = http.createServer(async (req, res) => {
@@ -313,6 +314,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, sp);
       }
       if (method === "GET" && pathname === "/sessions") return sendJson(res, 200, runtime.agentHost?.store.listSessions() ?? []);
+      if (method === "POST" && pathname === "/sessions/reset") {
+        if (typeof runtime.agentHost?.resetSession !== "function") {
+          return sendJson(res, 503, { error: "agent-host-disabled" });
+        }
+        const body = await readJson(req);
+        if (!body?.sessionId) return sendJson(res, 400, { error: "sessionId required" });
+        return sendJson(res, 200, runtime.agentHost.resetSession({
+          sessionId: body.sessionId,
+          channel: body.channel,
+          from: body.from,
+          agentId: body.agentId
+        }));
+      }
       if (method === "GET" && pathname.startsWith("/sessions/")) {
         const id = decodeURIComponent(pathname.slice("/sessions/".length));
         return sendJson(res, 200, runtime.agentHost?.store.getSession(id) ?? { error: "agent-host-disabled" });
@@ -1622,11 +1636,31 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           }
           const address = server.address();
           const actualPort = typeof address === "object" && address ? address.port : port;
+          if (!gatewayStarted) {
+            gatewayStarted = true;
+            let platforms = ["local"];
+            try {
+              const status = channels?.status?.() ?? {};
+              platforms = Object.entries(status)
+                .filter(([name, value]) => name === "local" || value?.configured || value?.enabled)
+                .map(([name]) => name);
+            } catch { /* use local fallback */ }
+            try {
+              runtime.hooks?.notify?.("gateway:startup", { host, port: actualPort, platforms });
+            } catch (error) {
+              console.warn(`[hooks] gateway:startup failed open: ${error?.message ?? String(error)}`);
+            }
+          }
           resolve({ host, port: actualPort, url: `http://${host}:${actualPort}` });
         });
       });
     },
-    close() {
+    async close() {
+      runtime.agentHost?.endActiveHookSessions?.("gateway-close");
+      try { runtime.hooks?.notify?.("gateway:shutdown", { host, port }); }
+      catch (error) { console.warn(`[hooks] gateway:shutdown failed open: ${error?.message ?? String(error)}`); }
+      try { await runtime.hooks?.flush?.(); }
+      catch (error) { console.warn(`[hooks] shutdown flush failed open: ${error?.message ?? String(error)}`); }
       return new Promise((resolve, reject) => {
         if (tickerHandle) clearInterval(tickerHandle);
         if (heartbeatHandle) clearInterval(heartbeatHandle);
@@ -2489,9 +2523,23 @@ function showToast(msg, ok = true) {
 
 newBtn.addEventListener("click", async () => {
   if (state.tab === "chat") {
-    state.sessionId = null;
+    if (state.sessionId) {
+      try {
+        const reset = await postJson("/sessions/reset", {
+          sessionId: state.sessionId,
+          channel: state.channel,
+          from: state.from,
+          agentId: state.agentId
+        });
+        state.sessionId = reset.sessionId ?? null;
+      } catch {
+        state.sessionId = null;
+      }
+    } else {
+      state.sessionId = null;
+    }
     state.messages = [];
-    state.from = "browser-" + Date.now();
+    if (!state.sessionId) state.from = "browser-" + Date.now();
     renderTab();
   } else if (state.tab === "cron") {
     openCronComposer();
