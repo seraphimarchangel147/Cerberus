@@ -1006,6 +1006,23 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args) => {
       if (!runtime.channels?.deliver) throw new Error("Channels are not bound to runtime.");
+      // Wrap the raw transport result with an explicit success signal. The
+      // Discord transport returns { text, candidates, successfulCandidates }
+      // where `candidates` are FILE ATTACHMENTS — a plain text message legitimately
+      // has zero candidates, which a model can misread as "nothing delivered."
+      // Normalize so the agent sees a clear delivered flag.
+      const finalize = (raw, deliveredChannel, deliveredTarget) => {
+        const delivered = raw?.delivered !== false;
+        return {
+          delivered,
+          channel: deliveredChannel,
+          target: deliveredTarget,
+          status: delivered
+            ? `Message delivered to ${deliveredChannel} target ${deliveredTarget}.`
+            : (raw?.reason ?? "Delivery reported failure."),
+          transport: raw
+        };
+      };
       // 'sibling' is a friendly alias that resolves an agent name to the
       // Discord channel where that sibling listens, then delivers over Discord.
       if (args.channel === "sibling") {
@@ -1016,9 +1033,11 @@ export function registerCoreTools(registry, runtime) {
             `Unknown sibling "${args.target}". Known siblings: ${siblingNames(process.env, dataDir).join(", ")}.`
           );
         }
-        return runtime.channels.deliver({ channel: "discord", target: channelId, text: args.text });
+        const raw = await runtime.channels.deliver({ channel: "discord", target: channelId, text: args.text });
+        return finalize(raw, "sibling", `${args.target} (discord ${channelId})`);
       }
-      return runtime.channels.deliver({ channel: args.channel, target: args.target, text: args.text });
+      const raw = await runtime.channels.deliver({ channel: args.channel, target: args.target, text: args.text });
+      return finalize(raw, args.channel, args.target);
     }
   });
 
