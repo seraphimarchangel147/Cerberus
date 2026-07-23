@@ -23,6 +23,30 @@ import { NodeRegistry, readOrCreateIdentity } from "./node-registry.js";
 import { readNodeConfig } from "./cli-client.js";
 import { redactKnownValues, sanitizeForAudit } from "./redact.js";
 import { approvePendingAction } from "./pending-actions.js";
+import { isModelProviderId } from "./model-router.js";
+
+function isHostedMoaProvider(provider) {
+  const id = String(provider?.provider ?? provider?.name ?? "").trim().toLowerCase();
+  return id === "moa" || provider?.constructor?.name === "MoaProvider";
+}
+
+function configuredMoaPresetNames(dataDir) {
+  const config = readJsonFile(path.join(dataDir, "moa.json"), {});
+  const root = config?.presets && typeof config.presets === "object"
+    ? config.presets
+    : config;
+  if (!root || typeof root !== "object" || Array.isArray(root)) return [];
+  return Object.entries(root)
+    .filter(([name, preset]) => (
+      /^[A-Za-z0-9][A-Za-z0-9._:/-]{1,79}$/.test(name)
+      && preset
+      && typeof preset === "object"
+      && !Array.isArray(preset)
+      && preset.aggregator
+    ))
+    .map(([name]) => name)
+    .sort();
+}
 
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
@@ -31,6 +55,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   const getAuthToken = () => options.authToken ?? process.env.OPENAGI_AUTH_TOKEN ?? null;
   const getPublicUrl = () => options.publicUrl ?? process.env.OPENAGI_PUBLIC_URL ?? null;
   const getTelegramSecret = () => options.telegramSecret ?? process.env.TELEGRAM_WEBHOOK_SECRET ?? null;
+  const createProvider = async (providerOptions = {}) => {
+    if (typeof options.modelProviderFactory === "function") {
+      return options.modelProviderFactory(providerOptions);
+    }
+    const { createModelProvider } = await import("./model-provider.js");
+    return createModelProvider(providerOptions);
+  };
   let channels =
     options.channels ??
     (runtime.agentHost
@@ -257,9 +288,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendSecretsJson(res, 500, { error: "setup persistence failed" });
         }
         try {
-          const { createModelProvider } = await import("./model-provider.js");
           if (runtime.agentHost) {
-            runtime.agentHost.modelProvider = createModelProvider({
+            runtime.agentHost.modelProvider = await createProvider({
               budgetGuard: runtime.budget,
               secrets: runtime.secrets,
               dataDir: runtime.secrets?.dataDir
@@ -687,40 +717,65 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "GET" && pathname === "/admin/provider") {
         const provider = runtime.agentHost?.modelProvider;
+        const moaPresets = configuredMoaPresetNames(dataDir);
         return sendJson(res, 200, {
           current: provider?.constructor?.name ?? null,
           model: provider?.model ?? null,
           configured: provider?.isConfigured?.() ?? false,
           preference: process.env.OPENAGI_PROVIDER ?? "auto",
+          moaPreset: process.env.OPENAGI_MOA_PRESET ?? null,
+          moaPresets,
           available: {
             anthropic: Boolean(process.env.ANTHROPIC_API_KEY),
-            openai: Boolean(process.env.OPENAI_API_KEY)
+            openai: Boolean(process.env.OPENAI_API_KEY),
+            moa: moaPresets.length > 0
           }
         });
       }
       if (method === "POST" && pathname === "/admin/provider") {
         const body = await readJson(req);
         const choice = String(body.preference ?? "").toLowerCase();
-        if (!["auto", "anthropic", "openai"].includes(choice)) {
-          return sendJson(res, 400, { error: "preference must be one of: auto, anthropic, openai" });
+        if (!isModelProviderId(choice, { includeAuto: true })) {
+          return sendJson(res, 400, { error: "preference must be one of: auto, anthropic, openai, moa" });
         }
-        process.env.OPENAGI_PROVIDER = choice;
+        const requestedPreset = String(
+          body.preset ?? process.env.OPENAGI_MOA_PRESET ?? ""
+        ).trim();
+        if (choice === "moa" && requestedPreset && !/^[\w.\-:/]{2,80}$/.test(requestedPreset)) {
+          return sendJson(res, 400, { error: "invalid MoA preset" });
+        }
+        let nextProvider = runtime.agentHost?.modelProvider ?? null;
         try {
-          const { createModelProvider } = await import("./model-provider.js");
-          if (runtime.agentHost) {
-            runtime.agentHost.modelProvider = createModelProvider({
-              budgetGuard: runtime.budget,
-              secrets: runtime.secrets,
-              dataDir: runtime.secrets?.dataDir
+          nextProvider = await createProvider({
+            preferred: choice,
+            moa: { preset: requestedPreset || undefined },
+            budgetGuard: runtime.budget,
+            secrets: runtime.secrets,
+            dataDir: runtime.secrets?.dataDir
+          });
+          if (choice === "moa" && !isHostedMoaProvider(nextProvider)) {
+            return sendJson(res, 400, {
+              error: `MoA preset not found: ${requestedPreset || "(default)"}`
             });
           }
-        } catch { /* swallow */ }
+        } catch (error) {
+          return sendJson(res, 400, { error: error?.message ?? String(error) });
+        }
+        process.env.OPENAGI_PROVIDER = choice;
+        if (choice === "moa" && requestedPreset) {
+          process.env.OPENAGI_MOA_PRESET = requestedPreset;
+        }
+        if (runtime.agentHost) runtime.agentHost.modelProvider = nextProvider;
         // Also persist to .env so it survives restart.
         try {
           const { saveEnv } = await import("./setup-wizard.js");
+          const values = { OPENAGI_PROVIDER: choice };
+          if (choice === "moa" && requestedPreset) {
+            values.OPENAGI_MOA_PRESET = requestedPreset;
+          }
           saveEnv({
             dataDir,
-            values: { OPENAGI_PROVIDER: choice },
+            values,
             store: runtime.secrets,
             decidedBy: "http:/admin/provider"
           });
@@ -728,7 +783,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, {
           preference: choice,
           current: runtime.agentHost?.modelProvider?.constructor?.name ?? null,
-          model: runtime.agentHost?.modelProvider?.model ?? null
+          model: runtime.agentHost?.modelProvider?.model ?? null,
+          moaPreset: choice === "moa"
+            ? (runtime.agentHost?.modelProvider?.model ?? requestedPreset ?? null)
+            : null
         });
       }
       if (method === "GET" && pathname === "/audit") return sendJson(res, 200, runtime.introspector?.audit?.() ?? null);
@@ -5737,7 +5795,8 @@ function renderProviderSwitch(p) {
   const opts = [
     \`<option value="auto" \${p.preference === "auto" ? "selected" : ""}>auto</option>\`,
     \`<option value="anthropic" \${p.preference === "anthropic" ? "selected" : ""} \${!p.available?.anthropic ? "disabled" : ""}>Anthropic\${p.available?.anthropic ? "" : " (no key)"}</option>\`,
-    \`<option value="openai" \${p.preference === "openai" ? "selected" : ""} \${!p.available?.openai ? "disabled" : ""}>OpenAI / ChatGPT\${p.available?.openai ? "" : " (no key)"}</option>\`
+    \`<option value="openai" \${p.preference === "openai" ? "selected" : ""} \${!p.available?.openai ? "disabled" : ""}>OpenAI / ChatGPT\${p.available?.openai ? "" : " (no key)"}</option>\`,
+    \`<option value="moa" \${p.preference === "moa" ? "selected" : ""} \${!p.available?.moa ? "disabled" : ""}>MoA\${p.moaPreset ? " / " + escapeHtml(p.moaPreset) : ""}\${p.available?.moa ? "" : " (no presets)"}</option>\`
   ].join("");
   host.innerHTML = \`<label style="color:var(--muted);">model: <select id="providerSelect" style="background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:12px;">\${opts}</select></label>\`;
   document.getElementById("providerSelect").addEventListener("change", async (e) => {

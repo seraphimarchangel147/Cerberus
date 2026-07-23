@@ -389,8 +389,24 @@ async function cmdModels(flags) {
   loadBootEnv();
   const { createModelProvider, renderModelPlan } = await import("../src/index.js");
   const provider = createModelProvider();
+  const providerId = String(provider?.provider ?? provider?.name ?? "").toLowerCase();
+  if (providerId === "moa" || provider?.constructor?.name === "MoaProvider") {
+    const models = typeof provider.availableModels === "function"
+      ? provider.availableModels()
+      : [];
+    if (flags.json) {
+      console.log(JSON.stringify({ provider: "moa", models }, null, 2));
+      return 0;
+    }
+    console.log(`${c(BOLD, "Mixture of Agents presets")} (${provider.model ?? "no active preset"})`);
+    for (const model of models) {
+      const name = typeof model === "string" ? model : model?.id ?? model?.name ?? model?.model;
+      if (name) console.log(`  ${name === provider.model ? "*" : "-"} ${name}`);
+    }
+    return 0;
+  }
   if (!provider.router) {
-    console.log(c(DIM, "No LLM provider configured (deterministic mode). Set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable tiering."));
+    console.log(c(DIM, "No LLM provider configured (deterministic mode). Configure Anthropic, OpenAI, or a MoA preset."));
     return 0;
   }
   const providerName = provider.constructor.name === "AnthropicProvider" ? "anthropic" : "openai";

@@ -17,6 +17,27 @@
 // tier and the reason it's safe to shrink. `chat` and `autopilot` intentionally
 // stay on base (real reasoning + tool use); the rest are small and/or frequent,
 // which is exactly where a mini/nano model saves the most money.
+export const MODEL_PROVIDER_IDS = Object.freeze([
+  "anthropic",
+  "openai",
+  "moa"
+]);
+
+export function isModelProviderId(value, { includeAuto = false } = {}) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return (includeAuto && normalized === "auto")
+    || MODEL_PROVIDER_IDS.includes(normalized);
+}
+
+export function normalizeModelProviderId(value, {
+  fallback = "auto",
+  includeAuto = true
+} = {}) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (isModelProviderId(normalized, { includeAuto })) return normalized;
+  return fallback;
+}
+
 export const TASK_PROFILES = {
   chat:      { tier: "base", label: "User chat",            why: "Real reasoning, user-facing replies — keep this on your best model." },
   autopilot: { tier: "base", label: "Autopilot task work", why: "Plans and executes real work with tools — needs the strong model." },

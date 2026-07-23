@@ -2,6 +2,7 @@ import { createId, nowIso, tokenOverlapScore } from "./utils.js";
 import { HookRegistry } from "./hook-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { validateMcpServerSpec } from "./mcp-registry.js";
+import { MODEL_PROVIDER_IDS, isModelProviderId } from "./model-router.js";
 import {
   ToolSearchController,
   isToolSearchDeferrable,
@@ -1483,24 +1484,30 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "set_provider",
-    description: "Switch the primary model provider live. 'auto' picks whichever has a key (Anthropic preferred), 'anthropic' forces Claude, 'openai' forces ChatGPT/GPT-5. Use this if the user wants to switch models mid-conversation or you detect repeated failures with the current one.",
+    description: "Switch the primary model provider live. 'auto' picks a configured direct provider, while 'anthropic', 'openai', and 'moa' select that provider explicitly. MoA uses OPENAGI_MOA_PRESET. Use this if the user wants to switch models mid-conversation or you detect repeated failures with the current one.",
     parameters: {
       type: "object",
       properties: {
-        preference: { type: "string", enum: ["auto", "anthropic", "openai"] }
+        preference: { type: "string", enum: ["auto", ...MODEL_PROVIDER_IDS] }
       },
       required: ["preference"],
       additionalProperties: false
     },
     handler: async (args) => {
-      process.env.OPENAGI_PROVIDER = args.preference;
+      if (!isModelProviderId(args.preference, { includeAuto: true })) {
+        throw new Error(`Invalid model provider: ${args.preference}`);
+      }
       const { createModelProvider } = await import("./model-provider.js");
+      const nextProvider = createModelProvider({
+        preferred: args.preference,
+        moa: { preset: process.env.OPENAGI_MOA_PRESET },
+        budgetGuard: runtime.budget,
+        secrets: runtime.secrets,
+        dataDir: runtime.secrets?.dataDir
+      });
+      process.env.OPENAGI_PROVIDER = args.preference;
       if (runtime.agentHost) {
-        runtime.agentHost.modelProvider = createModelProvider({
-          budgetGuard: runtime.budget,
-          secrets: runtime.secrets,
-          dataDir: runtime.secrets?.dataDir
-        });
+        runtime.agentHost.modelProvider = nextProvider;
       }
       // Persist
       try {

@@ -58,7 +58,23 @@ export {
   MemoryCapacityError,
   MemorySystem
 } from "./memory-system.js";
-export { AnthropicProvider, createModelProvider, DeterministicModelProvider, OpenAIResponsesProvider } from "./model-provider.js";
+export {
+  AnthropicProvider,
+  createDirectModelProviderFactory,
+  createModelProvider,
+  DeterministicModelProvider,
+  OpenAIResponsesProvider
+} from "./model-provider.js";
+export {
+  DEFAULT_MOA_MAX_ANALYSIS_CHARS,
+  DEFAULT_MOA_MAX_TOTAL_ANALYSIS_CHARS,
+  MAX_MOA_REFERENCES,
+  MoaProvider,
+  loadMoaPresets,
+  normalizeMoaModelSpec,
+  renderMoaAnalyses,
+  validateMoaPresets
+} from "./moa-provider.js";
 export {
   CredentialLease,
   CredentialPool,
@@ -80,7 +96,15 @@ export {
   resolveToolSearchMode,
   toolSchemaBytes
 } from "./tool-search.js";
-export { ModelRouter, TASK_PROFILES, TIERS, renderModelPlan } from "./model-router.js";
+export {
+  MODEL_PROVIDER_IDS,
+  ModelRouter,
+  TASK_PROFILES,
+  TIERS,
+  isModelProviderId,
+  normalizeModelProviderId,
+  renderModelPlan
+} from "./model-router.js";
 export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";
 export { registerCoreTools, ToolRegistry } from "./tool-registry.js";

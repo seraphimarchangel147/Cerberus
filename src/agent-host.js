@@ -202,6 +202,10 @@ export class AgentHost {
     let agentId = input.agentId ?? "main";
     const text = String(input.text ?? input.message ?? "").trim();
     if (!text) throw new Error("Message text is required.");
+    const turnProvider = input.modelProviderOverride ?? this.modelProvider;
+    if (!turnProvider || typeof turnProvider.generate !== "function") {
+      throw new Error("A model provider with generate() is required.");
+    }
     // Ephemeral turns (setup-wizard "say hi" test) must leave no trace:
     // no session in the dashboard list, no auto-task, no memory write,
     // no outcome — they're a connectivity check, not a conversation.
@@ -526,7 +530,7 @@ export class AgentHost {
 
     let modelResult;
     try {
-      modelResult = await this.modelProvider.generate({
+      modelResult = await turnProvider.generate({
         input: text,
         agent,
         // Route by what the call IS, so model tiering applies: autonomous pulses
@@ -663,7 +667,7 @@ export class AgentHost {
       model: {
         provider: modelResult.provider,
         model: modelResult.model,
-        configured: this.modelProvider.isConfigured(),
+        configured: turnProvider.isConfigured?.() ?? true,
         iterations: modelResult.iterations ?? null,
         maxIterations: modelResult.maxIterations ?? null,
         stopReason: modelResult.stopReason ?? null
@@ -1207,6 +1211,8 @@ export function formatScreenContextBlock(screenContext) {
 // dashboard header.
 function friendlyProviderLabel(provider) {
   if (!provider) return "—";
+  const providerId = String(provider.provider ?? provider.name ?? "").toLowerCase();
+  if (providerId === "moa" || provider.constructor?.name === "MoaProvider") return "MoA";
   const cls = provider.constructor?.name ?? "";
   if (cls === "AnthropicProvider") return "Anthropic";
   if (cls === "OpenAIResponsesProvider") return "OpenAI";

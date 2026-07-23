@@ -552,3 +552,13 @@ CRED POOLS COMPLETE
 - Added controller, ranking, schema-budget, OpenAI, Anthropic, scope, veto, activity, checkpoint, setup, prompt, cap, and fast-lane regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 983/983 with no environment pinning.
 TOOL SEARCH COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: Mixture of Agents (Codex)
+
+- Added the virtual `moa` provider with named data-directory presets, parallel and isolated reference analyses, bounded untrusted-context injection, and a direct aggregator that retains the normal iteration and tool loop.
+- Added credential-aware direct provider construction, exact per-role model overrides, recursion rejection, provider routing metadata, explicit-only selection, and native-provider auto behavior unchanged.
+- Added permanent model selection plus a serialized one-shot Discord `/moa` turn that uses a provider override without mutating the shared host provider, including failure-safe restoration.
+- Added setup, hosted administration, CLI, live provider-tool, and public export surfaces with the new preset environment field allowlisted through the setup wizard.
+- Added parallelism, isolation, redaction, failure, cancellation, real tool-loop, provider-construction, Discord restoration, hosted API, setup, and model-picker regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1008/1008 with no environment pinning.
+MOA COMPLETE

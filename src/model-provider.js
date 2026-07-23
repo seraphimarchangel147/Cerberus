@@ -4,6 +4,7 @@ import {
   CredentialPoolExhaustedError,
   createCredentialPoolRegistry
 } from "./credential-pool.js";
+import { MoaProvider, normalizeMoaModelSpec } from "./moa-provider.js";
 import { ModelRouter } from "./model-router.js";
 import { defaultToolOutputStore } from "./tool-output-store.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
@@ -2330,10 +2331,8 @@ export class AnthropicProvider {
   }
 }
 
-export function createModelProvider(options = {}) {
-  if (options.forceDeterministic === true) return new DeterministicModelProvider();
-  const budgetGuard = options.budgetGuard ?? null;
-  const credentialPools = options.credentialPoolRegistry ?? createCredentialPoolRegistry({
+function credentialPoolsForOptions(options = {}) {
+  return options.credentialPoolRegistry ?? createCredentialPoolRegistry({
     ...(options.credentialPoolConfig === undefined
       ? {}
       : { config: options.credentialPoolConfig }),
@@ -2345,24 +2344,110 @@ export function createModelProvider(options = {}) {
     refreshOAuth: options.refreshOAuth ?? null,
     onEvent: options.onCredentialPoolEvent ?? null
   });
-  const anthropic = new AnthropicProvider({
-    ...(options.anthropic ?? {}),
-    budgetGuard,
-    credentialPool: options.anthropic?.credentialPool ?? credentialPools.get("anthropic")
-  });
-  const openai = new OpenAIResponsesProvider({
-    ...(options.openai ?? {}),
-    budgetGuard,
-    credentialPool: options.openai?.credentialPool ?? credentialPools.get("openai")
-  });
+}
+
+function constructDirectProvider(providerName, model, options, credentialPools, budgetGuard) {
+  const normalized = String(providerName ?? "").trim().toLowerCase();
+  if (normalized === "anthropic") {
+    return new AnthropicProvider({
+      ...(options.anthropic ?? {}),
+      ...(model ? { model } : {}),
+      budgetGuard,
+      credentialPool: options.anthropic?.credentialPool ?? credentialPools.get("anthropic")
+    });
+  }
+  if (normalized === "openai") {
+    return new OpenAIResponsesProvider({
+      ...(options.openai ?? {}),
+      ...(model ? { model } : {}),
+      budgetGuard,
+      credentialPool: options.openai?.credentialPool ?? credentialPools.get("openai")
+    });
+  }
+  if (normalized === "moa") {
+    throw new Error("MoA model specs cannot recursively select provider moa.");
+  }
+  throw new Error(`Unsupported direct model provider: ${normalized || "(empty)"}.`);
+}
+
+export function createDirectModelProviderFactory(options = {}, shared = {}) {
+  const budgetGuard = shared.budgetGuard ?? options.budgetGuard ?? null;
+  const credentialPools = shared.credentialPoolRegistry
+    ?? credentialPoolsForOptions(options);
+  return (spec = {}) => {
+    const normalizedSpec = normalizeMoaModelSpec(spec, "MoA direct model");
+    const provider = constructDirectProvider(
+      normalizedSpec.provider,
+      normalizedSpec.model,
+      options,
+      credentialPools,
+      budgetGuard
+    );
+    if (!provider.isConfigured()) {
+      throw new Error(`MoA model provider ${normalizedSpec.provider} is not configured.`);
+    }
+    return provider;
+  };
+}
+
+export function createModelProvider(options = {}) {
+  if (options.forceDeterministic === true) return new DeterministicModelProvider();
+  const budgetGuard = options.budgetGuard ?? null;
+  const credentialPools = credentialPoolsForOptions(options);
+  const anthropic = constructDirectProvider(
+    "anthropic",
+    null,
+    options,
+    credentialPools,
+    budgetGuard
+  );
+  const openai = constructDirectProvider(
+    "openai",
+    null,
+    options,
+    credentialPools,
+    budgetGuard
+  );
 
   const withFallback = (primary, fallback) => {
     primary.fallbackProvider = fallback?.isConfigured?.() ? fallback : null;
     return primary;
   };
 
-  // Explicit preference wins. anthropic | openai | auto (default).
-  const preference = (options.preferred ?? process.env.OPENAGI_PROVIDER ?? "auto").toLowerCase();
+  // MoA is explicit-only. "auto" retains the native-provider order and never
+  // starts extra reference-model calls merely because moa.json exists.
+  const preference = String(
+    options.preferred
+      ?? options.env?.OPENAGI_PROVIDER
+      ?? process.env.OPENAGI_PROVIDER
+      ?? "auto"
+  ).trim().toLowerCase();
+  if (preference === "moa") {
+    const moaOptions = options.moa ?? {};
+    const providerFactory = moaOptions.providerFactory
+      ?? createDirectModelProviderFactory(options, {
+        budgetGuard,
+        credentialPoolRegistry: credentialPools
+      });
+    const preset = moaOptions.preset
+      ?? moaOptions.model
+      ?? options.env?.OPENAGI_MOA_PRESET
+      ?? process.env.OPENAGI_MOA_PRESET;
+    const moa = new MoaProvider({
+      ...moaOptions,
+      ...(options.dataDir === undefined || moaOptions.dataDir !== undefined
+        ? {}
+        : { dataDir: options.dataDir }),
+      ...(preset === undefined ? {} : { preset }),
+      providerFactory
+    });
+    if (!moa.isConfigured()) {
+      throw new Error("MoA provider has no configured preset.");
+    }
+    return moa;
+  }
+
+  // Explicit native preference wins. anthropic | openai | auto (default).
   if (preference === "openai" && openai.isConfigured()) return withFallback(openai, anthropic);
   if (preference === "anthropic" && anthropic.isConfigured()) return withFallback(anthropic, openai);
 

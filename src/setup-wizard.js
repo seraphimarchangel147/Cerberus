@@ -12,6 +12,7 @@ import { SecretsStore } from "./secrets-store.js";
 
 const WIZARD_FIELDS = [
   "OPENAGI_PROVIDER",
+  "OPENAGI_MOA_PRESET",
   "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
   "OPENAI_API_KEY", "OPENAI_MODEL",
   "OPENAGI_AUTH_TOKEN",
@@ -248,7 +249,11 @@ export function renderWizard({ proposedToken, existingEnv = {} } = {}) {
         <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="auto" ${providerChecked("auto")}> Auto · use whichever has a key (Anthropic preferred)</label>
         <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="anthropic" ${providerChecked("anthropic")}> Anthropic · Claude Sonnet 4.6</label>
         <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="openai" ${providerChecked("openai")}> OpenAI · ChatGPT (GPT-5)</label>
+        <label class="opt"><input type="radio" name="OPENAGI_PROVIDER" value="moa" ${providerChecked("moa")}> Mixture of Agents preset</label>
       </div>
+
+      <label style="margin-top:8px;">MoA preset</label>
+      <input type="text" name="OPENAGI_MOA_PRESET" value="${val("OPENAGI_MOA_PRESET", "default")}">
 
       <h3 style="margin-top:14px;">Anthropic key</h3>
       <p>Get one at <a href="https://console.anthropic.com/" target="_blank" rel="noopener">console.anthropic.com</a>.</p>
