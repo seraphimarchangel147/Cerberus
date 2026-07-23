@@ -59,6 +59,16 @@ export {
   MemorySystem
 } from "./memory-system.js";
 export { AnthropicProvider, createModelProvider, DeterministicModelProvider, OpenAIResponsesProvider } from "./model-provider.js";
+export {
+  CredentialLease,
+  CredentialPool,
+  CredentialPoolExhaustedError,
+  CredentialPoolRegistry,
+  CredentialPoolRequest,
+  classifyCredentialFailure,
+  createCredentialPoolRegistry,
+  loadCredentialPoolConfig
+} from "./credential-pool.js";
 export { ModelRouter, TASK_PROFILES, TIERS, renderModelPlan } from "./model-router.js";
 export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";

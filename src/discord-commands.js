@@ -505,7 +505,11 @@ export class DiscordCommands {
     try {
       const { createModelProvider } = await import("./model-provider.js");
       if (this.channel.agentHost) {
-        this.channel.agentHost.modelProvider = createModelProvider({ budgetGuard: this.runtime?.budget ?? null });
+        this.channel.agentHost.modelProvider = createModelProvider({
+          budgetGuard: this.runtime?.budget ?? null,
+          secrets: this.runtime?.secrets,
+          dataDir: this.runtime?.secrets?.dataDir
+        });
       }
     } catch (error) {
       return `⚠ provider rebuild failed: ${error.message}`;

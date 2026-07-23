@@ -130,7 +130,12 @@ export class AgentHost {
     this.runtime = options.runtime;
     if (!this.runtime) throw new Error("AgentHost requires a runtime.");
     this.store = options.store ?? new InMemoryAgentStore(options.storeOptions);
-    this.modelProvider = options.modelProvider ?? createModelProvider(options.modelProviderOptions);
+    const modelProviderOptions = {
+      ...(options.modelProviderOptions ?? {}),
+      secrets: options.modelProviderOptions?.secrets ?? this.runtime.secrets,
+      dataDir: options.modelProviderOptions?.dataDir ?? this.runtime.secrets?.dataDir
+    };
+    this.modelProvider = options.modelProvider ?? createModelProvider(modelProviderOptions);
     this.backgroundReviewer = options.backgroundReviewer ?? new BackgroundReviewer({
       runtime: this.runtime,
       modelProvider: this.modelProvider

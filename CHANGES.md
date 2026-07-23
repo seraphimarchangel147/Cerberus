@@ -531,3 +531,14 @@ KANBAN COMPLETE
 - Added client, subprocess, configuration, workspace, code-tool integration, syntax-failure, and graceful-degradation regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 943/943 with no environment pinning.
 LSP COMPLETE
+
+## 2026-07-23 - Hermes Parity Wave 3 Phase 2: credential pools (Codex)
+
+- Added same-provider API-key and OAuth credential pools with round-robin, least-used, fill-first, and random selection over secret-name references resolved through the Phase 1 secrets store.
+- Added sticky per-turn leases and exact recovery rules: plan-limit 429 rotates immediately, transient 429 retries once on the same key, 402 applies a durable 24-hour cooldown, and OAuth 401 refreshes before rotating.
+- Persisted secret-free pool state through atomic snapshots and JSONL events, auto-discovered existing provider keys as one-key pools, and kept live provider credential changes backward compatible.
+- Added first-hop-only native provider fallback after pool exhaustion while preventing fallback replay after a successful model hop or tool side effect.
+- Credential rotation intentionally resets the provider prompt cache, so the next request is a full-price re-read; this trades cache cost for keeping the session alive.
+- Added strategy, status, cooldown, refresh, redaction, config, cache-identity, auth-header, fallback, no-replay, setup, and provider regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 963/963 with no environment pinning.
+CRED POOLS COMPLETE

@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  CredentialPool,
+  CredentialPoolExhaustedError,
+  createCredentialPoolRegistry
+} from "./credential-pool.js";
 import { ModelRouter } from "./model-router.js";
 import { defaultToolOutputStore } from "./tool-output-store.js";
 import {
@@ -78,11 +83,19 @@ class ModelStallError extends Error {
 }
 
 export class ProviderError extends Error {
-  constructor(message, { status = null, retryAfterMs = null, cause = null } = {}) {
+  constructor(message, {
+    status = null,
+    retryAfterMs = null,
+    providerCode = null,
+    providerType = null,
+    cause = null
+  } = {}) {
     super(message, cause ? { cause } : undefined);
     this.name = "ProviderError";
     this.status = Number.isInteger(status) ? status : null;
     this.retryAfterMs = Number.isFinite(retryAfterMs) ? retryAfterMs : null;
+    this.providerCode = typeof providerCode === "string" ? providerCode : null;
+    this.providerType = typeof providerType === "string" ? providerType : null;
   }
 }
 
@@ -112,9 +125,15 @@ function isRetryableNetworkError(error) {
 
 async function responseProviderError(response) {
   const body = await response.json().catch(() => ({}));
+  const detail = body?.error && typeof body.error === "object" ? body.error : {};
   return new ProviderError(
-    body?.error?.message ?? `Provider request failed with ${response.status}`,
-    { status: response.status, retryAfterMs: retryAfterMs(response) }
+    detail.message ?? `Provider request failed with ${response.status}`,
+    {
+      status: response.status,
+      retryAfterMs: retryAfterMs(response),
+      providerCode: detail.code,
+      providerType: detail.type
+    }
   );
 }
 
@@ -157,7 +176,15 @@ export async function requestWithRetry(doRequest, options = {}) {
       const retryable = error instanceof ProviderError
         ? RETRYABLE_PROVIDER_STATUSES.has(error.status)
         : isRetryableNetworkError(error);
-      if (!retryable || attempt >= retries) {
+      let retryApproved = retryable;
+      if (retryable && typeof options.shouldRetry === "function") {
+        try {
+          retryApproved = options.shouldRetry({ attempt, error }) !== false;
+        } catch {
+          retryApproved = false;
+        }
+      }
+      if (!retryApproved || attempt >= retries) {
         if (error instanceof ProviderError) throw error;
         if (retryable) throw new ProviderError(error.message ?? "Provider network request failed", { cause: error });
         throw error;
@@ -302,6 +329,145 @@ function providerRetryOptions(provider, context, signal) {
   };
 }
 
+const MANAGED_CREDENTIAL_STATUSES = new Set([401, 402, 429]);
+
+function configureProviderCredentialPool(provider, options, {
+  providerName,
+  envSecretName
+}) {
+  provider.credentialProviderName = providerName;
+  provider.credentialEnvSecretName = envSecretName;
+  provider.credentialPool = options.credentialPool ?? null;
+  if (!provider.credentialPool && provider.apiKey) {
+    provider.credentialPool = createLiveApiKeyPool(provider);
+  }
+}
+
+function createLiveApiKeyPool(provider) {
+  return new CredentialPool({
+    provider: provider.credentialProviderName,
+    credentials: [{
+      id: "env",
+      type: "api_key",
+      secretName: provider.credentialEnvSecretName,
+      resolve: () => provider.apiKey
+    }]
+  });
+}
+
+function syncProviderCredentialPool(provider) {
+  if (!provider.credentialPool && provider.apiKey) {
+    provider.credentialPool = createLiveApiKeyPool(provider);
+  }
+  // Registry-created auto pools use the stable "env" id. Keeping that entry
+  // synchronized preserves the long-standing behavior where callers may
+  // replace provider.apiKey on a live native provider instance.
+  try {
+    provider.credentialPool?.syncCredential?.("env", provider.apiKey);
+  } catch {
+    // A configured multi-key pool has no mutable auto entry; it stays primary.
+  }
+  return provider.credentialPool ?? null;
+}
+
+function providerHasCredentials(provider) {
+  const pool = syncProviderCredentialPool(provider);
+  return Boolean(provider.apiKey) || Boolean(pool?.isConfigured?.());
+}
+
+function beginProviderCredentialRequest(provider) {
+  const pool = syncProviderCredentialPool(provider);
+  if (!pool) throw new CredentialPoolExhaustedError(provider.credentialProviderName);
+  const request = pool.beginRequest();
+  const lease = request.acquire();
+  return { request, lease };
+}
+
+function isCredentialPoolExhausted(error) {
+  return error instanceof CredentialPoolExhaustedError
+    || error?.code === "CREDENTIAL_POOL_EXHAUSTED";
+}
+
+function managedCredentialRetry({ error }) {
+  return !MANAGED_CREDENTIAL_STATUSES.has(error?.status);
+}
+
+function emitCredentialRotation(context, providerName, previousId, nextId, status) {
+  if (!previousId || !nextId || previousId === nextId) return;
+  try {
+    context?.__onToolEvent?.({
+      phase: "credential-rotation",
+      provider: providerName,
+      status: Number.isInteger(status) ? status : null
+    });
+  } catch {
+    // Rotation progress is advisory and never enters model context.
+  }
+}
+
+async function requestWithProviderCredential(provider, credentialRequest, {
+  context,
+  signal,
+  model,
+  request
+}) {
+  const active = credentialRequest ?? beginProviderCredentialRequest(provider).request;
+  let previousId = active.lease?.id ?? null;
+  let previousStatus = null;
+  return active.execute(async (lease) => {
+    emitCredentialRotation(
+      context,
+      provider.credentialProviderName,
+      previousId,
+      lease.id,
+      previousStatus
+    );
+    previousId = lease.id;
+    trackPromptCacheIdentity(provider, {
+      provider: provider.credentialProviderName,
+      model,
+      baseUrl: provider.baseUrl,
+      credential: lease.value,
+      context
+    });
+    try {
+      return await requestWithRetry(
+        () => request(lease.value, lease),
+        {
+          ...providerRetryOptions(provider, context, signal),
+          shouldRetry: managedCredentialRetry
+        }
+      );
+    } catch (error) {
+      previousStatus = Number.isInteger(error?.status) ? error.status : null;
+      throw error;
+    }
+  });
+}
+
+function initialCredentialState(provider, { model, context }) {
+  const state = beginProviderCredentialRequest(provider);
+  trackPromptCacheIdentity(provider, {
+    provider: provider.credentialProviderName,
+    model,
+    baseUrl: provider.baseUrl,
+    credential: state.lease.value,
+    context
+  });
+  return state;
+}
+
+async function tryFallbackProvider(provider, request, error) {
+  const fallback = provider.fallbackProvider;
+  if (!isCredentialPoolExhausted(error) || !fallback?.isConfigured?.()) {
+    return { used: false, result: null };
+  }
+  return {
+    used: true,
+    result: await fallback.generate(request)
+  };
+}
+
 function emitIteration(context, n, max) {
   try {
     context?.__onToolEvent?.({ phase: "iteration", n, max });
@@ -362,8 +528,9 @@ function requestTimedOut(error) {
 }
 
 function providerUnavailable(error) {
-  return error instanceof ProviderError
-    && (error.status === null || RETRYABLE_PROVIDER_STATUSES.has(error.status));
+  return isCredentialPoolExhausted(error)
+    || (error instanceof ProviderError
+      && (error.status === null || RETRYABLE_PROVIDER_STATUSES.has(error.status)));
 }
 
 function budgetExceeded(error) {
@@ -1287,10 +1454,14 @@ export class OpenAIResponsesProvider {
     // vars are set, so this is a no-op until the user opts in.
     this.ownsRouter = !options.router;
     this.router = options.router ?? new ModelRouter({ envPrefix: "OPENAI", baseModel: this.model });
+    configureProviderCredentialPool(this, options, {
+      providerName: "openai",
+      envSecretName: "OPENAI_API_KEY"
+    });
   }
 
   isConfigured() {
-    return Boolean(this.apiKey);
+    return providerHasCredentials(this);
   }
 
   // Resolve which model a call should use: explicit `model` wins, then a named
@@ -1303,31 +1474,48 @@ export class OpenAIResponsesProvider {
     return this.model;
   }
 
-  async judgeGoal(goal, assistantText, context, deadline, turnBudget) {
+  async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null) {
     checkRequestBudget(this, turnBudget);
     const response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
       model: this.resolveModel({ task: "goal" }),
       max_output_tokens: GOAL_JUDGE_MAX_TOKENS,
       instructions: GOAL_JUDGE_INSTRUCTIONS,
       input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
-    }, context, { timeoutMs: remainingMs, turnBudget }), context);
+    }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
     const verdict = parseGoalJudgeVerdict(extractResponseText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
     return verdict;
   }
 
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
+    const generationRequest = arguments[0] ?? {};
     const model = this.resolveModel({ model: modelOverride, tier, task });
-    if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
-    trackPromptCacheIdentity(this, {
-      provider: "openai",
-      model,
-      baseUrl: this.baseUrl,
-      credential: this.apiKey,
-      context
-    });
+    if (!this.isConfigured()) throw new Error("OPENAI_API_KEY is not configured.");
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
+    let credentialState;
+    try {
+      credentialState = initialCredentialState(this, { model, context });
+    } catch (error) {
+      const fallback = await tryFallbackProvider(this, generationRequest, error);
+      if (fallback.used) return fallback.result;
+      if (!isCredentialPoolExhausted(error)) throw error;
+      return {
+        provider: "openai",
+        model,
+        text: localPartialSummary({
+          reason: "provider-error",
+          iterations: 0,
+          maxIterations,
+          toolCalls: [],
+          lastText: ""
+        }),
+        toolCalls: [],
+        iterations: 0,
+        maxIterations,
+        stopReason: "provider-error"
+      };
+    }
 
     // Stateless tool loop — accumulates the full conversation in `input` each
     // hop instead of chaining via `previous_response_id`. Required for orgs
@@ -1376,6 +1564,7 @@ export class OpenAIResponsesProvider {
     let lastText = "";
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
+    let successfulModelHops = 0;
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -1423,9 +1612,21 @@ export class OpenAIResponsesProvider {
 
       try {
         response = await withinTurn(this, deadline, (remainingMs) => (
-          this.postResponses(body, context, { timeoutMs: remainingMs, turnBudget })
+          this.postResponses(body, context, {
+            timeoutMs: remainingMs,
+            turnBudget,
+            credentialRequest: credentialState.request
+          })
         ), context);
       } catch (error) {
+        if (isCredentialPoolExhausted(error) && successfulModelHops === 0 && toolCalls.length === 0) {
+          const fallback = await tryFallbackProvider(this, generationRequest, error);
+          if (fallback.used) return fallback.result;
+        }
+        if (isCredentialPoolExhausted(error)) {
+          stopReason = "provider-error";
+          break;
+        }
         if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
         if (providerUnavailable(error)) { stopReason = "provider-error"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
@@ -1433,6 +1634,7 @@ export class OpenAIResponsesProvider {
         break;
       }
 
+      successfulModelHops += 1;
       previousUsage = response?.usage ?? null;
       const calls = extractFunctionCalls(response);
       const responseText = extractResponseText(response);
@@ -1446,7 +1648,14 @@ export class OpenAIResponsesProvider {
           deadline,
           turnBudget,
           judge: (goal, text, judgeContext, judgeDeadline, judgeBudget) => (
-            this.judgeGoal(goal, text, judgeContext, judgeDeadline, judgeBudget)
+            this.judgeGoal(
+              goal,
+              text,
+              judgeContext,
+              judgeDeadline,
+              judgeBudget,
+              credentialState.request
+            )
           )
         });
         if (!goalDecision.continue) {
@@ -1577,7 +1786,11 @@ export class OpenAIResponsesProvider {
             model,
             instructions: baseInstructions,
             input: conversationInput
-          }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
+          }, context, {
+            timeoutMs: this.forceAnswerMs,
+            turnBudget,
+            credentialRequest: credentialState.request
+          });
           const forced = extractResponseText(response);
           if (forced) text = forced;
         }
@@ -1620,15 +1833,24 @@ export class OpenAIResponsesProvider {
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      const response = await requestWithRetry(() => fetch(`${this.baseUrl}/responses`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify(body)
-      }), providerRetryOptions(this, context, controller.signal));
+      const response = await requestWithProviderCredential(
+        this,
+        options.credentialRequest,
+        {
+          context,
+          signal: controller.signal,
+          model: body.model,
+          request: (credential) => fetch(`${this.baseUrl}/responses`, {
+            method: "POST",
+            signal: controller.signal,
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${credential}`
+            },
+            body: JSON.stringify(body)
+          })
+        }
+      );
       const json = await response.json().catch(() => ({}));
       const callTools = (json.output ?? []).filter((item) => item.type === "function_call").map((item) => item.name);
       const budgetRecord = this.budgetGuard?.record(json.usage, body.model, {
@@ -1670,10 +1892,14 @@ export class AnthropicProvider {
     this.budgetGuard = options.budgetGuard ?? null;
     this.ownsRouter = !options.router;
     this.router = options.router ?? new ModelRouter({ envPrefix: "ANTHROPIC", baseModel: this.model });
+    configureProviderCredentialPool(this, options, {
+      providerName: "anthropic",
+      envSecretName: "ANTHROPIC_API_KEY"
+    });
   }
 
   isConfigured() {
-    return Boolean(this.apiKey);
+    return providerHasCredentials(this);
   }
 
   resolveModel({ model, tier, task } = {}) {
@@ -1684,31 +1910,48 @@ export class AnthropicProvider {
     return this.model;
   }
 
-  async judgeGoal(goal, assistantText, context, deadline, turnBudget) {
+  async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null) {
     checkRequestBudget(this, turnBudget);
     const response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
       model: this.resolveModel({ task: "goal" }),
       max_tokens: GOAL_JUDGE_MAX_TOKENS,
       system: GOAL_JUDGE_INSTRUCTIONS,
       messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
-    }, context, { timeoutMs: remainingMs, turnBudget }), context);
+    }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
     const verdict = parseGoalJudgeVerdict(extractAnthropicText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
     return verdict;
   }
 
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
-    if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
+    const generationRequest = arguments[0] ?? {};
+    if (!this.isConfigured()) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
-    trackPromptCacheIdentity(this, {
-      provider: "anthropic",
-      model,
-      baseUrl: this.baseUrl,
-      credential: this.apiKey,
-      context
-    });
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
+    let credentialState;
+    try {
+      credentialState = initialCredentialState(this, { model, context });
+    } catch (error) {
+      const fallback = await tryFallbackProvider(this, generationRequest, error);
+      if (fallback.used) return fallback.result;
+      if (!isCredentialPoolExhausted(error)) throw error;
+      return {
+        provider: "anthropic",
+        model,
+        text: localPartialSummary({
+          reason: "provider-error",
+          iterations: 0,
+          maxIterations,
+          toolCalls: [],
+          lastText: ""
+        }),
+        toolCalls: [],
+        iterations: 0,
+        maxIterations,
+        stopReason: "provider-error"
+      };
+    }
 
     const advertisedTools = Array.isArray(context.__advertisedTools) ? context.__advertisedTools : null;
     let tools = advertisedTools
@@ -1761,6 +2004,7 @@ export class AnthropicProvider {
     let lastText = "";
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
+    let successfulModelHops = 0;
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -1810,8 +2054,21 @@ export class AnthropicProvider {
           messages: withAnthropicCacheBreakpoints(convo),
           ...(wantStream ? { stream: true } : {}),
           ...(tools.length > 0 ? { tools } : {})
-        }, context, { timeoutMs: remainingMs, turnBudget, onDelta }), context);
+        }, context, {
+          timeoutMs: remainingMs,
+          turnBudget,
+          onDelta,
+          credentialRequest: credentialState.request
+        }), context);
       } catch (error) {
+        if (isCredentialPoolExhausted(error) && successfulModelHops === 0 && toolCalls.length === 0) {
+          const fallback = await tryFallbackProvider(this, generationRequest, error);
+          if (fallback.used) return fallback.result;
+        }
+        if (isCredentialPoolExhausted(error)) {
+          stopReason = "provider-error";
+          break;
+        }
         if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
         if (providerUnavailable(error)) { stopReason = "provider-error"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
@@ -1819,6 +2076,7 @@ export class AnthropicProvider {
         break;
       }
 
+      successfulModelHops += 1;
       previousUsage = response?.usage ?? null;
       convo.push({ role: "assistant", content: response.content ?? [] });
 
@@ -1834,7 +2092,14 @@ export class AnthropicProvider {
           deadline,
           turnBudget,
           judge: (goal, text, judgeContext, judgeDeadline, judgeBudget) => (
-            this.judgeGoal(goal, text, judgeContext, judgeDeadline, judgeBudget)
+            this.judgeGoal(
+              goal,
+              text,
+              judgeContext,
+              judgeDeadline,
+              judgeBudget,
+              credentialState.request
+            )
           )
         });
         if (!goalDecision.continue) {
@@ -1930,7 +2195,11 @@ export class AnthropicProvider {
             max_tokens: this.maxTokens,
             system,
             messages: withAnthropicCacheBreakpoints(convo)
-          }, context, { timeoutMs: this.forceAnswerMs, turnBudget });
+          }, context, {
+            timeoutMs: this.forceAnswerMs,
+            turnBudget,
+            credentialRequest: credentialState.request
+          });
           const forced = extractAnthropicText(response);
           if (forced) text = forced;
         }
@@ -2002,16 +2271,29 @@ export class AnthropicProvider {
       ? () => { clearTimeout(timer); timer = armStallTimeout(); }
       : undefined;
     try {
-      const response = await requestWithRetry(() => fetch(`${this.baseUrl}/messages`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": this.apiKey,
-          "anthropic-version": this.version
-        },
-        body: JSON.stringify(body)
-      }), providerRetryOptions(this, context, controller.signal));
+      const response = await requestWithProviderCredential(
+        this,
+        options.credentialRequest,
+        {
+          context,
+          signal: controller.signal,
+          model: body.model,
+          request: (credential, lease) => {
+            const headers = {
+              "content-type": "application/json",
+              "anthropic-version": this.version
+            };
+            if (lease.type === "oauth") headers.authorization = `Bearer ${credential}`;
+            else headers["x-api-key"] = credential;
+            return fetch(`${this.baseUrl}/messages`, {
+              method: "POST",
+              signal: controller.signal,
+              headers,
+              body: JSON.stringify(body)
+            });
+          }
+        }
+      );
       const contentType = response.headers?.get?.("content-type") ?? "";
       const json = streaming && /text\/event-stream/i.test(contentType)
         ? await readAnthropicEventStream(response, { onDelta: options.onDelta, onActivity })
@@ -2042,17 +2324,42 @@ export class AnthropicProvider {
 export function createModelProvider(options = {}) {
   if (options.forceDeterministic === true) return new DeterministicModelProvider();
   const budgetGuard = options.budgetGuard ?? null;
-  const anthropic = new AnthropicProvider({ ...(options.anthropic ?? {}), budgetGuard });
-  const openai = new OpenAIResponsesProvider({ ...(options.openai ?? {}), budgetGuard });
+  const credentialPools = options.credentialPoolRegistry ?? createCredentialPoolRegistry({
+    ...(options.credentialPoolConfig === undefined
+      ? {}
+      : { config: options.credentialPoolConfig }),
+    ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
+    env: options.env ?? process.env,
+    secretsStore: options.secretsStore ?? options.secrets ?? null,
+    ...(options.credentialPoolNow === undefined ? {} : { now: options.credentialPoolNow }),
+    ...(options.credentialPoolRandom === undefined ? {} : { random: options.credentialPoolRandom }),
+    refreshOAuth: options.refreshOAuth ?? null,
+    onEvent: options.onCredentialPoolEvent ?? null
+  });
+  const anthropic = new AnthropicProvider({
+    ...(options.anthropic ?? {}),
+    budgetGuard,
+    credentialPool: options.anthropic?.credentialPool ?? credentialPools.get("anthropic")
+  });
+  const openai = new OpenAIResponsesProvider({
+    ...(options.openai ?? {}),
+    budgetGuard,
+    credentialPool: options.openai?.credentialPool ?? credentialPools.get("openai")
+  });
+
+  const withFallback = (primary, fallback) => {
+    primary.fallbackProvider = fallback?.isConfigured?.() ? fallback : null;
+    return primary;
+  };
 
   // Explicit preference wins. anthropic | openai | auto (default).
   const preference = (options.preferred ?? process.env.OPENAGI_PROVIDER ?? "auto").toLowerCase();
-  if (preference === "openai" && openai.isConfigured()) return openai;
-  if (preference === "anthropic" && anthropic.isConfigured()) return anthropic;
+  if (preference === "openai" && openai.isConfigured()) return withFallback(openai, anthropic);
+  if (preference === "anthropic" && anthropic.isConfigured()) return withFallback(anthropic, openai);
 
   // auto: anthropic first if configured, then openai, then deterministic.
-  if (anthropic.isConfigured()) return anthropic;
-  if (openai.isConfigured()) return openai;
+  if (anthropic.isConfigured()) return withFallback(anthropic, openai);
+  if (openai.isConfigured()) return withFallback(openai, anthropic);
   return new DeterministicModelProvider();
 }
 

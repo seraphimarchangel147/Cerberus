@@ -259,7 +259,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         try {
           const { createModelProvider } = await import("./model-provider.js");
           if (runtime.agentHost) {
-            runtime.agentHost.modelProvider = createModelProvider({ budgetGuard: runtime.budget });
+            runtime.agentHost.modelProvider = createModelProvider({
+              budgetGuard: runtime.budget,
+              secrets: runtime.secrets,
+              dataDir: runtime.secrets?.dataDir
+            });
           }
         } catch { /* swallow */ }
         if (process.env.OPENAGI_AUTH_TOKEN) {
@@ -704,7 +708,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         try {
           const { createModelProvider } = await import("./model-provider.js");
           if (runtime.agentHost) {
-            runtime.agentHost.modelProvider = createModelProvider({ budgetGuard: runtime.budget });
+            runtime.agentHost.modelProvider = createModelProvider({
+              budgetGuard: runtime.budget,
+              secrets: runtime.secrets,
+              dataDir: runtime.secrets?.dataDir
+            });
           }
         } catch { /* swallow */ }
         // Also persist to .env so it survives restart.

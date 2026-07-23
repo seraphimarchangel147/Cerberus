@@ -1422,7 +1422,11 @@ export function registerCoreTools(registry, runtime) {
       process.env.OPENAGI_PROVIDER = args.preference;
       const { createModelProvider } = await import("./model-provider.js");
       if (runtime.agentHost) {
-        runtime.agentHost.modelProvider = createModelProvider({ budgetGuard: runtime.budget });
+        runtime.agentHost.modelProvider = createModelProvider({
+          budgetGuard: runtime.budget,
+          secrets: runtime.secrets,
+          dataDir: runtime.secrets?.dataDir
+        });
       }
       // Persist
       try {
