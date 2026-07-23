@@ -615,3 +615,10 @@ PROVIDER ROUTING COMPLETE
 API SERVER COMPLETE
 
 PARITY WAVE 3 PHASE 2 COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: canonical provider requests (Codex)
+
+- Added a clean-room two-phase roadmap for execution-intelligence and workspace-product improvements inspired by the Agent Zero architecture review.
+- Made AgentHost keep the raw current message in durable session history while passing providers only prior messages plus one separately expanded current turn.
+- Preserved repeated identical user turns, context-reference expansion, image forwarding, and ephemeral behavior without content-based deduplication.
+- Added first-turn, multi-turn, repeated-text, ephemeral, context-reference, and image request-boundary regressions in both approval lanes.

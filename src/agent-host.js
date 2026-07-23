@@ -78,6 +78,22 @@ export function resolveChatMaxIterations(env = process.env) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_CHAT_MAX_ITERATIONS;
 }
 
+export function providerHistoryBeforeCurrentTurn(messages, currentMessageId) {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  const lastIndex = messages.length - 1;
+  const matchedIndex = messages.findIndex(
+    (message) => message?.id && message.id === currentMessageId
+  );
+  if (matchedIndex >= 0 && matchedIndex !== lastIndex) {
+    throw new Error("Current user turn is not the final session message.");
+  }
+  const current = messages[lastIndex];
+  if (matchedIndex < 0 && current?.role !== "user") {
+    throw new Error("Session append did not return the current user turn last.");
+  }
+  return messages.slice(0, lastIndex);
+}
+
 export function isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist = false }) {
   const interactive = channel !== "autopilot"
     && channel !== "cron"
@@ -281,9 +297,22 @@ export class AgentHost {
       }
     }
 
+    const currentMessageId = createId("msg");
     const sessionBefore = ephemeral
-      ? { id: sessionId, messages: [{ role: "user", content: text }] }
+      ? {
+          id: sessionId,
+          messages: [{
+            id: currentMessageId,
+            role: "user",
+            content: text,
+            agentId,
+            channel,
+            from,
+            metadata: input.metadata ?? {}
+          }]
+        }
       : await this.store.appendMessage(sessionId, {
+          id: currentMessageId,
           role: "user",
           content: text,
           agentId,
@@ -291,6 +320,10 @@ export class AgentHost {
           from,
           metadata: input.metadata ?? {}
         });
+    const providerHistory = providerHistoryBeforeCurrentTurn(
+      sessionBefore.messages,
+      currentMessageId
+    );
 
     if (lifecycle) {
       lifecycle.base = {
@@ -553,7 +586,10 @@ export class AgentHost {
         task: (channel === "autopilot" || channel === "cron") ? "autopilot" : "chat",
         scrutiny: effectiveScrutiny,
         memoryHits: memoryHitsForModel,
-        messages: sessionBefore.messages,
+        // The current message is already carried by `input` after context
+        // reference expansion. Provider history must contain only earlier
+        // turns or both paid paths serialize the current user content twice.
+        messages: providerHistory,
         images: Array.isArray(input.images) ? input.images : [],
         instructions: this.instructionsForAgent(agent),
         sessionMemorySnapshot,
