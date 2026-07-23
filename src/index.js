@@ -22,6 +22,7 @@ export { createAbiIntegration, IntegrationRegistry, normalizeSignal } from "./in
 export { McpRegistry } from "./mcp-registry.js";
 export { PendingActionStore } from "./pending-actions.js";
 export { GoalStore } from "./goal-store.js";
+export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 export { ComputerUseLog } from "./computer-use-log.js";
 export { McpStdioClient } from "./mcp-client.js";
 export { McpHttpClient } from "./mcp-http-client.js";

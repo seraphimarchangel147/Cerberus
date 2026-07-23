@@ -75,6 +75,17 @@ export const COMMAND_DEFS = [
     ]
   },
   {
+    name: "rollback",
+    description: "List recent checkpoints or preview one for rollback",
+    options: [{
+      type: 4,
+      name: "number",
+      description: "Checkpoint number from the newest-first list",
+      required: false,
+      min_value: 1
+    }]
+  },
+  {
     name: "schedule",
     description: "Schedule a prompt: one-shot delay, recurring interval, or daily time",
     options: [
@@ -94,6 +105,8 @@ export class DiscordCommands {
   constructor(channel) {
     this.channel = channel; // DiscordChannel — rest(), log(), agentHost, allowFrom
     this.registered = false;
+    this.rollbackConfirmations = new Map();
+    this.rollbackConfirmationSeq = 0;
   }
 
   get runtime() {
@@ -161,6 +174,7 @@ export class DiscordCommands {
       case "observe": return this.cmdObserve(interaction);
       case "sessions": return this.cmdSessions(interaction);
       case "goal": return this.cmdGoal(interaction);
+      case "rollback": return this.cmdRollback(interaction, opts);
       case "schedule": return this.cmdSchedule(interaction, opts);
       case "jobs": return this.cmdJobs(interaction);
       case "help": return this.cmdHelp(interaction);
@@ -179,6 +193,43 @@ export class DiscordCommands {
       const [verb, actionId] = id.split(":");
       const outcome = await this.decidePendingAction(actionId, verb === "pa-approve" ? "approve" : "deny", userId);
       return this.respond(interaction, { content: outcome, components: [] }, T.UPDATE_MESSAGE);
+    }
+    if (id.startsWith("rollback-confirm:")) {
+      const pending = this.rollbackConfirmations.get(id);
+      if (!pending) {
+        return this.respond(interaction, {
+          content: "This rollback confirmation is expired or was already used.",
+          flags: EPHEMERAL
+        });
+      }
+      const sessionId = this.goalSessionId(interaction);
+      if (pending.userId !== userId || pending.sessionId !== sessionId) {
+        return this.respond(interaction, {
+          content: "This rollback confirmation belongs to another session.",
+          flags: EPHEMERAL
+        });
+      }
+      if (typeof this.runtime?.tools?.invoke !== "function") {
+        return this.respond(interaction, { content: "Rollback is unavailable.", flags: EPHEMERAL });
+      }
+
+      // Delete before awaiting so simultaneous or replayed clicks cannot run
+      // the destructive restore more than once.
+      this.rollbackConfirmations.delete(id);
+      const outcome = await this.runtime.tools.invoke(
+        "rollback",
+        { checkpointId: pending.checkpointId },
+        {
+          channel: "discord",
+          sessionId,
+          __confirmed: true,
+          __approval: { approvedVia: "discord-button", decidedBy: userId }
+        }
+      );
+      const content = outcome?.ok
+        ? `Rollback complete for checkpoint ${pending.checkpointId}.`
+        : `Rollback failed: ${outcome?.error ?? "unknown error"}`;
+      return this.respond(interaction, { content: content.slice(0, 1900), components: [] }, T.UPDATE_MESSAGE);
     }
     if (id.startsWith("job-cancel:")) {
       const jobId = id.slice("job-cancel:".length);
@@ -535,6 +586,94 @@ export class DiscordCommands {
     return this.respond(interaction, { content: `Unknown goal action: ${action}`, flags: EPHEMERAL });
   }
 
+  async cmdRollback(interaction, opts = {}) {
+    const store = this.runtime?.checkpoints;
+    if (typeof store?.list !== "function") {
+      return this.respond(interaction, { content: "Checkpoints are unavailable.", flags: EPHEMERAL });
+    }
+    const sessionId = this.goalSessionId(interaction);
+    const listed = await store.list({ sessionId, limit: 10 });
+    const checkpoints = (Array.isArray(listed) ? listed : listed?.checkpoints ?? [])
+      .filter((checkpoint) => checkpointIdOf(checkpoint));
+    const requested = opts.number;
+
+    if (requested === undefined) {
+      if (checkpoints.length === 0) {
+        return this.respond(interaction, {
+          content: "No checkpoints are available for this session.",
+          flags: EPHEMERAL
+        });
+      }
+      const previews = await Promise.all(checkpoints.map(async (checkpoint) => ({
+        checkpoint,
+        preview: await this.checkpointPreview(checkpoint)
+      })));
+      const lines = ["Recent checkpoints for this session (newest first):"];
+      for (let index = 0; index < previews.length; index += 1) {
+        const { checkpoint, preview } = previews[index];
+        const summary = compactCheckpointPreview(checkpoint, preview, 180).replace(/\s*\n\s*/g, " / ");
+        lines.push(`${index + 1}. ${checkpointLabel(checkpoint)}${summary ? ` - ${summary}` : ""}`);
+      }
+      lines.push("Run /rollback number:<N> to preview and confirm a restore.");
+      return this.respond(interaction, { content: lines.join("\n").slice(0, 1900), flags: EPHEMERAL });
+    }
+
+    if (!Number.isInteger(requested) || requested < 1) {
+      return this.respond(interaction, {
+        content: "Rollback number must be a positive integer from the newest-first list.",
+        flags: EPHEMERAL
+      });
+    }
+    const checkpoint = checkpoints[requested - 1];
+    if (!checkpoint) {
+      return this.respond(interaction, {
+        content: `Checkpoint number ${requested} is out of range for this session.`,
+        flags: EPHEMERAL
+      });
+    }
+
+    const checkpointId = checkpointIdOf(checkpoint);
+    const preview = await this.checkpointPreview(checkpoint);
+    const previewText = compactCheckpointPreview(checkpoint, preview, 1200) || "No diff preview is available.";
+    const userId = interaction.member?.user?.id ?? interaction.user?.id ?? "unknown";
+    const confirmationId = `rollback-confirm:${(++this.rollbackConfirmationSeq).toString(36)}`;
+    if (this.rollbackConfirmations.size >= 50) {
+      const oldest = this.rollbackConfirmations.keys().next().value;
+      if (oldest) this.rollbackConfirmations.delete(oldest);
+    }
+    this.rollbackConfirmations.set(confirmationId, {
+      checkpointId,
+      sessionId,
+      userId
+    });
+    return this.respond(interaction, {
+      content: [
+        `Confirm rollback to checkpoint ${requested}: ${checkpointLabel(checkpoint)}`,
+        "Preview:",
+        previewText
+      ].join("\n").slice(0, 1900),
+      flags: EPHEMERAL,
+      components: [{
+        type: 1,
+        components: [{
+          type: 2,
+          style: 4,
+          label: `Confirm rollback ${requested}`,
+          custom_id: confirmationId
+        }]
+      }]
+    });
+  }
+
+  async checkpointPreview(checkpoint) {
+    if (typeof this.runtime?.checkpoints?.preview !== "function") return null;
+    try {
+      return await this.runtime.checkpoints.preview(checkpointIdOf(checkpoint));
+    } catch (error) {
+      return { error: error?.message ?? String(error) };
+    }
+  }
+
   async cmdSessions(interaction) {
     const sessions = this.channel.agentHost?.store?.listSessions?.() ?? [];
     if (sessions.length === 0) return this.respond(interaction, { content: "No sessions yet." });
@@ -672,6 +811,55 @@ export class DiscordCommands {
     }
     return response.json();
   }
+}
+
+function checkpointIdOf(checkpoint) {
+  return String(checkpoint?.id ?? checkpoint?.checkpointId ?? "").trim();
+}
+
+function checkpointLabel(checkpoint) {
+  const parts = [`\`${checkpointIdOf(checkpoint)}\``];
+  const createdAt = checkpoint?.createdAt ?? checkpoint?.at ?? null;
+  const target = checkpoint?.directory ?? checkpoint?.root ?? checkpoint?.path ?? null;
+  if (createdAt) parts.push(String(createdAt));
+  if (target) parts.push(String(target));
+  return parts.join(" | ");
+}
+
+function compactCheckpointPreview(checkpoint, preview, maxChars) {
+  const candidates = [];
+  if (typeof preview === "string") candidates.push(preview);
+  if (preview && typeof preview === "object") {
+    for (const key of ["summary", "preview", "diff", "diffPreview", "message", "error"]) {
+      if (typeof preview[key] === "string") candidates.push(preview[key]);
+    }
+    for (const collection of [preview.files, preview.changes]) {
+      if (!Array.isArray(collection)) continue;
+      for (const item of collection.slice(0, 5)) {
+        if (typeof item === "string") {
+          candidates.push(item);
+          continue;
+        }
+        const name = item?.path ?? item?.file ?? item?.name ?? "file";
+        const detail = item?.diffPreview ?? item?.diff ?? item?.summary ?? item?.status ?? "changed";
+        candidates.push(`${name}: ${detail}`);
+      }
+    }
+  }
+  if (candidates.length === 0) {
+    if (typeof checkpoint?.summary === "string") candidates.push(checkpoint.summary);
+    else if (Array.isArray(checkpoint?.files)) {
+      candidates.push(checkpoint.files.slice(0, 5).map((item) => item?.path ?? item?.file ?? item).join(", "));
+    } else if (preview != null) {
+      try { candidates.push(JSON.stringify(preview)); } catch { /* bounded fallback below */ }
+    }
+  }
+  return candidates
+    .filter(Boolean)
+    .join("\n")
+    .replace(/```/g, "'''")
+    .trim()
+    .slice(0, maxChars);
 }
 
 function formatUptime(seconds) {

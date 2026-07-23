@@ -25,14 +25,15 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "goal_status",
   "pause_goal",
   "resume_goal",
-  "clear_goal"
+  "clear_goal",
+  "list_checkpoints"
 ]);
 export const DEFAULT_CHAT_MAX_ITERATIONS = 4;
 
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
 // from every ordinary question.
-export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|pause|resume|clear|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
+export const CHAT_TOOL_INTENT_RE = /^(?:[!/]|(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+(?:you\s+)?to|i(?:'d| would)\s+like\s+you\s+to)\s+(?:please\s+)?)?(?:remind|schedule|search|find|look\s+up|run|open|send|remember|delete|remove|fix|build|create|deploy|email|post|execute|install|update|edit|write|save|move|upload|download|call|message|book|buy|set|configure|test|check|fetch|browse|commit|push|merge|rollback|restart|reboot|shut\s+down|turn\s+(?:on|off)|approve|cancel|pause|resume|clear|complete|analyze|inspect|review|read|summarize|compare|explain|show|tell|give|draft|plan|research|calculate|translate|help)\b)/iu;
 
 // Intentionally narrow, anchored phrases: consent should be explicit, not
 // inferred from a sentence that merely contains "yes" or "continue". The
@@ -166,6 +167,7 @@ export class AgentHost {
     const requestedMemoryScope = String(input.memoryScope ?? "").trim();
     const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
     const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
+    const turnId = String(input.__turnId ?? input.turnId ?? createId("turn"));
 
     // A real inbound user message always wins over an automated goal loop.
     // Discord also performs this at enqueue time so a queued message can stop
@@ -401,6 +403,7 @@ export class AgentHost {
       // does not read this field.
       __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
       __memoryScope: memoryScope,
+      __turnId: turnId,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,
       __abortSignal: turnAbortController.signal,
       __turnAbortController: turnAbortController,
@@ -538,7 +541,7 @@ export class AgentHost {
     }
 
     return {
-      id: createId("turn"),
+      id: turnId,
       createdAt: nowIso(),
       agent,
       session: {

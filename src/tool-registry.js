@@ -42,6 +42,10 @@ export class ToolRegistry {
     this.pendingActions = pendingActions;
   }
 
+  bindCheckpoints(checkpoints) {
+    this.checkpoints = checkpoints;
+  }
+
   allowForSession(sessionId, toolName) {
     if (!sessionId || !toolName) return false;
     this.sessionAllows.add(sessionAllowKey(sessionId, toolName));
@@ -365,6 +369,11 @@ export class ToolRegistry {
       return this._suspendForApproval(action, name, args, context);
     }
     try {
+      await this.checkpoints?.beforeToolCall?.({
+        toolName: name,
+        args: args ?? {},
+        context
+      });
       const result = await tool.handler(args ?? {}, context);
       return { ok: true, result: appendApprovalNote(result, context?.__approval) };
     } catch (error) {
@@ -1005,6 +1014,66 @@ export function registerCoreTools(registry, runtime) {
     description: "Get a structural health snapshot of the runtime: specialist counts, memory tier saturation, outcome quality (7d/30d), upcoming cron jobs, MCP servers, and any actionable findings (warn/err severity). Use this when the user asks 'how are you doing' or 'what's wrong'.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     handler: async () => runtime.introspector?.audit() ?? { error: "no introspector" }
+  });
+
+  registry.register({
+    name: "list_checkpoints",
+    sideEffects: false,
+    description: "List recent file checkpoints for this session, including bounded diff previews. Checkpoints exist only when OPENAGI_CHECKPOINTS=1.",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 20 },
+        directory: { type: "string", description: "Optional directory filter." }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (!runtime.checkpoints) return { enabled: false, checkpoints: [] };
+      const checkpoints = await runtime.checkpoints.list({
+        limit: args.limit ?? 10,
+        sessionId: context?.sessionId ?? null,
+        directory: args.directory ?? null
+      });
+      const withPreviews = await Promise.all(checkpoints.map(async (checkpoint) => ({
+        ...checkpoint,
+        preview: await runtime.checkpoints.preview(checkpoint.id)
+      })));
+      return {
+        enabled: true,
+        count: checkpoints.length,
+        checkpoints: withPreviews
+      };
+    }
+  });
+
+  registry.register({
+    name: "rollback",
+    needsConfirmation: true,
+    description: "Restore one file or every file in a checkpoint. Always inspect list_checkpoints first; rollback requires human confirmation.",
+    parameters: {
+      type: "object",
+      properties: {
+        checkpointId: { type: "string", description: "Checkpoint id from list_checkpoints." },
+        path: { type: "string", description: "Optional single file to restore; omit to restore the whole checkpoint." }
+      },
+      required: ["checkpointId"],
+      additionalProperties: false
+    },
+    summarize: (args) => `Rollback checkpoint ${args.checkpointId}${args.path ? ` file ${args.path}` : ""}`,
+    handler: async (args, context) => {
+      if (!runtime.checkpoints) throw new Error("Checkpoints are disabled. Set OPENAGI_CHECKPOINTS=1 and restart.");
+      const result = await runtime.checkpoints.rollback(args.checkpointId, {
+        path: args.path ?? null,
+        decidedBy: context?.__approval?.decider
+          ?? context?.__approval?.decidedBy
+          ?? context?.from
+          ?? "user",
+        ...(context?.sessionId != null ? { sessionId: context.sessionId } : {})
+      });
+      if (!result) throw new Error(`Checkpoint not found: ${args.checkpointId}`);
+      return result;
+    }
   });
 
   registry.register({

@@ -1630,6 +1630,7 @@ Tools available to you (call them when useful):
 - add_goal(title, description?, dueDate?, parentGoalId?) - create a tracked goal and activate persistent goal mode for this session
 - list_goals / link_task_to_goal - inspect goal rollups and attach tasks to a goal
 - goal_status / pause_goal / resume_goal / clear_goal - inspect or control this session's automatic goal loop
+- list_checkpoints / rollback - inspect automatic pre-mutation file snapshots and restore a confirmed checkpoint
 - list_skills / use_skill / run_skill / restore_skill - discover, load, run, or restore named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
 - list_sessions — see recent conversations

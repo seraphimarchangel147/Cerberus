@@ -346,6 +346,7 @@ function serializableContext(ctx) {
     agentId: ctx.agentId ?? null,
     channel: ctx.channel ?? null,
     from: ctx.from ?? null,
-    target: ctx.target ?? null
+    target: ctx.target ?? null,
+    ...(ctx.__turnId ? { __turnId: String(ctx.__turnId) } : {})
   };
 }

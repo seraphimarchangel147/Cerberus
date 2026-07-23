@@ -459,3 +459,12 @@ GOALS LOOP COMPLETE
 - Suppressed delivery only when the complete trimmed scheduled reply is exactly [SILENT], while preserving the assistant output in the durable session transcript.
 - Added pinning, persistence, replacement, alert, toggle, exact-marker, near-miss, and transcript-audit regressions.
 CRON CONTROL VERIFIED
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: checkpoints and rollback (Codex)
+
+- Added opt-in pre-mutation checkpoints for whole-file writes, anchored edits, and destructive shell rm/mv/sed operations, with one evolving checkpoint per directory and turn.
+- Persisted byte-exact, mode-aware snapshots as content-addressed blobs with a durable JSONL journal and atomic index snapshot; disabled mode performs no checkpoint filesystem work.
+- Added bounded diff previews, session-scoped listing, selective or whole-checkpoint restoration, and confirmation-gated agent and Discord rollback surfaces.
+- Kept approval and catastrophic gates ahead of capture, blocked ambiguous or unsafe targets before dispatch, and preserved turn identity across suspended approvals and multi-tool iterations.
+- Added store, registry, AgentHost, persistence, shell parsing, integrity, containment, prompt, setup, and Discord confirmation regressions in both approval lanes.
+CHECKPOINTS COMPLETE

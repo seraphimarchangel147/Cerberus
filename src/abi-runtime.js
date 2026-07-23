@@ -37,6 +37,7 @@ import { TaskSweep } from "./task-sweep.js";
 import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
 import { GoalStore } from "./goal-store.js";
+import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
 import { ComputerUseLog } from "./computer-use-log.js";
@@ -177,6 +178,18 @@ export class AbiRuntime {
     this.mcp = options.mcp ?? new McpRegistry(options.mcpOptions ?? {});
     this.tools = options.tools ?? new ToolRegistry();
     this.mcp.bindToolRegistry(this.tools);
+    const checkpointOptIn = options.checkpointOptions?.enabled
+      ?? checkpointsEnabled(options.env ?? process.env);
+    this.checkpoints = options.checkpoints
+      ?? (checkpointOptIn
+        ? new CheckpointStore({
+            dataDir: options.dataDir,
+            workspaceDir: options.workspaceDir ?? process.cwd(),
+            ...(options.checkpointOptions ?? {}),
+            enabled: true
+          })
+        : null);
+    this.tools.bindCheckpoints?.(this.checkpoints);
     // Pending-action queue: tools flagged needsConfirmation route through
     // here so the user can approve/deny before the agent's intent runs.
     this.pendingActions = options.pendingActions ?? new PendingActionStore({
