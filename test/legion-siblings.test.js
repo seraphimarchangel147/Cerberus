@@ -92,6 +92,8 @@ test("formatLegionContextBlock names the channel, server, and sibling lane", () 
   assert.match(block, /Legion \/ Discord context/);
   assert.match(block, /channel C1 in server G1/);
   assert.match(block, /send_message\(channel:"sibling"/);
+  assert.match(block, /send_message\(channel:"mailbox"/);
+  assert.match(block, /prefixes the sibling's real raw-ID mention/);
   assert.match(block, /seraphim/);
 });
 

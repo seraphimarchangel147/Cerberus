@@ -11,6 +11,7 @@ import {
   AgentHost,
   CHAT_CORE_TOOLS,
   DEFAULT_CHAT_MAX_ITERATIONS,
+  formatFastLaneNotice,
   hasImperativeToolIntent,
   isConversationalTurn,
   resolveChatMaxIterations
@@ -309,4 +310,60 @@ test("Anthropic-shaped chat requests receive the same core-only schema list", as
 
   assert.equal(result.text, "Done.");
   assert.deepEqual(body.tools.map((tool) => tool.name), CHAT_CORE_TOOLS);
+});
+
+test("formatFastLaneNotice is self-declaring only when tools were actually trimmed", () => {
+  // No trim / nothing hidden ⇒ silent (a genuinely small toolset must not be
+  // mislabeled as a trim, and a full-lane turn must never see the notice).
+  assert.equal(formatFastLaneNotice(null), "");
+  assert.equal(formatFastLaneNotice({ advertised: 13, hidden: 0 }), "");
+  assert.equal(formatFastLaneNotice({ advertised: 13, hidden: -4 }), "");
+
+  const notice = formatFastLaneNotice({ advertised: 13, hidden: 102 });
+  assert.match(notice, /Conversational fast lane/);
+  assert.match(notice, /13 core tools; 102 more are registered/);
+  // Awareness + agency, no trigger word: it must name searcmcp_tools as the
+  // escalation path and explicitly say it is NOT gated on a codeword.
+  assert.match(notice, /searcmcp_tools/);
+  assert.match(notice, /NOT gated on any trigger word/);
+});
+
+test("a trimmed chat turn injects the self-declaring fast-lane notice into the model turnContext", async (t) => {
+  isolateEnv(t, ["OPENAGI_CHAT_MAX_ITERATIONS", "OPENAGI_MAX_MODEL_TOOLS"]);
+  delete process.env.OPENAGI_CHAT_MAX_ITERATIONS;
+  process.env.OPENAGI_MAX_MODEL_TOOLS = "128";
+
+  const { host, requests } = makeHarness("watch");
+  const turn = await host.handleMessage({
+    channel: "discord",
+    from: "creator",
+    sessionId: "fastlane-notice",
+    text: "what's the capital of France"
+  });
+
+  assert.equal(turn.conversational, true);
+  // FULL_TOOL_NAMES = CHAT_CORE_TOOLS + 2 extras, so exactly 2 are held back.
+  assert.match(requests[0].turnContext, /Conversational fast lane/);
+  assert.match(
+    requests[0].turnContext,
+    new RegExp(`only ${CHAT_CORE_TOOLS.length} core tools; 2 more are registered`)
+  );
+  assert.match(requests[0].turnContext, /searcmcp_tools/);
+});
+
+test("a full-lane work turn does NOT inject the fast-lane notice", async (t) => {
+  isolateEnv(t, ["OPENAGI_MAX_MODEL_TOOLS"]);
+  process.env.OPENAGI_MAX_MODEL_TOOLS = "128";
+
+  const { host, requests } = makeHarness("watch");
+  const turn = await host.handleMessage({
+    channel: "discord",
+    from: "creator",
+    sessionId: "fastlane-notice-fulllane",
+    text: "Could you please search the repository for TODO comments?",
+    maxIterations: 19
+  });
+
+  assert.equal(turn.conversational, false, "an imperative work request stays on the full lane");
+  assert.doesNotMatch(requests[0].turnContext, /Conversational fast lane/);
 });

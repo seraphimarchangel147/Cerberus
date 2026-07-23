@@ -8,7 +8,8 @@ import {
   isToolSearchDeferrable,
   registerToolSearchTools
 } from "./tool-search.js";
-import { resolveSibling, siblingNames } from "./legion-siblings.js";
+import { resolveSibling, siblingNames, legionUserId } from "./legion-siblings.js";
+import { deliverLegionMailbox } from "./legion-mailbox.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
@@ -993,13 +994,13 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "send_message",
-    description: "Proactively send a message via a channel. channel='discord' posts to a Discord channel id; channel='sibling' reaches another Legion agent by name (e.g. 'seraphim') — the message lands in that agent's Discord channel where they'll see it. channel='telegram' or 'local' as before. Use to reach out unprompted, hand off to a sibling agent, or answer a cross-agent question. Returns delivery status.",
+    description: "Proactively send a message via a channel. channel='discord' posts to a Discord channel id; channel='sibling' resolves a Legion agent name and sends a real raw-ID mention in that agent's Discord channel; channel='mailbox' writes to the sibling's local WSL inbox under ~/.legion/mailbox. Use the mailbox lane when Discord is unavailable or asynchronous local delivery is preferred. Returns a structured delivery envelope.",
     parameters: {
       type: "object",
       properties: {
-        channel: { type: "string", enum: ["discord", "sibling", "telegram", "local"], description: "Delivery lane: 'discord' (target=channel id), 'sibling' (target=agent name like 'seraphim'), 'telegram' (target=chat id), or 'local'." },
-        target: { type: "string", description: "For 'sibling': the agent name (seraphim, home, …). For 'discord': the channel id. For 'telegram': the chat id." },
-        text: { type: "string", description: "Message body. Keep it short and useful. When messaging a sibling, sign it so they know it's from you." }
+        channel: { type: "string", enum: ["discord", "sibling", "mailbox", "telegram", "local"], description: "Delivery lane: 'discord' (target=channel id), 'sibling' (target=Legion agent name over Discord), 'mailbox' (target=Legion agent name over local WSL JSONL), 'telegram' (target=chat id), or 'local'." },
+        target: { type: "string", description: "For 'sibling'/'mailbox': the agent name (ziz, seraphim, …). For 'discord': the channel id. For 'telegram': the chat id." },
+        text: { type: "string", description: "Message body. Keep it short and useful. Sibling Discord delivery automatically prefixes the recipient's raw <@userId> mention." }
       },
       required: ["channel", "target", "text"],
       additionalProperties: false
@@ -1023,18 +1024,41 @@ export function registerCoreTools(registry, runtime) {
           transport: raw
         };
       };
-      // 'sibling' is a friendly alias that resolves an agent name to the
-      // Discord channel where that sibling listens, then delivers over Discord.
+      // 'sibling' resolves a Legion name to both its Discord channel and raw
+      // user ID. Prefixing the raw mention is mandatory: plain @Name text does
+      // not pass sibling gateways' bot-message mention gates.
       if (args.channel === "sibling") {
         const dataDir = runtime.dataDir ?? null;
         const channelId = resolveSibling(args.target, process.env, dataDir);
-        if (!channelId) {
+        const userId = legionUserId(args.target);
+        if (!channelId || !userId) {
           throw new Error(
             `Unknown sibling "${args.target}". Known siblings: ${siblingNames(process.env, dataDir).join(", ")}.`
           );
         }
-        const raw = await runtime.channels.deliver({ channel: "discord", target: channelId, text: args.text });
-        return finalize(raw, "sibling", `${args.target} (discord ${channelId})`);
+        const mention = `<@${userId}>`;
+        const body = String(args.text ?? "").trim();
+        const text = body.startsWith(mention) ? body : `${mention} ${body}`;
+        const raw = await runtime.channels.deliver({ channel: "discord", target: channelId, text });
+        const result = finalize(raw, "sibling", `${args.target} (discord ${channelId})`);
+        result.recipient = String(args.target).trim().toLowerCase();
+        result.destination = channelId;
+        result.mention = mention;
+        result.messageId = raw?.message?.id ?? raw?.id ?? null;
+        return result;
+      }
+      if (args.channel === "mailbox") {
+        const dataDir = runtime.dataDir ?? null;
+        if (!resolveSibling(args.target, process.env, dataDir) || !legionUserId(args.target)) {
+          throw new Error(
+            `Unknown sibling "${args.target}". Known siblings: ${siblingNames(process.env, dataDir).join(", ")}.`
+          );
+        }
+        return deliverLegionMailbox({
+          from: process.env.OPENAGI_AGENT_NAME || "azazel",
+          to: args.target,
+          text: args.text
+        });
       }
       const raw = await runtime.channels.deliver({ channel: args.channel, target: args.target, text: args.text });
       return finalize(raw, args.channel, args.target);

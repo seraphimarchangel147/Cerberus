@@ -3,7 +3,7 @@
 // presentation without changing turn, approval, or live-status call sites.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DiscordChannel, discordReplyEnabled } from "../src/discord-channel.js";
+import { DiscordChannel, discordReplyEnabled, extractDiscordUserMentionIds } from "../src/discord-channel.js";
 
 function isolateReplyEnv(t) {
   const previous = process.env.DISCORD_REPLY;
@@ -23,6 +23,22 @@ function makeChannelHarness() {
   };
   return { channel, requests };
 }
+
+test("explicit raw user mentions are allowlisted without enabling mass or role pings", async () => {
+  const { channel, requests } = makeChannelHarness();
+  await channel.sendMessage(
+    "channel-1",
+    "<@1487563271753040063> hello @everyone <@&999999999999999999> <@!1487563271753040063> <@1493089655531241634>"
+  );
+  assert.deepEqual(extractDiscordUserMentionIds(requests[0].options.body.content), [
+    "1487563271753040063",
+    "1493089655531241634"
+  ]);
+  assert.deepEqual(requests[0].options.body.allowed_mentions, {
+    parse: [],
+    users: ["1487563271753040063", "1493089655531241634"]
+  });
+});
 
 test("Discord reply quoting defaults off for messages and embeds", async (t) => {
   isolateReplyEnv(t);

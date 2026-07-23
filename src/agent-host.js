@@ -467,6 +467,18 @@ export class AgentHost {
       toolRegistry?.toolSearchController?.env ?? process.env
     );
 
+    // Self-declaring fast lane: when a casual turn is trimmed to CHAT_CORE_TOOLS
+    // the agent should KNOW it is on the trimmed lane, how many tools are held
+    // back, and how to pull them — no trigger word, just awareness. Only fires
+    // when the trim actually happened (conversational + core list served), so a
+    // full-arsenal work turn never sees it.
+    const fastLane = (conversational && !chatCoreUnavailable)
+      ? {
+          advertised: tools.length,
+          hidden: Math.max(0, (toolRegistry?.list?.().length ?? tools.length) - tools.length)
+        }
+      : null;
+
     // Lava intuition (C2): top principles from the vector store inserted into
     // the prompt as soft hints — distinct from explicit memoryHits.
     let intuitions = [];
@@ -568,7 +580,7 @@ export class AgentHost {
         images: Array.isArray(input.images) ? input.images : [],
         instructions: this.instructionsForAgent(agent),
         sessionMemorySnapshot,
-        turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice, { channel, metadata: input.metadata ?? null }),
+        turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice, { channel, metadata: input.metadata ?? null }, fastLane),
         tools,
         toolRegistry,
         context: modelContext,
@@ -991,7 +1003,7 @@ Answer the user plainly. If a specialist was created, mention its name and scope
   // Per-turn [context] block prepended to the latest user message (see
   // buildTurnContext in model-provider.js for the provider-side fallback).
   // Carries everything that used to make the system prompt churn per turn.
-  turnContextForAgent(output, memoryHits = [], intuitions = [], ambientContext = null, screenContext = null, toolOverflowNotice = null, channelContext = null) {
+  turnContextForAgent(output, memoryHits = [], intuitions = [], ambientContext = null, screenContext = null, toolOverflowNotice = null, channelContext = null, fastLane = null) {
     const sections = [];
 
     sections.push(`Current decision: ${output.scrutiny.action}`);
@@ -1035,6 +1047,9 @@ Answer the user plainly. If a specialist was created, mention its name and scope
 
     const legionBlock = formatLegionContextBlock(channelContext);
     if (legionBlock) sections.push(legionBlock);
+
+    const fastLaneNotice = formatFastLaneNotice(fastLane);
+    if (fastLaneNotice) sections.push(fastLaneNotice);
 
     return `[context]\nPer-turn background assembled by the runtime — not typed by the user.\n${sections.join("\n")}\n[/context]`;
   }
@@ -1234,6 +1249,25 @@ export function formatScreenContextBlock(screenContext) {
   return `\nActive window the user is looking at right now (${where}):\n${body}\nGround your answer in this if it's relevant; don't quote it back verbatim.\n`;
 }
 
+// Self-declaring conversational fast lane. On a casual turn the runtime trims
+// the advertised tool schema to CHAT_CORE_TOOLS to save tokens; without this
+// the agent can't tell a trim from a genuinely small toolset and reports "I
+// only see ~6 tools / I have no lane to X". This block tells it, every trimmed
+// turn, that it is on the fast lane, how many tools are held back, and how to
+// pull them — so it stays AWARE and can self-escalate with judgment, no magic
+// trigger word required. Returns "" when the turn was not trimmed. Pure +
+// exported for testing.
+export function formatFastLaneNotice(fastLane) {
+  if (!fastLane || !Number.isFinite(fastLane.hidden) || fastLane.hidden <= 0) return "";
+  return [
+    "Conversational fast lane (token-saving trim):",
+    `- This casual turn advertises only ${fastLane.advertised} core tools; ${fastLane.hidden} more are registered but held back to save tokens. Nothing was removed — the full toolset is still invokable.`,
+    "- This trim fires automatically on chat-shaped turns. It is NOT a bug or a lost capability, and it is NOT gated on any trigger word.",
+    "- When the turn is actually WORK (edit/read files, run code, control cron/jobs, drive the desktop, anything beyond the core set), call searcmcp_tools to pull the tool you need, or just proceed — a work-shaped request auto-restores the full arsenal on the next turn.",
+    "- Use judgment: don't reflexively expand on every message, but don't report yourself as blocked or tool-less either. If you need a hidden tool, searcmcp_tools is always available on this lane."
+  ].join("\n");
+}
+
 // Tells the agent WHERE it is when a turn arrives over Discord: which server /
 // channel, that it's part of the Legion family, and that it CAN reach siblings.
 // Without this the agent has no idea it lives in a Discord server or that a
@@ -1251,7 +1285,8 @@ export function formatLegionContextBlock(channelContext, env = process.env) {
   let siblings = [];
   try { siblings = siblingNames(env); } catch { siblings = []; }
   if (siblings.length) {
-    lines.push(`- You can message a sibling with send_message(channel:"sibling", target:"<name>", text:...). Known siblings: ${siblings.join(", ")}.`);
+    lines.push(`- You can message a sibling through Discord with send_message(channel:"sibling", target:"<name>", text:...). The runtime prefixes the sibling's real raw-ID mention automatically. Known siblings: ${siblings.join(", ")}.`);
+    lines.push("- For a Discord-independent async WSL delivery, use send_message(channel:\"mailbox\", target:\"<name>\", text:...).");
     lines.push("- To reach a specific Discord channel directly, use send_message(channel:\"discord\", target:\"<channelId>\", text:...).");
   }
   // MENTION DISCIPLINE — a plain-text "@Name" NEVER pings on Discord; siblings
@@ -1264,7 +1299,7 @@ export function formatLegionContextBlock(channelContext, env = process.env) {
     const where = m.home ? ` — runs at ${m.home}` : "";
     lines.push(`    • ${name}: <@${m.userId}> — ${m.label}${where}`);
   }
-  lines.push("- Off-Discord lane (works even if Discord is down): drop a JSON line in the shared Legion mailbox `~/.legion/mailbox/<sibling>.jsonl` (and read your own `~/.legion/mailbox/azazel.jsonl`). See `~/.legion/README.md` for the one-line protocol.");
+  lines.push("- Off-Discord lane (works even if Discord is down): call send_message(channel:\"mailbox\", target:\"<sibling>\", text:...) to append a structured, ID-bearing JSON record to `~/.legion/mailbox/<sibling>.jsonl`; read your own `~/.legion/mailbox/azazel.jsonl`. Canonical roster: `~/.legion/roster.json`; protocol: `~/.legion/README.md`. Never put secrets there.");
   lines.push("- If a task needs another agent (e.g. Seraphim runs the Hermes gateway, Ziz runs the Rust zerohermes harness), reach out over the sibling lane instead of saying you have no way to contact them.");
   return lines.join("\n");
 }

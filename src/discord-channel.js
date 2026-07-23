@@ -34,6 +34,18 @@ const EXPIRED_COLOR = 0x95a5a6;
 const DISCORD_REST_MAX_ATTEMPTS = 3;
 const DISCORD_RETRY_MAX_MS = 10_000;
 
+export function extractDiscordUserMentionIds(text) {
+  const ids = [];
+  const seen = new Set();
+  for (const match of String(text ?? "").matchAll(/<@!?(\d{15,22})>/gu)) {
+    if (seen.has(match[1])) continue;
+    seen.add(match[1]);
+    ids.push(match[1]);
+    if (ids.length >= 100) break;
+  }
+  return ids;
+}
+
 // Reply quoting is deliberately opt-in and checked at send time. Operators
 // can flip DISCORD_REPLY live without rebuilding the channel or changing the
 // many call sites that still pass the originating message id.
@@ -559,6 +571,10 @@ export class DiscordChannel {
     let last = null;
     for (let i = 0; i < chunks.length; i += 1) {
       const body = { content: chunks[i] };
+      // Restrict outbound mentions to explicit user IDs in the content. This
+      // lets sibling raw-ID pings work while preventing accidental @everyone,
+      // @here, or role mentions from model-generated text.
+      body.allowed_mentions = { parse: [], users: extractDiscordUserMentionIds(chunks[i]) };
       if (i === 0 && replyToId && discordReplyEnabled()) {
         body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
       }

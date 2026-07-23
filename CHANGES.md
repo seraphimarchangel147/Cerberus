@@ -2,6 +2,29 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-23 — Self-declaring conversational fast lane (Seraphim)
+
+Follow-up to the fast-lane work below. Azazel could see the trimmed toolset but had no way to
+KNOW he was trimmed — so a hidden tool read as "I only see ~6 tools / I have no lane," and the
+only remedies were a trigger word or nagging him to remember `searcmcp_tools`. Now the fast lane
+announces itself, every trimmed turn, with no trigger word.
+
+- **New exported `formatFastLaneNotice(fastLane)`** (`src/agent-host.js`). When a casual turn is
+  trimmed to `CHAT_CORE_TOOLS`, `handleMessage` computes a `fastLane` descriptor
+  `{advertised, hidden}` (hidden = `toolRegistry.list().length - advertised`) and threads it into
+  `turnContextForAgent`, which renders a short `[context]` section: it states the turn is on the
+  token-saving fast lane, how many tools are held back, that nothing was removed, that the trim is
+  automatic and NOT gated on any trigger word, and that `searcmcp_tools` (or just phrasing a work
+  request) restores the full arsenal. Closes with a "use judgment — don't over-expand, don't
+  report yourself blocked" nudge so it stays awareness, not a reflex to escalate.
+- **Fires only on a genuine trim.** Gated on `conversational && !chatCoreUnavailable` and
+  `hidden > 0`, so a full-lane work turn and a genuinely small toolset both stay silent (no
+  mislabeling). Pure/exported for testing; zero change to the invoke-time scrutiny gate.
+- Regression: `test/chat-fastlane.test.js` +4 cases (helper silent-vs-declaring, trimmed turn
+  injects the notice into the model `turnContext` with the right hidden count + `searcmcp_tools`,
+  full-lane work turn omits it). Both lanes 1096/1096 green. Homoglyph-clean. Live-verified by
+  importing the running-tree export and rendering the notice; daemon restarted 17:59 on the new code.
+
 ## 2026-07-23 — Discord/Legion awareness + sibling send lane (Seraphim)
 
 Fixes Azazel reporting "I only see ~6 tools" and "no lane to Seraphim from this seat."
