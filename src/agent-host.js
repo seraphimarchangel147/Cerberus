@@ -29,6 +29,9 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "list_checkpoints"
 ]);
 export const DEFAULT_CHAT_MAX_ITERATIONS = 4;
+const DEFAULT_BACKGROUND_REVIEW_SNAPSHOT_WAIT_MS = 5000;
+const DEFAULT_BACKGROUND_REVIEW_FLUSH_MS = 60_000;
+const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
 
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
@@ -137,6 +140,18 @@ export class AgentHost {
     });
     this.lastBackgroundReview = null;
     this.activeHookSessions = new Set();
+    this.sessionMemorySnapshots = new Map();
+    this.backgroundReviewPromises = new Map();
+    this.backgroundReviewRescanSessions = new Set();
+    this.sessionReviewDependencies = new Map();
+    this.backgroundReviewSnapshotWaitMs = positiveDuration(
+      options.backgroundReviewSnapshotWaitMs,
+      DEFAULT_BACKGROUND_REVIEW_SNAPSHOT_WAIT_MS
+    );
+    this.backgroundReviewFlushMs = positiveDuration(
+      options.backgroundReviewFlushMs,
+      DEFAULT_BACKGROUND_REVIEW_FLUSH_MS
+    );
   }
 
   async handleMessage(input) {
@@ -194,6 +209,12 @@ export class AgentHost {
     const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
     const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
     const turnId = String(input.__turnId ?? input.turnId ?? createId("turn"));
+    const sessionMemorySnapshot = await this.sessionMemorySnapshotFor(
+      sessionId,
+      memoryScope,
+      agentId,
+      { ephemeral }
+    );
 
     // A real inbound user message always wins over an automated goal loop.
     // Discord also performs this at enqueue time so a queued message can stop
@@ -485,6 +506,7 @@ export class AgentHost {
         messages: sessionBefore.messages,
         images: Array.isArray(input.images) ? input.images : [],
         instructions: this.instructionsForAgent(agent),
+        sessionMemorySnapshot,
         turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice),
         tools,
         toolRegistry,
@@ -547,6 +569,9 @@ export class AgentHost {
             stopReason: modelResult.stopReason ?? null,
             outputId: output.id,
             outcomeId: outcomeRecord?.id ?? null,
+            conversational,
+            backgroundReview: input.backgroundReview !== false,
+            memoryScope,
             toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
               name: call.name,
               arguments: sanitizeForAudit(call.arguments),
@@ -593,20 +618,6 @@ export class AgentHost {
       );
     }
 
-    if (!ephemeral && !conversational && input.backgroundReview !== false) {
-      this.queueBackgroundReview({
-        sessionId,
-        agentId,
-        memoryScope,
-        userText: text,
-        assistantText: modelResult.text,
-        toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
-          name: call.name,
-          ok: call.result?.ok ?? false
-        }))
-      });
-    }
-
     return {
       id: turnId,
       createdAt: nowIso(),
@@ -641,17 +652,23 @@ export class AgentHost {
       userId: input.from ?? "user",
       agentId: input.agentId ?? "main"
     };
+    const review = this.queueBackgroundReviewForSession(previousSessionId, base);
+    if (review) this.trackSessionReviewDependency(sessionId, review);
     this._notifyHook("session:end", { ...base, sessionId: previousSessionId, reason: "reset" });
     this.activeHookSessions.delete(previousSessionId);
     this._notifyHook("session:reset", { ...base, previousSessionId, sessionId });
     return { previousSessionId, sessionId };
   }
 
-  endActiveHookSessions(reason = "gateway-close") {
+  async endActiveHookSessions(reason = "gateway-close") {
+    const pending = new Set(this.backgroundReviewPromises.values());
     for (const sessionId of this.activeHookSessions) {
+      const review = this.queueBackgroundReviewForSession(sessionId, {});
+      if (review) pending.add(review);
       this._notifyHook("session:end", { sessionId, reason });
     }
     this.activeHookSessions.clear();
+    return boundedAllSettled([...pending], this.backgroundReviewFlushMs);
   }
 
   _notifyHook(event, payload) {
@@ -670,6 +687,120 @@ export class AgentHost {
       });
     this.lastBackgroundReview = pending;
     return pending;
+  }
+
+  queueBackgroundReviewForSession(sessionId, defaults = {}) {
+    if (!backgroundReviewEnabled() || typeof this.backgroundReviewer?.review !== "function") return null;
+    const existing = this.backgroundReviewPromises.get(sessionId);
+    if (existing) {
+      this.backgroundReviewRescanSessions.add(sessionId);
+      return existing;
+    }
+
+    const initial = this.prepareBackgroundReviewForSession(sessionId, defaults);
+    if (!initial) return null;
+
+    const run = async () => {
+      let prepared = initial;
+      let result = null;
+      do {
+        this.backgroundReviewRescanSessions.delete(sessionId);
+        prepared = prepared ?? this.prepareBackgroundReviewForSession(sessionId, defaults);
+        if (prepared) {
+          result = await this.queueBackgroundReview(prepared.turn);
+          if (result?.skipped === false) {
+            await this.advanceBackgroundReviewWatermark(sessionId, prepared.watermark);
+          }
+        }
+        prepared = null;
+      } while (this.backgroundReviewRescanSessions.delete(sessionId));
+      return result;
+    };
+
+    let pending;
+    pending = run()
+      .catch((error) => {
+        try { this.backgroundReviewLog(error); } catch { /* logging is advisory */ }
+        return { skipped: true, reason: `review failed: ${error?.message ?? String(error)}` };
+      })
+      .finally(() => {
+        if (this.backgroundReviewPromises.get(sessionId) === pending) {
+          this.backgroundReviewPromises.delete(sessionId);
+        }
+      });
+    this.backgroundReviewPromises.set(sessionId, pending);
+    this.lastBackgroundReview = pending;
+    return pending;
+  }
+
+  prepareBackgroundReviewForSession(sessionId, defaults = {}) {
+    let session;
+    try { session = this.store.getSession(sessionId); } catch { return null; }
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+    const start = backgroundReviewStartIndex(messages, session?.metadata?.[BACKGROUND_REVIEW_WATERMARK_KEY]);
+    const lastAssistantIndex = findLastIndex(messages, (message, index) => (
+      index >= start && message?.role === "assistant"
+    ));
+    if (lastAssistantIndex < start) return null;
+
+    const delta = cloneMessages(messages.slice(start, lastAssistantIndex + 1));
+    const reviewable = reviewableBackgroundMessages(delta);
+    const substantive = reviewable.some((message) => (
+      message?.role === "assistant"
+      && message.metadata?.conversational === false
+    ));
+    if (!substantive) return null;
+
+    const users = reviewable.filter((message) => message?.role === "user");
+    const assistants = reviewable.filter((message) => message?.role === "assistant");
+    const toolCalls = assistants.flatMap((message) => (
+      Array.isArray(message.metadata?.toolCalls) ? message.metadata.toolCalls : []
+    ));
+    const lastAssistant = assistants.at(-1);
+    const reviewedMessageCount = lastAssistantIndex + 1;
+    const reviewedLastMessageId = messages[lastAssistantIndex]?.id ?? null;
+    return {
+      turn: {
+        sessionId,
+        agentId: lastAssistant?.agentId ?? defaults.agentId ?? "main",
+        memoryScope: lastAssistant?.metadata?.memoryScope ?? "main",
+        userText: users.at(-1)?.content ?? "",
+        assistantText: lastAssistant?.content ?? "",
+        toolCalls,
+        messages: reviewable
+      },
+      watermark: {
+        version: 1,
+        reviewedMessageCount,
+        reviewedLastMessageId,
+        reviewedAt: nowIso()
+      }
+    };
+  }
+
+  async advanceBackgroundReviewWatermark(sessionId, watermark) {
+    if (typeof this.store.updateSessionMetadata === "function") {
+      return this.store.updateSessionMetadata(sessionId, BACKGROUND_REVIEW_WATERMARK_KEY, (current) => {
+        const currentCount = Number(current?.reviewedMessageCount);
+        return Number.isSafeInteger(currentCount) && currentCount >= watermark.reviewedMessageCount
+          ? current
+          : watermark;
+      });
+    }
+    const session = this.store.getSession(sessionId);
+    session.metadata = { ...(session.metadata ?? {}), [BACKGROUND_REVIEW_WATERMARK_KEY]: watermark };
+    await this.store.saveSession(session);
+    return watermark;
+  }
+
+  trackSessionReviewDependency(sessionId, review) {
+    this.sessionReviewDependencies.set(sessionId, review);
+    const cleanup = () => {
+      if (this.sessionReviewDependencies.get(sessionId) === review) {
+        this.sessionReviewDependencies.delete(sessionId);
+      }
+    };
+    Promise.resolve(review).then(cleanup, cleanup);
   }
 
   async messageToSignal({ text, channel, from, agent, sessionId, metadata, scrutinyOverrides = null }) {
@@ -737,11 +868,54 @@ export class AgentHost {
     return signal;
   }
 
-  // STATIC persona + standing instructions only — byte-identical for the same
-  // agent on every turn, so the provider's cache_control prefix actually hits.
-  // Everything per-turn (verdict, reasons, memory, intuitions, ambient/screen
-  // context) travels in turnContextForAgent() below. Extra positional args
-  // from pre-split callers are deliberately ignored.
+  // Capture the curated projection before processSignal can write on turn
+  // one. File-backed stores persist these exact bytes in session metadata.
+  async sessionMemorySnapshotFor(sessionId, scope, agentId = "main", { ephemeral = false } = {}) {
+    const render = () => {
+      try {
+        return String(this.runtime.memory?.renderSessionMemorySnapshot?.({ scope }) ?? "");
+      } catch {
+        return "";
+      }
+    };
+    if (ephemeral) return render();
+
+    const reviewDependency = this.sessionReviewDependencies.get(sessionId);
+    if (reviewDependency) {
+      await waitBounded(reviewDependency, this.backgroundReviewSnapshotWaitMs);
+    }
+
+    const identity = {
+      version: 1,
+      sessionId: String(sessionId),
+      scope: String(scope),
+      agentId: String(agentId)
+    };
+    const metadataKey = frozenMemoryMetadataKey(identity.scope, identity.agentId);
+    const createFrozen = () => ({ ...identity, text: render() });
+    if (typeof this.store.ensureSessionMetadata === "function") {
+      let stored = await this.store.ensureSessionMetadata(sessionId, metadataKey, createFrozen);
+      if (!validFrozenMemory(stored, identity) && typeof this.store.updateSessionMetadata === "function") {
+        stored = await this.store.updateSessionMetadata(sessionId, metadataKey, (current) => (
+          validFrozenMemory(current, identity) ? current : createFrozen()
+        ));
+      }
+      return validFrozenMemory(stored, identity) ? stored.text : "";
+    }
+
+    const cacheKey = JSON.stringify([identity.sessionId, identity.scope, identity.agentId]);
+    if (!this.sessionMemorySnapshots.has(cacheKey)) {
+      if (this.sessionMemorySnapshots.size >= 1000) {
+        this.sessionMemorySnapshots.delete(this.sessionMemorySnapshots.keys().next().value);
+      }
+      this.sessionMemorySnapshots.set(cacheKey, render());
+    }
+    return this.sessionMemorySnapshots.get(cacheKey) ?? "";
+  }
+
+  // STATIC persona + standing instructions only. The provider appends the
+  // separately frozen session memory block; volatile retrieval hits and
+  // scrutiny remain in turnContextForAgent() below.
   instructionsForAgent(agent) {
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
@@ -831,6 +1005,114 @@ Stay inside the bounded scope. If the user's request falls outside it, say so an
       sessions: this.store.listSessions()
     };
   }
+}
+
+function positiveDuration(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function frozenMemoryMetadataKey(scope, agentId) {
+  return `frozenMemoryV1:${encodeURIComponent(String(scope))}:${encodeURIComponent(String(agentId))}`;
+}
+
+function validFrozenMemory(value, identity) {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && value.version === identity.version
+    && value.sessionId === identity.sessionId
+    && value.scope === identity.scope
+    && value.agentId === identity.agentId
+    && typeof value.text === "string"
+  );
+}
+
+function backgroundReviewStartIndex(messages, watermark) {
+  if (!watermark || watermark.version !== 1) return 0;
+  const count = Number(watermark.reviewedMessageCount);
+  const id = String(watermark.reviewedLastMessageId ?? "");
+  if (!Number.isSafeInteger(count) || count <= 0 || count > messages.length || !id) return 0;
+  if (messages[count - 1]?.id === id) return count;
+  const recovered = messages.findIndex((message) => message?.id === id);
+  return recovered >= 0 ? recovered + 1 : 0;
+}
+
+function findLastIndex(values, predicate) {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (predicate(values[index], index)) return index;
+  }
+  return -1;
+}
+
+function cloneMessages(messages) {
+  try {
+    return structuredClone(messages);
+  } catch {
+    return messages.map((message) => ({
+      ...message,
+      metadata: message?.metadata && typeof message.metadata === "object"
+        ? { ...message.metadata }
+        : {}
+    }));
+  }
+}
+
+function reviewableBackgroundMessages(messages) {
+  const reviewable = [];
+  let pending = [];
+  for (const message of messages) {
+    if (message?.role !== "assistant") {
+      pending.push(message);
+      continue;
+    }
+    if (message.metadata?.backgroundReview !== false) {
+      reviewable.push(...pending, message);
+    }
+    pending = [];
+  }
+  return reviewable;
+}
+
+async function waitBounded(promise, timeoutMs) {
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  try {
+    await Promise.race([Promise.resolve(promise).catch(() => undefined), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function boundedAllSettled(promises, timeoutMs) {
+  if (promises.length === 0) return [];
+  const outcomes = new Array(promises.length);
+  const settled = Promise.all(promises.map((promise, index) => (
+    Promise.resolve(promise).then(
+      (value) => {
+        outcomes[index] = { status: "fulfilled", value };
+      },
+      (reason) => {
+        outcomes[index] = { status: "rejected", reason };
+      }
+    )
+  )));
+  let timer = null;
+  const timedOut = Symbol("background-review-timeout");
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), timeoutMs);
+  });
+  const result = await Promise.race([settled, timeout]);
+  if (timer) clearTimeout(timer);
+  if (result !== timedOut) return outcomes;
+  return Array.from({ length: outcomes.length }, (_, index) => (
+    outcomes[index] ?? {
+      status: "rejected",
+      reason: new Error(`Background review flush exceeded ${timeoutMs}ms.`)
+    }
+  ));
 }
 
 export function filterPrincipleHits(hits, memory, { limit = 3, now = Date.now() } = {}) {

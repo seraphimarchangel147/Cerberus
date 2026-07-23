@@ -66,6 +66,95 @@ export function installCrashGuards() {
   });
 }
 
+export const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 65_000;
+
+// One daemon process should have one termination path, even when startServer()
+// is exercised repeatedly in an embedding process or test. Replacing an older
+// registration also prevents a signal from closing a stale app instance.
+const gracefulShutdownByProcess = new WeakMap();
+
+export function installGracefulShutdown(app, {
+  processLike = process,
+  timeoutMs = DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+  log = (message) => console.warn(message)
+} = {}) {
+  if (!app || typeof app.close !== "function") {
+    throw new TypeError("installGracefulShutdown requires an app with close()");
+  }
+  if (!processLike || typeof processLike.on !== "function"
+      || typeof processLike.removeListener !== "function"
+      || typeof processLike.exit !== "function") {
+    throw new TypeError("installGracefulShutdown requires a process-like event emitter");
+  }
+
+  gracefulShutdownByProcess.get(processLike)?.dispose();
+
+  const parsedTimeout = Number(timeoutMs);
+  const boundedTimeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout >= 0
+    ? parsedTimeout
+    : DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS;
+  let disposed = false;
+  let shutdownPromise = null;
+  let controller;
+
+  const onSigint = () => { void shutdown("SIGINT"); };
+  const onSigterm = () => { void shutdown("SIGTERM"); };
+  const report = (message) => {
+    try { log(message); } catch { /* shutdown logging is advisory */ }
+  };
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    processLike.removeListener("SIGINT", onSigint);
+    processLike.removeListener("SIGTERM", onSigterm);
+    if (gracefulShutdownByProcess.get(processLike) === controller) {
+      gracefulShutdownByProcess.delete(processLike);
+    }
+  }
+
+  function shutdown(signal = "shutdown") {
+    if (shutdownPromise) return shutdownPromise;
+    // Keep the handlers installed while close is pending so a second OS
+    // signal is coalesced here instead of falling back to Node's immediate
+    // default termination path and cutting off the review flush.
+    shutdownPromise = (async () => {
+      let timeoutHandle;
+      let timedOut = false;
+      const timeout = new Promise((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, boundedTimeoutMs);
+      });
+
+      try {
+        await Promise.race([Promise.resolve().then(() => app.close()), timeout]);
+        if (timedOut) {
+          report(`[openagi] ${signal} shutdown timed out after ${boundedTimeoutMs}ms; exiting`);
+        }
+      } catch (error) {
+        report(`[openagi] ${signal} shutdown close failed open: ${error?.message ?? String(error)}`);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        dispose();
+        processLike.exit(0);
+      }
+    })();
+    return shutdownPromise;
+  }
+
+  processLike.on("SIGINT", onSigint);
+  processLike.on("SIGTERM", onSigterm);
+  controller = {
+    dispose,
+    shutdown,
+    get pending() { return shutdownPromise; }
+  };
+  gracefulShutdownByProcess.set(processLike, controller);
+  return controller;
+}
+
 // Boot env + start the hosted interface. Returns the listen address.
 // host/port fall back to HOST/PORT env then sane defaults; callers (the CLI)
 // can override. Binding to 0.0.0.0 is safe because the HTTP interface enforces
@@ -97,5 +186,6 @@ export async function startServer({ host, port } = {}) {
   const runtime = createDurableRuntime({ dataDir });
   const app = createHostedInterface(runtime, { host: resolvedHost, port: resolvedPort });
   const address = await app.listen();
-  return { app, runtime, address, dataDir, host: resolvedHost, port: resolvedPort };
+  const shutdown = installGracefulShutdown(app);
+  return { app, runtime, address, dataDir, host: resolvedHost, port: resolvedPort, shutdown };
 }

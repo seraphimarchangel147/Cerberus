@@ -1,13 +1,14 @@
 import path from "node:path";
 import { appendJsonLine } from "./file-utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { MemoryCapacityError } from "./memory-system.js";
 import { nowIso, tokenOverlapScore } from "./utils.js";
 
 export const DEFAULT_BACKGROUND_REVIEW_MAX_ITERATIONS = 2;
 export const DEFAULT_BACKGROUND_REVIEW_MAX_TURN_SECONDS = 60;
 
 const REVIEW_INSTRUCTIONS = [
-  "You are OpenAGI's post-turn reviewer. Extract only durable, user-grounded learning from the completed turn.",
+  "You are OpenAGI's post-session reviewer. Extract only durable, user-grounded learning from the completed session digest.",
   "Return STRICT JSON with this shape:",
   '{"memories":[{"content":"...","kind":"preference|correction|environment","confidence":"high|medium|low","tags":["..."]}],"skill":null}',
   "A repeatable successful workflow may replace null with a skill object: {\"title\":\"...\",\"rationale\":\"...\",\"draftBody\":\"...\"}.",
@@ -102,10 +103,14 @@ export function applyBackgroundReviewProposal({ runtime, proposal, turn = {} }) 
   const memory = runtime?.memory;
   const scope = turn.memoryScope ?? "main";
   const memories = [];
+  const memoryErrors = [];
   let duplicatesSkipped = 0;
 
   for (const raw of Array.isArray(proposal?.memories) ? proposal.memories.slice(0, 3) : []) {
-    const content = String(raw?.content ?? "").trim().slice(0, 2000);
+    // Capacity-managed writes must reject over-limit proposals intact. A
+    // pre-slice here would silently turn an invalid memory into a different
+    // fact and bypass MemoryCapacityError.
+    const content = String(raw?.content ?? "").trim();
     const kind = String(raw?.kind ?? "").toLowerCase();
     const confidence = String(raw?.confidence ?? "low").toLowerCase();
     const profile = CONFIDENCE_PROFILE[confidence] ?? CONFIDENCE_PROFILE.low;
@@ -122,32 +127,43 @@ export function applyBackgroundReviewProposal({ runtime, proposal, turn = {} }) 
         duplicateMergedAt: nowIso()
       };
       duplicate.strength = Math.min(1, (duplicate.strength ?? 0.5) + 0.03);
+      try {
+        memory.persist?.("background-review-duplicate", { id: duplicate.id, item: duplicate });
+      } catch {
+        // Duplicate reinforcement is best-effort; review remains non-blocking.
+      }
       duplicatesSkipped += 1;
       continue;
     }
 
-    const item = memory.remember({
-      source: "background-review",
-      scope,
-      content,
-      kind,
-      tags: [...new Set(["background-review", kind, ...cleanTags(raw.tags)])],
-      novelty: 0.55,
-      risk: kind === "correction" ? 0.35 : 0.1,
-      repetition: 0.25,
-      specificity: 0.8,
-      metadata: {
-        sessionId: turn.sessionId ?? null,
-        confidence,
-        reviewedAt: nowIso()
-      }
-    }, {
-      source: "background-review",
-      strength: profile.strength,
-      tier: profile.tier,
-      critical: false
-    });
-    memories.push(item);
+    try {
+      const item = memory.remember({
+        source: "background-review",
+        scope,
+        content,
+        kind,
+        tags: [...new Set(["background-review", kind, ...cleanTags(raw.tags)])],
+        novelty: 0.55,
+        risk: kind === "correction" ? 0.35 : 0.1,
+        repetition: 0.25,
+        specificity: 0.8,
+        metadata: {
+          sessionId: turn.sessionId ?? null,
+          confidence,
+          reviewedAt: nowIso()
+        }
+      }, {
+        source: "background-review",
+        strength: profile.strength,
+        tier: profile.tier,
+        critical: false,
+        capacityManaged: true
+      });
+      memories.push(item);
+    } catch (error) {
+      if (!(error instanceof MemoryCapacityError)) throw error;
+      memoryErrors.push(error.message);
+    }
   }
 
   let skill = null;
@@ -172,12 +188,15 @@ export function applyBackgroundReviewProposal({ runtime, proposal, turn = {} }) 
     }
   }
 
-  return { memories, duplicatesSkipped, skill };
+  return { memories, memoryErrors, duplicatesSkipped, skill };
 }
 
 function findNearDuplicate(memory, content, scope, threshold = 0.72) {
   for (const existing of memory?.items?.values?.() ?? []) {
-    if (existing.metadata?.supersededBy || (existing.scope ?? "main") !== scope) continue;
+    if (existing.metadata?.capacityManaged !== true
+      || existing.metadata?.supersededBy
+      || existing.metadata?.condensedInto
+      || (existing.scope ?? "main") !== scope) continue;
     const forward = tokenOverlapScore(content, existing.content);
     const reverse = tokenOverlapScore(existing.content, content);
     if ((forward + reverse) / 2 >= threshold) return existing;
@@ -193,16 +212,44 @@ function cleanTags(tags) {
 }
 
 function buildReviewPrompt(turn) {
+  const digest = buildBackgroundReviewDigest(turn.messages);
   const toolSummary = (turn.toolCalls ?? [])
     .slice(0, 20)
     .map((call) => `${call.name}:${call.ok ? "ok" : "failed"}`)
     .join(", ") || "none";
   return [
     `Session: ${turn.sessionId ?? "unknown"}`,
-    `User: ${String(turn.userText ?? "").slice(0, 6000)}`,
-    `Assistant: ${String(turn.assistantText ?? "").slice(0, 6000)}`,
+    ...(digest
+      ? [`Warm-cache session digest:\n${digest}`]
+      : [
+          `User: ${String(turn.userText ?? "").slice(0, 6000)}`,
+          `Assistant: ${String(turn.assistantText ?? "").slice(0, 6000)}`
+        ]),
     `Tools: ${toolSummary}`
   ].join("\n");
+}
+
+export function buildBackgroundReviewDigest(messages, { maxChars = 12_000 } = {}) {
+  const source = Array.isArray(messages) ? messages : [];
+  const limit = Math.max(500, Math.min(50_000, Number(maxChars) || 12_000));
+  const retained = [];
+  let used = 0;
+  const bodyLimit = Math.max(1, limit - 48);
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    const message = source[index];
+    const role = message?.role === "assistant" ? "Assistant" : "User";
+    const line = `${role}: ${String(message?.content ?? "").replace(/\s+/g, " ").trim()}`;
+    const remaining = bodyLimit - used;
+    if (remaining <= 0) break;
+    const value = line.length <= remaining ? line : line.slice(line.length - remaining);
+    retained.unshift(value);
+    used += value.length + (retained.length > 1 ? 1 : 0);
+  }
+  if (retained.length === 0) return "";
+  const omitted = Math.max(0, source.length - retained.length);
+  const prefix = omitted ? `[${omitted} older messages omitted]\n` : "";
+  const available = Math.max(0, limit - prefix.length);
+  return `${prefix}${retained.join("\n").slice(-available)}`;
 }
 
 function persistReview(file, turn, details) {

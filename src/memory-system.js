@@ -12,11 +12,38 @@ const DEFAULT_TTL_MS = {
   long: Number.POSITIVE_INFINITY
 };
 
+export const DEFAULT_CURATED_MEMORY_MAX_CHARS = 2200;
+
+export class MemoryCapacityError extends Error {
+  constructor({ scope, usedChars, requestedChars, reclaimedChars = 0, maxChars }) {
+    const projectedChars = Math.max(0, usedChars - reclaimedChars) + requestedChars;
+    super(
+      `Curated memory capacity exceeded for scope "${scope}": ` +
+      `${formatMemoryChars(projectedChars)}/${formatMemoryChars(maxChars)} chars ` +
+      `(${formatMemoryChars(usedChars)} used + ${formatMemoryChars(requestedChars)} requested` +
+      `${reclaimedChars ? ` - ${formatMemoryChars(reclaimedChars)} replaced` : ""}). ` +
+      "Nothing was saved. Call recall to find overlapping active curated memories in the same scope, then retry remember with replaceIds containing only results marked replaceable and one consolidated replacement."
+    );
+    this.name = "MemoryCapacityError";
+    this.code = "MEMORY_CAPACITY_EXCEEDED";
+    this.scope = scope;
+    this.usedChars = usedChars;
+    this.requestedChars = requestedChars;
+    this.reclaimedChars = reclaimedChars;
+    this.projectedChars = projectedChars;
+    this.maxChars = maxChars;
+  }
+}
+
 export class MemorySystem {
   constructor(options = {}) {
     this.items = new Map();
     this.limits = { ...DEFAULT_LIMITS, ...(options.limits ?? {}) };
     this.ttlMs = { ...DEFAULT_TTL_MS, ...(options.ttlMs ?? {}) };
+    this.curatedMemoryMaxChars = positiveMemoryInteger(
+      options.curatedMemoryMaxChars ?? options.memoryCharLimit,
+      DEFAULT_CURATED_MEMORY_MAX_CHARS
+    );
     this.vectors = null;
   }
 
@@ -37,8 +64,16 @@ export class MemorySystem {
     const createdAt = context.now ?? nowIso();
     const tier = context.tier ?? this.selectTier(observation, context);
     const content = this.formatContent(observation);
+    const capacityManaged = context.capacityManaged === true || observation?.capacityManaged === true;
+    const curatedContent = capacityManaged ? String(content ?? "") : null;
+    if (capacityManaged && !curatedContent.trim()) {
+      throw new Error("Curated memory content must contain non-whitespace characters. Nothing was saved.");
+    }
     const fidelity = this.selectFidelity(tier, observation, context);
-    const compressed = this.compressForTier(content, tier, fidelity);
+    // The curated MEMORY-style projection is a byte-accounted source of
+    // truth. Never silently shorten a write to make it fit; reject it before
+    // any in-memory or durable mutation instead.
+    const compressed = capacityManaged ? curatedContent : this.compressForTier(content, tier, fidelity);
     const id = context.id ?? createId(`mem_${tier}`);
     const risk = clamp(observation.risk ?? context.risk ?? 0);
     const specificity = clamp(observation.specificity ?? context.specificity ?? 0.45);
@@ -69,11 +104,45 @@ export class MemorySystem {
       locked: Boolean(observation.locked ?? context.locked ?? false),
       metadata: {
         ...(observation.metadata ?? {}),
-        ...(context.metadata ?? {})
+        ...(context.metadata ?? {}),
+        ...(capacityManaged ? { capacityManaged: true } : {})
       }
     };
+    const existing = this.items.get(item.id);
+    if (capacityManaged
+      && existing
+      && (existing.scope ?? "main") !== (item.scope ?? "main")) {
+      throw new Error(
+        `Cannot overwrite memory "${item.id}" from scope "${item.scope ?? "main"}": ` +
+        `the existing memory belongs to scope "${existing.scope ?? "main"}". Nothing was saved.`
+      );
+    }
+
+    const replacementItems = capacityManaged
+      ? this.capacityReplacementItems(context.replaceIds, item)
+      : [];
+    const supersessionItems = this.capacitySupersessionItems(context.supersedeIds, item);
+    if (capacityManaged) {
+      const creditIds = new Set([
+        ...replacementItems.map((entry) => entry.id),
+        ...supersessionItems.map((entry) => entry.id),
+        ...(this.items.has(id) ? [id] : [])
+      ]);
+      this.assertCuratedCapacity(item, creditIds);
+    }
 
     this.items.set(item.id, item);
+    const supersededItems = uniqueMemoryItems([...replacementItems, ...supersessionItems]);
+    if (supersededItems.length > 0) {
+      const replacedAt = createdAt;
+      for (const replaced of supersededItems) {
+        replaced.metadata = { ...replaced.metadata, supersededBy: item.id, supersededAt: replacedAt };
+        this.dropPrincipleVector(replaced.id);
+      }
+    }
+    if (replacementItems.length > 0) {
+      item.metadata.replaces = replacementItems.map((entry) => entry.id);
+    }
     this.enforceLimits(tier);
     return item;
   }
@@ -84,13 +153,18 @@ export class MemorySystem {
     const queryText = typeof query === "string" ? query : this.formatContent(query);
     const queryTags = new Set((options.tags ?? []).map((t) => String(t).toLowerCase()));
     const scope = options.scope ?? null;
+    const exactScope = options.exactScope === true;
     const now = options.now ?? nowIso();
     const nowMs = new Date(now).getTime();
 
     const scored = [];
     for (const item of this.items.values()) {
       if (!tiers.has(item.tier)) continue;
-      if (scope && item.scope && item.scope !== scope && item.scope !== "main") continue;
+      if (
+        scope
+        && (item.scope ?? "main") !== scope
+        && (exactScope || (item.scope ?? "main") !== "main")
+      ) continue;
       // Superseded items were corrected by the user — never recall the stale
       // version (the correction itself carries the fact forward).
       if (item.metadata?.supersededBy) continue;
@@ -122,9 +196,11 @@ export class MemorySystem {
     }
 
     scored.sort((a, b) => b.score - a.score);
-    for (const entry of scored.slice(0, limit)) {
-      entry.item.lastAccessedAt = now;
-      entry.item.strength = clamp(entry.item.strength + 0.03);
+    if (options.touch !== false) {
+      for (const entry of scored.slice(0, limit)) {
+        entry.item.lastAccessedAt = now;
+        entry.item.strength = clamp(entry.item.strength + 0.03);
+      }
     }
     return scored.slice(0, limit);
   }
@@ -152,11 +228,19 @@ export class MemorySystem {
     const targets = [];
     if (id) {
       const item = this.items.get(id);
+      if (item && (item.scope ?? "main") !== scope) {
+        throw new Error(
+          `Cannot correct memory "${id}" from scope "${scope}": ` +
+          `the memory belongs to scope "${item.scope ?? "main"}". Nothing was saved.`
+        );
+      }
       // A prior correction CAN be re-corrected (9:00 → 9:30 → 10:00): supersede
       // even locked items, just not one already superseded.
       if (item && !item.metadata?.supersededBy) targets.push(item);
     } else if (query) {
-      const hits = this.retrieve(query, { limit: 5, scope });
+      // Correction target discovery is preflight-only. In particular, a
+      // capacity rejection must not reinforce or timestamp the scored items.
+      const hits = this.retrieve(query, { limit: 5, scope, exactScope: true, touch: false });
       const top = hits[0]?.score ?? 0;
       for (const { item, score } of hits) {
         // retrieve() already hides superseded items; corrections themselves are
@@ -187,14 +271,14 @@ export class MemorySystem {
         locked: true,
         metadata: { ...metadata, corrects: targets.map((t) => t.id) }
       },
-      { strength: 1.0, tier: targetTier }
+      {
+        strength: 1.0,
+        tier: targetTier,
+        capacityManaged: true,
+        supersedeIds: targets.map((target) => target.id),
+        persistenceOp: "correct"
+      }
     );
-
-    const at = nowIso();
-    for (const target of targets) {
-      target.metadata = { ...target.metadata, supersededBy: corrected.id, supersededAt: at };
-      this.dropPrincipleVector(target.id);
-    }
 
     return { item: corrected, superseded: targets };
   }
@@ -217,16 +301,32 @@ export class MemorySystem {
       // Superseded items never promote — a corrected fact must not ride the
       // promotion path into long-term memory. They expire on tier TTL.
       const superseded = Boolean(item.metadata?.supersededBy);
+      const curated = item.metadata?.capacityManaged === true;
 
       if (!superseded && item.tier === "short" && (item.locked || item.repetition >= 0.55 || item.risk >= 0.7 || item.novelty >= 0.7)) {
-        const medium = this.promote(item, "medium", current.toISOString());
-        promoted.push(medium);
+        try {
+          const medium = this.promote(item, "medium", current.toISOString());
+          promoted.push(medium);
+        } catch (error) {
+          if (!(curated && error instanceof MemoryCapacityError)) throw error;
+        }
         continue;
       }
 
       if (!superseded && item.tier === "medium" && (item.locked || item.risk >= 0.8 || item.repetition >= 0.75)) {
-        const long = this.promote(item, "long", current.toISOString());
-        promoted.push(long);
+        try {
+          const long = this.promote(item, "long", current.toISOString());
+          promoted.push(long);
+        } catch (error) {
+          if (!(curated && error instanceof MemoryCapacityError)) throw error;
+        }
+        continue;
+      }
+
+      // Curated memory is explicitly capacity-managed by consolidation. Never
+      // let TTL maintenance silently erase an active user-facing entry.
+      if (!superseded && curated) {
+        if (!item.locked) item.strength = clamp(item.strength - this.decayRate(item.tier));
         continue;
       }
 
@@ -243,6 +343,40 @@ export class MemorySystem {
       medium: this.byTier("medium"),
       long: this.byTier("long")
     };
+  }
+
+  curatedUsage({ scope = "main" } = {}) {
+    const items = this.curatedItems({ scope });
+    // The cap applies to the exact body injected into the prompt. Formatting
+    // characters and separators consume context just as memory prose does.
+    const body = this.renderCuratedBody(items);
+    const usedChars = body.length;
+    const maxChars = this.curatedMemoryMaxChars;
+    const percent = maxChars > 0 ? Math.min(100, Math.round((usedChars / maxChars) * 100)) : 100;
+    return { scope, usedChars, maxChars, percent, items, body };
+  }
+
+  curatedItems({ scope = "main" } = {}) {
+    return [...this.items.values()]
+      .filter((item) => item?.metadata?.capacityManaged === true)
+      // Specialist retrieval already inherits main-scope memory. Freeze the
+      // same effective view so global facts do not become volatile mid-session.
+      .filter((item) => (
+        (item.scope ?? "main") === scope
+        || (scope !== "main" && (item.scope ?? "main") === "main")
+      ))
+      .filter((item) => !item.metadata?.supersededBy && !item.metadata?.condensedInto)
+      .sort(compareCuratedItems);
+  }
+
+  renderCuratedBody(items) {
+    return items.map((item) => `- [${item.tier}] ${item.content}`).join("\n");
+  }
+
+  renderSessionMemorySnapshot({ scope = "main" } = {}) {
+    const usage = this.curatedUsage({ scope });
+    const header = `[${usage.percent}% \u2014 ${formatMemoryChars(usage.usedChars)}/${formatMemoryChars(usage.maxChars)} chars]`;
+    return usage.body ? `${header}\n${usage.body}` : `${header}\n(no curated memory yet)`;
   }
 
   byTier(tier) {
@@ -296,13 +430,20 @@ export class MemorySystem {
   promote(item, tier, now) {
     const promoted = {
       ...item,
-      id: createId(`mem_${tier}`),
+      // Curated IDs are referenced by replacement/correction provenance.
+      // Preserve them across tier movement so those backlinks never dangle.
+      id: item.metadata?.capacityManaged === true ? item.id : createId(`mem_${tier}`),
       tier,
-      content: this.compressForTier(item.content, tier, item.fidelity),
+      content: item.metadata?.capacityManaged === true
+        ? item.content
+        : this.compressForTier(item.content, tier, item.fidelity),
       createdAt: now,
       lastAccessedAt: now,
       strength: clamp(item.strength + 0.08)
     };
+    if (promoted.metadata?.capacityManaged === true) {
+      this.assertCuratedCapacity(promoted, new Set([item.id]));
+    }
     this.items.delete(item.id);
     this.items.set(promoted.id, promoted);
     this.enforceLimits(tier);
@@ -323,7 +464,7 @@ export class MemorySystem {
     // Locked corrections are exempt from cap eviction (low volume by nature;
     // a tier may briefly exceed its cap rather than forget a correction).
     tierItems
-      .filter((item) => !item.locked)
+      .filter((item) => !item.locked && item.metadata?.capacityManaged !== true)
       .sort((a, b) => a.strength - b.strength || a.lastAccessedAt.localeCompare(b.lastAccessedAt))
       .slice(0, Math.max(0, tierItems.length - limit))
       .forEach((item) => {
@@ -331,4 +472,114 @@ export class MemorySystem {
         this.dropPrincipleVector(item.id);
       });
   }
+
+  capacityReplacementItems(replaceIds, candidate) {
+    const ids = [...new Set((Array.isArray(replaceIds) ? replaceIds : []).map((id) => String(id ?? "").trim()).filter(Boolean))];
+    if (ids.length === 0) return [];
+    const replacements = [];
+    for (const id of ids) {
+      const item = this.items.get(id);
+      if (!item
+        || item.id === candidate.id
+        || item.metadata?.capacityManaged !== true
+        || item.metadata?.supersededBy
+        || item.metadata?.condensedInto
+        || (item.scope ?? "main") !== (candidate.scope ?? "main")) {
+        throw new Error(
+          `Cannot replace curated memory "${id}": it must be an active curated item in scope "${candidate.scope ?? "main"}". Nothing was saved.`
+        );
+      }
+      replacements.push(item);
+    }
+    return replacements;
+  }
+
+  capacitySupersessionItems(supersedeIds, candidate) {
+    const ids = normalizedMemoryIds(supersedeIds);
+    if (ids.length === 0) return [];
+    const targets = [];
+    for (const id of ids) {
+      const item = this.items.get(id);
+      if (!item
+        || item.id === candidate.id
+        || item.metadata?.supersededBy
+        || item.metadata?.condensedInto
+        || (item.scope ?? "main") !== (candidate.scope ?? "main")) {
+        throw new Error(
+          `Cannot supersede memory "${id}": it must be active in scope "${candidate.scope ?? "main"}". Nothing was saved.`
+        );
+      }
+      targets.push(item);
+    }
+    return targets;
+  }
+
+  assertCuratedCapacity(candidate, creditIds = new Set()) {
+    const credited = new Set(creditIds);
+    const candidateScope = candidate.scope ?? "main";
+    // A main-scope write changes every specialist's inherited projection.
+    // Validate each affected view before mutating any item; local writes only
+    // affect their own specialist view.
+    const affectedScopes = candidateScope === "main"
+      ? this.curatedCapacityScopes()
+      : [candidateScope];
+    for (const scope of affectedScopes) {
+      const usage = this.curatedUsage({ scope });
+      const retained = usage.items.filter((item) => !credited.has(item.id));
+      const retainedChars = this.renderCuratedBody(retained).length;
+      const projectedItems = [...retained, candidate].sort(compareCuratedItems);
+      const projectedChars = this.renderCuratedBody(projectedItems).length;
+      const reclaimedChars = Math.max(0, usage.usedChars - retainedChars);
+      const requestedChars = Math.max(0, projectedChars - retainedChars);
+      if (projectedChars > usage.maxChars) {
+        throw new MemoryCapacityError({
+          scope,
+          usedChars: usage.usedChars,
+          requestedChars,
+          reclaimedChars,
+          maxChars: usage.maxChars
+        });
+      }
+    }
+  }
+
+  curatedCapacityScopes() {
+    const scopes = new Set(["main"]);
+    for (const item of this.items.values()) {
+      if (item?.metadata?.capacityManaged !== true) continue;
+      if (item.metadata?.supersededBy || item.metadata?.condensedInto) continue;
+      scopes.add(item.scope ?? "main");
+    }
+    return [...scopes].sort();
+  }
+}
+
+function positiveMemoryInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizedMemoryIds(ids) {
+  return [...new Set(
+    (Array.isArray(ids) ? ids : [])
+      .map((id) => String(id ?? "").trim())
+      .filter(Boolean)
+  )];
+}
+
+function uniqueMemoryItems(items) {
+  const byId = new Map();
+  for (const item of items) byId.set(item.id, item);
+  return [...byId.values()];
+}
+
+function compareCuratedItems(a, b) {
+  return (
+    String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? ""))
+    || String(a.id ?? "").localeCompare(String(b.id ?? ""))
+  );
+}
+
+function formatMemoryChars(value) {
+  return String(Math.max(0, Number(value) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }

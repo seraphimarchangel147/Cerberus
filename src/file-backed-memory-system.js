@@ -26,7 +26,14 @@ export class FileBackedMemorySystem extends MemorySystem {
 
   remember(observation, context = {}) {
     const item = super.remember(observation, context);
-    this.persist("remember", { item });
+    const correction = context.persistenceOp === "correct";
+    this.persist(correction ? "correct" : "remember", correction
+      ? {
+          item,
+          correctedId: item.id,
+          superseded: item.metadata?.corrects ?? []
+        }
+      : { item });
     return item;
   }
 
@@ -37,15 +44,10 @@ export class FileBackedMemorySystem extends MemorySystem {
   }
 
   correct(input) {
-    // super.correct() routes the new locked item through this.remember()
-    // (already persisted); this extra event captures the supersede mutations
-    // on the stale items and snapshots them.
-    const result = super.correct(input);
-    this.persist("correct", {
-      correctedId: result.item.id,
-      superseded: result.superseded.map((item) => item.id)
-    });
-    return result;
+    // MemorySystem.correct() routes the fully superseded state through the
+    // overridden remember() above. That produces one JSONL event and one
+    // atomic snapshot, with no intermediate stale+corrected durable state.
+    return super.correct(input);
   }
 
   decay(now = new Date()) {

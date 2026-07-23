@@ -523,7 +523,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "remember",
-    description: "Save a piece of information to long-lived memory so it can be recalled in future turns. Use when the user says 'remember', 'save', or shares a durable fact.",
+    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
     parameters: {
       type: "object",
       properties: {
@@ -537,6 +537,13 @@ export function registerCoreTools(registry, runtime) {
           type: "string",
           enum: ["low", "normal", "high"],
           description: "Higher importance items resist decay and may promote to long-term memory."
+        },
+        replaceIds: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 20,
+          uniqueItems: true,
+          description: "Optional active curated memory IDs to atomically supersede with this consolidated note. Use after a capacity error."
         }
       },
       required: ["content"],
@@ -544,6 +551,7 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       const importance = args.importance ?? "normal";
+      const replaceIds = validateReplaceIds(args.replaceIds);
       const risk = importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45;
       const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
         ? context.__memoryScope
@@ -559,16 +567,26 @@ export function registerCoreTools(registry, runtime) {
           novelty: 0.55,
           metadata: { agentId: context.agentId, sessionId: context.sessionId }
         },
-        { source: "remember-tool", strength: importance === "high" ? 0.85 : 0.6 }
+        {
+          source: "remember-tool",
+          strength: importance === "high" ? 0.85 : 0.6,
+          capacityManaged: true,
+          replaceIds
+        }
       );
-      return { id: item.id, tier: item.tier, content: item.content };
+      return {
+        id: item.id,
+        tier: item.tier,
+        content: item.content,
+        replaced: item.metadata?.replaces ?? []
+      };
     }
   });
 
   registry.register({
     name: "recall",
     sideEffects: false,
-    description: "Search memory for items related to a query. Returns the most relevant items across short, medium, and long-term memory.",
+    description: "Search memory for items related to a query. Returns relevant items plus curated/replaceable flags; only replaceable IDs are valid in remember.replaceIds.",
     parameters: {
       type: "object",
       properties: {
@@ -582,6 +600,7 @@ export function registerCoreTools(registry, runtime) {
       const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
         ? context.__memoryScope
         : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
+      const effectiveScope = scope ?? "main";
       const hits = runtime.memory.retrieve(String(args.query ?? ""), { limit: args.limit ?? 5, scope });
       return {
         count: hits.length,
@@ -592,6 +611,10 @@ export function registerCoreTools(registry, runtime) {
           tags: item.tags,
           content: item.content,
           kind: item.kind ?? "raw",
+          scope: item.scope ?? "main",
+          curated: item.metadata?.capacityManaged === true,
+          replaceable: item.metadata?.capacityManaged === true
+            && (item.scope ?? "main") === effectiveScope,
           // Confidence signals: fidelity ("specific" = precise, trust details),
           // strength (decays unless reinforced), locked (a user correction).
           fidelity: item.fidelity ?? "normal",
@@ -1644,6 +1667,20 @@ export function registerCoreTools(registry, runtime) {
   });
 
   return registry;
+}
+
+function validateReplaceIds(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("replaceIds must be an array of active curated-memory ids.");
+  if (value.length > 20) throw new Error("replaceIds accepts at most 20 ids.");
+  const ids = value.map((id) => {
+    if (typeof id !== "string" || !id.trim()) {
+      throw new Error("replaceIds must contain only non-empty string ids.");
+    }
+    return id.trim();
+  });
+  if (new Set(ids).size !== ids.length) throw new Error("replaceIds must not contain duplicate ids.");
+  return ids;
 }
 
 // Builds the human-readable summary shown on register_mcp_server approval

@@ -486,3 +486,12 @@ HOOKS COMPLETE
 - Added runtime and session cache-identity warnings for model, provider, endpoint, or credential changes without logging secrets or placing warnings in prompts, and kept injected routers authoritative.
 - Added verified context-window maps and a wizard-allowlisted override, adaptive fail-closed sizing, protocol, boundary, force-answer, cache, and preemption regressions, plus live HTTP proof at the exact 50% boundary.
 COMPRESSION COMPLETE
+
+## 2026-07-22 - Hermes Parity Wave 3 Phase 1: memory design details (Codex)
+
+- Added an exact 2,200-character curated-memory projection with visible usage headers, pre-mutation overflow errors, no truncation or silent eviction, and atomic replacement-based consolidation.
+- Persisted one scope-and-agent keyed memory snapshot before a session's first signal mutation, then reused its byte-identical block in OpenAI and Anthropic static instructions while keeping retrieval context volatile.
+- Moved optional nano-tier learning to session end with bounded warm-cache digests, durable review watermarks, retry-safe lifecycle handling, graceful shutdown flushing, and explicit per-turn opt-out preservation.
+- Kept specialist snapshots consistent with inherited main memory, made correction persistence atomic, and exposed curated and replaceable recall metadata so capacity errors are actionable.
+- Added exact-boundary, JSONL and snapshot immutability, provider cache, host restart, correction, lifecycle, HTTP validation, graceful shutdown, and both-policy regression coverage.
+MEMORY DETAILS COMPLETE

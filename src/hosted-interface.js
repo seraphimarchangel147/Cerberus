@@ -282,25 +282,61 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/memory/remember") {
         // Direct memory import (auth-gated) — for migrations from another
         // agent, bulk seeding, or integrations. Body: { content, tags?,
-        // importance?, scope?, source? }. Mirrors the `remember` tool.
+        // importance?, scope?, source?, replaceIds? }. Mirrors `remember`.
         const body = await readJson(req);
         const content = String(body?.content ?? "").trim();
         if (!content) return sendJson(res, 400, { error: "content required" });
+        if (body.replaceIds !== undefined && !Array.isArray(body.replaceIds)) {
+          return sendJson(res, 400, { error: "replaceIds must be an array of active curated-memory ids" });
+        }
+        const replaceIds = Array.isArray(body.replaceIds) ? body.replaceIds : [];
+        if (replaceIds.length > 20
+          || replaceIds.some((id) => typeof id !== "string" || !id.trim())
+          || new Set(replaceIds.map((id) => id.trim())).size !== replaceIds.length) {
+          return sendJson(res, 400, {
+            error: "replaceIds must contain at most 20 unique, non-empty string ids"
+          });
+        }
         const importance = body.importance ?? "normal";
-        const item = runtime.memory.remember(
-          {
-            source: body.source ?? "import",
-            scope: body.scope ?? "main",
-            content,
-            tags: ["import", ...(Array.isArray(body.tags) ? body.tags : [])],
-            risk: importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45,
-            specificity: 0.7,
-            repetition: 0.4,
-            novelty: 0.5
-          },
-          { source: "memory-import", strength: importance === "high" ? 0.85 : 0.6 }
-        );
-        return sendJson(res, 200, { id: item.id, tier: item.tier });
+        try {
+          const item = runtime.memory.remember(
+            {
+              source: body.source ?? "import",
+              scope: body.scope ?? "main",
+              content,
+              tags: ["import", ...(Array.isArray(body.tags) ? body.tags : [])],
+              risk: importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45,
+              specificity: 0.7,
+              repetition: 0.4,
+              novelty: 0.5
+            },
+            {
+              source: "memory-import",
+              strength: importance === "high" ? 0.85 : 0.6,
+              capacityManaged: true,
+              replaceIds: replaceIds.map((id) => id.trim())
+            }
+          );
+          return sendJson(res, 200, {
+            id: item.id,
+            tier: item.tier,
+            replaced: item.metadata?.replaces ?? []
+          });
+        } catch (error) {
+          if (error?.code === "MEMORY_CAPACITY_EXCEEDED") {
+            return sendJson(res, 409, {
+              error: error.message,
+              code: error.code,
+              usedChars: error.usedChars,
+              requestedChars: error.requestedChars,
+              maxChars: error.maxChars
+            });
+          }
+          if (/^Cannot replace curated memory /u.test(String(error?.message ?? ""))) {
+            return sendJson(res, 409, { error: error.message, code: "MEMORY_REPLACEMENT_CONFLICT" });
+          }
+          throw error;
+        }
       }
       if (method === "GET" && pathname === "/agents") return sendJson(res, 200, runtime.agentHost?.store.listAgents() ?? runtime.propagation.list());
       if (method === "GET" && pathname === "/specialists") {
@@ -1656,7 +1692,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       });
     },
     async close() {
-      runtime.agentHost?.endActiveHookSessions?.("gateway-close");
+      try { await runtime.agentHost?.endActiveHookSessions?.("gateway-close"); }
+      catch (error) { console.warn(`[openagi] session review flush failed open: ${error?.message ?? String(error)}`); }
       try { runtime.hooks?.notify?.("gateway:shutdown", { host, port }); }
       catch (error) { console.warn(`[hooks] gateway:shutdown failed open: ${error?.message ?? String(error)}`); }
       try { await runtime.hooks?.flush?.(); }

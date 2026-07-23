@@ -68,6 +68,28 @@ export class InMemoryAgentStore {
     return this.getSession(sessionId);
   }
 
+  async ensureSessionMetadata(sessionId, key, createValue) {
+    const session = this.getSession(sessionId);
+    session.metadata = session.metadata ?? {};
+    if (!Object.hasOwn(session.metadata, key)) {
+      session.metadata[key] = typeof createValue === "function" ? createValue() : createValue;
+      await this.saveSession(session);
+    }
+    return session.metadata[key];
+  }
+
+  async updateSessionMetadata(sessionId, key, updateValue) {
+    const session = this.getSession(sessionId);
+    session.metadata = session.metadata ?? {};
+    const current = session.metadata[key];
+    const next = typeof updateValue === "function" ? updateValue(current) : updateValue;
+    if (next !== current) {
+      session.metadata[key] = next;
+      await this.saveSession(session);
+    }
+    return next;
+  }
+
   listSessions() {
     return [...this.sessions.values()]
       .map((session) => ({
@@ -186,6 +208,46 @@ export class FileBackedAgentStore extends InMemoryAgentStore {
     return write.finally(() => {
       // A later append may already have extended the chain. Only its final
       // link may remove the key, or a third writer could slip past the mutex.
+      if (this.sessionWriteChains.get(sessionId) === write) {
+        this.sessionWriteChains.delete(sessionId);
+      }
+    });
+  }
+
+  ensureSessionMetadata(sessionId, key, createValue) {
+    const previous = this.sessionWriteChains.get(sessionId) ?? Promise.resolve();
+    const write = previous.catch(() => {}).then(async () => {
+      const session = this.getSession(sessionId);
+      session.metadata = session.metadata ?? {};
+      if (!Object.hasOwn(session.metadata, key)) {
+        session.metadata[key] = typeof createValue === "function" ? createValue() : createValue;
+        await this.saveSession(session);
+      }
+      return session.metadata[key];
+    });
+    this.sessionWriteChains.set(sessionId, write);
+    return write.finally(() => {
+      if (this.sessionWriteChains.get(sessionId) === write) {
+        this.sessionWriteChains.delete(sessionId);
+      }
+    });
+  }
+
+  updateSessionMetadata(sessionId, key, updateValue) {
+    const previous = this.sessionWriteChains.get(sessionId) ?? Promise.resolve();
+    const write = previous.catch(() => {}).then(async () => {
+      const session = this.getSession(sessionId);
+      session.metadata = session.metadata ?? {};
+      const current = session.metadata[key];
+      const next = typeof updateValue === "function" ? updateValue(current) : updateValue;
+      if (next !== current) {
+        session.metadata[key] = next;
+        await this.saveSession(session);
+      }
+      return next;
+    });
+    this.sessionWriteChains.set(sessionId, write);
+    return write.finally(() => {
       if (this.sessionWriteChains.get(sessionId) === write) {
         this.sessionWriteChains.delete(sessionId);
       }

@@ -1316,7 +1316,7 @@ export class OpenAIResponsesProvider {
     return verdict;
   }
 
-  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
+  async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured.");
     trackPromptCacheIdentity(this, {
@@ -1357,7 +1357,10 @@ export class OpenAIResponsesProvider {
       finalUserTurn
     ];
 
-    const baseInstructions = instructions ?? buildDefaultInstructions({ agent });
+    const baseInstructions = appendSessionMemorySnapshot(
+      instructions ?? buildDefaultInstructions({ agent }),
+      sessionMemorySnapshot
+    );
     const toolList = tools.length > 0
       ? tools
       : Array.isArray(context.__advertisedTools)
@@ -1694,7 +1697,7 @@ export class AnthropicProvider {
     return verdict;
   }
 
-  async generate({ input, instructions, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
+  async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     if (!this.apiKey) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
     trackPromptCacheIdentity(this, {
@@ -1723,7 +1726,10 @@ export class AnthropicProvider {
     const system = [
       {
         type: "text",
-        text: instructions ?? buildDefaultInstructions({ agent }),
+        text: appendSessionMemorySnapshot(
+          instructions ?? buildDefaultInstructions({ agent }),
+          sessionMemorySnapshot
+        ),
         cache_control: { type: "ephemeral" }
       }
     ];
@@ -2058,8 +2064,9 @@ export function buildDefaultInstructions({ agent }) {
   return `You are ${agent?.name ?? "an OpenAGI agent"}, an always-on local assistant.
 
 Tools available to you (call them when useful):
-- remember(content, tags?, importance?) — save a durable note
-- recall(query, limit?) — search memory
+- remember(content, tags?, importance?, replaceIds?) - save a durable note; after a capacity error, consolidate overlapping recall results marked replaceable
+- recall(query, limit?) - search memory and identify curated results that are replaceable in the current scope
+- correct_memory(correction, query? | id?, tags?) - supersede a wrong memory with the corrected fact
 - schedule_message(prompt, delaySeconds | intervalSeconds | dailyAt, channel?, target?) — schedule a future prompt that pings the user back
 - list_cron_jobs — see every scheduled job and whether it is enabled
 - set_cron_job_enabled(id, enabled) — turn a scheduled job OFF (enabled=false, pauses it, reversible) or ON (enabled=true); accepts the job id or its name
@@ -2101,6 +2108,13 @@ export function buildTurnContext({ scrutiny, memoryHits } = {}) {
   }
   if (sections.length === 0) return "";
   return `[context]\nPer-turn background assembled by the runtime — not typed by the user.\n${sections.join("\n")}\n[/context]`;
+}
+
+export function appendSessionMemorySnapshot(instructions, snapshot) {
+  const base = String(instructions ?? "");
+  const memory = String(snapshot ?? "").trim();
+  if (!memory) return base;
+  return `${base}\n\n[session-memory]\nFrozen at session start; later memory writes are intentionally absent until a new session.\n${memory}\n[/session-memory]`;
 }
 
 export function extractResponseText(response) {

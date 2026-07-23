@@ -40,7 +40,11 @@ export { Introspector } from "./introspector.js";
 export { ScrutinyFitter } from "./scrutiny-fitter.js";
 export { ScrutinyPanel } from "./scrutiny-panel.js";
 export { SpecialistRouter } from "./specialist-router.js";
-export { MemorySystem } from "./memory-system.js";
+export {
+  DEFAULT_CURATED_MEMORY_MAX_CHARS,
+  MemoryCapacityError,
+  MemorySystem
+} from "./memory-system.js";
 export { AnthropicProvider, createModelProvider, DeterministicModelProvider, OpenAIResponsesProvider } from "./model-provider.js";
 export { ModelRouter, TASK_PROFILES, TIERS, renderModelPlan } from "./model-router.js";
 export { PropagationController } from "./propagation-controller.js";
