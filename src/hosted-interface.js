@@ -30,6 +30,20 @@ function isHostedMoaProvider(provider) {
   return id === "moa" || provider?.constructor?.name === "MoaProvider";
 }
 
+// A request whose TCP peer is a loopback address is a process on this same
+// box. The daemon binds 127.0.0.1 by default, so for the local dashboard
+// this is always true — we use it to skip the sign-in wall for local
+// operators while still gating paired remote nodes (non-loopback peers).
+function isLoopbackPeer(req) {
+  const addr = req?.socket?.remoteAddress ?? "";
+  return (
+    addr === "127.0.0.1" ||
+    addr === "::1" ||
+    addr === "::ffff:127.0.0.1" ||
+    addr.startsWith("127.")
+  );
+}
+
 function configuredMoaPresetNames(dataDir) {
   const config = readJsonFile(path.join(dataDir, "moa.json"), {});
   const root = config?.presets && typeof config.presets === "object"
@@ -222,7 +236,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // bypass auth ONLY during first-run (no token exists yet).
       const extraCookies = [];
       const setupBypass = setupActive && setupRoutes;
-      if (!isPublicRoute(pathname) && !setupBypass) {
+      // Loopback trust: the daemon binds 127.0.0.1 by default, so a request
+      // arriving from a loopback peer is a local operator on this box — no
+      // login wall for the dashboard. The bearer token still gates paired
+      // REMOTE nodes (they connect over a non-loopback address), so the node
+      // fabric and secrets API keep their protection. This is what removes
+      // the sign-in page for the local Cerberus dashboard.
+      const loopbackTrusted = isLoopbackPeer(req);
+      if (!isPublicRoute(pathname) && !setupBypass && !loopbackTrusted) {
         const authToken = getAuthToken();
         // The rest of the local-only API retains its backwards-compatible
         // auth-disabled mode. The secrets surface is different: it must never
@@ -2041,7 +2062,7 @@ function renderLoginPage(reason, next = "/") {
   // off-site after sign-in.
   const safeNext = typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : "/";
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>OpenAGI · auth</title>
+<html lang="en"><head><meta charset="utf-8"><title>Cerberus · auth</title>
 <style>body{font:14px/1.5 ui-sans-serif,system-ui;background:#0e1411;color:#e8efea;display:grid;place-items:center;min-height:100vh;margin:0}
 form{background:#161d19;border:1px solid #2a352f;border-radius:10px;padding:24px;width:min(420px,90vw)}
 h1{margin:0 0 4px;font-size:18px}p{color:#8da59a;margin:6px 0 16px;font-size:13px}
@@ -2051,7 +2072,7 @@ button{background:#6fe1b1;color:#002219;border:0;padding:9px 14px;border-radius:
 .hint{color:#8da59a;font-size:12px;margin-top:14px}
 .hint code{background:#0e1411;padding:2px 5px;border-radius:3px;border:1px solid #2a352f}</style></head>
 <body><form method="POST" action="/sign-in" id="loginForm" enctype="application/x-www-form-urlencoded">
-<h1>OpenAGI</h1><p>This daemon requires authentication.</p>
+<h1>Cerberus</h1><p>This daemon requires authentication.</p>
 ${reason ? `<div class="err">${escapeHtmlForLogin(reason)}</div>` : ""}
 <input name="token" placeholder="Bearer token" autofocus required spellcheck="false" autocapitalize="off">
 <input type="hidden" name="next" value="${escapeHtmlForLogin(safeNext)}">
@@ -2275,7 +2296,7 @@ function renderApp() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenAGI</title>
+  <title>Cerberus</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -2346,59 +2367,80 @@ function renderApp() {
       height: 100vh;
       overflow: hidden;
     }
-    .app { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
-    header {
-      display: flex; align-items: center; gap: 16px;
-      padding: 0 16px;
+    /* ─── Hermes-style shell: fixed left nav rail + content column ─────── */
+    :root { --rail-w: 232px; }
+    .app { display: grid; grid-template-columns: var(--rail-w) 1fr; height: 100vh; }
+
+    /* Left navigation rail — brand at top, grouped vertical nav, setup pinned
+       to the bottom. Mirrors the Hermes dashboard's persistent left sidebar. */
+    .railnav {
       background: var(--panel);
+      border-right: 1px solid var(--line);
+      display: flex; flex-direction: column; min-height: 0;
+      padding: 0;
+    }
+    .railnav .brand {
+      display: flex; align-items: center; gap: 10px;
+      height: 56px; padding: 0 18px; flex: 0 0 auto;
       border-bottom: 1px solid var(--line);
     }
-    header h1 { font-size: 14px; font-weight: 700; margin: 0; letter-spacing: 0.02em; }
-    header .status { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
-    header .status .status-pill { white-space: nowrap; padding: 2px 8px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
-    nav { display: flex; gap: 4px; margin-left: auto; align-items: center; }
-    nav button {
+    .railnav .brand-mark {
+      width: 28px; height: 28px; border-radius: 8px; flex: 0 0 auto;
+      display: grid; place-items: center; font-size: 16px;
+      background: var(--accent-soft); color: var(--accent);
+      border: 1px solid var(--line);
+    }
+    .railnav .brand-name { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+    .railnav nav {
+      display: flex; flex-direction: column; gap: 1px;
+      padding: 10px 10px 16px; overflow-y: auto; flex: 1 1 auto; min-height: 0;
+    }
+    .nav-group-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em;
+      color: var(--muted-foreground); padding: 14px 10px 4px; user-select: none;
+    }
+    .nav-group-label:first-child { padding-top: 4px; }
+    .railnav nav button {
+      display: flex; align-items: center; gap: 9px;
+      text-align: left; width: 100%;
       background: transparent; border: 1px solid transparent; color: var(--muted);
-      padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
-      font-family: inherit;
+      padding: 7px 10px; border-radius: var(--radius-sm); cursor: pointer;
+      font-size: 13px; font-family: inherit; line-height: 1.2;
+      transition: background 0.12s, color 0.12s;
     }
-    nav button.active { color: var(--text); background: var(--panel-2); border-color: var(--line); }
-    nav button:hover { color: var(--text); }
+    .railnav nav button .nav-ico { width: 16px; text-align: center; flex: 0 0 auto; opacity: 0.85; font-size: 13px; }
+    .railnav nav button:hover { color: var(--text); background: var(--muted-bg); }
+    .railnav nav button.active {
+      color: var(--accent-foreground); background: var(--accent-bg);
+      border-color: transparent; font-weight: 600;
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    .railnav .rail-footer { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 10px; }
+    #setupBtn {
+      display: flex; align-items: center; gap: 9px; width: 100%;
+      background: transparent; border: 1px solid var(--line); color: var(--muted);
+      padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer;
+      font-size: 13px; font-family: inherit;
+    }
+    #setupBtn:hover { color: var(--text); border-color: var(--accent); }
 
-    /* "More ▾" dropdown — clusters the 11 secondary tabs (build +
-       diagnostics) so the primary nav stays under control. Hides
-       behind a click; outside-click closes. */
-    .nav-more { position: relative; }
-    .nav-more-btn {
-      background: transparent; border: 1px solid transparent; color: var(--muted);
-      padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
-      font-family: inherit;
+    /* Content column: slim topbar (live status) + the working body. */
+    .content { display: grid; grid-template-rows: 44px 1fr; min-width: 0; min-height: 0; }
+    .topbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--bg);
     }
-    .nav-more-btn:hover, .nav-more.open .nav-more-btn { color: var(--text); background: var(--panel-2); border-color: var(--line); }
-    .nav-more-panel {
-      position: absolute; right: 0; top: calc(100% + 6px); z-index: 50;
-      background: var(--popover); color: var(--popover-foreground);
-      border: 1px solid var(--border); border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      padding: var(--space-2); min-width: 220px;
-      display: flex; flex-direction: column; gap: var(--space-3);
-    }
-    .nav-more-panel[hidden] { display: none; }
-    .nav-more-section { display: flex; flex-direction: column; gap: 2px; }
-    .nav-more-label {
-      font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
-      color: var(--muted-foreground); padding: 4px 8px 2px;
-    }
-    .nav-more-panel button {
-      text-align: left; padding: 6px 10px; border-radius: var(--radius-sm);
-      color: var(--text); background: transparent; border: 1px solid transparent;
-      width: 100%; font-size: 13px; cursor: pointer; font-family: inherit;
-    }
-    .nav-more-panel button:hover { background: var(--muted-bg); }
-    .nav-more-panel button.active { background: var(--accent-bg); color: var(--accent-foreground); }
+    .topbar .status { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+    .topbar .status .status-pill { white-space: nowrap; padding: 2px 8px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); }
 
-    .body { display: grid; grid-template-columns: 280px 1fr; min-height: 0; }
+    .body { display: grid; grid-template-columns: 280px 1fr; min-height: 0; min-width: 0; }
     .body.no-sidebar { grid-template-columns: 1fr; }
+
+    @media (max-width: 820px) {
+      :root { --rail-w: 60px; }
+      .railnav .brand-name, .nav-group-label, .railnav nav button span:not(.nav-ico), #setupBtn span:not(.nav-ico) { display: none; }
+      .railnav nav button { justify-content: center; }
+    }
     .sidebar {
       background: var(--panel);
       border-right: 1px solid var(--line);
@@ -2672,54 +2714,55 @@ function renderApp() {
 </head>
 <body>
 <div class="app">
-  <header>
-    <h1>OpenAGI</h1>
-    <span id="status" class="status">connecting…</span>
+  <aside class="railnav">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">🐺</span>
+      <span class="brand-name">Cerberus</span>
+    </div>
     <nav id="nav">
-      <!-- Primary tabs — the 5 everyday surfaces. Keeps the nav readable
-           on narrow windows; the other 11 tabs live behind "More ▾". -->
-      <button data-tab="chat" class="active" title="Talk to your agent in natural language.">Chat</button>
-      <button data-tab="tasks" title="My tasks + agent tasks. The agent's own queue gets drained every 30 min by the autopilot pulse.">Tasks</button>
-      <button data-tab="suggestions" title="Things the proactive observer noticed + agent actions awaiting your approval.">Suggestions</button>
-      <button data-tab="memory" title="Short, medium, and long-term memory. Promotion happens automatically.">Memory</button>
-      <button data-tab="integrations" title="Connect MCPs (Linear, GitHub, Stripe, …), sources (BuildBetter, Rize, inbox folder), and channels (Telegram).">Integrations</button>
-      <div class="nav-more" id="navMore">
-        <button id="navMoreBtn" class="nav-more-btn" type="button" title="Build + diagnostic tabs">More ▾</button>
-        <div class="nav-more-panel" id="navMorePanel" hidden>
-          <div class="nav-more-section">
-            <div class="nav-more-label">Build</div>
-            <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones.">MCP</button>
-            <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored.">Skills</button>
-            <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs.">Cron</button>
-            <button data-tab="kanban" title="Local multi-agent coordination board with blockers, runs, and handoffs.">Kanban</button>
-            <button data-tab="channels" title="Telegram / webhook channels the agent can deliver through.">Channels</button>
-            <button data-tab="agents" title="Specialists the propagation controller has spawned for repeated tasks.">Agents</button>
-            <button data-tab="nodes" title="Which machines are paired, which one is main, and who's online right now.">Nodes</button>
-          </div>
-          <div class="nav-more-section">
-            <div class="nav-more-label">Diagnostics</div>
-            <button data-tab="today" title="What you got done today — completed tasks, skills run, actions approved, time tracked, themes.">Today</button>
-            <button data-tab="activity" title="Ambient capture log — what you were doing on screen (if capture is enabled).">Activity</button>
-            <button data-tab="computer-use" title="Computer use (beta) — every action the agent intended to take, with the reasoning it gave.">Computer Use</button>
-            <button data-tab="budget" title="Today's LLM spend + 14-day history.">Credits</button>
-            <button data-tab="outcomes" title="Quality scores for completed agent work, 7d + 30d rolling.">Outcomes</button>
-            <button data-tab="health" title="Memory saturation, specialist health, MCP status, upcoming cron.">Health</button>
-            <button data-tab="scrutiny" title="Directional Adaptive Scrutiny — the 7-axis scorer's calibration + recent verdicts.">Scrutiny</button>
-          </div>
-        </div>
-      </div>
-      <button id="setupBtn" title="Re-run the setup wizard or edit credentials">⚙ Setup</button>
+      <div class="nav-group-label">Workspace</div>
+      <button data-tab="chat" class="active" title="Talk to your agent in natural language."><span class="nav-ico">💬</span><span>Chat</span></button>
+      <button data-tab="tasks" title="My tasks + agent tasks. The agent's own queue gets drained every 30 min by the autopilot pulse."><span class="nav-ico">✓</span><span>Tasks</span></button>
+      <button data-tab="suggestions" title="Things the proactive observer noticed + agent actions awaiting your approval."><span class="nav-ico">💡</span><span>Suggestions</span></button>
+      <button data-tab="memory" title="Short, medium, and long-term memory. Promotion happens automatically."><span class="nav-ico">🧠</span><span>Memory</span></button>
+      <button data-tab="integrations" title="Connect MCPs (Linear, GitHub, Stripe, …), sources (BuildBetter, Rize, inbox folder), and channels (Telegram)."><span class="nav-ico">🔌</span><span>Integrations</span></button>
+
+      <div class="nav-group-label">Build</div>
+      <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones."><span class="nav-ico">🧩</span><span>MCP</span></button>
+      <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored."><span class="nav-ico">✨</span><span>Skills</span></button>
+      <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs."><span class="nav-ico">⏱</span><span>Cron</span></button>
+      <button data-tab="kanban" title="Local multi-agent coordination board with blockers, runs, and handoffs."><span class="nav-ico">📋</span><span>Kanban</span></button>
+      <button data-tab="channels" title="Telegram / webhook channels the agent can deliver through."><span class="nav-ico">📡</span><span>Channels</span></button>
+      <button data-tab="agents" title="Specialists the propagation controller has spawned for repeated tasks."><span class="nav-ico">🤖</span><span>Agents</span></button>
+      <button data-tab="nodes" title="Which machines are paired, which one is main, and who's online right now."><span class="nav-ico">🖧</span><span>Nodes</span></button>
+
+      <div class="nav-group-label">Diagnostics</div>
+      <button data-tab="today" title="What you got done today — completed tasks, skills run, actions approved, time tracked, themes."><span class="nav-ico">📅</span><span>Today</span></button>
+      <button data-tab="activity" title="Ambient capture log — what you were doing on screen (if capture is enabled)."><span class="nav-ico">📈</span><span>Activity</span></button>
+      <button data-tab="computer-use" title="Computer use (beta) — every action the agent intended to take, with the reasoning it gave."><span class="nav-ico">🖱</span><span>Computer Use</span></button>
+      <button data-tab="budget" title="Today's LLM spend + 14-day history."><span class="nav-ico">💳</span><span>Credits</span></button>
+      <button data-tab="outcomes" title="Quality scores for completed agent work, 7d + 30d rolling."><span class="nav-ico">🏅</span><span>Outcomes</span></button>
+      <button data-tab="health" title="Memory saturation, specialist health, MCP status, upcoming cron."><span class="nav-ico">❤</span><span>Health</span></button>
+      <button data-tab="scrutiny" title="Directional Adaptive Scrutiny — the 7-axis scorer's calibration + recent verdicts."><span class="nav-ico">🔎</span><span>Scrutiny</span></button>
     </nav>
-  </header>
-  <div class="body">
-    <aside class="sidebar" id="sidebar">
-      <header class="sub">
-        <h2 id="sidebarTitle">Sessions</h2>
-        <button class="add" id="newSession">+ New</button>
-      </header>
-      <ul id="sidebarList"></ul>
-    </aside>
-    <section class="main" id="main"></section>
+    <div class="rail-footer">
+      <button id="setupBtn" title="Re-run the setup wizard or edit credentials"><span class="nav-ico">⚙</span><span>Setup</span></button>
+    </div>
+  </aside>
+  <div class="content">
+    <div class="topbar">
+      <span id="status" class="status">connecting…</span>
+    </div>
+    <div class="body">
+      <aside class="sidebar" id="sidebar">
+        <header class="sub">
+          <h2 id="sidebarTitle">Sessions</h2>
+          <button class="add" id="newSession">+ New</button>
+        </header>
+        <ul id="sidebarList"></ul>
+      </aside>
+      <section class="main" id="main"></section>
+    </div>
   </div>
 </div>
 <script>
@@ -2746,32 +2789,8 @@ const newBtn = $("newSession");
 document.querySelectorAll("nav button[data-tab]").forEach((btn) => {
   btn.addEventListener("click", () => {
     switchTab(btn.dataset.tab);
-    // Close the More dropdown if the click came from inside it, so the
-    // user lands on the new tab with the panel out of the way.
-    document.getElementById("navMore")?.classList.remove("open");
-    const panel = document.getElementById("navMorePanel");
-    if (panel) panel.hidden = true;
   });
 });
-// More dropdown: toggle on click, close on outside click or Escape.
-(function initNavMore() {
-  const wrap = document.getElementById("navMore");
-  const btn = document.getElementById("navMoreBtn");
-  const panel = document.getElementById("navMorePanel");
-  if (!wrap || !btn || !panel) return;
-  function toggle(open) {
-    const next = typeof open === "boolean" ? open : panel.hidden;
-    panel.hidden = !next;
-    wrap.classList.toggle("open", next);
-  }
-  btn.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
-  document.addEventListener("click", (e) => {
-    if (!wrap.contains(e.target)) toggle(false);
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") toggle(false);
-  });
-})();
 document.getElementById("setupBtn")?.addEventListener("click", () => {
   window.location.href = "/setup";
 });
@@ -3099,7 +3118,7 @@ function renderChat() {
     <div id="chat-deeplink" style="margin-bottom:8px;"></div>
     <div class="thread" id="thread"></div>
     <form class="composer" id="composer">
-      <textarea id="input" placeholder="Message your OpenAGI agent…" rows="1"></textarea>
+      <textarea id="input" placeholder="Message your Cerberus agent…" rows="1"></textarea>
       <button type="submit" id="send">Send</button>
     </form>
   \`;
@@ -3235,7 +3254,7 @@ async function renderChatDeepLink() {
         <div class="card" style="padding:14px;">
           <div style="display:flex; gap:8px; align-items:center;">
             <span style="font-size:18px;">\${icon}</span>
-            <span style="font-weight:600;">\${escapeHtml(sug.title || "OpenAGI noticed something")}</span>
+            <span style="font-weight:600;">\${escapeHtml(sug.title || "Cerberus noticed something")}</span>
             <span class="badge">\${escapeHtml(sug.category || "fyi")}</span>
           </div>
           <div class="muted" style="margin-top:6px; font-size:12px;">\${escapeHtml(sug.rationale || "")}</div>
@@ -3322,11 +3341,11 @@ function renderChatPlaceholder() {
 function renderFirstRunWelcome() {
   // First-run dashboard card. Points the user at the 4 high-value next
   // moves so they're not staring at an empty chat input wondering what
-  // OpenAGI is for. Each card is a real link to the right tab/action,
+  // Cerberus is for. Each card is a real link to the right tab/action,
   // no fake content. Kept compact — this is a welcome, not a tutorial.
   return \`
     <div class="ui-card ui-card-elev" style="margin: var(--space-4) 0; padding: var(--space-5);">
-      <h2 style="margin: 0 0 var(--space-2); font-size: 18px;">Welcome to OpenAGI 👋</h2>
+      <h2 style="margin: 0 0 var(--space-2); font-size: 18px;">Welcome to Cerberus 👋</h2>
       <p class="ui-muted" style="margin: 0 0 var(--space-4);">You're set up. Here's what's worth doing first — talk to your agent any time you want, but most users start with one of these:</p>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3);">
         <a class="ui-card" data-welcome-target="integrations" style="cursor:pointer; text-decoration:none; color:inherit;">
@@ -3556,7 +3575,7 @@ function openKanbanComposer() {
   main.innerHTML = \`
     <div class="pane">
       <h2>New Kanban task</h2>
-      <p class="muted">This is the local openAGI board. Cross-agent shared boards are intentionally separate.</p>
+      <p class="muted">This is the local Cerberus board. Cross-agent shared boards are intentionally separate.</p>
       <form class="form" id="kanbanForm">
         <div style="margin-bottom:var(--space-3);"><label>Title</label><input class="ui-input" name="title" required maxlength="300"></div>
         <div style="margin-bottom:var(--space-3);"><label>Body</label><textarea class="ui-textarea" name="body" rows="5"></textarea></div>
@@ -3937,12 +3956,12 @@ async function refreshMcp() {
     // throws, the user (and console) sees what happened. Several
     // bug reports about "nothing happens" — instrument so next time
     // it's diagnosable.
-    console.log("[OpenAGI] MCP +Register clicked");
+    console.log("[Cerberus] MCP +Register clicked");
     try {
       openMcpComposer();
-      console.log("[OpenAGI] openMcpComposer returned, composerOpen =", composerOpen);
+      console.log("[Cerberus] openMcpComposer returned, composerOpen =", composerOpen);
     } catch (err) {
-      console.error("[OpenAGI] openMcpComposer threw:", err);
+      console.error("[Cerberus] openMcpComposer threw:", err);
       showToast("MCP composer error — check console: " + (err.message || err), false);
     }
   });
@@ -5159,7 +5178,7 @@ async function renderTasks() {
     <div class="pane">
       <h2>Tasks</h2>
       \${gettingStarted}
-      <p class="ui-muted">Talk to the agent below to add, complete, or rearrange tasks. Or click checkboxes directly. <strong>My tasks</strong> are what you should do; <strong>Agent tasks</strong> are what OpenAGI is working on for you.</p>
+      <p class="ui-muted">Talk to the agent below to add, complete, or rearrange tasks. Or click checkboxes directly. <strong>My tasks</strong> are what you should do; <strong>Agent tasks</strong> are what Cerberus is working on for you.</p>
 
       <div id="tasksPageChat"></div>
 
@@ -5183,9 +5202,9 @@ async function renderTasks() {
           <h3>Agent tasks</h3>
           <span class="ui-section-meta">· \${agentTotal} total</span>
         </div>
-        <p class="ui-meta" style="margin: 0 0 var(--space-2);">Things OpenAGI has committed to do for you (or that the proactive observer queued).</p>
+        <p class="ui-meta" style="margin: 0 0 var(--space-2);">Things Cerberus has committed to do for you (or that the proactive observer queued).</p>
         \${agentTasks.length === 0
-          ? \`<div class="ui-empty">No agent tasks. The agent will queue work here when it picks something up via the proactive observer or via "OpenAGI, please look into X" in chat.</div>\`
+          ? \`<div class="ui-empty">No agent tasks. The agent will queue work here when it picks something up via the proactive observer or via "Cerberus, please look into X" in chat.</div>\`
           : \`<ul class="ui-task-list">\${agentTasks.map(taskRow).join("")}</ul>\`}
       </section>
     </div>
@@ -5827,7 +5846,7 @@ evt.addEventListener("mcp", (e) => {
     if (data.op === "oauth-required" && document.hidden) {
       // Best-effort browser notification
       if ("Notification" in window && Notification.permission === "granted") {
-        new Notification("OpenAGI · OAuth required", { body: data.name + " — open the MCP tab to authorize." });
+        new Notification("Cerberus · OAuth required", { body: data.name + " — open the MCP tab to authorize." });
       }
     }
   } catch {}
@@ -5842,7 +5861,7 @@ evt.addEventListener("skill-candidate", (e) => {
   try {
     const data = JSON.parse(e.data);
     if ("Notification" in window && Notification.permission === "granted") {
-      new Notification("OpenAGI learned a new skill candidate", {
+      new Notification("Cerberus learned a new skill candidate", {
         body: (data.name || "untitled") + (data.description ? " — " + data.description : "")
       });
     }
@@ -5861,7 +5880,7 @@ evt.addEventListener("proactive-suggestion", (e) => {
     const body = (data.title || "Suggestion") + (data.rationale ? " — " + data.rationale : "");
     showToast(tag + ": " + body, true);
     if ("Notification" in window && Notification.permission === "granted") {
-      new Notification("OpenAGI noticed something", { body });
+      new Notification("Cerberus noticed something", { body });
     }
   } catch {}
 });

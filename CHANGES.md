@@ -2,6 +2,31 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-24 — Cerberus dashboard: Hermes-style shell, no login, rebrand (Seraphim)
+
+Overhauled the hosted web interface (`src/hosted-interface.js`) to match the Hermes dashboard
+look, remove the local login wall, and rebrand OpenAGI → Cerberus. Requested by the Creator.
+
+- **Login removed for local operators.** Added `isLoopbackPeer(req)`; the auth gate now bypasses
+  sign-in when the TCP peer is loopback (127.0.0.1 / ::1). The daemon binds 127.0.0.1 by default,
+  so the local dashboard opens straight to content — no Bearer-token page. The `OPENAGI_AUTH_TOKEN`
+  still gates paired REMOTE nodes (non-loopback peers) and the secrets API, so the node fabric
+  keeps its protection. `src/auth.js` untouched.
+- **Layout → Hermes-style left rail.** Replaced the top header + "More ▾" dropdown with a fixed
+  vertical navigation rail: Cerberus wolf brand at top, all 19 tabs grouped under
+  Workspace / Build / Diagnostics labels (was 5 primary + 11 hidden behind a dropdown), each with
+  an icon; Setup pinned to a bottom footer. Live status pills moved into a slim topbar in the
+  content column. Added a narrow-viewport collapse (icons-only under 820px). Removed the now-dead
+  `initNavMore` dropdown JS. Tab-switching keys off `nav button[data-tab]` as before, so all
+  render/refresh wiring is unchanged.
+- **Rebrand.** OpenAGI/openAGI → Cerberus across all 18 user-facing strings (title, brand, chat
+  placeholder, welcome card, notifications, board copy, console logs). Left the real filesystem
+  path `~/Library/Application Support/OpenAGI/inbox/` and all `OPENAGI_*` env vars / internal
+  identifiers untouched.
+- Verified: `node --check` clean; auth/hosted/moa test files green; live throwaway instance on a
+  temp data dir served the full 191KB dashboard to a loopback client with no login, correct
+  branding, and working Chat→Health→Memory tab switches (no page JS errors).
+
 ## 2026-07-23 — Self-declaring conversational fast lane (Seraphim)
 
 Follow-up to the fast-lane work below. Azazel could see the trimmed toolset but had no way to
