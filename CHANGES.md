@@ -792,3 +792,5 @@ WORKSPACE TIMELINE COMPLETE
 - Added adapter, store, manager, policy, approval, privacy, resource-bound, revocation, restart, corruption, shutdown, prompt, setup, and both-policy regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1611/1612 tests with zero failures and one intentional Windows permission-mode skip.
 PERSISTENT TERMINALS COMPLETE
+
+AGENT WORKSPACE PHASE 2 COMPLETE
