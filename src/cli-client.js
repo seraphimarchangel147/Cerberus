@@ -21,6 +21,31 @@ import { secretRedactionSpellings } from "./credential-redaction.js";
 
 const DEFAULT_LOCAL_PORT = () => Number.parseInt(process.env.PORT ?? "43210", 10);
 const REMOTE_TOKEN_KEY = "OPENAGI_REMOTE_TOKEN";
+const PROJECT_ID_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
+
+export function projectSelectionPath(dataDir = resolveDataDir()) {
+  return path.join(dataDir, "client-project.json");
+}
+
+export function readProjectSelection(dataDir = resolveDataDir()) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(projectSelectionPath(dataDir), "utf8"));
+    const id = String(parsed?.projectId ?? "").trim().toLowerCase();
+    return PROJECT_ID_RE.test(id) ? id : "default";
+  } catch {
+    return "default";
+  }
+}
+
+export function writeProjectSelection(projectId, dataDir = resolveDataDir()) {
+  const id = String(projectId ?? "").trim().toLowerCase();
+  if (!PROJECT_ID_RE.test(id)) throw new TypeError("Invalid project id.");
+  writeJsonAtomic(projectSelectionPath(dataDir), {
+    version: 1,
+    projectId: id
+  });
+  return id;
+}
 
 export function nodeConfigPath(dataDir = resolveDataDir()) {
   return path.join(dataDir, "node.json");
@@ -381,19 +406,28 @@ function peekEnvToken(dataDir, key = "OPENAGI_AUTH_TOKEN") {
 }
 
 export class CliClient {
-  constructor(target, { fetchImpl = globalThis.fetch, timeoutMs = 60000 } = {}) {
+  constructor(target, {
+    fetchImpl = globalThis.fetch,
+    timeoutMs = 60000,
+    projectId = "default"
+  } = {}) {
     this.target = target;
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
+    this.projectId = String(projectId ?? "default").trim().toLowerCase() || "default";
+    if (!PROJECT_ID_RE.test(this.projectId)) throw new TypeError("Invalid project id.");
   }
 
-  headers(extra = {}) {
+  headers(extra = {}, { projectScoped = true } = {}) {
     const h = { ...extra };
     if (this.target.token) h.authorization = `Bearer ${this.target.token}`;
+    if (projectScoped && this.projectId !== "default") {
+      h["x-openagi-project"] = this.projectId;
+    }
     return h;
   }
 
-  async request(method, route, body) {
+  async request(method, route, body, { projectScoped = true } = {}) {
     const url = this.target.url + route;
     const redactValues = secretRedactionSpellings(this.target.token);
     const ctrl = new AbortController();
@@ -401,7 +435,10 @@ export class CliClient {
     try {
       const res = await this.fetchImpl(url, {
         method,
-        headers: this.headers(body !== undefined ? { "content-type": "application/json" } : {}),
+        headers: this.headers(
+          body !== undefined ? { "content-type": "application/json" } : {},
+          { projectScoped }
+        ),
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: ctrl.signal
       });
@@ -453,6 +490,44 @@ export class CliClient {
     return this.request("POST", "/kanban", input);
   }
   integrations() { return this.request("GET", "/integrations/status"); }
+  projects({ includeArchived = false } = {}) {
+    return this.request(
+      "GET",
+      `/projects${includeArchived ? "?archived=1" : ""}`,
+      undefined,
+      { projectScoped: false }
+    );
+  }
+  project(projectId) {
+    return this.request(
+      "GET",
+      `/projects/${encodeURIComponent(projectId)}`,
+      undefined,
+      { projectScoped: false }
+    );
+  }
+  createProject(input) {
+    return this.request("POST", "/projects", input, { projectScoped: false });
+  }
+  selectProject(projectId) {
+    return this.request(
+      "POST",
+      `/projects/${encodeURIComponent(projectId)}/select`,
+      {},
+      { projectScoped: false }
+    );
+  }
+  updateProject(projectId, patch, expectedRevision) {
+    return this.request("PATCH", `/projects/${encodeURIComponent(projectId)}`, {
+      patch,
+      expectedRevision
+    }, { projectScoped: false });
+  }
+  archiveProject(projectId, expectedRevision) {
+    return this.request("POST", `/projects/${encodeURIComponent(projectId)}/archive`, {
+      expectedRevision
+    }, { projectScoped: false });
+  }
 }
 
 // Run the diagnostic ladder (Hermes-style `doctor`). Returns an array of

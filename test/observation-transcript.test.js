@@ -6,9 +6,13 @@ import os from "node:os";
 import path from "node:path";
 import { ObservationStore } from "../src/observation-store.js";
 
-test("records and searches a transcript observation", async () => {
+test("records and searches a transcript observation", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "obs-tx-"));
   const store = new ObservationStore({ dir });
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   await store.record({
     kind: "transcript",
     at: "2026-06-01T10:00:00.000Z",
@@ -24,12 +28,15 @@ test("records and searches a transcript observation", async () => {
   // Durable dedup lookup used by the BuildBetter transcript sync.
   assert.equal(await store.existsRef("buildbetter:call:42"), true);
   assert.equal(await store.existsRef("buildbetter:call:999"), false);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("search caps long transcript text but keeps the match snippet", async () => {
+test("search caps long transcript text but keeps the match snippet", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "obs-cap-"));
   const store = new ObservationStore({ dir });
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   const longText = "intro. " + "alpha ".repeat(400) + "the secret passphrase is xyzzy. " + "omega ".repeat(400);
   await store.record({
     kind: "transcript", at: "2026-06-01T10:00:00.000Z", app: "BuildBetter",
@@ -40,5 +47,4 @@ test("search caps long transcript text but keeps the match snippet", async () =>
   // text is capped (not the full multi-KB transcript) and marked truncated
   assert.ok(results[0].text.length <= 1001, `expected capped text, got ${results[0].text.length}`);
   assert.ok(results[0].text.endsWith("…"), "capped text should end with an ellipsis");
-  fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -52,6 +52,7 @@ test("consumeInterruption returns the stale marker once and clears it", () => {
       name: "Outreach digest",
       enabled: true,
       task: "outreach-digest",
+      input: { projectId: "alpha", projectRevision: 3 },
       intervalMs: 3_600_000,
       nextRunAt: "2026-01-01T01:00:00.000Z",
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -64,7 +65,9 @@ test("consumeInterruption returns the stale marker once and clears it", () => {
   assert.deepEqual(marker, {
     runningJobId: "digest",
     startedAt: "2026-01-01T00:00:00.000Z",
-    jobName: "Outreach digest"
+    jobName: "Outreach digest",
+    projectId: "alpha",
+    projectRevision: 3
   });
   assert.equal(cron.consumeInterruption(), null, "second consume returns null");
   const onDisk = JSON.parse(fs.readFileSync(storePath, "utf8"));

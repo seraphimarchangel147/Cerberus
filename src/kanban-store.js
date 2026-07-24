@@ -1116,6 +1116,7 @@ export class KanbanStore {
       assignee: task.assignee,
       agentId: context.agentId ?? null,
       sessionId: context.sessionId ?? null,
+      projectId: context.__projectId ?? context.projectId ?? "default",
       ...details
     };
     try {
@@ -1142,7 +1143,8 @@ export class KanbanStore {
         fromStatus: previousStatus,
         status: task.status,
         assignee: task.assignee,
-        sessionId: context.sessionId ?? null
+        sessionId: context.sessionId ?? null,
+        projectId: context.__projectId ?? context.projectId ?? "default"
       });
     }
   }

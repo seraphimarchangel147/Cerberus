@@ -36,6 +36,7 @@ export class ChannelManager {
       from: body.from ?? "user",
       agentId: body.agentId ?? "main",
       sessionId: body.sessionId,
+      projectId: body.projectId ?? body.metadata?.projectId ?? null,
       text: body.text ?? body.message,
       images: Array.isArray(body.images) ? body.images : [],
       metadata: body.metadata ?? {},

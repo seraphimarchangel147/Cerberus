@@ -153,8 +153,10 @@ test("API server runs an ephemeral full agent turn and returns an OpenAI complet
   assert.ok(calls[0].abortSignal instanceof AbortSignal);
   assert.deepEqual(calls[0].metadata, {
     apiModel: "requested-model",
-    apiStream: false
+    apiStream: false,
+    projectId: "default"
   });
+  assert.equal(calls[0].projectId, "default");
 });
 
 test("API streaming emits role, sanitized progress, text, finish, and DONE", async (t) => {
@@ -241,6 +243,8 @@ test("API streaming emits role, sanitized progress, text, finish, and DONE", asy
   assert.doesNotMatch(raw, new RegExp(secret));
   assert.doesNotMatch(raw, /"args"|"result"|"error":"tool/u);
   assert.equal(calls[0].ephemeral, true);
+  assert.equal(calls[0].projectId, "default");
+  assert.equal(calls[0].metadata.projectId, "default");
   assert.ok(calls[0].abortSignal instanceof AbortSignal);
 });
 

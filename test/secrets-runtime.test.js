@@ -24,8 +24,11 @@ function runtimeOptions(dataDir, env) {
 
 test("default runtime wires one filesystem-lazy secrets store into MCP", async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-secrets-runtime-"));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const runtime = createDefaultRuntime(runtimeOptions(dataDir, {}));
+  t.after(async () => {
+    await runtime.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
 
   assert.ok(runtime.secrets instanceof SecretsStore);
   assert.equal(runtime.mcp.secretStore, runtime.secrets);
@@ -39,7 +42,6 @@ test("default runtime wires one filesystem-lazy secrets store into MCP", async (
 
 test("durable runtime migrates and hydrates secrets before MCP config loads", async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-secrets-durable-"));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   fs.writeFileSync(
     path.join(dataDir, ".env"),
     "OPENAI_API_KEY=durable-secret-canary\nCUSTOM_VALUE=preserved\n",
@@ -60,6 +62,10 @@ test("durable runtime migrates and hydrates secrets before MCP config loads", as
   );
   const env = {};
   const runtime = createDurableRuntime(runtimeOptions(dataDir, env));
+  t.after(async () => {
+    await runtime.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
 
   assert.equal(runtime.mcp.secretStore, runtime.secrets);
   assert.equal(env.OPENAI_API_KEY, "durable-secret-canary");

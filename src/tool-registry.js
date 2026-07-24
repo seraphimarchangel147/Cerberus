@@ -4,6 +4,10 @@ import { sanitizeForAudit } from "./redact.js";
 import { validateMcpServerSpec } from "./mcp-registry.js";
 import { MODEL_PROVIDER_IDS, isModelProviderId } from "./model-router.js";
 import {
+  DEFAULT_PROJECT_ID,
+  projectMemoryScope
+} from "./project-store.js";
+import {
   TOOL_SEARCH_BRIDGE_NAMES,
   ToolSearchController,
   isToolSearchDeferrable,
@@ -87,6 +91,7 @@ export class ToolRegistry {
     this.sessionAllows = new Set();
     this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
     this.toolSearchController = options.toolSearchController ?? null;
+    this.projects = options.projects ?? null;
     REGISTRY_FAILURE_STATE.set(this, {
       contextFailures: new WeakMap(),
       turnFailures: new Map(),
@@ -175,9 +180,27 @@ export class ToolRegistry {
     this.toolSearchController = controller ?? null;
   }
 
+  bindProjects(projects) {
+    this.projects = projects ?? null;
+  }
+
   approvalIdentity(name, context = {}) {
     const tool = this.tools.get(name);
     if (!tool) return null;
+    const projectId = String(context?.__projectId ?? "").trim() || null;
+    let currentProject = null;
+    if (projectId && (
+      typeof this.projects?.authorize === "function"
+      || typeof this.projects?.get === "function"
+    )) {
+      try {
+        currentProject = typeof this.projects.authorize === "function"
+          ? this.projects.authorize(projectId, { includeArchived: true })
+          : this.projects.get(projectId, { includeArchived: true });
+      } catch {
+        currentProject = null;
+      }
+    }
     return toolFailureFingerprint("tool_approval", {
       name: tool.name,
       source: tool.source,
@@ -190,7 +213,31 @@ export class ToolRegistry {
         scrutiny: context?.__scrutinyPolicy ?? null,
         allowedTools: Array.isArray(context?.__allowedTools)
           ? [...context.__allowedTools].map(String).sort()
-          : null
+          : null,
+        projectId,
+        projectStatus: currentProject?.status
+          ?? (projectId && this.projects ? "missing" : null),
+        projectRevision: currentProject?.revision
+          ?? context?.__projectRevision
+          ?? null,
+        projectWorkspace: currentProject?.workspaceRoot
+          ?? context?.__projectWorkspaceDir
+          ?? null,
+        projectKanbanBoard: currentProject?.kanbanBoardId
+          ?? context?.__projectKanbanBoardId
+          ?? null,
+        projectMcpGrants: sortedProjectGrants(
+          currentProject?.mcpGrants ?? context?.__projectMcpGrants
+        ),
+        projectActiveSkills: sortedProjectGrants(
+          currentProject?.activeSkills ?? context?.__projectActiveSkills
+        ),
+        projectSecretRefs: sortedProjectGrants(
+          currentProject?.secretRefs ?? context?.__projectSecretRefs
+        ),
+        projectHookIds: sortedProjectGrants(
+          currentProject?.hookIds ?? context?.__projectHookIds
+        )
       }
     });
   }
@@ -231,7 +278,9 @@ export class ToolRegistry {
   // advertised is STILL invokable via run_mcp_tool + discoverable via
   // list_mcp_tools — no capability is lost, just the direct function affordance.
   modelToolPlan(options = {}) {
-    const listed = this.list({ readOnly: options.readOnly === true });
+    const projectContext = options.context ?? {};
+    const listed = this.list({ readOnly: options.readOnly === true })
+      .filter((tool) => !projectToolBoundaryError(tool, projectContext));
     const only = Array.isArray(options.only) ? new Set(options.only.map(String)) : null;
     const narrowed = only
       ? listed.filter((tool) => only.has(tool.name))
@@ -382,6 +431,16 @@ export class ToolRegistry {
         error: safeToolErrorMessage(error, "Tool arguments are not safe JSON.")
       });
     }
+    const projectScope = validateProjectScope(this.projects, context);
+    if (projectScope.error) {
+      return this._finalizeInvocation(tool, name, args, context, {
+        ok: false,
+        blocked: true,
+        code: "project_scope_invalid",
+        error: projectScope.error
+      });
+    }
+    context = authorizedProjectContext(context, projectScope.project);
     const forwardInvocation = tool?.forwardInvocation;
     if (typeof forwardInvocation === "function") {
       let forwarded;
@@ -774,6 +833,7 @@ export class ToolRegistry {
     context,
     { preToolHooksPassed = false, failureTracking = null } = {}
   ) {
+    const tool = this.tools.get(name);
     // Lightweight store doubles used by embedders may only implement the old
     // queue API. Preserve that contract while the real store provides the
     // Hermes-style suspend/resume rail.
@@ -906,6 +966,16 @@ export class ToolRegistry {
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
     }
+    const projectScope = validateProjectScope(this.projects, context);
+    if (projectScope.error) {
+      return {
+        ok: false,
+        blocked: true,
+        code: "project_scope_invalid",
+        error: projectScope.error
+      };
+    }
+    context = authorizedProjectContext(context, projectScope.project);
     // Specialist bounds: a propagated specialist may only call tools inside
     // its allowlist (its scoped MCP tools + the core set agent-host grants).
     // Same advisory-list / enforced-gate split as the scrutiny policies.
@@ -920,6 +990,15 @@ export class ToolRegistry {
       return {
         ok: false,
         error: `Tool ${name} is outside this specialist's bounded scope. Recommend the user take this to the main agent.`
+      };
+    }
+    const projectBoundaryError = projectToolBoundaryError(tool, context);
+    if (projectBoundaryError) {
+      return {
+        ok: false,
+        blocked: true,
+        code: "project_capability_denied",
+        error: projectBoundaryError
       };
     }
     // Scrutiny 'none' policy (ignore verdict): hard-block EVERY tool. An empty
@@ -1214,6 +1293,355 @@ function scopeHasInFlight(scope) {
 function normalizedToolSource(value) {
   const source = String(value ?? "internal").trim();
   return source || "internal";
+}
+
+function sortedProjectGrants(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))].sort()
+    : null;
+}
+
+function validateProjectScope(projects, context) {
+  const projectId = String(context?.__projectId ?? "").trim();
+  if (!projectId) return { project: null, error: null };
+  if (!projects || (
+    typeof projects.authorize !== "function"
+    && typeof projects.get !== "function"
+  )) {
+    return {
+      project: null,
+      error: `Project '${projectId}' cannot be verified by this tool registry.`
+    };
+  }
+  let project;
+  try {
+    if (typeof projects.authorize === "function") {
+      project = projects.authorize(projectId, {
+        includeArchived: true,
+        sessionId: context?.sessionId ?? null
+      });
+    } else {
+      project = projects.get(projectId, { includeArchived: true });
+      if (context?.sessionId && typeof projects.assertSession === "function") {
+        projects.assertSession(projectId, context.sessionId);
+      }
+    }
+  } catch (error) {
+    return {
+      project: null,
+      error: error?.code === "PROJECT_BOUNDARY_VIOLATION"
+        ? String(error.message)
+        : `Project '${projectId}' is not a valid project scope.`
+    };
+  }
+  if (!project) {
+    return { project: null, error: `Project '${projectId}' does not exist.` };
+  }
+  if (project.status !== "active") {
+    return { project: null, error: `Project '${projectId}' is archived.` };
+  }
+  const expectedRevision = context?.__projectRevision;
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    return {
+      project: null,
+      error: `Project '${projectId}' requires a current integer project revision.`
+    };
+  }
+  if (project.revision !== expectedRevision) {
+    return {
+      project: null,
+      error: `Project '${projectId}' revision ${expectedRevision} is stale; current revision is ${project.revision}.`
+    };
+  }
+  return { project, error: null };
+}
+
+function authorizedProjectContext(context, project) {
+  if (!project) return context;
+  const agentId = String(context?.agentId ?? "main").trim() || "main";
+  const specialistId = agentId === "main" ? null : agentId;
+  const canonicalMemoryScope = projectMemoryScope(project, specialistId);
+  const requestedMemoryScope = String(context?.__memoryScope ?? "").trim();
+  let memoryScope = canonicalMemoryScope;
+  if (requestedMemoryScope) {
+    if (project.id === DEFAULT_PROJECT_ID && !specialistId) {
+      memoryScope = requestedMemoryScope.startsWith("project:")
+        ? canonicalMemoryScope
+        : requestedMemoryScope;
+    } else if (
+      requestedMemoryScope === canonicalMemoryScope
+      || requestedMemoryScope.startsWith(`${canonicalMemoryScope}:`)
+    ) {
+      memoryScope = requestedMemoryScope;
+    }
+  }
+  const projectAllowed = Array.isArray(project.policy?.allowedTools)
+    && !project.policy.allowedTools.includes("*")
+    ? project.policy.allowedTools
+    : null;
+  const inheritedAllowed = Array.isArray(context?.__allowedTools)
+    ? context.__allowedTools
+    : null;
+  const allowedTools = projectAllowed
+    ? inheritedAllowed
+      ? projectAllowed.filter((name) => inheritedAllowed.includes(name))
+      : [...projectAllowed]
+    : inheritedAllowed;
+  return {
+    ...(context ?? {}),
+    __projectId: project.id,
+    __projectRevision: project.revision,
+    __memoryScope: memoryScope,
+    __projectWorkspaceDir: project.workspaceRoot,
+    __projectSecretRefs: [...(project.secretRefs ?? [])],
+    __projectMcpGrants: [...(project.mcpGrants ?? [])],
+    __projectActiveSkills: [...(project.activeSkills ?? [])],
+    __projectHookIds: [...(project.hookIds ?? [])],
+    __projectKanbanBoardId: project.kanbanBoardId ?? "default",
+    __projectModelProfile: structuredClone(project.modelProfile ?? {}),
+    __projectRoutingProfile: structuredClone(project.routingProfile ?? {}),
+    ...(allowedTools ? { __allowedTools: allowedTools } : {}),
+    __scrutinyPolicy: stricterProjectToolPolicy(
+      context?.__scrutinyPolicy,
+      project.policy?.toolPolicy
+    )
+  };
+}
+
+function stricterProjectToolPolicy(left, right) {
+  const rank = new Map([
+    ["full", 0],
+    ["confirm", 1],
+    ["read-only", 2],
+    ["none", 3]
+  ]);
+  const a = rank.has(left) ? left : "full";
+  const b = rank.has(right) ? right : "full";
+  return rank.get(a) >= rank.get(b) ? a : b;
+}
+
+function requireProjectControlIdentity(projects, context, operation) {
+  // Runtimes created before ProjectStore remain compatible. Once a project
+  // store exists, management calls must carry the registry-authenticated
+  // private project identity; a missing public context must not become an
+  // implicit administrator.
+  if (!projects || typeof projects.get !== "function") return null;
+  const projectId = String(context?.__projectId ?? "").trim();
+  if (projectId) return projectId;
+  const error = new Error(
+    `${operation} requires an authenticated project control context.`
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function assertDefaultProjectControl(projects, context, operation) {
+  const projectId = requireProjectControlIdentity(projects, context, operation);
+  if (projectId === null || projectId === "default") return true;
+  const error = new Error(
+    `${operation} is restricted to the default project control plane.`
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function assertDefaultProjectRead(projects, context, operation) {
+  if (!projects || typeof projects.get !== "function") return true;
+  const projectId = String(
+    context?.__projectId ?? context?.projectId ?? ""
+  ).trim();
+  // Context-free direct invocations are the legacy default-project API.
+  if (!projectId || projectId === "default") return true;
+  const error = new Error(
+    `${operation} is restricted to the default project control plane.`
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function assertProjectReadBoundary(projects, context, targetProjectId) {
+  const currentProjectId = requireProjectControlIdentity(
+    projects,
+    context,
+    "Project inspection"
+  );
+  if (
+    currentProjectId === null
+    || currentProjectId === "default"
+    || String(targetProjectId ?? "").trim().toLowerCase() === currentProjectId
+  ) {
+    return true;
+  }
+  const error = new Error(
+    "Project inspection is limited to the current project."
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function projectGrantSet(value) {
+  if (!Array.isArray(value)) return null;
+  return new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean));
+}
+
+function projectGrantAllows(value, capability) {
+  const grants = projectGrantSet(value);
+  if (!grants || grants.has("*")) return true;
+  const name = String(capability ?? "").trim();
+  return Boolean(name) && grants.has(name);
+}
+
+function projectRequiredSecretsAllowed(context, requiredSecretRefs) {
+  if (!Array.isArray(requiredSecretRefs) || requiredSecretRefs.length === 0) return true;
+  if (!context?.__projectId) return true;
+  return requiredSecretRefs.every((name) => (
+    projectGrantAllows(context?.__projectSecretRefs, name)
+  ));
+}
+
+function assertProjectRequiredSecrets(context, requiredSecretRefs, label) {
+  if (projectRequiredSecretsAllowed(context, requiredSecretRefs)) return;
+  const denied = requiredSecretRefs.find((name) => (
+    !projectGrantAllows(context?.__projectSecretRefs, name)
+  ));
+  const project = String(context?.__projectId ?? "").trim() || "current project";
+  throw new Error(
+    `${label} requires secret reference '${denied}' which is not granted to project '${project}'.`
+  );
+}
+
+function assertProjectGrant(value, capability, label, projectId) {
+  if (projectGrantAllows(value, capability)) return;
+  const name = String(capability ?? "").trim() || "(missing)";
+  const project = String(projectId ?? "").trim() || "current project";
+  throw new Error(`${label} '${name}' is not granted to project '${project}'.`);
+}
+
+function projectToolBoundaryError(tool, context) {
+  if (
+    tool?.metadata?.projectScope === "default"
+    && context?.__projectId
+    && context.__projectId !== "default"
+  ) {
+    return `Tool '${tool.name}' is restricted to the default project control plane.`;
+  }
+  if (tool?.source === "mcp" && !projectGrantAllows(
+    context?.__projectMcpGrants,
+    tool.metadata?.server
+  )) {
+    const server = String(tool.metadata?.server ?? "").trim() || "(unscoped)";
+    const project = String(context?.__projectId ?? "").trim() || "current project";
+    return `MCP server '${server}' is not granted to project '${project}'.`;
+  }
+  if (
+    tool?.source === "mcp"
+    && !projectRequiredSecretsAllowed(context, tool.metadata?.requiredSecretRefs)
+  ) {
+    const denied = tool.metadata.requiredSecretRefs.find((name) => (
+      !projectGrantAllows(context?.__projectSecretRefs, name)
+    ));
+    const project = String(context?.__projectId ?? "").trim() || "current project";
+    return `MCP tool '${tool.name}' requires secret reference '${denied}' which is not granted to project '${project}'.`;
+  }
+  if (tool?.source === "skill" && tool.metadata?.skill !== undefined && !projectGrantAllows(
+    context?.__projectActiveSkills,
+    tool.metadata.skill
+  )) {
+    const skill = String(tool.metadata?.skill ?? "").trim() || "(unscoped)";
+    const project = String(context?.__projectId ?? "").trim() || "current project";
+    return `Skill '${skill}' is not active for project '${project}'.`;
+  }
+  return null;
+}
+
+function projectKanbanBoard(context) {
+  return String(context?.__projectKanbanBoardId ?? "default");
+}
+
+function scopedCronJobs(runtime, context) {
+  const projectId = String(context?.__projectId ?? "default").trim() || "default";
+  let project = null;
+  if (
+    typeof runtime.projects?.authorize === "function"
+    || typeof runtime.projects?.get === "function"
+  ) {
+    try {
+      project = typeof runtime.projects.authorize === "function"
+        ? runtime.projects.authorize(projectId, { includeArchived: false })
+        : runtime.projects.get(projectId, { includeArchived: false });
+    } catch {
+      project = null;
+    }
+  }
+  if (projectId !== "default" && !project) {
+    return { jobs: [], project: null, projectId };
+  }
+  const scheduleIds = projectId === "default"
+    ? null
+    : new Set(project?.scheduleIds ?? []);
+  const jobs = (runtime.cron?.listJobs?.() ?? []).filter((job) => (
+    (job?.input?.projectId ?? "default") === projectId
+    && (scheduleIds == null || scheduleIds.has(job.id))
+  ));
+  return { jobs, project, projectId };
+}
+
+function projectOwnsSession(projects, sessionId, projectId) {
+  if (typeof projects?.projectForSession !== "function") return true;
+  try {
+    return projects.projectForSession(
+      sessionId,
+      { includeArchived: false }
+    )?.id === projectId;
+  } catch {
+    // Corrupt, archived, or hostile session identities are never visible
+    // through another project's session surfaces.
+    return false;
+  }
+}
+
+function assertProjectBoardArgument(value, context) {
+  if (value == null || String(value) === projectKanbanBoard(context)) return;
+  throw new Error("Kanban board is outside the current project.");
+}
+
+function createProjectDraft(runtime, args, projectId) {
+  const draftId = createId("draft");
+  let attached = false;
+  try {
+    runtime.projects?.attachResource?.(
+      projectId,
+      "artifactIds",
+      draftId,
+      { actor: "tool:save_draft" }
+    );
+    attached = Boolean(runtime.projects?.attachResource);
+    return runtime.drafts.add({ ...args, id: draftId, projectId });
+  } catch (error) {
+    if (attached) {
+      try {
+        runtime.projects?.detachResource?.(
+          projectId,
+          "artifactIds",
+          draftId,
+          { actor: "tool:save_draft:rollback" }
+        );
+      } catch {
+        // A dangling non-secret reference is safer than an untracked draft.
+      }
+    }
+    throw error;
+  }
+}
+
+async function requireProjectKanbanTask(runtime, taskId, context) {
+  if (!runtime.kanban?.getTask) throw new Error("Kanban store is unavailable.");
+  const task = await runtime.kanban.getTask(taskId);
+  if (!task) throw new Error(`Unknown Kanban task: ${taskId}`);
+  if (task.board !== projectKanbanBoard(context)) {
+    throw new Error("Kanban task is outside the current project.");
+  }
+  return task;
 }
 
 function modelToolCap(env = process.env) {
@@ -1593,6 +2021,12 @@ function buildHookPayload({ name, args, context = {}, tool, sessionAllowed }) {
     providerToolCallId: context?.__providerToolCallId ?? null,
     operationReceipt: context?.__operationReceipt ?? context?.__idempotencyKey ?? null,
     agentId: context?.agentId ?? null,
+    projectId: context?.__projectId ?? "default",
+    projectRevision: context?.__projectRevision ?? null,
+    projectHookIds: Array.isArray(context?.__projectHookIds)
+      ? [...context.__projectHookIds]
+      : null,
+    jobId: context?.__jobId ?? null,
     channel: context?.channel ?? null,
     from: context?.from ?? null,
     cwd: args?.cwd ?? null,
@@ -1701,9 +2135,14 @@ function externalMemoryIdentity(context = {}) {
     context?.from ?? context?.userId ?? context?.agentId,
     "default"
   );
+  const projectId = identityPart(
+    context?.__projectId ?? context?.projectId,
+    "default"
+  );
+  const prefix = projectId === "default" ? "" : `project:${projectId}:`;
   return {
-    userId: `${channel}:${owner}`,
-    observerId: identityPart(context?.agentId, "main")
+    userId: `${prefix}${channel}:${owner}`,
+    observerId: `${prefix}${identityPart(context?.agentId, "main")}`
   };
 }
 
@@ -1856,9 +2295,211 @@ export function registerCoreTools(registry, runtime) {
       required: ["ref"],
       additionalProperties: false
     },
-    handler: async ({ ref, offset, maxChars }) => {
+    handler: async ({ ref, offset, maxChars }, context) => {
       if (!runtime.toolOutputs) throw new Error("Tool-output store is unavailable.");
-      return runtime.toolOutputs.read(ref, { offset, maxChars });
+      return runtime.toolOutputs.read(ref, {
+        offset,
+        maxChars,
+        projectId: context?.__projectId ?? "default"
+      });
+    }
+  });
+
+  registry.register({
+    name: "project_list",
+    sideEffects: false,
+    description: "List active projects and their bounded composition metadata. Project records contain secret references, never secret values.",
+    parameters: {
+      type: "object",
+      properties: {
+        includeArchived: { type: "boolean" }
+      },
+      additionalProperties: false
+    },
+    preflight: (_args, context) => requireProjectControlIdentity(
+      runtime.projects,
+      context,
+      "Project listing"
+    ),
+    handler: async (args, context) => {
+      const currentProjectId = requireProjectControlIdentity(
+        runtime.projects,
+        context,
+        "Project listing"
+      );
+      if (currentProjectId && currentProjectId !== "default") {
+        const project = runtime.projects?.get?.(currentProjectId, {
+          includeArchived: args.includeArchived === true
+        });
+        return { projects: project ? [project] : [] };
+      }
+      return {
+        projects: runtime.projects?.list?.({
+          includeArchived: args.includeArchived === true
+        }) ?? []
+      };
+    }
+  });
+
+  registry.register({
+    name: "project_show",
+    sideEffects: false,
+    description: "Show one project's composition metadata and immutable session bindings.",
+    parameters: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" }
+      },
+      required: ["projectId"],
+      additionalProperties: false
+    },
+    preflight: ({ projectId }, context) => assertProjectReadBoundary(
+      runtime.projects,
+      context,
+      projectId
+    ),
+    handler: async ({ projectId }, context) => {
+      assertProjectReadBoundary(runtime.projects, context, projectId);
+      const project = runtime.projects?.get?.(projectId);
+      if (!project) throw new Error(`Unknown project: ${projectId}`);
+      return project;
+    }
+  });
+
+  registry.register({
+    name: "project_create",
+    metadata: { projectScope: "default" },
+    description: "Create an isolated project workspace and its explicit memory, secret, skill, MCP, policy, hook, schedule, Kanban, session, and artifact boundaries.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        name: { type: "string" },
+        instructions: { type: "string" },
+        secretRefs: { type: "array", items: { type: "string" } },
+        activeSkills: { type: "array", items: { type: "string" } },
+        mcpGrants: { type: "array", items: { type: "string" } },
+        hookIds: { type: "array", items: { type: "string" } },
+        modelProfile: { type: "object", additionalProperties: true },
+        routingProfile: { type: "object", additionalProperties: true },
+        policy: { type: "object", additionalProperties: true }
+      },
+      required: ["name"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Project creation"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Project creation");
+      if (!runtime.projects?.create) throw new Error("Project store is unavailable.");
+      return runtime.projects.create(args, {
+        actor: context?.from ?? context?.agentId ?? "agent"
+      });
+    }
+  });
+
+  registry.register({
+    name: "project_select",
+    metadata: { projectScope: "default" },
+    description: "Set the local presentation preference to an active project. This never rebinds the current session; authenticated requests must still carry the selected project id.",
+    parameters: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" }
+      },
+      required: ["projectId"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Project selection"
+    ),
+    handler: async ({ projectId }, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Project selection");
+      if (!runtime.projects?.select) throw new Error("Project store is unavailable.");
+      return runtime.projects.select(projectId, {
+        actor: context?.from ?? context?.agentId ?? "agent"
+      });
+    }
+  });
+
+  registry.register({
+    name: "project_update",
+    metadata: { projectScope: "default" },
+    description: "Update a project using compare-and-swap revision protection. Capability and policy changes invalidate stale tool contexts.",
+    parameters: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        expectedRevision: { type: "integer", minimum: 1 },
+        patch: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            instructions: { type: "string" },
+            secretRefs: { type: "array", items: { type: "string" } },
+            activeSkills: { type: "array", items: { type: "string" } },
+            mcpGrants: { type: "array", items: { type: "string" } },
+            hookIds: { type: "array", items: { type: "string" } },
+            modelProfile: { type: "object", additionalProperties: true },
+            routingProfile: { type: "object", additionalProperties: true },
+            policy: { type: "object", additionalProperties: true }
+          },
+          additionalProperties: false
+        }
+      },
+      required: ["projectId", "expectedRevision", "patch"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Project update"
+    ),
+    handler: async ({ projectId, expectedRevision, patch }, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Project update");
+      if (!runtime.projects?.update) throw new Error("Project store is unavailable.");
+      return runtime.projects.update(projectId, patch, {
+        expectedRevision,
+        actor: context?.from ?? context?.agentId ?? "agent"
+      });
+    }
+  });
+
+  registry.register({
+    name: "project_archive",
+    metadata: { projectScope: "default" },
+    needsConfirmation: true,
+    description: "Soft-archive a non-default project. Archived projects immediately reject new turns, tools, schedules, and deferred approvals.",
+    parameters: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        expectedRevision: { type: "integer", minimum: 1 }
+      },
+      required: ["projectId", "expectedRevision"],
+      additionalProperties: false
+    },
+    summarize: ({ projectId }) => `Archive project ${projectId}`,
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Project archive"
+    ),
+    handler: async ({ projectId, expectedRevision }, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Project archive");
+      if (!runtime.projects?.archive) throw new Error("Project store is unavailable.");
+      return runtime.projects.archive(projectId, {
+        expectedRevision,
+        actor: context?.__approval?.decider
+          ?? context?.from
+          ?? context?.agentId
+          ?? "agent"
+      });
     }
   });
 
@@ -2076,8 +2717,10 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       if (!runtime.cron) throw new Error("Cron scheduler is not available.");
+      const jobId = createId("job");
+      const projectId = context?.__projectId ?? "default";
       const job = {
-        id: args.id ?? createId("job"),
+        id: jobId,
         name: args.name ?? `prompt-${nowIso()}`,
         enabled: true,
         task: "prompt",
@@ -2088,6 +2731,8 @@ export function registerCoreTools(registry, runtime) {
           target: args.target ?? context.from ?? context.target ?? null,
           agentId: context.agentId ?? "main",
           sessionId: context.sessionId,
+          projectId,
+          projectRevision: context?.__projectRevision ?? 1,
           oneShot: Boolean(args.delaySeconds && !args.intervalSeconds && !args.dailyAt)
         }
       };
@@ -2101,7 +2746,51 @@ export function registerCoreTools(registry, runtime) {
       } else {
         throw new Error("Provide one of delaySeconds, intervalSeconds, or dailyAt.");
       }
-      const created = runtime.cron.addJob(job);
+      let created = runtime.cron.addJob(job);
+      if (runtime.projects?.attachResource) {
+        let attachedByThisCall = true;
+        try {
+          const currentProject = runtime.projects.get?.(projectId, {
+            includeArchived: false
+          });
+          attachedByThisCall = !currentProject?.scheduleIds?.includes(created.id);
+          const attachedProject = runtime.projects.attachResource(
+            projectId,
+            "scheduleIds",
+            created.id,
+            { actor: context?.from ?? "tool:schedule_message" }
+          );
+          const pinnedRevision = attachedProject?.revision
+            ?? context?.__projectRevision
+            ?? 1;
+          if (created.input?.projectRevision !== pinnedRevision) {
+            const patch = {
+              input: {
+                ...created.input,
+                projectRevision: pinnedRevision
+              }
+            };
+            created = typeof runtime.cron.updateJob === "function"
+              ? runtime.cron.updateJob(created.id, patch)
+              : runtime.cron.addJob({ ...created, ...patch, replace: true });
+          }
+        } catch (error) {
+          if (attachedByThisCall) {
+            try {
+              runtime.projects.detachResource?.(
+                projectId,
+                "scheduleIds",
+                created.id,
+                { actor: context?.from ?? "tool:schedule_message:rollback" }
+              );
+            } catch {
+              // Best effort: the orphaned attachment has no runnable job.
+            }
+          }
+          runtime.cron.removeJob?.(created.id);
+          throw error;
+        }
+      }
       return { id: created.id, name: created.name, nextRunAt: created.nextRunAt, task: created.task };
     }
   });
@@ -2127,8 +2816,9 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "recall_activity",
+    metadata: { projectScope: "default" },
     sideEffects: false,
-    description: "Search the user's ambient capture log (window titles + app focus events + OCR text from screen frames). Use this when the user asks about what they were doing at a specific time, or to ground 'where did I leave off' questions. Returns rows with timestamp, app, window, and matching snippet.",
+    description: "Search the user-global ambient capture log (window titles + app focus events + OCR text from screen frames). Ambient capture belongs to the default project control plane and is unavailable inside isolated nondefault projects. Use this when the user asks what they were doing at a specific time. Returns rows with timestamp, app, window, and matching snippet.",
     parameters: {
       type: "object",
       properties: {
@@ -2141,7 +2831,17 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Ambient activity recall"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectRead(
+        runtime.projects,
+        context,
+        "Ambient activity recall"
+      );
       if (!runtime.observations) return { error: "no observation store" };
       const results = await runtime.observations.search({
         query: args.query ?? null,
@@ -2157,6 +2857,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "recall_spend",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "Summarize LLM credit (USD) usage: how much has been spent, on what activity/model, and the costliest recent calls. Use to answer questions about cost/credits/budget — e.g. 'why did I spend $4 today?'.",
     parameters: {
@@ -2166,7 +2867,13 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Credit ledger recall"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "Credit ledger recall");
       const ledger = runtime.budget?.ledger;
       if (!ledger) return { error: "no credit ledger available" };
       // Clamp to the retained window so the reported `days` matches the data.
@@ -2192,8 +2899,14 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
-      const sessions = runtime.agentHost?.store.listSessions() ?? [];
+    handler: async (args, context) => {
+      const projectId = context?.__projectId ?? "default";
+      const sessions = (runtime.agentHost?.store.listSessions() ?? [])
+        .filter((session) => projectOwnsSession(
+          runtime.projects,
+          session.id,
+          projectId
+        ));
       return sessions.slice(0, args.limit ?? 10);
     }
   });
@@ -2215,18 +2928,33 @@ export function registerCoreTools(registry, runtime) {
       required: ["query"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context) => {
       if (!runtime.sessionIndex) return { error: "no session index" };
+      const projectId = context?.__projectId ?? "default";
+      if (
+        args.sessionId
+        && !projectOwnsSession(runtime.projects, args.sessionId, projectId)
+      ) {
+        throw new Error("Session is outside the current project.");
+      }
+      const requestedLimit = args.limit ?? 8;
       const results = await runtime.sessionIndex.search(String(args.query ?? ""), {
-        limit: args.limit ?? 8,
+        limit: Math.min(100, requestedLimit * 8),
         role: args.role ?? null,
         sessionId: args.sessionId ?? null,
         since: args.since ?? null,
         until: args.until ?? null
       });
+      const visible = results
+        .filter((result) => projectOwnsSession(
+          runtime.projects,
+          result.sessionId,
+          projectId
+        ))
+        .slice(0, requestedLimit);
       return {
-        count: results.length,
-        results: results.map((r) => ({
+        count: visible.length,
+        results: visible.map((r) => ({
           sessionId: r.sessionId,
           at: r.ts,
           when: String(r.ts ?? "").slice(0, 16).replace("T", " "),
@@ -2242,8 +2970,9 @@ export function registerCoreTools(registry, runtime) {
     sideEffects: false,
     description: "List the skills (named prompts) available to this agent.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => {
-      const skills = runtime.skills?.list?.() ?? [];
+    handler: async (_args, context) => {
+      const skills = (runtime.skills?.list?.() ?? [])
+        .filter((skill) => projectGrantAllows(context?.__projectActiveSkills, skill.name));
       return { count: skills.length, items: skills.map((s) => ({ name: s.name, description: s.description })) };
     }
   });
@@ -2256,6 +2985,12 @@ export function registerCoreTools(registry, runtime) {
     // is declared explicitly so an audit of gate flags reads unambiguously.
     needsConfirmation: true,
     sideEffects: true,
+    preflight: (args, context) => assertProjectGrant(
+      context?.__projectActiveSkills,
+      args.name,
+      "Skill",
+      context?.__projectId
+    ),
     summarize: (args) =>
       `Replay skill '${args.name}' on the Mac${args.dryRun ? " (dry run — logs only)" : " (AppleScript/keyboard control)"}`,
     description: "Trigger a skill's structured replay steps (open_app, keyboard_shortcut, type, applescript, etc.) on the user's Mac. Use only for skills with a `replay:` block in their SKILL.md. Set dryRun:true to log actions without executing — recommended for first-time use. THIS REQUIRES USER APPROVAL — calls return {status:'awaiting_confirmation'} and run only after the user approves via the dashboard's Approvals tab.",
@@ -2268,15 +3003,31 @@ export function registerCoreTools(registry, runtime) {
       required: ["name"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context) => {
       if (!runtime.skillReplay) throw new Error("Skill replay not available.");
-      return runtime.skillReplay.run({ skill: args.name, dryRun: args.dryRun ?? false });
+      assertProjectGrant(
+        context?.__projectActiveSkills,
+        args.name,
+        "skill",
+        context?.__projectId
+      );
+        return runtime.skillReplay.run({
+          skill: args.name,
+          dryRun: args.dryRun ?? false,
+          projectId: context?.__projectId ?? "default"
+        });
     }
   });
 
   registry.register({
     name: "run_skill",
     description: "Run a named skill with the given input. Returns the skill's output.",
+    preflight: (args, context) => assertProjectGrant(
+      context?.__projectActiveSkills,
+      args.name,
+      "Skill",
+      context?.__projectId
+    ),
     parameters: {
       type: "object",
       properties: {
@@ -2289,6 +3040,12 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       if (!runtime.skills) throw new Error("Skills are not configured.");
+      assertProjectGrant(
+        context?.__projectActiveSkills,
+        args.name,
+        "skill",
+        context?.__projectId
+      );
       return runtime.skills.run(args.name, { input: args.input, args: args.args ?? {} }, context);
     }
   });
@@ -2298,8 +3055,12 @@ export function registerCoreTools(registry, runtime) {
     sideEffects: false,
     description: "List tools exposed by connected MCP servers — INCLUDING ones not advertised directly as functions (large servers are capped to keep the tool list within provider limits). Use this to discover a tool, then call it with run_mcp_tool.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => {
-      const tools = runtime.mcp?.listTools?.() ?? [];
+    handler: async (_args, context) => {
+      const tools = (runtime.mcp?.listTools?.() ?? [])
+        .filter((tool) => (
+          projectGrantAllows(context?.__projectMcpGrants, tool.server)
+          && projectRequiredSecretsAllowed(context, tool.requiredSecretRefs)
+        ));
       return { count: tools.length, items: tools };
     }
   });
@@ -2317,10 +3078,14 @@ export function registerCoreTools(registry, runtime) {
       required: ["query"],
       additionalProperties: false
     },
-    handler: async ({ query, limit = 20 }) => {
+    handler: async ({ query, limit = 20 }, context) => {
       const text = String(query ?? "").trim();
       if (!text) return { query: text, count: 0, items: [] };
       const items = (runtime.mcp?.listTools?.() ?? [])
+        .filter((tool) => (
+          projectGrantAllows(context?.__projectMcpGrants, tool.server)
+          && projectRequiredSecretsAllowed(context, tool.requiredSecretRefs)
+        ))
         .map((tool) => ({
           tool,
           score: tokenOverlapScore(text, `${tool.server} ${tool.name} ${tool.registeredName ?? ""} ${tool.description ?? ""}`)
@@ -2343,6 +3108,16 @@ export function registerCoreTools(registry, runtime) {
   registry.register({
     name: "run_mcp_tool",
     description: "Invoke a tool on a connected MCP server. Use this for any MCP tool that isn't available as a direct function (large servers like PostHog are reached this way). Call list_mcp_tools first if unsure of the exact server/tool name.",
+    preflight: (args, context) => assertProjectGrant(
+      context?.__projectMcpGrants,
+      args.server,
+      "MCP server",
+      context?.__projectId
+    ) ?? assertProjectRequiredSecrets(
+      context,
+      runtime.mcp?.requiredSecretRefs?.(args.server) ?? [],
+      `MCP server '${args.server}'`
+    ),
     parameters: {
       type: "object",
       properties: {
@@ -2353,8 +3128,19 @@ export function registerCoreTools(registry, runtime) {
       required: ["server", "tool"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context) => {
       if (!runtime.mcp?.callTool) throw new Error("MCP execution is not available.");
+      assertProjectGrant(
+        context?.__projectMcpGrants,
+        args.server,
+        "MCP server",
+        context?.__projectId
+      );
+      assertProjectRequiredSecrets(
+        context,
+        runtime.mcp?.requiredSecretRefs?.(args.server) ?? [],
+        `MCP server '${args.server}'`
+      );
       return runtime.mcp.callTool(args.server, args.tool, args.args ?? {});
     }
   });
@@ -2363,9 +3149,13 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "register_mcp_server",
+    metadata: { projectScope: "default" },
     description: "Add a new MCP server to the registry. Three transport+auth shapes: stdio (spawn a local process), http+bearer (URL with a ${VAR} secret reference), http+oauth (URL with browser-based OAuth). Store credentials through the authenticated secrets surface first; never pass a literal secret to this tool. After registering, the user typically needs to call connect_mcp_server. THIS REQUIRES USER APPROVAL - registering an MCP can mean spawning an arbitrary process or contacting an arbitrary host. Prefer connect_catalog_mcp when the server is already in the curated catalog.",
     needsConfirmation: true,
-    preflight: (args) => preflightRegisterMcpServer(args),
+    preflight: (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "MCP registration");
+      return preflightRegisterMcpServer(args);
+    },
     // Summary is what shows in the menu-bar notification and dashboard
     // approval card header. Critically include the fields that determine
     // whether the action is dangerous: the stdio command + first few args,
@@ -2396,7 +3186,8 @@ export function registerCoreTools(registry, runtime) {
       required: ["name"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "MCP registration");
       if (!runtime.mcp?.registerServer) throw new Error("MCP registry not available.");
       const server = runtime.mcp.registerServer({
         name: args.name,
@@ -2416,6 +3207,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "connect_mcp_server",
+    metadata: { projectScope: "default" },
     description: "Spawn / connect to a registered MCP server and discover its tools. For OAuth servers, this triggers the browser-based auth flow; the user will need to complete it in their browser. Returns immediately; check list_mcp_tools afterward to see what's available.",
     parameters: {
       type: "object",
@@ -2423,7 +3215,13 @@ export function registerCoreTools(registry, runtime) {
       required: ["name"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "MCP connection"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "MCP connection");
       if (!runtime.mcp?.connect) throw new Error("MCP registry not available.");
       // Fire and forget — OAuth can take minutes.
       runtime.mcp.connect(args.name).catch(() => { /* surfaced via SSE */ });
@@ -2433,6 +3231,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "disconnect_mcp_server",
+    metadata: { projectScope: "default" },
     description: "Close the connection to an MCP server (kills the stdio child or drops the HTTP session).",
     parameters: {
       type: "object",
@@ -2440,7 +3239,13 @@ export function registerCoreTools(registry, runtime) {
       required: ["name"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "MCP disconnection"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "MCP disconnection");
       if (!runtime.mcp?.disconnect) throw new Error("MCP registry not available.");
       const ok = await runtime.mcp.disconnect(args.name);
       return { name: args.name, disconnected: ok };
@@ -2450,27 +3255,28 @@ export function registerCoreTools(registry, runtime) {
   registry.register({
     name: "list_cron_jobs",
     sideEffects: false,
-    description: "List all scheduled jobs (prompt schedules, autopilot pulses, system tasks).",
+    description: "List scheduled jobs owned by the current project.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => runtime.cron.listJobs()
+    handler: async (_args, context) => scopedCronJobs(runtime, context).jobs
   });
 
   // Resolve a cron job by exact id first, then by exact name, then by a
   // unique case-insensitive name match. Returns { job } or { error } so the
   // LLM gets an actionable message (e.g. "turn off nightly-qa" by name) rather
   // than a silent no-op. Ambiguous name matches are refused, not guessed.
-  const resolveCronJob = (idOrName) => {
+  const resolveCronJob = (idOrName, context) => {
     if (!runtime.cron) return { error: "Cron scheduler is not available." };
     const needle = String(idOrName ?? "").trim();
     if (!needle) return { error: "Provide a cron job id or name." };
-    const jobs = runtime.cron.listJobs();
+    const scope = scopedCronJobs(runtime, context);
+    const jobs = scope.jobs;
     const byId = jobs.find((j) => j.id === needle);
-    if (byId) return { job: byId };
+    if (byId) return { job: byId, scope };
     const exactName = jobs.filter((j) => j.name === needle);
-    if (exactName.length === 1) return { job: exactName[0] };
+    if (exactName.length === 1) return { job: exactName[0], scope };
     const lower = needle.toLowerCase();
     const ci = jobs.filter((j) => (j.name ?? "").toLowerCase() === lower || j.id.toLowerCase() === lower);
-    if (ci.length === 1) return { job: ci[0] };
+    if (ci.length === 1) return { job: ci[0], scope };
     if (ci.length > 1 || exactName.length > 1) {
       return { error: `Ambiguous: "${needle}" matches ${(ci.length || exactName.length)} jobs. Use the exact id from list_cron_jobs.` };
     }
@@ -2488,9 +3294,20 @@ export function registerCoreTools(registry, runtime) {
       required: ["id"],
       additionalProperties: false
     },
-    handler: async (args) => {
-      const found = resolveCronJob(args.id);
+    handler: async (args, context) => {
+      const found = resolveCronJob(args.id, context);
       if (found.error) return { id: args.id, removed: false, error: found.error };
+      if (
+        found.scope.project
+        && runtime.projects?.detachResource
+      ) {
+        runtime.projects.detachResource(
+          found.scope.projectId,
+          "scheduleIds",
+          found.job.id,
+          { actor: context?.from ?? "tool:cancel_cron_job" }
+        );
+      }
       const removed = runtime.cron.removeJob(found.job.id);
       return { id: found.job.id, name: found.job.name, removed };
     }
@@ -2508,8 +3325,8 @@ export function registerCoreTools(registry, runtime) {
       required: ["id", "enabled"],
       additionalProperties: false
     },
-    handler: async (args) => {
-      const found = resolveCronJob(args.id);
+    handler: async (args, context) => {
+      const found = resolveCronJob(args.id, context);
       if (found.error) return { id: args.id, enabled: null, ok: false, error: found.error };
       const job = runtime.cron.enableJob(found.job.id, Boolean(args.enabled));
       return {
@@ -2524,10 +3341,19 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "get_audit",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "Get a structural health snapshot of the runtime: specialist counts, memory tier saturation, outcome quality (7d/30d), upcoming cron jobs, MCP servers, and any actionable findings (warn/err severity). Use this when the user asks 'how are you doing' or 'what's wrong'.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => runtime.introspector?.audit() ?? { error: "no introspector" }
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Runtime audit"
+    ),
+    handler: async (_args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "Runtime audit");
+      return runtime.introspector?.audit() ?? { error: "no introspector" };
+    }
   });
 
   registry.register({
@@ -2547,11 +3373,16 @@ export function registerCoreTools(registry, runtime) {
       const checkpoints = await runtime.checkpoints.list({
         limit: args.limit ?? 10,
         sessionId: context?.sessionId ?? null,
-        directory: args.directory ?? null
+        directory: args.directory ?? null,
+        ...(context?.__projectId ? { projectId: context.__projectId } : {})
       });
       const withPreviews = await Promise.all(checkpoints.map(async (checkpoint) => ({
         ...checkpoint,
-        preview: await runtime.checkpoints.preview(checkpoint.id)
+        preview: context?.__projectId
+          ? await runtime.checkpoints.preview(checkpoint.id, {
+              projectId: context.__projectId
+            })
+          : await runtime.checkpoints.preview(checkpoint.id)
       })));
       return {
         enabled: true,
@@ -2583,6 +3414,7 @@ export function registerCoreTools(registry, runtime) {
           ?? context?.__approval?.decidedBy
           ?? context?.from
           ?? "user",
+        ...(context?.__projectId ? { projectId: context.__projectId } : {}),
         ...(context?.sessionId != null ? { sessionId: context.sessionId } : {})
       });
       if (!result) throw new Error(`Checkpoint not found: ${args.checkpointId}`);
@@ -2592,14 +3424,24 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "get_budget",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "Get today's LLM spend, daily limit, calls, and token counts. Returns 14 days of history.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => runtime.budget?.status?.() ?? { error: "no budget" }
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Global budget inspection"
+    ),
+    handler: async (_args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "Global budget inspection");
+      return runtime.budget?.status?.() ?? { error: "no budget" };
+    }
   });
 
   registry.register({
     name: "set_provider",
+    metadata: { projectScope: "default" },
     description: "Switch the primary model provider live. 'auto' picks a configured direct provider, while 'anthropic', 'openai', and 'moa' select that provider explicitly. MoA uses OPENAGI_MOA_PRESET. Use this if the user wants to switch models mid-conversation or you detect repeated failures with the current one.",
     parameters: {
       type: "object",
@@ -2609,7 +3451,17 @@ export function registerCoreTools(registry, runtime) {
       required: ["preference"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Model provider selection"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(
+        runtime.projects,
+        context,
+        "Model provider selection"
+      );
       if (!isModelProviderId(args.preference, { includeAuto: true })) {
         throw new Error(`Invalid model provider: ${args.preference}`);
       }
@@ -2661,11 +3513,8 @@ export function registerCoreTools(registry, runtime) {
       required: ["taskId"],
       additionalProperties: false
     },
-    handler: async ({ taskId }) => {
-      if (!runtime.kanban?.getTask) throw new Error("Kanban store is unavailable.");
-      const task = await runtime.kanban.getTask(taskId);
-      if (!task) throw new Error(`Unknown Kanban task: ${taskId}`);
-      return task;
+    handler: async ({ taskId }, context) => {
+      return requireProjectKanbanTask(runtime, taskId, context);
     }
   });
 
@@ -2687,9 +3536,13 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context) => {
       if (!runtime.kanban?.boardView) throw new Error("Kanban store is unavailable.");
-      return runtime.kanban.boardView(args);
+      assertProjectBoardArgument(args.board, context);
+      return runtime.kanban.boardView({
+        ...args,
+        board: projectKanbanBoard(context)
+      });
     }
   });
 
@@ -2722,7 +3575,14 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       if (!runtime.kanban?.createTask) throw new Error("Kanban store is unavailable.");
-      return runtime.kanban.createTask(args, context);
+      assertProjectBoardArgument(args.board, context);
+      for (const blockerId of args.blockedBy ?? []) {
+        await requireProjectKanbanTask(runtime, blockerId, context);
+      }
+      return runtime.kanban.createTask({
+        ...args,
+        board: projectKanbanBoard(context)
+      }, context);
     }
   });
 
@@ -2747,6 +3607,7 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async ({ taskId, ...input }, context) => {
       if (!runtime.kanban?.completeTask) throw new Error("Kanban store is unavailable.");
+      await requireProjectKanbanTask(runtime, taskId, context);
       return runtime.kanban.completeTask(taskId, input, context);
     }
   });
@@ -2771,6 +3632,10 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async ({ taskId, ...input }, context) => {
       if (!runtime.kanban?.blockTask) throw new Error("Kanban store is unavailable.");
+      await requireProjectKanbanTask(runtime, taskId, context);
+      for (const blockerId of input.blockedBy ?? []) {
+        await requireProjectKanbanTask(runtime, blockerId, context);
+      }
       return runtime.kanban.blockTask(taskId, input, context);
     }
   });
@@ -2790,6 +3655,8 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async ({ taskId, blockerId }, context) => {
       if (!runtime.kanban?.unblockTask) throw new Error("Kanban store is unavailable.");
+      await requireProjectKanbanTask(runtime, taskId, context);
+      if (blockerId) await requireProjectKanbanTask(runtime, blockerId, context);
       return runtime.kanban.unblockTask(taskId, { blockerId }, context);
     }
   });
@@ -2809,6 +3676,7 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async ({ taskId, body }, context) => {
       if (!runtime.kanban?.commentTask) throw new Error("Kanban store is unavailable.");
+      await requireProjectKanbanTask(runtime, taskId, context);
       return runtime.kanban.commentTask(taskId, body, context);
     }
   });
@@ -2841,6 +3709,7 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async ({ taskId, ...input }, context) => {
       if (!runtime.kanban?.heartbeatTask) throw new Error("Kanban store is unavailable.");
+      await requireProjectKanbanTask(runtime, taskId, context);
       return runtime.kanban.heartbeatTask(taskId, input, context);
     }
   });
@@ -2860,12 +3729,15 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async ({ parentId, childId }, context) => {
       if (!runtime.kanban?.linkTasks) throw new Error("Kanban store is unavailable.");
+      await requireProjectKanbanTask(runtime, parentId, context);
+      await requireProjectKanbanTask(runtime, childId, context);
       return runtime.kanban.linkTasks(parentId, childId, context);
     }
   });
 
   registry.register({
     name: "add_task",
+    metadata: { projectScope: "default" },
     domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Add a task to the user's todo list (default) or the agent's own queue. Use queue='agent' when YOU are committing to do this task yourself; use queue='user' when the human should do it. Buckets: today, this_week, this_month, this_quarter, this_year, someday, done — pick the one matching the realistic horizon.",
     parameters: {
@@ -2886,7 +3758,13 @@ export function registerCoreTools(registry, runtime) {
       required: ["title"],
       additionalProperties: false
     },
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Task creation"
+    ),
     handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Task creation");
       if (!runtime.tasks?.add) throw new Error("task store not available");
       const queue = args.queue === "agent" ? "agent" : "user";
       const sourceMeta = args.sourceMeta ?? (context.sessionId ? { sessionId: context.sessionId } : null);
@@ -2897,6 +3775,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "list_tasks",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "List tasks. Filter by queue (user/agent), bucket (today / this_week / this_month / this_quarter / this_year / someday / done), or status (pending/in_progress/blocked/completed/cancelled).",
     parameters: {
@@ -2909,7 +3788,13 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Task listing"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "Task listing");
       if (!runtime.tasks?.list) return { error: "task store not available" };
       const tasks = runtime.tasks.list(args);
       return { count: tasks.length, tasks };
@@ -2918,6 +3803,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "complete_task",
+    metadata: { projectScope: "default" },
     domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Mark a task as completed. Moves it to the 'done' bucket.",
     parameters: {
@@ -2929,7 +3815,13 @@ export function registerCoreTools(registry, runtime) {
       required: ["id"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Task completion"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Task completion");
       const task = runtime.tasks.complete(args.id, args.completedVia ?? "agent");
       return task ? { id: task.id, status: task.status } : { error: "unknown task" };
     }
@@ -2937,6 +3829,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "move_task",
+    metadata: { projectScope: "default" },
     domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Update a task — change bucket, priority, status, due date, etc. without completing it.",
     parameters: {
@@ -2954,7 +3847,13 @@ export function registerCoreTools(registry, runtime) {
       required: ["id"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Task update"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Task update");
       const { id, ...patch } = args;
       const task = runtime.tasks.update(id, patch);
       return task ? task : { error: "unknown task" };
@@ -2963,6 +3862,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "add_goal",
+    metadata: { projectScope: "default" },
     domainResultStatuses: GOAL_DOMAIN_STATUSES,
     description: "Create a Goal that tasks can be grouped under for rollup tracking. Goals have a title, optional description, optional dueDate, and optional parentGoalId (goals can nest, e.g. a quarter goal contains monthly goals).",
     parameters: {
@@ -2976,7 +3876,13 @@ export function registerCoreTools(registry, runtime) {
       required: ["title"],
       additionalProperties: false
     },
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Goal creation"
+    ),
     handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Goal creation");
       const goal = runtime.tasks.addGoal(args);
       const sessionId = context?.sessionId;
       if (!sessionId || typeof runtime.goals?.activate !== "function") return goal;
@@ -2990,6 +3896,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "list_goals",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "List goals with optional status filter. Use to see what longer-term threads exist before adding more tasks — a task linked to an existing goal is more useful than a free-floating one.",
     parameters: {
@@ -3000,7 +3907,13 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Goal listing"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "Goal listing");
       const goals = runtime.tasks.listGoals({ status: args.status });
       if (args.includeProgress) {
         return goals.map((g) => ({ ...g, progress: runtime.tasks.goalProgress(g.id) }));
@@ -3011,6 +3924,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "link_task_to_goal",
+    metadata: { projectScope: "default" },
     domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Link an existing task to a goal so it counts toward that goal's rollup progress. Pass goalId=null to unlink. Use after creating a related task without specifying parentGoalId at creation time.",
     parameters: {
@@ -3022,7 +3936,15 @@ export function registerCoreTools(registry, runtime) {
       required: ["taskId"],
       additionalProperties: false
     },
-    handler: async (args) => runtime.tasks.linkTaskToGoal(args.taskId, args.goalId)
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Task goal linking"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Task goal linking");
+      return runtime.tasks.linkTaskToGoal(args.taskId, args.goalId);
+    }
   });
 
   registry.register({
@@ -3102,9 +4024,16 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "agent_pick_next",
+    metadata: { projectScope: "default" },
     description: "Pop the next task from the agent's own queue. Returns the highest-priority pending task in the agent queue, or null if the queue is empty.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Agent task queue mutation"
+    ),
+    handler: async (_args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Agent task queue mutation");
       const task = runtime.tasks.agentPickNext?.() ?? null;
       return task ? { task } : { task: null, reason: "agent queue empty" };
     }
@@ -3112,6 +4041,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "daily_recap",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "Answer 'what did I get done today?' Returns a structured summary of completed tasks, skills run, agent actions approved, time tracked, and themes. Pass a date (YYYY-MM-DD) to recap a specific day; defaults to today in the user's local timezone. format='markdown' returns a human-readable chat reply; format='json' returns the raw structure for further processing.",
     parameters: {
@@ -3122,7 +4052,13 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Daily recap"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "Daily recap");
       const { computeDailyRecap, renderDailyRecapMarkdown } = await import("./daily-recap.js");
       const date = args.date ? new Date(args.date + "T12:00:00") : new Date();
       const recap = computeDailyRecap(runtime, { date });
@@ -3133,6 +4069,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "daily_plan",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "Answer 'what should I do today?' Returns a forward-looking plan synthesized from the user's calendar, pending + carried-over tasks, recent call commitments, and active goals: a focus list, what the agent can take off their plate, and time-sensitive items. Pass a date (YYYY-MM-DD) to plan a specific day; defaults to today. format='markdown' for a chat reply, 'json' for the raw structure.",
     parameters: {
@@ -3143,7 +4080,13 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "Daily planning"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "Daily planning");
       const { computeDailyPlan, renderDailyPlanMarkdown } = await import("./daily-planner.js");
       const date = args.date ? new Date(args.date + "T12:00:00") : new Date();
       const plan = await computeDailyPlan(runtime, { date });
@@ -3168,9 +4111,10 @@ export function registerCoreTools(registry, runtime) {
       required: ["title", "body"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context = {}) => {
       if (!runtime.drafts?.add) throw new Error("no draft store available");
-      const draft = runtime.drafts.add(args);
+      const projectId = context.__projectId ?? context.projectId ?? "default";
+      const draft = createProjectDraft(runtime, args, projectId);
       return { draftId: draft.id, status: draft.status, note: "Draft saved for review. It has NOT been sent — the user will review and approve it." };
     }
   });
@@ -3179,6 +4123,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "list_mcp_catalog",
+    metadata: { projectScope: "default" },
     sideEffects: false,
     description: "List the MCP servers in OpenAGI's curated catalog — names, descriptions, auth mode (api-key vs oauth), availability (available vs coming-soon), and required env-var name for bearer-auth entries. Use BEFORE connect_catalog_mcp to confirm an entry exists and learn what credentials it needs.",
     parameters: {
@@ -3189,7 +4134,13 @@ export function registerCoreTools(registry, runtime) {
       },
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectRead(
+      runtime.projects,
+      context,
+      "MCP catalog inspection"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectRead(runtime.projects, context, "MCP catalog inspection");
       const { MCP_CATALOG } = await import("./mcp-catalog.js");
       let entries = MCP_CATALOG;
       if (args.category) entries = entries.filter((e) => e.category === args.category);
@@ -3215,8 +4166,12 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "connect_catalog_mcp",
+    metadata: { projectScope: "default" },
     description: "One-click register an MCP server from the curated catalog by id. Bearer credentials must already be stored through the authenticated /secrets, Discord modal, or setup surface; this tool never accepts or returns secret values. For OAuth entries (Linear, Notion, GitHub), the handshake will surface in the dashboard's MCP tab. THIS REQUIRES USER APPROVAL - the user must approve through the normal approval surface before registration runs.",
-    preflight: (args) => preflightConnectCatalogMcp(args),
+    preflight: (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "MCP catalog connection");
+      return preflightConnectCatalogMcp(args);
+    },
     parameters: {
       type: "object",
       properties: {
@@ -3228,6 +4183,7 @@ export function registerCoreTools(registry, runtime) {
     needsConfirmation: true,
     summarize: (args) => `Connect MCP: ${args.catalogId}`,
     handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "MCP catalog connection");
       const { MCP_CATALOG } = await import("./mcp-catalog.js");
       const entry = MCP_CATALOG.find((e) => e.id === args.catalogId);
       if (!entry) throw new Error(`Catalog entry '${args.catalogId}' not found. Use list_mcp_catalog to see what's available.`);
@@ -3271,6 +4227,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "restart_daemon",
+    metadata: { projectScope: "default" },
     description: "Bounce the OpenAGI process so .env changes (new credentials, providers, etc) take effect. Existing integration constructors only re-read env at boot, so this is required after save_integration_credentials or a credentials change. THIS REQUIRES USER APPROVAL — restart drops in-flight chat connections briefly. Use sparingly; only when an integration won't work otherwise.",
     parameters: {
       type: "object",
@@ -3281,7 +4238,13 @@ export function registerCoreTools(registry, runtime) {
     },
     needsConfirmation: true,
     summarize: (args) => args.reason ? `Restart daemon (reason: ${args.reason})` : "Restart daemon",
-    handler: async () => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Daemon restart"
+    ),
+    handler: async (_args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Daemon restart");
       // Same pattern as /control/restart — schedule exit so the response can flush.
       setTimeout(() => process.exit(0), 200);
       return { restarting: true };
@@ -3290,6 +4253,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "retire_specialist",
+    metadata: { projectScope: "default" },
     description: "Retire a propagated specialist by id. Use this when the user explicitly says a specialist isn't useful, or when get_audit shows a low-quality specialist.",
     parameters: {
       type: "object",
@@ -3300,7 +4264,13 @@ export function registerCoreTools(registry, runtime) {
       required: ["id"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    preflight: (_args, context) => assertDefaultProjectControl(
+      runtime.projects,
+      context,
+      "Specialist retirement"
+    ),
+    handler: async (args, context) => {
+      assertDefaultProjectControl(runtime.projects, context, "Specialist retirement");
       const sp = runtime.propagation?.retire?.(args.id, args.reason ?? "agent-initiated");
       if (!sp) return { error: "unknown specialist" };
       return { id: sp.id, status: sp.status, reason: sp.retirementReason };

@@ -111,6 +111,84 @@ test("a specialist turn sees only core + scoped tools, with the allowlist enforc
   assert.ok(!captured.context.__allowedTools.includes("stripe_refund_charge"));
 });
 
+test("a specialist scope cannot widen its project tool allowlist", async () => {
+  const registry = new ToolRegistry();
+  for (const name of ["recall", "remember", "calendar_create_event"]) {
+    registry.register({ name, handler: async () => ({}) });
+  }
+  const project = {
+    id: "calendar-project",
+    name: "Calendar Project",
+    status: "active",
+    revision: 2,
+    workspaceRoot: process.cwd(),
+    instructions: "",
+    policy: { toolPolicy: "full", allowedTools: ["recall"] },
+    secretRefs: [],
+    activeSkills: [],
+    mcpGrants: [],
+    hookIds: [],
+    kanbanBoardId: "project-calendar",
+    modelProfile: {},
+    routingProfile: {}
+  };
+  const captured = {};
+  const runtime = {
+    tools: registry,
+    projects: {
+      hasSessionBinding: () => false,
+      resolveForSession: () => structuredClone(project)
+    },
+    memory: { remember: () => ({ id: "m-project" }) },
+    outcomes: null,
+    processSignal: () => ({
+      id: "out_project",
+      scrutiny: {
+        action: "act",
+        score: 0.6,
+        reasons: [],
+        dimensions: { novelty: 0.4, risk: 0.3, repetition: 0.3 }
+      },
+      customContext: [],
+      propagation: { created: false }
+    })
+  };
+  const host = new AgentHost({
+    runtime,
+    modelProvider: {
+      isConfigured: () => true,
+      model: "stub",
+      generate: async (args) => {
+        captured.tools = args.tools;
+        captured.context = args.context;
+        return { text: "ok", provider: "stub", model: "stub", id: "r-project", toolCalls: [] };
+      }
+    }
+  });
+  host.ensureSpecialistAgent({
+    id: "agent_project_calendar",
+    name: "calendar-project-specialist",
+    boundedScope: "handle project calendar conflicts",
+    parentGoal: "calendar",
+    successMetric: "fewer conflicts",
+    allowedTools: ["calendar_create_event"]
+  }, "main");
+
+  await host.handleMessage({
+    text: "resolve the project calendar overlap",
+    channel: "local",
+    from: "u",
+    sessionId: "project-specialist-scope",
+    projectId: project.id,
+    agentId: "agent_project_calendar",
+    routeTo: false,
+    backgroundReview: false
+  });
+
+  assert.deepEqual(captured.tools.map((tool) => tool.name), ["recall"]);
+  assert.deepEqual(captured.context.__allowedTools, ["recall"]);
+});
+
 test("the main agent's tools are not filtered", async () => {
   const registry = new ToolRegistry();
   for (const name of ["recall", "send_message"]) registry.register({ name, handler: async () => ({}) });

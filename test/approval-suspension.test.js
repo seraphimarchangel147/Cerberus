@@ -109,6 +109,72 @@ test("an approval that wins before the timeout remains approved", async (t) => {
   assert.equal(store.get(action.id).decidedBy, "creator");
 });
 
+test("a live approval fails semantically when project authorization changes", async (t) => {
+  const store = makeStore(t);
+  let project = {
+    id: "alpha",
+    status: "active",
+    revision: 1,
+    workspaceRoot: "/workspace/alpha",
+    policy: { toolPolicy: "full", allowedTools: ["send_thing"] },
+    mcpGrants: [],
+    activeSkills: [],
+    secretRefs: [],
+    hookIds: [],
+    kanbanBoardId: "project-alpha"
+  };
+  const tools = new ToolRegistry({
+    projects: {
+      authorize(id) {
+        return id === project.id ? structuredClone(project) : null;
+      }
+    }
+  });
+  tools.bindPendingActions(store);
+  let calls = 0;
+  tools.register({
+    name: "send_thing",
+    needsConfirmation: true,
+    handler: async () => {
+      calls += 1;
+      return "sent";
+    }
+  });
+  const context = {
+    __projectId: "alpha",
+    __projectRevision: 1
+  };
+  const action = store.enqueue({
+    toolName: "send_thing",
+    args: { value: 1 },
+    context,
+    approvalIdentity: tools.approvalIdentity("send_thing", context)
+  });
+  const waiting = tools._suspendForApproval(
+    action,
+    "send_thing",
+    { value: 1 },
+    context
+  );
+  project = {
+    ...project,
+    revision: 2,
+    policy: { toolPolicy: "none", allowedTools: [] }
+  };
+  store.decide(action.id, {
+    decision: "approve",
+    decidedBy: "creator"
+  });
+
+  const result = await waiting;
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome.code, "approval_identity_changed");
+  assert.equal(calls, 0);
+  assert.equal(store.get(action.id).status, "approved");
+  assert.ok(store.get(action.id).completedAt);
+  assert.equal(store.get(action.id).outcome.code, "approval_identity_changed");
+});
+
 test("recovery fails closed for approved actions with no completion receipt", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-approval-recovery-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

@@ -95,11 +95,13 @@ export class SkillRegistry {
 
   recordDiagnostic(file, error) {
     const diagnostic = {
-      file,
+      // Diagnostics are display/audit values, not filesystem operands.
+      // Keep them stable across Windows and POSIX hosts.
+      file: String(file).replaceAll("\\", "/"),
       reason: error?.message ?? String(error)
     };
     this.diagnostics.push(diagnostic);
-    try { this.warn(`[openagi] skipped invalid skill ${file}: ${diagnostic.reason}`); } catch { /* advisory */ }
+    try { this.warn(`[openagi] skipped invalid skill ${diagnostic.file}: ${diagnostic.reason}`); } catch { /* advisory */ }
     return diagnostic;
   }
 
@@ -478,8 +480,9 @@ export class SkillRegistry {
         },
         additionalProperties: false
       },
-      handler: (args = {}) => this.list()
+      handler: (args = {}, context) => this.list()
         .filter((skill) => args.include_archived === true || skill.state !== "archived")
+        .filter((skill) => projectAllowsSkill(context, skill.name))
         .map(({ name, description, category, pinned, state, stats }) => ({
           name, description, category, pinned, state,
           runs: stats.runs, views: stats.views, avgScore: stats.avgScore, lastUsedAt: stats.lastUsedAt
@@ -500,7 +503,8 @@ export class SkillRegistry {
         required: ["name"],
         additionalProperties: false
       },
-      handler: (args) => {
+      handler: (args, context) => {
+        assertProjectSkill(context, args.name);
         const skill = this.mustGet(args.name);
         if (skill.state === "archived") {
           throw new Error(`Skill '${args.name}' is archived; call restore_skill before using it.`);
@@ -523,7 +527,14 @@ export class SkillRegistry {
         required: ["name"],
         additionalProperties: false
       },
-      handler: (args, context) => this.run(args.name, { input: args.input ?? "", args: args.args ?? {} }, context)
+      handler: (args, context) => {
+        assertProjectSkill(context, args.name);
+        return this.run(
+          args.name,
+          { input: args.input ?? "", args: args.args ?? {} },
+          context
+        );
+      }
     });
 
     toolRegistry.register({
@@ -541,7 +552,15 @@ export class SkillRegistry {
         required: ["name", "description", "body"],
         additionalProperties: false
       },
-      handler: (args, context) => this.createSkill({ ...args, createdBy: context?.agentId ?? "agent" })
+      preflight: (_args, context) => assertDefaultProjectSkillControl(
+        this.runtime?.projects,
+        context,
+        "Skill creation"
+      ),
+      handler: (args, context) => {
+        assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill creation");
+        return this.createSkill({ ...args, createdBy: context?.agentId ?? "agent" });
+      }
     });
 
     toolRegistry.register({
@@ -561,7 +580,13 @@ export class SkillRegistry {
         required: ["name"],
         additionalProperties: false
       },
+      preflight: (_args, context) => assertDefaultProjectSkillControl(
+        this.runtime?.projects,
+        context,
+        "Skill editing"
+      ),
       handler: (args, context) => {
+        assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill editing");
         const by = context?.agentId ?? "agent";
         if (args.old_string !== undefined) return this.patchSkill(args.name, args.old_string, args.new_string ?? "", by);
         return this.editSkill(args.name, args, by);
@@ -579,7 +604,15 @@ export class SkillRegistry {
         required: ["name"],
         additionalProperties: false
       },
-      handler: (args, context) => this.deleteSkill(args.name, context?.agentId ?? "agent")
+      preflight: (_args, context) => assertDefaultProjectSkillControl(
+        this.runtime?.projects,
+        context,
+        "Skill deletion"
+      ),
+      handler: (args, context) => {
+        assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill deletion");
+        return this.deleteSkill(args.name, context?.agentId ?? "agent");
+      }
     });
 
     toolRegistry.register({
@@ -595,7 +628,19 @@ export class SkillRegistry {
         required: ["name"],
         additionalProperties: false
       },
-      handler: (args, context) => this.setPinned(args.name, args.pinned !== false, context?.agentId ?? "agent")
+      preflight: (_args, context) => assertDefaultProjectSkillControl(
+        this.runtime?.projects,
+        context,
+        "Skill pinning"
+      ),
+      handler: (args, context) => {
+        assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill pinning");
+        return this.setPinned(
+          args.name,
+          args.pinned !== false,
+          context?.agentId ?? "agent"
+        );
+      }
     });
 
     toolRegistry.register({
@@ -608,11 +653,20 @@ export class SkillRegistry {
         required: ["name"],
         additionalProperties: false
       },
-      handler: (args, context) => this.restoreSkill(args.name, context?.agentId ?? "agent")
+      preflight: (_args, context) => assertDefaultProjectSkillControl(
+        this.runtime?.projects,
+        context,
+        "Skill restoration"
+      ),
+      handler: (args, context) => {
+        assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill restoration");
+        return this.restoreSkill(args.name, context?.agentId ?? "agent");
+      }
     });
   }
 
   async run(name, { input = "", args = {} } = {}, context = {}) {
+    assertProjectSkill(context, name);
     const skill = this.mustGet(name);
     if (skill.state === "archived") {
       throw new Error(`Skill '${name}' is archived; call restore_skill before using it.`);
@@ -628,8 +682,8 @@ export class SkillRegistry {
     const declaredAllowed = Array.isArray(skill.allowedTools) ? skill.allowedTools : null;
     const effectiveAllowed = declaredAllowed && inheritedAllowed
       ? declaredAllowed.filter((toolName) => inheritedAllowed.includes(toolName))
-      : declaredAllowed;
-    if (!declaredAllowed) {
+      : declaredAllowed ?? inheritedAllowed;
+    if (!effectiveAllowed) {
       try {
         this.warn(`[openagi] skill '${skill.name}' ran with the full tool registry because it has no allowed_tools frontmatter; prefer use_skill for contextual procedures.`);
       } catch { /* visibility must not break execution */ }
@@ -1009,6 +1063,39 @@ function safeReadDir(dir) {
   } catch {
     return [];
   }
+}
+
+function projectAllowsSkill(context, skillName) {
+  const grants = context?.__projectActiveSkills;
+  if (!Array.isArray(grants)) return true;
+  const name = String(skillName ?? "").trim();
+  return Boolean(name && (grants.includes("*") || grants.includes(name)));
+}
+
+function assertProjectSkill(context, skillName) {
+  if (projectAllowsSkill(context, skillName)) return;
+  const error = new Error(
+    `Skill '${String(skillName ?? "")}' is not active in project '${context?.__projectId ?? "default"}'.`
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function assertDefaultProjectSkillControl(projects, context, operation) {
+  // Preserve the pre-ProjectStore embedding contract. Once the store exists,
+  // only the registry-authenticated private identity may authorize a global
+  // skill-definition mutation; a public projectId is not a control-plane
+  // credential and deferred/aliased calls must be rechecked.
+  if (!projects || typeof projects.get !== "function") return true;
+  const projectId = String(context?.__projectId ?? "").trim();
+  if (projectId === "default") return true;
+  const error = new Error(
+    projectId
+      ? `${operation} is restricted to the default project control plane.`
+      : `${operation} requires an authenticated project control context.`
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
 }
 
 function safeIsDir(p) {

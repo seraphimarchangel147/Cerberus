@@ -168,10 +168,16 @@ export function registerDelegateTaskTool(runtime) {
             from: context.from ?? "delegator",
             agentId: "main",
             sessionId,
+            projectId: context.__projectId ?? "default",
             text: childPrompt(task),
             origin: "subagent",
             routeTo: false,
-            metadata: { delegatedBy: parentSessionId, role: effectiveRole, spawnDepth: childDepth },
+            metadata: {
+              delegatedBy: parentSessionId,
+              projectId: context.__projectId ?? "default",
+              role: effectiveRole,
+              spawnDepth: childDepth
+            },
             memoryScope: `subagent:${childId}`,
             allowedTools,
             scrutinyPolicyCeiling: context.__scrutinyPolicy ?? "full",

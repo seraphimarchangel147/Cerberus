@@ -15,6 +15,10 @@ import { createId, nowIso } from "./utils.js";
 const DEFAULT_MAX_FILES = 5000;
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const DEFAULT_PREVIEW_CHARS = 6000;
+const DEFAULT_MAX_REPLAY_BYTES = 32 * 1024 * 1024;
+const DEFAULT_MAX_EVENT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_ROLLBACKS = 1000;
 const DEFAULT_WORKSPACE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WRITE_TOOLS = new Set(["code_write", "write_file"]);
 const EDIT_TOOLS = new Set(["code_edit", "patch"]);
@@ -55,8 +59,14 @@ export class CheckpointStore {
     this.maxFiles = positiveInteger(options.maxFiles, DEFAULT_MAX_FILES);
     this.maxBytes = positiveInteger(options.maxBytes, DEFAULT_MAX_BYTES);
     this.previewMaxChars = positiveInteger(options.previewMaxChars, DEFAULT_PREVIEW_CHARS);
+    this.maxReplayBytes = positiveInteger(options.maxReplayBytes, DEFAULT_MAX_REPLAY_BYTES);
+    this.maxEventBytes = positiveInteger(options.maxEventBytes, DEFAULT_MAX_EVENT_BYTES);
+    this.maxSnapshotBytes = positiveInteger(options.maxSnapshotBytes, DEFAULT_MAX_SNAPSHOT_BYTES);
+    this.maxRollbacks = positiveInteger(options.maxRollbacks, DEFAULT_MAX_ROLLBACKS);
     this.checkpoints = new Map();
     this.dedupe = new Map();
+    this.projectRoots = new Map();
+    this.invalidProjectCheckpoints = new Set();
     this.nextSequence = 1;
 
     // Disabled mode is deliberately inert: no mkdir, stat, read, or replay.
@@ -64,12 +74,31 @@ export class CheckpointStore {
     ensureDir(this.dir);
     this._loadSnapshot();
     this._replayIndex();
+    this._rebuildProjectRoots();
     this._rebuildDedupe();
+    this._reconcileInterruptedRollbacks();
   }
 
   beforeToolCall({ toolName, args = {}, context = {} } = {}) {
     if (!this.enabled) return emptyCapture(false);
     const name = String(toolName ?? "");
+    const projectId = normalizedProjectId(context.__projectId);
+    if (projectId !== "default" && !nonEmpty(context.__projectWorkspaceDir)) {
+      throw projectBoundaryError(
+        `Project ${projectId} has no verified workspace for checkpoint capture`
+      );
+    }
+    const workspaceDir = projectId === "default"
+      ? (
+          nonEmpty(context.__projectWorkspaceDir)
+            ? path.resolve(String(context.__projectWorkspaceDir))
+            : this.workspaceDir
+        )
+      : path.resolve(String(context.__projectWorkspaceDir));
+    this._bindProjectRoot(projectId, workspaceDir);
+    const allowedRoots = projectId === "default"
+      ? this.allowedRoots
+      : [workspaceDir];
     let destructive = false;
     let targets = [];
 
@@ -78,10 +107,10 @@ export class CheckpointStore {
       if (!nonEmpty(args.path)) {
         throw new CheckpointTargetError(`${name} requires a concrete path before checkpointing`);
       }
-      targets = [this._resolveOperand(args.path, this.workspaceDir)];
+      targets = [this._resolveOperand(args.path, workspaceDir)];
     } else if (name === "code_shell") {
       const extracted = extractShellMutationTargets(args.command, {
-        cwd: args.cwd ? this._resolveOperand(args.cwd, this.workspaceDir) : this.workspaceDir
+        cwd: args.cwd ? this._resolveOperand(args.cwd, workspaceDir) : workspaceDir
       });
       destructive = extracted.destructive;
       targets = extracted.targets.map((target) => this._resolveOperand(target, extracted.cwd));
@@ -92,31 +121,53 @@ export class CheckpointStore {
     if (targets.length === 0) {
       throw new CheckpointTargetError(`Destructive ${name} call had no safely resolvable targets`);
     }
-    for (const target of targets) this._assertAllowed(target);
+    for (const target of targets) this._assertAllowed(target, allowedRoots);
     const turnId = nonEmpty(context.__turnId ?? context.__checkpointTurnId ?? context.turnId)
       ? String(context.__turnId ?? context.__checkpointTurnId ?? context.turnId)
       : createId("turn");
     const checkpoints = this.capture({
       turnId,
       sessionId: context.sessionId ?? null,
+      projectId,
+      workspaceRoot: workspaceDir,
       toolName: name,
-      targets
+      targets,
+      allowedRoots
     });
     return { enabled: true, destructive: true, targets, checkpoints };
   }
 
-  capture({ turnId, sessionId = null, toolName = "unknown", targets } = {}) {
+  capture(options = {}) {
     if (!this.enabled) return [];
+    const {
+      turnId,
+      sessionId = null,
+      toolName = "unknown",
+      targets
+    } = options;
     if (!nonEmpty(turnId)) throw new TypeError("checkpoint capture requires turnId");
     const incoming = Array.isArray(targets) ? targets : [];
     if (incoming.length === 0) return [];
+    const projectId = normalizedProjectId(options.projectId);
+    if (projectId !== "default" && !nonEmpty(options.workspaceRoot)) {
+      throw projectBoundaryError(
+        `Project ${projectId} has no verified workspace for checkpoint capture`
+      );
+    }
+    const workspaceRoot = projectId === "default"
+      ? path.resolve(options.workspaceRoot ?? this.workspaceDir)
+      : path.resolve(String(options.workspaceRoot));
+    this._bindProjectRoot(projectId, workspaceRoot);
+    const allowedRoots = projectId === "default"
+      ? uniquePaths(options.allowedRoots ?? this.allowedRoots)
+      : [workspaceRoot];
 
     const groups = new Map();
     for (const value of incoming) {
       const raw = typeof value === "object" && value !== null ? value.path : value;
       if (!nonEmpty(raw)) throw new CheckpointTargetError("checkpoint target path is required");
       const target = path.resolve(String(raw));
-      this._assertAllowed(target);
+      this._assertAllowed(target, allowedRoots);
       const kind = lstatKind(target);
       const directory = kind === "directory" ? target : path.dirname(target);
       if (!groups.has(directory)) groups.set(directory, []);
@@ -125,7 +176,7 @@ export class CheckpointStore {
 
     const out = [];
     for (const [directory, roots] of groups) {
-      const key = dedupeKey(turnId, directory);
+      const key = dedupeKey(turnId, directory, projectId);
       const existing = this.dedupe.get(key) ? this.checkpoints.get(this.dedupe.get(key)) : null;
       const seen = new Set((existing?.targets ?? []).map((target) => target.path));
       const budget = {
@@ -134,7 +185,7 @@ export class CheckpointStore {
       };
       const records = [];
       for (const root of [...new Set(roots)].sort()) {
-        this._collectTarget(root, records, seen, budget, true);
+        this._collectTarget(root, records, seen, budget, true, allowedRoots);
       }
 
       const at = this._now();
@@ -165,6 +216,8 @@ export class CheckpointStore {
         revision: 1,
         turnId: String(turnId),
         sessionId: sessionId == null ? null : String(sessionId),
+        projectId: String(projectId || "default"),
+        workspaceRoot: path.resolve(workspaceRoot),
         directory,
         toolNames: [String(toolName || "unknown")],
         createdAt: at,
@@ -180,35 +233,63 @@ export class CheckpointStore {
     return out;
   }
 
-  get(id) {
+  get(id, { projectId } = {}) {
     if (!this.enabled || !nonEmpty(id)) return null;
-    return this._view(this.checkpoints.get(String(id)) ?? null);
+    const checkpoint = this.checkpoints.get(String(id)) ?? null;
+    if (checkpoint && this.invalidProjectCheckpoints.has(checkpoint.id)) return null;
+    if (
+      checkpoint
+      && projectId === undefined
+      && normalizedProjectId(checkpoint.projectId) !== "default"
+    ) {
+      return null;
+    }
+    if (
+      checkpoint
+      && projectId !== undefined
+      && normalizedProjectId(checkpoint.projectId) !== normalizedProjectId(projectId)
+    ) {
+      return null;
+    }
+    return this._view(checkpoint);
   }
 
-  list({ limit = 10, sessionId, directory } = {}) {
+  list({ limit = 10, sessionId, directory, projectId } = {}) {
     if (!this.enabled) return [];
     const bounded = Math.max(0, Math.min(100, Number.isFinite(Number(limit)) ? Math.trunc(Number(limit)) : 10));
     const wantedDir = nonEmpty(directory) ? path.resolve(String(directory)) : null;
     const wantedSession = sessionId == null ? sessionId : String(sessionId);
     return [...this.checkpoints.values()]
+      .filter((checkpoint) => !this.invalidProjectCheckpoints.has(checkpoint.id))
+      .filter((checkpoint) => (
+        projectId !== undefined
+        || normalizedProjectId(checkpoint.projectId) === "default"
+      ))
       .filter((checkpoint) => sessionId === undefined || checkpoint.sessionId === wantedSession)
+      .filter((checkpoint) => (
+        projectId === undefined
+        || normalizedProjectId(checkpoint.projectId) === normalizedProjectId(projectId)
+      ))
       .filter((checkpoint) => !wantedDir || checkpoint.directory === wantedDir)
       .sort((a, b) => b.sequence - a.sequence)
       .slice(0, bounded)
       .map((checkpoint) => this._view(checkpoint));
   }
 
-  preview(id, { path: selectedPath } = {}) {
+  preview(id, { path: selectedPath, projectId } = {}) {
     if (!this.enabled) return null;
     const checkpoint = this.checkpoints.get(String(id));
     if (!checkpoint) return null;
-    const targets = this._selectTargets(checkpoint, selectedPath);
+    this._assertUsableCheckpoint(checkpoint);
+    this._assertProject(checkpoint, projectId);
+    const allowedRoots = this._checkpointAllowedRoots(checkpoint);
+    const targets = this._selectTargets(checkpoint, selectedPath, allowedRoots);
     const files = [];
     let remaining = this.previewMaxChars;
     let truncated = false;
 
     for (const target of targets) {
-      this._assertAllowed(target.path);
+      this._assertAllowed(target.path, allowedRoots);
       const current = readCurrent(target.path);
       const status = previewStatus(target, current);
       let diff = "";
@@ -239,85 +320,147 @@ export class CheckpointStore {
     return { checkpoint: this._view(checkpoint), files, truncated };
   }
 
-  rollback(id, { path: selectedPath, decidedBy = "system", sessionId } = {}) {
+  rollback(id, {
+    path: selectedPath,
+    decidedBy = "system",
+    sessionId,
+    projectId
+  } = {}) {
     if (!this.enabled) return null;
     const current = this.checkpoints.get(String(id));
     if (!current) return null;
+    this._assertUsableCheckpoint(current);
+    this._assertProject(current, projectId);
+    const allowedRoots = this._checkpointAllowedRoots(current);
     const wantedSession = sessionId == null ? sessionId : String(sessionId);
     if (sessionId !== undefined && current.sessionId !== wantedSession) {
       throw new Error(`Checkpoint ${current.id} does not belong to this session`);
     }
-    const targets = this._selectTargets(current, selectedPath);
+    const targets = this._selectTargets(current, selectedPath, allowedRoots);
     if (targets.length === 0) throw new Error("checkpoint contains no matching targets");
 
     const blobs = new Map();
     for (const target of targets) {
-      this._assertAllowed(target.path);
+      this._assertAllowed(target.path, allowedRoots);
       if (target.kind === "file") blobs.set(target.path, this._readVerifiedBlob(target));
+      if (target.kind === "missing") this._assertSafeRemoval(target.path, allowedRoots);
     }
 
     const removed = [];
     const restored = [];
-    const missing = targets.filter((target) => target.kind === "missing")
-      .sort((a, b) => b.path.length - a.path.length);
-    for (const target of missing) {
-      this._assertSafeRemoval(target.path);
-      if (fs.existsSync(target.path) || isSymlink(target.path)) {
-        fs.rmSync(target.path, { recursive: true, force: true });
-        removed.push(target.path);
-      }
-    }
-
-    const directories = targets.filter((target) => target.kind === "directory")
-      .sort((a, b) => a.path.length - b.path.length);
-    for (const target of directories) {
-      if (fs.existsSync(target.path) && lstatKind(target.path) !== "directory") {
-        fs.rmSync(target.path, { recursive: true, force: true });
-      }
-      ensureDir(target.path);
-      safeChmod(target.path, target.mode);
-      restored.push(target.path);
-    }
-
-    for (const target of targets.filter((entry) => entry.kind === "file")) {
-      const liveKind = lstatKind(target.path);
-      if (liveKind !== "missing" && liveKind !== "file") {
-        fs.rmSync(target.path, { recursive: true, force: true });
-      }
-      ensureDir(path.dirname(target.path));
-      writeBufferAtomic(target.path, blobs.get(target.path), target.mode ?? 0o600);
-      safeChmod(target.path, target.mode);
-      restored.push(target.path);
-    }
-
-    for (const target of targets.filter((entry) => entry.kind === "symlink")) {
-      ensureDir(path.dirname(target.path));
-      fs.rmSync(target.path, { recursive: true, force: true });
-      fs.symlinkSync(target.linkTarget, target.path);
-      restored.push(target.path);
-    }
-
-    const at = this._now();
-    const event = {
-      at,
+    const requestedAt = this._now();
+    const rollbackId = createId("rollback");
+    const intent = {
+      id: rollbackId,
+      at: requestedAt,
+      requestedAt,
+      completedAt: null,
+      status: "pending",
       decidedBy: String(decidedBy ?? "system"),
       path: selectedPath == null ? null : String(selectedPath),
-      restored: [...restored],
-      removed: [...removed]
+      targets: targets.map((target) => target.path),
+      restored: [],
+      removed: []
     };
-    const next = {
+    const pending = {
       ...clone(current),
       revision: current.revision + 1,
-      updatedAt: at,
-      rollbacks: [...current.rollbacks, event]
+      updatedAt: requestedAt,
+      rollbacks: boundedRollbackHistory(
+        [...current.rollbacks, intent],
+        this.maxRollbacks
+      )
     };
-    this._persist("rollback", next, event);
-    return { checkpointId: current.id, restored, removed, at };
+    this._persist("rollback_intent", pending, {
+      rollbackId,
+      decidedBy: intent.decidedBy,
+      path: intent.path,
+      targets: intent.targets
+    });
+
+    try {
+      const missing = targets.filter((target) => target.kind === "missing")
+        .sort((a, b) => b.path.length - a.path.length);
+      for (const target of missing) {
+        this._assertSafeRemoval(target.path, allowedRoots);
+        if (fs.existsSync(target.path) || isSymlink(target.path)) {
+          fs.rmSync(target.path, { recursive: true, force: true });
+          removed.push(target.path);
+        }
+      }
+
+      const directories = targets.filter((target) => target.kind === "directory")
+        .sort((a, b) => a.path.length - b.path.length);
+      for (const target of directories) {
+        this._assertAllowed(target.path, allowedRoots);
+        if (fs.existsSync(target.path) && lstatKind(target.path) !== "directory") {
+          fs.rmSync(target.path, { recursive: true, force: true });
+        }
+        ensureDir(target.path);
+        safeChmod(target.path, target.mode);
+        restored.push(target.path);
+      }
+
+      for (const target of targets.filter((entry) => entry.kind === "file")) {
+        this._assertAllowed(target.path, allowedRoots);
+        const liveKind = lstatKind(target.path);
+        if (liveKind !== "missing" && liveKind !== "file") {
+          fs.rmSync(target.path, { recursive: true, force: true });
+        }
+        ensureDir(path.dirname(target.path));
+        writeBufferAtomic(target.path, blobs.get(target.path), target.mode ?? 0o600);
+        safeChmod(target.path, target.mode);
+        restored.push(target.path);
+      }
+
+      for (const target of targets.filter((entry) => entry.kind === "symlink")) {
+        this._assertAllowed(target.path, allowedRoots);
+        ensureDir(path.dirname(target.path));
+        fs.rmSync(target.path, { recursive: true, force: true });
+        fs.symlinkSync(target.linkTarget, target.path);
+        restored.push(target.path);
+      }
+    } catch (error) {
+      try {
+        this._finishRollback(current.id, rollbackId, {
+          status: "failed",
+          restored,
+          removed,
+          error: safeErrorMessage(error)
+        }, "rollback_failed");
+      } catch {
+        // The durable intent remains authoritative when failure-detail
+        // persistence is itself unavailable. Do not mask the mutation error.
+      }
+      throw error;
+    }
+
+    const completedAt = this._now();
+    this._finishRollback(current.id, rollbackId, {
+      status: "complete",
+      completedAt,
+      restored,
+      removed
+    }, "rollback");
+    return {
+      checkpointId: current.id,
+      rollbackId,
+      restored,
+      removed,
+      at: completedAt
+    };
   }
 
-  _collectTarget(targetPath, records, seen, budget, root = false) {
+  _collectTarget(
+    targetPath,
+    records,
+    seen,
+    budget,
+    root = false,
+    allowedRoots = this.allowedRoots
+  ) {
     const target = path.resolve(targetPath);
-    this._assertAllowed(target);
+    this._assertAllowed(target, allowedRoots);
     if (seen.has(target)) return;
     seen.add(target);
     const stat = safeLstat(target);
@@ -345,7 +488,16 @@ export class CheckpointStore {
       budget.files += 1;
       this._checkBudget(budget);
       const entries = fs.readdirSync(target, { withFileTypes: true }).map((entry) => entry.name).sort();
-      for (const entry of entries) this._collectTarget(path.join(target, entry), records, seen, budget, false);
+      for (const entry of entries) {
+        this._collectTarget(
+          path.join(target, entry),
+          records,
+          seen,
+          budget,
+          false,
+          allowedRoots
+        );
+      }
       return;
     }
     if (!stat.isFile()) throw new CheckpointTargetError(`Unsupported checkpoint target type: ${target}`);
@@ -377,13 +529,39 @@ export class CheckpointStore {
 
   _writeBlob(hash, data) {
     const blobPath = this._blobPath(hash);
-    if (fs.existsSync(blobPath)) return;
+    if (fs.existsSync(blobPath)) {
+      const stat = fs.lstatSync(blobPath);
+      if (
+        stat.isSymbolicLink()
+        || !stat.isFile()
+        || stat.size !== data.length
+        || sha256(fs.readFileSync(blobPath)) !== hash
+      ) {
+        throw new Error(`Checkpoint blob failed integrity check: ${hash}`);
+      }
+      return;
+    }
     writeBufferAtomic(blobPath, data, 0o600);
   }
 
   _readVerifiedBlob(target) {
-    const data = fs.readFileSync(this._blobPath(target.hash));
-    if (sha256(data) !== target.hash) {
+    const blobPath = this._blobPath(target.hash);
+    let stat;
+    try {
+      stat = fs.lstatSync(blobPath);
+    } catch {
+      throw new Error(`Checkpoint blob failed integrity check for ${target.path}`);
+    }
+    if (
+      stat.isSymbolicLink()
+      || !stat.isFile()
+      || stat.size !== target.size
+      || stat.size > this.maxBytes
+    ) {
+      throw new Error(`Checkpoint blob failed integrity check for ${target.path}`);
+    }
+    const data = fs.readFileSync(blobPath);
+    if (data.length !== target.size || sha256(data) !== target.hash) {
       throw new Error(`Checkpoint blob failed integrity check for ${target.path}`);
     }
     return data;
@@ -393,12 +571,12 @@ export class CheckpointStore {
     return path.join(this.blobsDir, hash.slice(0, 2), hash);
   }
 
-  _selectTargets(checkpoint, selectedPath) {
+  _selectTargets(checkpoint, selectedPath, allowedRoots = this._checkpointAllowedRoots(checkpoint)) {
     if (!nonEmpty(selectedPath)) return checkpoint.targets.map(clone);
     const selected = path.isAbsolute(String(selectedPath))
       ? path.resolve(String(selectedPath))
       : path.resolve(checkpoint.directory, String(selectedPath));
-    this._assertAllowed(selected);
+    this._assertAllowed(selected, allowedRoots);
     const matches = checkpoint.targets.filter((target) => (
       target.path === selected || target.path.startsWith(selected + path.sep)
     ));
@@ -416,23 +594,37 @@ export class CheckpointStore {
       details,
       checkpoint
     };
+    if (jsonByteLength(event) > this.maxEventBytes) {
+      throw new Error(`Checkpoint event exceeds ${this.maxEventBytes} bytes`);
+    }
     appendJsonLine(this.indexPath, event);
     this.checkpoints.set(checkpoint.id, clone(checkpoint));
+    this._refreshCheckpointProjectState(checkpoint);
     this._rebuildDedupe();
-    writeCheckpointSnapshot(this.snapshotPath, {
+    const snapshot = {
       version: 1,
       updatedAt: this._now(),
       nextSequence: this.nextSequence,
       checkpoints: [...this.checkpoints.values()].sort((a, b) => a.sequence - b.sequence)
-    });
+    };
+    if (jsonByteLength(snapshot) > this.maxSnapshotBytes) {
+      throw new Error(`Checkpoint snapshot exceeds ${this.maxSnapshotBytes} bytes`);
+    }
+    writeCheckpointSnapshot(this.snapshotPath, snapshot);
   }
 
   _loadSnapshot() {
     let snapshot;
-    try { snapshot = readJsonFile(this.snapshotPath, null); } catch { return; }
+    try {
+      const stat = fs.statSync(this.snapshotPath);
+      if (!stat.isFile() || stat.size > this.maxSnapshotBytes) return;
+      snapshot = readJsonFile(this.snapshotPath, null);
+    } catch {
+      return;
+    }
     if (!Array.isArray(snapshot?.checkpoints)) return;
     for (const checkpoint of snapshot.checkpoints) {
-      if (!validCheckpoint(checkpoint)) continue;
+      if (!this._validCheckpoint(checkpoint)) continue;
       this.checkpoints.set(checkpoint.id, clone(checkpoint));
       this.nextSequence = Math.max(this.nextSequence, checkpoint.sequence + 1);
     }
@@ -442,25 +634,193 @@ export class CheckpointStore {
   }
 
   _replayIndex() {
-    let text;
-    try { text = fs.readFileSync(this.indexPath, "utf8"); }
+    let lines;
+    try { lines = readJsonLineTail(this.indexPath, this.maxReplayBytes); }
     catch (error) { if (error.code === "ENOENT") return; throw error; }
-    for (const line of text.split(/\r?\n/)) {
+    for (const line of lines) {
       if (!line.trim()) continue;
+      if (Buffer.byteLength(line, "utf8") > this.maxEventBytes) continue;
       let event;
       try { event = JSON.parse(line); } catch { continue; }
       const checkpoint = event?.checkpoint;
-      if (!validCheckpoint(checkpoint) || event.id !== checkpoint.id || event.revision !== checkpoint.revision) continue;
+      if (
+        !this._validCheckpoint(checkpoint)
+        || event.id !== checkpoint.id
+        || event.revision !== checkpoint.revision
+      ) {
+        continue;
+      }
       const current = this.checkpoints.get(checkpoint.id);
       if (!current || checkpoint.revision >= current.revision) this.checkpoints.set(checkpoint.id, clone(checkpoint));
       this.nextSequence = Math.max(this.nextSequence, checkpoint.sequence + 1);
     }
   }
 
+  _validCheckpoint(checkpoint) {
+    return validCheckpoint(checkpoint, {
+      maxFiles: this.maxFiles,
+      maxBytes: this.maxBytes,
+      maxRollbacks: this.maxRollbacks
+    });
+  }
+
+  _finishRollback(checkpointId, rollbackId, changes, op) {
+    const checkpoint = this.checkpoints.get(checkpointId);
+    if (!checkpoint) throw new Error(`Checkpoint not found while recording rollback: ${checkpointId}`);
+    const index = checkpoint.rollbacks.findIndex((event) => event?.id === rollbackId);
+    if (index < 0) throw new Error(`Rollback intent not found: ${rollbackId}`);
+    const at = this._now();
+    const rollbacks = checkpoint.rollbacks.map((event, eventIndex) => (
+      eventIndex === index
+        ? {
+            ...event,
+            ...changes,
+            at,
+            completedAt: changes.completedAt ?? at
+          }
+        : event
+    ));
+    const next = {
+      ...clone(checkpoint),
+      revision: checkpoint.revision + 1,
+      updatedAt: at,
+      rollbacks
+    };
+    this._persist(op, next, {
+      rollbackId,
+      status: changes.status,
+      restored: [...(changes.restored ?? [])],
+      removed: [...(changes.removed ?? [])],
+      ...(changes.error ? { error: changes.error } : {})
+    });
+  }
+
+  _reconcileInterruptedRollbacks() {
+    for (const checkpoint of [...this.checkpoints.values()]) {
+      if (this.invalidProjectCheckpoints.has(checkpoint.id)) continue;
+      const pendingIds = checkpoint.rollbacks
+        .filter((event) => event?.status === "pending" && nonEmpty(event.id))
+        .map((event) => String(event.id));
+      if (pendingIds.length === 0) continue;
+      const at = this._now();
+      const pending = new Set(pendingIds);
+      const next = {
+        ...clone(checkpoint),
+        revision: checkpoint.revision + 1,
+        updatedAt: at,
+        rollbacks: checkpoint.rollbacks.map((event) => (
+          pending.has(String(event?.id ?? ""))
+            ? {
+                ...event,
+                at,
+                completedAt: at,
+                status: "outcome_unknown",
+                error: "Process restarted before rollback completion was durably recorded."
+              }
+            : event
+        ))
+      };
+      try {
+        this._persist("rollback_reconcile", next, {
+          rollbackIds: pendingIds,
+          status: "outcome_unknown"
+        });
+      } catch {
+        // A read-only or full store must not prevent startup. The original
+        // durable pending intent remains visible for operator inspection.
+      }
+    }
+  }
+
+  _rebuildProjectRoots() {
+    this.projectRoots = new Map();
+    this.invalidProjectCheckpoints = new Set();
+    const checkpoints = [...this.checkpoints.values()]
+      .sort((left, right) => left.sequence - right.sequence);
+    for (const checkpoint of checkpoints) {
+      const projectId = normalizedProjectId(checkpoint.projectId);
+      if (projectId === "default") {
+        if (!this._checkpointTargetsAreAllowed(checkpoint, this.allowedRoots)) {
+          this.invalidProjectCheckpoints.add(checkpoint.id);
+        }
+        continue;
+      }
+      if (!nonEmpty(checkpoint.workspaceRoot)) {
+        this.invalidProjectCheckpoints.add(checkpoint.id);
+        continue;
+      }
+      const workspaceRoot = path.resolve(String(checkpoint.workspaceRoot));
+      const existing = this.projectRoots.get(projectId);
+      if (existing && existing !== workspaceRoot) {
+        this.invalidProjectCheckpoints.add(checkpoint.id);
+        continue;
+      }
+      const overlapsAnotherProject = [...this.projectRoots.entries()].some(
+        ([otherProjectId, otherRoot]) => (
+          otherProjectId !== projectId && pathsOverlap(workspaceRoot, otherRoot)
+        )
+      );
+      if (overlapsAnotherProject) {
+        this.invalidProjectCheckpoints.add(checkpoint.id);
+        continue;
+      }
+      this.projectRoots.set(projectId, workspaceRoot);
+      if (!this._checkpointTargetsAreAllowed(checkpoint, [workspaceRoot])) {
+        this.invalidProjectCheckpoints.add(checkpoint.id);
+      }
+    }
+  }
+
+  _refreshCheckpointProjectState(checkpoint) {
+    this.invalidProjectCheckpoints.delete(checkpoint.id);
+    const projectId = normalizedProjectId(checkpoint.projectId);
+    if (projectId === "default") {
+      if (!this._checkpointTargetsAreAllowed(checkpoint, this.allowedRoots)) {
+        this.invalidProjectCheckpoints.add(checkpoint.id);
+      }
+      return;
+    }
+    if (!nonEmpty(checkpoint.workspaceRoot)) {
+      this.invalidProjectCheckpoints.add(checkpoint.id);
+      return;
+    }
+    const workspaceRoot = path.resolve(String(checkpoint.workspaceRoot));
+    const existing = this.projectRoots.get(projectId);
+    const overlap = [...this.projectRoots.entries()].some(
+      ([otherProjectId, otherRoot]) => (
+        otherProjectId !== projectId && pathsOverlap(workspaceRoot, otherRoot)
+      )
+    );
+    if ((existing && existing !== workspaceRoot) || overlap) {
+      this.invalidProjectCheckpoints.add(checkpoint.id);
+      return;
+    }
+    this.projectRoots.set(projectId, workspaceRoot);
+    if (!this._checkpointTargetsAreAllowed(checkpoint, [workspaceRoot])) {
+      this.invalidProjectCheckpoints.add(checkpoint.id);
+    }
+  }
+
+  _checkpointTargetsAreAllowed(checkpoint, allowedRoots) {
+    try {
+      for (const target of checkpoint.targets) {
+        this._assertAllowed(target.path, allowedRoots);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   _rebuildDedupe() {
     this.dedupe = new Map();
     for (const checkpoint of this.checkpoints.values()) {
-      const key = dedupeKey(checkpoint.turnId, checkpoint.directory);
+      if (this.invalidProjectCheckpoints.has(checkpoint.id)) continue;
+      const key = dedupeKey(
+        checkpoint.turnId,
+        checkpoint.directory,
+        checkpoint.projectId ?? "default"
+      );
       const current = this.dedupe.get(key) ? this.checkpoints.get(this.dedupe.get(key)) : null;
       if (!current || checkpoint.sequence > current.sequence) this.dedupe.set(key, checkpoint.id);
     }
@@ -473,11 +833,14 @@ export class CheckpointStore {
     return path.resolve(cwd, text);
   }
 
-  _assertAllowed(value) {
+  _assertAllowed(value, allowedRoots = this.allowedRoots) {
     const target = path.resolve(value);
-    const lexical = this.allowedRoots.some((root) => target === root || target.startsWith(root + path.sep));
+    const roots = uniquePaths(allowedRoots);
+    const lexical = roots.some(
+      (root) => target === root || target.startsWith(root + path.sep)
+    );
     const realTarget = resolveThroughExistingAncestor(target);
-    const real = this.allowedRoots.map(resolveThroughExistingAncestor)
+    const real = roots.map(resolveThroughExistingAncestor)
       .some((root) => realTarget === root || realTarget.startsWith(root + path.sep));
     if (!lexical || !real) {
       throw new CheckpointTargetError(`Checkpoint target is outside allowed roots: ${target}`);
@@ -495,12 +858,68 @@ export class CheckpointStore {
     }
   }
 
-  _assertSafeRemoval(value) {
+  _assertSafeRemoval(value, allowedRoots = this.allowedRoots) {
     const target = path.resolve(value);
-    this._assertAllowed(target);
-    if (this.allowedRoots.some((root) => target === root)) {
+    const roots = uniquePaths(allowedRoots);
+    this._assertAllowed(target, roots);
+    if (roots.some((root) => target === root)) {
       throw new Error(`Refusing to remove checkpoint root path: ${target}`);
     }
+  }
+
+  _assertProject(checkpoint, projectId) {
+    const actual = normalizedProjectId(checkpoint.projectId);
+    if (projectId === undefined) {
+      if (actual === "default") return;
+      throw projectBoundaryError(
+        `Checkpoint ${checkpoint.id} requires an explicit project scope`
+      );
+    }
+    if (actual !== normalizedProjectId(projectId)) {
+      throw projectBoundaryError(
+        `Checkpoint ${checkpoint.id} is outside the current project`
+      );
+    }
+  }
+
+  _assertUsableCheckpoint(checkpoint) {
+    if (!this.invalidProjectCheckpoints.has(checkpoint.id)) return;
+    throw projectBoundaryError(
+      `Checkpoint ${checkpoint.id} has an invalid or conflicting project workspace`
+    );
+  }
+
+  _bindProjectRoot(projectId, workspaceRoot) {
+    if (projectId === "default") return;
+    const root = path.resolve(workspaceRoot);
+    const existing = this.projectRoots.get(projectId);
+    if (existing && existing !== root) {
+      throw projectBoundaryError(
+        `Project ${projectId} checkpoint workspace does not match its existing binding`
+      );
+    }
+    for (const [otherProjectId, otherRoot] of this.projectRoots) {
+      if (otherProjectId !== projectId && pathsOverlap(root, otherRoot)) {
+        throw projectBoundaryError(
+          `Project ${projectId} checkpoint workspace overlaps project ${otherProjectId}`
+        );
+      }
+    }
+    this.projectRoots.set(projectId, root);
+  }
+
+  _checkpointAllowedRoots(checkpoint) {
+    this._assertUsableCheckpoint(checkpoint);
+    const projectId = normalizedProjectId(checkpoint.projectId);
+    if (projectId === "default") return this.allowedRoots;
+    const workspaceRoot = path.resolve(checkpoint.workspaceRoot);
+    const boundRoot = this.projectRoots.get(projectId);
+    if (!boundRoot || boundRoot !== workspaceRoot) {
+      throw projectBoundaryError(
+        `Checkpoint ${checkpoint.id} is outside its bound project workspace`
+      );
+    }
+    return [workspaceRoot];
   }
 
   _view(checkpoint) {
@@ -875,27 +1294,66 @@ function isBinary(value) {
   return false;
 }
 
-function validCheckpoint(value) {
-  return Boolean(
-    value
-    && typeof value === "object"
-    && nonEmpty(value.id)
-    && Number.isSafeInteger(value.sequence)
-    && Number.isSafeInteger(value.revision)
-    && nonEmpty(value.turnId)
-    && nonEmpty(value.directory)
-    && Array.isArray(value.toolNames)
-    && Array.isArray(value.targets)
-    && Array.isArray(value.rollbacks)
-  );
+function validCheckpoint(value, { maxFiles, maxBytes } = {}) {
+  if (
+    !value
+    || typeof value !== "object"
+    || !nonEmpty(value.id)
+    || !Number.isSafeInteger(value.sequence)
+    || value.sequence < 1
+    || !Number.isSafeInteger(value.revision)
+    || value.revision < 1
+    || !nonEmpty(value.turnId)
+    || !nonEmpty(value.directory)
+    || !path.isAbsolute(String(value.directory))
+    || !Array.isArray(value.toolNames)
+    || value.toolNames.some((name) => !nonEmpty(name))
+    || !Array.isArray(value.targets)
+    || value.targets.length === 0
+    || value.targets.length > positiveInteger(maxFiles, DEFAULT_MAX_FILES)
+    || !Array.isArray(value.rollbacks)
+  ) {
+    return false;
+  }
+  if (
+    value.workspaceRoot !== undefined
+    && (!nonEmpty(value.workspaceRoot) || !path.isAbsolute(String(value.workspaceRoot)))
+  ) {
+    return false;
+  }
+  let capturedBytes = 0;
+  for (const target of value.targets) {
+    if (
+      !target
+      || typeof target !== "object"
+      || !nonEmpty(target.path)
+      || !path.isAbsolute(String(target.path))
+      || !["missing", "directory", "file", "symlink"].includes(target.kind)
+    ) {
+      return false;
+    }
+    if (target.kind === "file") {
+      if (
+        !/^[a-f0-9]{64}$/u.test(String(target.hash ?? ""))
+        || !Number.isSafeInteger(target.size)
+        || target.size < 0
+      ) {
+        return false;
+      }
+      capturedBytes += target.size;
+      if (capturedBytes > positiveInteger(maxBytes, DEFAULT_MAX_BYTES)) return false;
+    }
+    if (target.kind === "symlink" && typeof target.linkTarget !== "string") return false;
+  }
+  return true;
 }
 
 function emptyCapture(enabled) {
   return { enabled, destructive: false, targets: [], checkpoints: [] };
 }
 
-function dedupeKey(turnId, directory) {
-  return `${String(turnId)}\u0000${path.resolve(directory)}`;
+function dedupeKey(turnId, directory, projectId = "default") {
+  return `${normalizedProjectId(projectId)}\u0000${String(turnId)}\u0000${path.resolve(directory)}`;
 }
 
 function nonEmpty(value) {
@@ -905,6 +1363,65 @@ function nonEmpty(value) {
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number > 0 ? number : fallback;
+}
+
+function normalizedProjectId(value) {
+  const projectId = String(value ?? "").trim();
+  return projectId || "default";
+}
+
+function projectBoundaryError(message) {
+  const error = new Error(message);
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  return error;
+}
+
+function boundedRollbackHistory(events, limit) {
+  const bounded = positiveInteger(limit, DEFAULT_MAX_ROLLBACKS);
+  return events.length <= bounded ? events : events.slice(-bounded);
+}
+
+function safeErrorMessage(error) {
+  const message = String(error?.message ?? "Rollback failed")
+    .replace(/[\r\n]+/gu, " ")
+    .trim();
+  return (message || "Rollback failed").slice(0, 500);
+}
+
+function jsonByteLength(value) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function readJsonLineTail(filePath, maxBytes) {
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) return [];
+  const length = Math.min(stat.size, positiveInteger(maxBytes, DEFAULT_MAX_REPLAY_BYTES));
+  if (length === 0) return [];
+  const offset = stat.size - length;
+  const buffer = Buffer.allocUnsafe(length);
+  const fd = fs.openSync(filePath, "r");
+  let bytesRead = 0;
+  try {
+    while (bytesRead < length) {
+      const count = fs.readSync(
+        fd,
+        buffer,
+        bytesRead,
+        length - bytesRead,
+        offset + bytesRead
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  let text = buffer.subarray(0, bytesRead).toString("utf8");
+  if (offset > 0) {
+    const newline = text.indexOf("\n");
+    text = newline < 0 ? "" : text.slice(newline + 1);
+  }
+  return text.split(/\r?\n/u);
 }
 
 function uniquePaths(values) {

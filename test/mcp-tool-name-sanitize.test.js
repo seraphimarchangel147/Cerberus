@@ -32,3 +32,47 @@ test("a server name with a space yields OpenAI-valid tool names", () => {
   assert.ok(registered.every((n) => VALID.test(n)), `exposed names not API-valid: ${registered.join(", ")}`);
   assert.ok(registered.includes("mcp_BB_Staging_get_call_transcript"));
 });
+
+test("MCP tool metadata carries only the server's required secret references", () => {
+  const reg = new McpRegistry({
+    dataDir: tmp,
+    configPath: null,
+    permittedEnvKeys: new Set(["MCP_ALPHA_TOKEN", "MCP_HEADER_TOKEN"])
+  });
+  reg.registerServer({
+    name: "private",
+    url: "https://mcp.example.test",
+    auth: "bearer",
+    apiKey: "${MCP_ALPHA_TOKEN}",
+    headers: {
+      "x-secondary-token": "${MCP_HEADER_TOKEN}"
+    },
+    trustLevel: "trusted"
+  });
+  reg.clients.set("private", {
+    connected: true,
+    tools: [{ name: "read", description: "read", inputSchema: {} }],
+    callTool: async () => ({})
+  });
+
+  assert.deepEqual(
+    reg.requiredSecretRefs("private"),
+    ["MCP_ALPHA_TOKEN", "MCP_HEADER_TOKEN"]
+  );
+  assert.deepEqual(
+    reg.listTools()[0].requiredSecretRefs,
+    ["MCP_ALPHA_TOKEN", "MCP_HEADER_TOKEN"]
+  );
+
+  const registered = [];
+  reg.toolRegistry = {
+    tools: new Map(),
+    register: (tool) => registered.push(tool),
+    unregister: () => {}
+  };
+  reg.exposeAsTools("private");
+  assert.deepEqual(
+    registered[0].metadata.requiredSecretRefs,
+    ["MCP_ALPHA_TOKEN", "MCP_HEADER_TOKEN"]
+  );
+});

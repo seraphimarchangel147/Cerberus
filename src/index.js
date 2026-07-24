@@ -35,6 +35,15 @@ export { createSecretsStore, SecretsStore } from "./secrets-store.js";
 export { PendingActionStore } from "./pending-actions.js";
 export { GoalStore } from "./goal-store.js";
 export { KanbanStore, KANBAN_COLUMNS } from "./kanban-store.js";
+export {
+  DEFAULT_PROJECT_ID,
+  PROJECT_STATUSES,
+  ProjectBoundaryError,
+  ProjectRevisionError,
+  ProjectStore,
+  projectAllows,
+  projectMemoryScope
+} from "./project-store.js";
 export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";

@@ -45,6 +45,7 @@ import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
 import { GoalStore } from "./goal-store.js";
 import { KanbanStore } from "./kanban-store.js";
+import { ProjectStore } from "./project-store.js";
 import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
@@ -130,6 +131,7 @@ function guardCronModelPin(runtime, job) {
     jobId: job?.id ?? null,
     jobName: job?.name ?? "Scheduled job",
     sessionId: job?.input?.sessionId ?? null,
+    projectId: job?.input?.projectId ?? "default",
     reason: check.reason,
     expected: check.expected,
     current: check.current
@@ -147,6 +149,79 @@ function guardCronModelPin(runtime, job) {
     current: check.current,
     alert
   };
+}
+
+function resolveCronProject(runtime, job) {
+  const input = job?.input ?? {};
+  const projectId = input.projectId ?? "default";
+  if (
+    typeof runtime.projects?.authorize !== "function"
+    && typeof runtime.projects?.get !== "function"
+  ) {
+    return projectId === "default"
+      ? { projectId, project: null }
+      : {
+          error: {
+            skipped: true,
+            blocked: true,
+            reason: "project-unavailable",
+            projectId
+          }
+        };
+  }
+  const project = typeof runtime.projects.authorize === "function"
+    ? runtime.projects.authorize(projectId, { includeArchived: false })
+    : runtime.projects.get(projectId, { includeArchived: false });
+  if (!project) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "project-unavailable",
+        projectId
+      }
+    };
+  }
+  if (
+    projectId !== "default"
+    && !Number.isSafeInteger(input.projectRevision)
+  ) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "project-revision-required",
+        projectId
+      }
+    };
+  }
+  if (
+    Number.isSafeInteger(input.projectRevision)
+    && input.projectRevision !== project.revision
+  ) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "project-revision-changed",
+        projectId
+      }
+    };
+  }
+  if (
+    projectId !== "default"
+    && !project.scheduleIds.includes(job.id)
+  ) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "schedule-outside-project",
+        projectId
+      }
+    };
+  }
+  return { projectId, project };
 }
 
 function nextSundayEvening() {
@@ -240,6 +315,11 @@ export class AbiRuntime {
       allowlist: SETUP_FIELDS,
       env: options.env ?? process.env
     });
+    this.projects = options.projects ?? new ProjectStore({
+      dataDir: secretsDataDir,
+      defaultWorkspaceRoot: options.workspaceDir ?? process.cwd(),
+      ...(options.projectOptions ?? {})
+    });
     this.scrutiny = options.scrutiny ?? (options.scrutinyMode === "single"
       ? new DirectionalAdaptiveScrutiny(options.scrutinyOptions)
       : new ScrutinyPanel(options.scrutinyOptions));
@@ -255,6 +335,7 @@ export class AbiRuntime {
       ?? new HookRegistry({ dataDir: options.dataDir, ...(options.hookOptions ?? {}) });
     this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks });
     this.tools.bindHooks?.(this.hooks);
+    this.tools.bindProjects?.(this.projects);
     this.mcp.bindToolRegistry(this.tools);
     const checkpointOptIn = options.checkpointOptions?.enabled
       ?? checkpointsEnabled(options.env ?? process.env);
@@ -1237,6 +1318,8 @@ export class AbiRuntime {
     if (!this.agentHost) return { skipped: true, reason: "agent-host-disabled" };
     const pinFailure = guardCronModelPin(this, job);
     if (pinFailure) return pinFailure;
+    const projectScope = resolveCronProject(this, job);
+    if (projectScope.error) return projectScope.error;
     // Cheap gate (no tokens): a queue-draining pulse must NOT spend a base-model
     // call when there's nothing committed to do. Jobs opt in via
     // input.requireQueuedWork; scheduled review prompts (weekly-harsh-review)
@@ -1264,16 +1347,27 @@ export class AbiRuntime {
       from: "autopilot",
       agentId: input.agentId ?? "main",
       sessionId,
+      projectId: projectScope.projectId,
       text: prompt,
       scrutinyOverrides,
       metadata: {
         scheduledJobId: job.id,
         scheduledJobName: job.name,
-        firedAt: nowIso()
+        firedAt: nowIso(),
+        projectId: projectScope.projectId
       },
       origin: "autopilot"
     });
     result.autopilot = true;
+    if (input.oneShot) {
+      this.cron.removeJob(job.id);
+      this.projects?.detachResource?.(
+        projectScope.projectId,
+        "scheduleIds",
+        job.id,
+        { actor: "runtime:autopilot-one-shot" }
+      );
+    }
     return result;
   }
 
@@ -1312,13 +1406,21 @@ export class AbiRuntime {
     const pinFailure = guardCronModelPin(this, job);
     if (pinFailure) return pinFailure;
     const input = job.input ?? {};
+    const projectScope = resolveCronProject(this, job);
+    if (projectScope.error) return projectScope.error;
+    const projectId = projectScope.projectId;
     const result = await this.agentHost.handleMessage({
       channel: input.channel ?? "cron",
       from: input.target ?? "cron",
       agentId: input.agentId ?? "main",
       sessionId: input.sessionId,
+      projectId,
       text: input.prompt ?? "(empty scheduled prompt)",
-      metadata: { scheduledJobId: job.id, scheduledJobName: job.name },
+      metadata: {
+        scheduledJobId: job.id,
+        scheduledJobName: job.name,
+        projectId
+      },
       origin: "cron"
     });
     if (isSilentCronOutput(result.reply)) {
@@ -1337,6 +1439,12 @@ export class AbiRuntime {
     }
     if (input.oneShot) {
       this.cron.removeJob(job.id);
+      this.projects?.detachResource?.(
+        projectId,
+        "scheduleIds",
+        job.id,
+        { actor: "runtime:cron-one-shot" }
+      );
     }
     return result;
   }
@@ -1388,8 +1496,31 @@ export class AbiRuntime {
             agents: this.agentHost.store.listAgents().length,
             sessions: this.agentHost.store.listSessions().length
           }
-        : null
+        : null,
+      projects: {
+        selected: this.projects?.selected?.()?.id ?? null,
+        active: this.projects?.list?.().length ?? 0
+      }
     };
+  }
+
+  async close() {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = (async () => {
+      this.tunnelWatcher?.stop?.();
+      const settled = await Promise.allSettled([
+        this.mcp?.disconnectAll?.(),
+        this.sessionIndex?.rebuildPromise
+      ]);
+      settled.push(...await Promise.allSettled([
+        this.kanban?.close?.(),
+        this.observations?.close?.(),
+        this.sessionIndex?.close?.()
+      ]));
+      const failure = settled.find((result) => result.status === "rejected");
+      if (failure) throw failure.reason;
+    })();
+    return this.closePromise;
   }
 }
 
@@ -1402,6 +1533,7 @@ export function createDefaultRuntime(options = {}) {
         runtime,
         store: options.agentStore,
         storeOptions: options.agentStoreOptions,
+        workspaceDir: options.workspaceDir,
         modelProvider: options.modelProvider,
         modelProviderOptions: { ...(options.modelProviderOptions ?? {}), budgetGuard: runtime.budget }
       });

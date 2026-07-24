@@ -312,4 +312,12 @@ export class ObservationStore {
     const t = this.db.prepare("DELETE FROM texts WHERE at < ? OR (kind='frame' AND at < ?)").run(cutoffActivity, cutoffFrames).changes;
     return { activity: a, frames: f, texts: t };
   }
+
+  async close() {
+    await this.ready;
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+  }
 }

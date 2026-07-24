@@ -111,6 +111,59 @@ test("remember and correction commit locally before mirroring with stable identi
   assert.equal(memory.items.get(corrected.result.id).content, writes[1].content);
 });
 
+test("external memory identities are isolated across nondefault projects", async () => {
+  const memory = new MemorySystem();
+  const writes = [];
+  const projects = new Map(["alpha", "beta"].map((id) => [id, {
+    id,
+    status: "active",
+    revision: 1,
+    workspaceRoot: `/workspace/${id}`,
+    policy: { toolPolicy: "full", allowedTools: ["*"] },
+    secretRefs: [],
+    activeSkills: [],
+    mcpGrants: [],
+    hookIds: [],
+    kanbanBoardId: `project-${id}`,
+    modelProfile: {},
+    routingProfile: {}
+  }]));
+  const tools = new ToolRegistry({
+    projects: {
+      get(id) {
+        return structuredClone(projects.get(id) ?? null);
+      }
+    }
+  });
+  registerCoreTools(tools, {
+    memory,
+    externalMemoryProvider: {
+      provider: "mock-honcho",
+      async setUserModel(request) {
+        writes.push(request);
+        return { provider: "mock-honcho" };
+      }
+    }
+  });
+
+  for (const id of ["alpha", "beta"]) {
+    const result = await tools.invoke("remember", {
+      content: `${id} deployment preference`
+    }, {
+      ...TOOL_CONTEXT,
+      __projectId: id,
+      __projectRevision: 1,
+      __memoryScope: `project:${id}`
+    });
+    assert.equal(result.ok, true);
+  }
+
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].userId, "project:alpha:discord:User:42/slash");
+  assert.equal(writes[1].userId, "project:beta:discord:User:42/slash");
+  assert.notEqual(writes[0].observerId, writes[1].observerId);
+});
+
 test("external rejection is sanitized and cannot undo a successful local write", async () => {
   const memory = new MemorySystem();
   const leakedToken = "sk-123456789012345678901234567890";

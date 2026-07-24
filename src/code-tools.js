@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveDataDir } from "./data-dir.js";
@@ -43,21 +44,36 @@ export function mintTag(content) {
 }
 
 // ── path guard ───────────────────────────────────────────────────────
-export function allowedRoots(dataDir = resolveDataDir()) {
-  return [REPO_ROOT, path.resolve(dataDir), "/tmp"];
+export function allowedRoots(dataDir = resolveDataDir(), explicitRoots = null) {
+  if (Array.isArray(explicitRoots)) {
+    return [...new Set(explicitRoots.map((root) => path.resolve(String(root))))];
+  }
+  return [...new Set([
+    REPO_ROOT,
+    path.resolve(dataDir),
+    path.resolve("/tmp"),
+    path.resolve(os.tmpdir())
+  ])];
 }
 
-export function resolveSafe(p, { dataDir = resolveDataDir() } = {}) {
+export function resolveSafe(p, {
+  dataDir = resolveDataDir(),
+  roots = null
+} = {}) {
   const abs = path.resolve(String(p ?? ""));
   // Lexical containment first (cheap), then REAL containment: resolve
   // symlinks on the nearest existing ancestor so a link inside an allowed
   // root can't smuggle reads/writes outside it (Tier-1 hardening, 2026-07).
-  const roots = allowedRoots(dataDir);
-  const inRoots = (candidate) => roots.some((root) => candidate === root || candidate.startsWith(root + path.sep));
+  const effectiveRoots = allowedRoots(dataDir, roots);
+  const inRoots = (candidate) => effectiveRoots.some(
+    (root) => candidate === root || candidate.startsWith(root + path.sep)
+  );
   if (!inRoots(abs)) return { abs, ok: false };
   const realAbs = resolveRealCandidate(abs);
   if (!realAbs) return { abs, ok: false };
-  const realRoots = roots.map((r) => { try { return fs.realpathSync(r); } catch { return r; } });
+  const realRoots = effectiveRoots.map((r) => {
+    try { return fs.realpathSync(r); } catch { return r; }
+  });
   const okReal = realRoots.some((root) => realAbs === root || realAbs.startsWith(root + path.sep));
   const sensitive = okReal && isSensitiveCodePath(abs, { dataDir, realPath: realAbs });
   return { abs, realAbs, ok: okReal && !sensitive, sensitive };
@@ -299,13 +315,25 @@ function exportConfiguredSecrets(secretStore, configuredNames, { decidedBy }) {
   return filtered;
 }
 
-function buildShellEnvironment(runtime, { command, decidedBy }) {
+function buildShellEnvironment(runtime, {
+  command,
+  decidedBy,
+  allowedSecretRefs = ["*"]
+}) {
   const secretStore = runtime?.secrets ?? runtime?.secretStore ?? null;
   if (!secretStore) return { env: undefined, redactValues: new Set() };
 
   const { configuredNames, managedNames } = secretNameSets(secretStore, { decidedBy });
+  const grantedNames = new Set(
+    Array.isArray(allowedSecretRefs)
+      ? allowedSecretRefs.map((name) => String(name))
+      : []
+  );
   const referencedNames = [...shellEnvReferences(command)]
-    .filter((name) => configuredNames.has(name));
+    .filter((name) => (
+      configuredNames.has(name)
+      && (grantedNames.has("*") || grantedNames.has(name))
+    ));
 
   // Fetch every configured value for boundary redaction. Only the explicitly
   // referenced subset is injected below; the broader read prevents a command
@@ -339,7 +367,7 @@ function buildShellEnvironment(runtime, { command, decidedBy }) {
   return { env, redactValues };
 }
 
-function buildTestExecution(runtime, { decidedBy }) {
+function buildTestExecution(runtime, { decidedBy, projectScoped = false }) {
   const secretStore = runtime?.secrets ?? runtime?.secretStore ?? null;
   const { configuredNames, managedNames } = secretNameSets(secretStore, { decidedBy });
   // The store also owns ordinary configuration (for example model names and
@@ -361,7 +389,7 @@ function buildTestExecution(runtime, { decidedBy }) {
   return {
     env: scrubTestEnvironment(process.env, {
       managedNames,
-      scrubCredentialShaped: Boolean(secretStore)
+      scrubCredentialShaped: Boolean(secretStore) || projectScoped
     }),
     redactValues
   };
@@ -412,6 +440,50 @@ async function captureLspBaseline(lspClient, filePath) {
   }
 }
 
+function codeExecutionScope(context, safetyOptions) {
+  const projectId = String(context?.__projectId ?? "default").trim() || "default";
+  const configuredWorkspace = String(context?.__projectWorkspaceDir ?? "").trim();
+  const workspaceDir = configuredWorkspace
+    ? path.resolve(configuredWorkspace)
+    : REPO_ROOT;
+  const projectScoped = projectId !== "default";
+  return {
+    projectId,
+    projectScoped,
+    workspaceDir,
+    safetyOptions: projectScoped
+      ? { ...safetyOptions, roots: [workspaceDir] }
+      : safetyOptions
+  };
+}
+
+function assertProjectShellBoundary(context) {
+  const projectId = String(context?.__projectId ?? "default").trim() || "default";
+  if (projectId === "default") return;
+  throw new Error(
+    `code_shell is unavailable in isolated project '${projectId}' because a working directory is not a filesystem sandbox.`
+  );
+}
+
+function resolveWorkspaceOperand(operand, workspaceDir, safetyOptions) {
+  const candidate = path.isAbsolute(String(operand ?? ""))
+    ? String(operand)
+    : path.join(workspaceDir, String(operand ?? ""));
+  return mustResolve(candidate, safetyOptions);
+}
+
+function revalidateBeforeFsOperation(abs, safetyOptions, callback, operation) {
+  if (typeof callback === "function") {
+    const result = callback({ path: abs, operation });
+    if (result && typeof result.then === "function") {
+      throw new TypeError("beforeFsOperation must be synchronous.");
+    }
+  }
+  const verified = mustResolve(abs, safetyOptions);
+  if (verified !== abs) throw new Error(`Unsafe path changed before ${operation}.`);
+  return verified;
+}
+
 async function collectNewLspDiagnostics(lspClient, filePath, baseline, syntaxClean) {
   if (!syntaxClean || !baseline.ok) return null;
   try {
@@ -450,10 +522,18 @@ export function registerCodeTools(registry, runtime, options = {}) {
       required: ["path"],
       additionalProperties: false
     },
-    handler: async (args) => {
-      const abs = mustResolve(
-        path.isAbsolute(args.path) ? args.path : path.join(REPO_ROOT, args.path),
-        safetyOptions
+    handler: async (args, context) => {
+      const scope = codeExecutionScope(context, safetyOptions);
+      const abs = resolveWorkspaceOperand(
+        args.path,
+        scope.workspaceDir,
+        scope.safetyOptions
+      );
+      revalidateBeforeFsOperation(
+        abs,
+        scope.safetyOptions,
+        options.beforeFsOperation,
+        "read"
       );
       const content = fs.readFileSync(abs, "utf8");
       const tag = mintTag(content);
@@ -486,16 +566,14 @@ export function registerCodeTools(registry, runtime, options = {}) {
       required: ["pattern"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context) => {
+      const scope = codeExecutionScope(context, safetyOptions);
       const dir = args.dir
-        ? mustResolve(
-            path.isAbsolute(args.dir) ? args.dir : path.join(REPO_ROOT, args.dir),
-            safetyOptions
-          )
-        : REPO_ROOT;
+        ? resolveWorkspaceOperand(args.dir, scope.workspaceDir, scope.safetyOptions)
+        : scope.workspaceDir;
       const re = new RegExp(args.pattern, args.ignoreCase ? "i" : undefined);
       const files = [];
-      walk(dir, files, 0, safetyOptions);
+      walk(dir, files, 0, scope.safetyOptions);
       const results = [];
       const tags = {};
       for (const f of files) {
@@ -506,7 +584,11 @@ export function registerCodeTools(registry, runtime, options = {}) {
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i += 1) {
           if (re.test(lines[i])) {
-            results.push({ file: path.relative(REPO_ROOT, f), line: i + 1, text: lines[i].slice(0, 200) });
+            results.push({
+              file: path.relative(scope.workspaceDir, f),
+              line: i + 1,
+              text: lines[i].slice(0, 200)
+            });
             if (!tags[f]) tags[f] = mintTag(content);
             if (results.length >= MAX_SEARCH_RESULTS) break;
           }
@@ -516,7 +598,9 @@ export function registerCodeTools(registry, runtime, options = {}) {
       return {
         matches: results,
         truncated: results.length >= MAX_SEARCH_RESULTS,
-        tags: Object.fromEntries(Object.entries(tags).map(([f, t]) => [path.relative(REPO_ROOT, f), t]))
+        tags: Object.fromEntries(
+          Object.entries(tags).map(([f, t]) => [path.relative(scope.workspaceDir, f), t])
+        )
       };
     }
   });
@@ -549,10 +633,18 @@ export function registerCodeTools(registry, runtime, options = {}) {
       additionalProperties: false
     },
     summarize: (args) => `Edit ${args.path} (${args.edits?.length ?? 0} hunk${(args.edits?.length ?? 0) === 1 ? "" : "s"})`,
-    handler: async (args) => {
-      const abs = mustResolve(
-        path.isAbsolute(args.path) ? args.path : path.join(REPO_ROOT, args.path),
-        safetyOptions
+    handler: async (args, context) => {
+      const scope = codeExecutionScope(context, safetyOptions);
+      const abs = resolveWorkspaceOperand(
+        args.path,
+        scope.workspaceDir,
+        scope.safetyOptions
+      );
+      revalidateBeforeFsOperation(
+        abs,
+        scope.safetyOptions,
+        options.beforeFsOperation,
+        "edit-read"
       );
       const content = fs.readFileSync(abs, "utf8");
       const liveTag = mintTag(content);
@@ -578,6 +670,12 @@ export function registerCodeTools(registry, runtime, options = {}) {
       }
       const next = lines.join("\n");
       const lspBaseline = await captureLspBaseline(lspClient, abs);
+      revalidateBeforeFsOperation(
+        abs,
+        scope.safetyOptions,
+        options.beforeFsOperation,
+        "edit-write"
+      );
       fs.writeFileSync(abs, next, "utf8");
       const newTag = mintTag(next);
       let lint = null;
@@ -604,7 +702,7 @@ export function registerCodeTools(registry, runtime, options = {}) {
 
   registry.register({
     name: "code_write",
-    description: "Create or overwrite a whole file inside the repo/data/tmp roots. For existing files prefer code_edit (anchored, safer). Runs the homoglyph guard and node --check on .js files.",
+    description: "Create or overwrite a whole file inside the current project workspace. For existing files prefer code_edit (anchored, safer). Runs the homoglyph guard and node --check on .js files.",
     parameters: {
       type: "object",
       properties: {
@@ -616,16 +714,24 @@ export function registerCodeTools(registry, runtime, options = {}) {
       additionalProperties: false
     },
     summarize: (args) => `Write ${args.path} (${String(args.content ?? "").length} chars)`,
-    handler: async (args) => {
-      const abs = mustResolve(
-        path.isAbsolute(args.path) ? args.path : path.join(REPO_ROOT, args.path),
-        safetyOptions
+    handler: async (args, context) => {
+      const scope = codeExecutionScope(context, safetyOptions);
+      const abs = resolveWorkspaceOperand(
+        args.path,
+        scope.workspaceDir,
+        scope.safetyOptions
       );
       const ghost = scanGhosts(args.content);
       if (ghost) throw new Error(`Rejected: suspicious character ${ghost.codePoint} at line ${ghost.line} (homoglyph/zero-width).`);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       const existed = fs.existsSync(abs);
       const lspBaseline = await captureLspBaseline(lspClient, abs);
+      revalidateBeforeFsOperation(
+        abs,
+        scope.safetyOptions,
+        options.beforeFsOperation,
+        "write"
+      );
       fs.writeFileSync(abs, args.content, "utf8");
       let lint = null;
       if (abs.endsWith(".js") || abs.endsWith(".mjs")) {
@@ -658,19 +764,28 @@ export function registerCodeTools(registry, runtime, options = {}) {
       properties: { path: { type: "string", description: "File or directory. Default: src/" } },
       additionalProperties: false
     },
-    handler: async (args) => {
-      const target = mustResolve(
-        path.isAbsolute(args.path ?? "") ? args.path : path.join(REPO_ROOT, args.path ?? "src"),
-        safetyOptions
+    handler: async (args, context) => {
+      const scope = codeExecutionScope(context, safetyOptions);
+      const target = resolveWorkspaceOperand(
+        args.path ?? "src",
+        scope.workspaceDir,
+        scope.safetyOptions
       );
       const files = [];
-      if (fs.statSync(target).isDirectory()) walk(target, files, 0, safetyOptions);
+      if (fs.statSync(target).isDirectory()) {
+        walk(target, files, 0, scope.safetyOptions);
+      }
       else files.push(target);
       const jsFiles = files.filter((f) => f.endsWith(".js") || f.endsWith(".mjs"));
       const failures = [];
       for (const f of jsFiles) {
         const r = await run(process.execPath, ["--check", f]);
-        if (!r.ok) failures.push({ file: path.relative(REPO_ROOT, f), error: r.stderr.slice(0, 400) });
+        if (!r.ok) {
+          failures.push({
+            file: path.relative(scope.workspaceDir, f),
+            error: r.stderr.slice(0, 400)
+          });
+        }
       }
       return { checked: jsFiles.length, ok: failures.length === 0, failures };
     }
@@ -686,19 +801,29 @@ export function registerCodeTools(registry, runtime, options = {}) {
       additionalProperties: false
     },
     handler: async (args, context) => {
-      const testArgs = ["--test"];
+      const scope = codeExecutionScope(context, safetyOptions);
+      const testArgs = scope.projectScoped
+        ? [
+            "--permission",
+            `--allow-fs-read=${scope.workspaceDir}`,
+            "--test-isolation=none",
+            "--test"
+          ]
+        : ["--test"];
       if (args.file) {
-        testArgs.push(mustResolve(
-          path.isAbsolute(args.file) ? args.file : path.join(REPO_ROOT, args.file),
-          safetyOptions
+        testArgs.push(resolveWorkspaceOperand(
+          args.file,
+          scope.workspaceDir,
+          scope.safetyOptions
         ));
       }
       const runTest = options.runTest ?? run;
       const execution = buildTestExecution(runtime, {
-        decidedBy: decisionActor(context, "tool:code_test")
+        decidedBy: decisionActor(context, "tool:code_test"),
+        projectScoped: scope.projectScoped
       });
       const runOptions = {
-        cwd: REPO_ROOT,
+        cwd: scope.workspaceDir,
         timeoutMs: 300000,
         env: execution.env
       };
@@ -724,24 +849,30 @@ export function registerCodeTools(registry, runtime, options = {}) {
 
   registry.register({
     name: "code_shell",
-    description: "Run a shell command in the repo (git, grep, npm, etc). THIS REQUIRES USER APPROVAL — arbitrary commands are dangerous. Prefer the specific code_* tools when they cover the need.",
+    description: "Run a shell command in the current project workspace. THIS REQUIRES USER APPROVAL because arbitrary commands are dangerous. Prefer the specific code_* tools when they cover the need.",
     needsConfirmation: true,
     parameters: {
       type: "object",
       properties: {
         command: { type: "string", description: "Command line to run via bash -lc." },
-        cwd: { type: "string", description: "Working directory (default repo root)." },
+        cwd: { type: "string", description: "Working directory (default project workspace)." },
         timeoutSeconds: { type: "integer", minimum: 1, maximum: 600 }
       },
       required: ["command"],
       additionalProperties: false
     },
     summarize: (args) => `shell: ${String(args.command).slice(0, 120)}`,
+    preflight: (_args, context) => assertProjectShellBoundary(context),
     handler: async (args, context) => {
-      const cwd = args.cwd ? mustResolve(args.cwd, safetyOptions) : REPO_ROOT;
+      assertProjectShellBoundary(context);
+      const scope = codeExecutionScope(context, safetyOptions);
+      const cwd = args.cwd
+        ? resolveWorkspaceOperand(args.cwd, scope.workspaceDir, scope.safetyOptions)
+        : scope.workspaceDir;
       const { env, redactValues } = buildShellEnvironment(runtime, {
         command: args.command,
-        decidedBy: decisionActor(context, "tool:code_shell")
+        decidedBy: decisionActor(context, "tool:code_shell"),
+        allowedSecretRefs: context?.__projectSecretRefs ?? ["*"]
       });
       const runShell = options.runShell ?? run;
       let result;

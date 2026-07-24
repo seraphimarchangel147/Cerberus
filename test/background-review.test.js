@@ -17,6 +17,7 @@ import {
 } from "../src/background-review.js";
 import { MemorySystem } from "../src/memory-system.js";
 import { TASK_PROFILES } from "../src/model-router.js";
+import { ProjectStore } from "../src/project-store.js";
 import { SETUP_FIELDS } from "../src/setup-wizard.js";
 
 function isolateEnv(t, key) {
@@ -118,13 +119,21 @@ test("review memories use confidence tiers and merge duplicates while skills sta
   const result = await reviewer.review({
     sessionId: "discord:guild:channel:user",
     agentId: "main",
+    projectId: "alpha",
+    projectRevision: 4,
     memoryScope: "main",
+    modelProfile: { model: "project-review-model" },
+    routingProfile: { tier: "mini", task: "project-review" },
     userText: "Deploy this release through canary.",
     assistantText: "Canary passed and production was promoted.",
     toolCalls: [{ name: "deploy", ok: true }]
   });
 
-  assert.equal(requests[0].task, "review");
+  assert.equal(requests[0].task, "project-review");
+  assert.equal(requests[0].model, "project-review-model");
+  assert.equal(requests[0].tier, "mini");
+  assert.equal(requests[0].context.__projectId, "alpha");
+  assert.equal(requests[0].context.__projectRevision, 4);
   assert.equal(requests[0].maxIterations, DEFAULT_BACKGROUND_REVIEW_MAX_ITERATIONS);
   assert.deepEqual(requests[0].context.__advertisedTools, []);
   assert.equal(result.applied.duplicatesSkipped, 1);
@@ -135,12 +144,14 @@ test("review memories use confidence tiers and merge duplicates while skills sta
   assert.equal(persistedSkills.length, 1);
   assert.equal(persistedSkills[0].status, "pending");
   assert.equal(persistedSkills[0].source, "background-review");
+  assert.equal(persistedSkills[0].context.projectId, "alpha");
   assert.equal(events.length, 1);
   assert.equal(events[0].skillPending, true);
 
   const lines = fs.readFileSync(path.join(dataDir, "background-review", "reviews.jsonl"), "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
   assert.equal(JSON.parse(lines[0]).status, "reviewed");
+  assert.equal(JSON.parse(lines[0]).projectId, "alpha");
 });
 
 test("AgentHost reviews a substantive session only after it ends and skips conversational sessions", async (t) => {
@@ -184,6 +195,55 @@ test("AgentHost reviews a substantive session only after it ends and skips conve
   casualHost.resetSession({ sessionId: "review-casual", nextSessionId: "review-casual-next" });
   assert.equal(casualHost.lastBackgroundReview, null);
   assert.equal(calls.length, 1, "plain conversation must not spend review tokens");
+});
+
+test("AgentHost preserves project scope and model routing in post-session review", async (t) => {
+  isolateEnv(t, "OPENAGI_BACKGROUND_REVIEW");
+  process.env.OPENAGI_BACKGROUND_REVIEW = "1";
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-project-review-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const projects = new ProjectStore({
+    dataDir: path.join(root, "data"),
+    defaultWorkspaceRoot: path.join(root, "default")
+  });
+  const project = projects.create({
+    id: "review-project",
+    name: "Review Project",
+    modelProfile: { model: "project-review-model" },
+    routingProfile: { task: "project-review", tier: "mini" }
+  });
+  const runtime = { ...hostRuntime(), projects };
+  const calls = [];
+  const host = new AgentHost({
+    runtime,
+    workspaceDir: path.join(root, "default"),
+    store: new InMemoryAgentStore(),
+    modelProvider: primaryProvider(),
+    backgroundReviewer: {
+      async review(turn) {
+        calls.push(turn);
+        return { skipped: false };
+      }
+    }
+  });
+
+  await host.handleMessage({
+    sessionId: "project-review-session",
+    projectId: project.id,
+    text: "build the project report"
+  });
+  host.resetSession({
+    sessionId: "project-review-session",
+    nextSessionId: "project-review-next"
+  });
+  await host.lastBackgroundReview;
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].projectId, project.id);
+  assert.equal(calls[0].projectRevision, project.revision);
+  assert.equal(calls[0].memoryScope, `project:${project.id}`);
+  assert.deepEqual(calls[0].modelProfile, { model: "project-review-model" });
+  assert.deepEqual(calls[0].routingProfile, { task: "project-review", tier: "mini" });
 });
 
 test("durable review watermarks process only appended substantive messages across reopen and restart", async (t) => {

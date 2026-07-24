@@ -189,13 +189,19 @@ export class ToolSearchController {
 
   planModelTools(tools, options = {}) {
     const all = asToolArray(tools);
+    const projectContext = this._projectCatalogContext(options.context ?? {});
     const only = nameSet(options.only);
-    const contextAllowed = nameSet(options.context?.__allowedTools);
+    const contextAllowed = nameSet(projectContext?.__allowedTools);
     const readOnly = options.readOnly === true
-      || options.context?.__scrutinyPolicy === "read-only";
-    const noTools = options.context?.__scrutinyPolicy === "none";
+      || projectContext?.__scrutinyPolicy === "read-only";
+    const noTools = projectContext?.__scrutinyPolicy === "none";
 
-    let eligible = noTools ? [] : all.filter((tool) => !BRIDGE_NAME_SET.has(tool.name));
+    let eligible = noTools
+      ? []
+      : all.filter((tool) => (
+          !BRIDGE_NAME_SET.has(tool.name)
+          && projectGrantsAllowTool(tool, projectContext)
+        ));
     if (contextAllowed) eligible = eligible.filter((tool) => contextAllowed.has(tool.name));
     if (readOnly) eligible = eligible.filter((tool) => tool.sideEffects === false);
     const directEligible = only
@@ -260,13 +266,15 @@ export class ToolSearchController {
   }
 
   eligibleDeferredTools({ context = {}, only, readOnly } = {}) {
-    const allowed = nameSet(context?.__allowedTools);
+    const projectContext = this._projectCatalogContext(context);
+    const allowed = nameSet(projectContext?.__allowedTools);
     const onlyNames = nameSet(only);
-    const omittedNames = Array.isArray(context?.__toolRadarOmitted)
-      ? nameSet(context.__toolRadarOmitted)
+    const omittedNames = Array.isArray(projectContext?.__toolRadarOmitted)
+      ? nameSet(projectContext.__toolRadarOmitted)
       : null;
-    const requireReadOnly = readOnly === true || context?.__scrutinyPolicy === "read-only";
-    if (context?.__scrutinyPolicy === "none") return [];
+    const requireReadOnly = readOnly === true
+      || projectContext?.__scrutinyPolicy === "read-only";
+    if (projectContext?.__scrutinyPolicy === "none") return [];
 
     return this._registryTools().filter((tool) => {
       if (BRIDGE_NAME_SET.has(String(tool.name ?? ""))) return false;
@@ -274,6 +282,7 @@ export class ToolSearchController {
       if (allowed && !allowed.has(tool.name)) return false;
       if (onlyNames && !onlyNames.has(tool.name)) return false;
       if (requireReadOnly && tool.sideEffects !== false) return false;
+      if (!projectGrantsAllowTool(tool, projectContext)) return false;
       return true;
     });
   }
@@ -355,6 +364,106 @@ export class ToolSearchController {
     }
     return [];
   }
+
+  _projectCatalogContext(context = {}) {
+    const source = context && typeof context === "object" ? context : {};
+    if (!isNonDefaultProjectContext(source)) return source;
+    const projects = this.registry?.projects;
+    if (!projects) return source;
+
+    let project;
+    try {
+      if (typeof projects.authorize === "function") {
+        project = projects.authorize(source.__projectId, { includeArchived: true });
+      } else if (typeof projects.get === "function") {
+        project = projects.get(source.__projectId, { includeArchived: true });
+      } else {
+        return revokedProjectCatalogContext(source);
+      }
+    } catch {
+      return revokedProjectCatalogContext(source);
+    }
+
+    const expectedRevision = source.__projectRevision;
+    if (
+      !project
+      || typeof project?.then === "function"
+      || project.status !== "active"
+      || !Number.isSafeInteger(expectedRevision)
+      || expectedRevision < 1
+      || project.revision !== expectedRevision
+    ) {
+      return revokedProjectCatalogContext(source);
+    }
+    return {
+      ...source,
+      __projectMcpGrants: Array.isArray(project.mcpGrants)
+        ? [...project.mcpGrants]
+        : [],
+      __projectActiveSkills: Array.isArray(project.activeSkills)
+        ? [...project.activeSkills]
+        : [],
+      __projectSecretRefs: Array.isArray(project.secretRefs)
+        ? [...project.secretRefs]
+        : []
+    };
+  }
+}
+
+function projectGrantsAllowTool(tool, context) {
+  if (
+    tool?.metadata?.projectScope === "default"
+    && context?.__projectId
+    && context.__projectId !== "default"
+  ) {
+    return false;
+  }
+  if (tool?.source === "mcp") {
+    const failClosed = isNonDefaultProjectContext(context);
+    return projectGrantAllows(
+      context?.__projectMcpGrants,
+      tool.metadata?.server,
+      { failClosed }
+    ) && projectRequiredSecretsAllow(
+      context?.__projectSecretRefs,
+      tool.metadata?.requiredSecretRefs,
+      { failClosed }
+    );
+  }
+  if (tool?.source === "skill" && tool.metadata?.skill !== undefined) {
+    return projectGrantAllows(
+      context?.__projectActiveSkills,
+      tool.metadata.skill,
+      { failClosed: isNonDefaultProjectContext(context) }
+    );
+  }
+  return true;
+}
+
+function projectGrantAllows(grants, capability, { failClosed = false } = {}) {
+  if (!Array.isArray(grants)) return !failClosed;
+  if (grants.includes("*")) return true;
+  const name = String(capability ?? "").trim();
+  return Boolean(name) && grants.some((grant) => String(grant ?? "").trim() === name);
+}
+
+function projectRequiredSecretsAllow(grants, required, { failClosed = false } = {}) {
+  if (!Array.isArray(required) || required.length === 0) return true;
+  return required.every((name) => projectGrantAllows(grants, name, { failClosed }));
+}
+
+function isNonDefaultProjectContext(context) {
+  const projectId = String(context?.__projectId ?? "").trim().toLowerCase();
+  return Boolean(projectId) && projectId !== "default";
+}
+
+function revokedProjectCatalogContext(context) {
+  return {
+    ...context,
+    __projectMcpGrants: [],
+    __projectActiveSkills: [],
+    __projectSecretRefs: []
+  };
 }
 
 export function registerToolSearchTools(registry, options = {}) {

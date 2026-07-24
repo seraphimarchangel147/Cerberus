@@ -39,7 +39,9 @@ test("synthesize writes stubbed provider audio to the private cache", async () =
   assert.deepEqual(fs.readFileSync(result.path), fakeAudio);
   assert.equal(seen[0].text, "hello there");
   assert.equal(seen[0].voice, "test-voice");
-  assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
+  }
 });
 
 test("synthesize truncates over-length input before invoking a provider", async () => {

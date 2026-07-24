@@ -1958,7 +1958,13 @@ export function reconcileOrphanedToolCalls(conversation, format = "auto") {
   return missing.length;
 }
 
-export function capToolOutput(value, { maxChars = DEFAULT_MAX_TOOL_OUTPUT_CHARS, store } = {}) {
+export function capToolOutput(value, {
+  maxChars = DEFAULT_MAX_TOOL_OUTPUT_CHARS,
+  store,
+  projectId = "default",
+  ownerType = null,
+  ownerId = null
+} = {}) {
   let safeValue;
   try {
     safeValue = snapshotToolValue(value);
@@ -1985,7 +1991,13 @@ export function capToolOutput(value, { maxChars = DEFAULT_MAX_TOOL_OUTPUT_CHARS,
   let ref = null;
   try {
     const outputStore = store === undefined ? defaultToolOutputStore() : store;
-    if (typeof outputStore?.put === "function") ref = outputStore.put(output);
+    if (typeof outputStore?.put === "function") {
+      ref = outputStore.put(output, {
+        projectId,
+        ownerType,
+        ownerId
+      });
+    }
   } catch {
     // The bounded semantic preview remains usable without durable storage.
   }
@@ -2081,7 +2093,10 @@ function toolOutputStore(context) {
 function modelToolOutput(provider, context, value) {
   return capToolOutput(value, {
     maxChars: provider.maxToolOutputChars,
-    store: toolOutputStore(context)
+    store: toolOutputStore(context),
+    projectId: context?.__projectId ?? context?.projectId ?? "default",
+    ownerType: context?.__jobId ? "job" : "turn",
+    ownerId: context?.__jobId ?? context?.turnId ?? context?.__turnId ?? null
   }).output;
 }
 
@@ -4936,6 +4951,7 @@ export function buildDefaultInstructions({ agent }) {
   return `You are ${agent?.name ?? "an OpenAGI agent"}, an always-on local assistant.
 
 Tools available to you (call them when useful):
+- project_list / project_show / project_create / project_select / project_update / project_archive - manage isolated project composition roots; never assume selection rebinds the current session
 - remember(content, tags?, importance?, replaceIds?) - save a durable note and mirror it to the optional external user model; after a capacity error, consolidate overlapping recall results marked replaceable
 - recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope
 - correct_memory(correction, query? | id?, tags?) - supersede a wrong memory with the corrected fact and mirror the correction to the optional external user model

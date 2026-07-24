@@ -79,7 +79,13 @@ test("near-miss silent markers are delivered normally", async () => {
 
 test("silent scheduled output remains in the durable session transcript", async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-cron-silent-audit-"));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  let runtime = null;
+  t.after(async () => {
+    await runtime?.kanban?.close?.();
+    await runtime?.observations?.close?.();
+    await runtime?.sessionIndex?.close?.();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
   const store = new FileBackedAgentStore({ dir: path.join(dataDir, "agent-host") });
   const provider = {
     provider: "fixture",
@@ -98,7 +104,7 @@ test("silent scheduled output remains in the durable session transcript", async 
       };
     }
   };
-  const runtime = createDefaultRuntime({
+  runtime = createDefaultRuntime({
     dataDir,
     agentStore: store,
     modelProvider: provider,

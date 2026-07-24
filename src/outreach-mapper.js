@@ -5,6 +5,7 @@
 
 const MAP = {
   "draft-created": (d) => ({
+    projectId: eventProjectId(d),
     type: "draft",
     sourceRef: { kind: "draft", id: d.id },
     outcomeId: d.outcomeId ?? null,
@@ -14,6 +15,7 @@ const MAP = {
     actions: ["approve", "edit", "dismiss", "up", "down"]
   }),
   "proactive-suggestion": (d) => ({
+    projectId: eventProjectId(d),
     type: "suggestion",
     sourceRef: { kind: "suggestion", id: d.id },
     outcomeId: d.outcomeId ?? null,
@@ -23,6 +25,7 @@ const MAP = {
     actions: ["accept", "dismiss", "up", "down"]
   }),
   "pending-action": (d) => ({
+    projectId: eventProjectId(d),
     type: "pending-action",
     sourceRef: { kind: "pending-action", id: d.id },
     outcomeId: d.outcomeId ?? null,
@@ -32,6 +35,7 @@ const MAP = {
     actions: ["do", "dismiss"]
   }),
   "clarification-created": (d) => ({
+    projectId: eventProjectId(d),
     type: "clarification",
     sourceRef: { kind: "clarification", id: d.id },
     outcomeId: d.outcomeId ?? null,
@@ -41,6 +45,7 @@ const MAP = {
     actions: ["yes", "no", "in_progress", "dropped"]
   }),
   "skill-candidate": (d) => ({
+    projectId: eventProjectId(d),
     type: "skill",
     sourceRef: { kind: "skill-candidate", id: d.id },
     outcomeId: d.outcomeId ?? null,
@@ -54,6 +59,7 @@ const MAP = {
   // Durable so Spencer SEES the silent death even if no client was
   // connected at boot; type "suggestion" puts it in the digest rollup.
   "cron-interrupted": (d) => ({
+    projectId: eventProjectId(d),
     type: "suggestion",
     sourceRef: { kind: "cron-job", id: d.jobId ?? "unknown" },
     title: `Scheduled job interrupted mid-run: ${d.jobName ?? (d.jobId ?? "unknown")}`,
@@ -62,6 +68,7 @@ const MAP = {
     actions: ["dismiss"]
   }),
   "cron-model-mismatch": (d) => ({
+    projectId: eventProjectId(d),
     type: "suggestion",
     sourceRef: { kind: "cron-job", id: d.jobId ?? "unknown" },
     title: `Scheduled job skipped: ${d.jobName ?? (d.jobId ?? "unknown")}`,
@@ -70,6 +77,15 @@ const MAP = {
     actions: ["dismiss"]
   })
 };
+
+function eventProjectId(data) {
+  return data?.projectId
+    ?? data?.draft?.projectId
+    ?? data?.context?.__projectId
+    ?? data?.job?.input?.projectId
+    ?? data?.input?.projectId
+    ?? "default";
+}
 
 export class OutreachMapper {
   constructor({ store, events }) {

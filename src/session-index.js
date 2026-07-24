@@ -250,6 +250,14 @@ export class SessionIndex {
     const m = this.db.prepare("SELECT COUNT(*) AS n FROM messages").get();
     return { mode: "sqlite", messages: m.n };
   }
+
+  async close() {
+    await this.ready;
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+  }
 }
 
 function normalizeSearchFilters({ role, sessionId, since, until }) {

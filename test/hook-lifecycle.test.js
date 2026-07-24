@@ -7,14 +7,18 @@ import { createDurableRuntime } from "../src/abi-runtime.js";
 import { HookRegistry } from "../src/hook-registry.js";
 import { createHostedInterface } from "../src/hosted-interface.js";
 
-function tempFixture(t, prefix) {
+function tempFixture(t, prefix, { registerCleanup = true } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  if (registerCleanup) {
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  }
   return dataDir;
 }
 
 test("AgentHost emits non-blocking session and per-turn lifecycle hooks", async (t) => {
-  const dataDir = tempFixture(t, "openagi-hook-lifecycle-");
+  const dataDir = tempFixture(t, "openagi-hook-lifecycle-", {
+    registerCleanup: false
+  });
   const hooks = new HookRegistry({
     dataDir,
     loadConfig: false,
@@ -61,6 +65,10 @@ test("AgentHost emits non-blocking session and per-turn lifecycle hooks", async 
     hooks,
     modelProvider,
     autoConnectMcp: false
+  });
+  t.after(async () => {
+    await runtime.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
   });
   assert.equal(runtime.hooks, hooks);
   assert.equal(runtime.tools.hooks, hooks);

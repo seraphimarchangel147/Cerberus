@@ -8,7 +8,8 @@ import path from "node:path";
 import test from "node:test";
 import {
   resolveTarget, normalizeBase, CliClient, runDoctor,
-  writeNodeConfig, readNodeConfig, clearNodeConfig
+  writeNodeConfig, readNodeConfig, clearNodeConfig,
+  readProjectSelection, writeProjectSelection
 } from "../src/cli-client.js";
 
 const cleanEnv = (t) => {
@@ -510,6 +511,42 @@ test("CliClient attaches the bearer token", async () => {
   assert.equal(seen[0].url, "http://main:43210/message");
   assert.equal(seen[0].opts.headers.authorization, "Bearer secret");
   assert.deepEqual(JSON.parse(seen[0].opts.body), { text: "hi", from: "cli" });
+});
+
+test("CliClient scopes requests to its validated project and exposes project CRUD", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-cli-project-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  tolerateWindowsReadHandleFsync(t);
+  assert.equal(readProjectSelection(dir), "default");
+  assert.equal(writeProjectSelection("release_1", dir), "release_1");
+  assert.equal(readProjectSelection(dir), "release_1");
+  assert.throws(() => writeProjectSelection("bad/project", dir), /invalid project id/i);
+
+  const seen = [];
+  const fetchImpl = async (url, options) => {
+    seen.push({ url, options });
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  const client = new CliClient(
+    { url: "http://main:43210", token: null, remote: true, source: "flag" },
+    { fetchImpl, projectId: "release_1" }
+  );
+  await client.projects({ includeArchived: true });
+  await client.project("release_1");
+  await client.createProject({ id: "other", name: "Other" });
+  await client.selectProject("other");
+  await client.updateProject("release_1", { name: "Release" }, 2);
+  await client.archiveProject("release_1", 3);
+  await client.chat("scoped work");
+
+  assert.equal(seen.length, 7);
+  assert.ok(seen.slice(0, 6).every(({ options }) => (
+    options.headers["x-openagi-project"] === undefined
+  )));
+  assert.equal(seen[6].options.headers["x-openagi-project"], "release_1");
+  assert.equal(seen[0].url, "http://main:43210/projects?archived=1");
+  assert.equal(seen[4].options.method, "PATCH");
+  assert.deepEqual(JSON.parse(seen[5].options.body), { expectedRevision: 3 });
 });
 
 function stubClient(responses) {

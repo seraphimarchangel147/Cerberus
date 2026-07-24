@@ -22,8 +22,12 @@ async function seededStore() {
   return { dir, store };
 }
 
-test("recall_activity forwards the machine filter to the observation store", { skip: !hasSqlite }, async () => {
+test("recall_activity forwards the machine filter to the observation store", { skip: !hasSqlite }, async (t) => {
   const { dir, store } = await seededStore();
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   const registry = new ToolRegistry();
   registerCoreTools(registry, { observations: store });
   const { ok, result } = await registry.invoke("recall_activity", { machine: "mac-A", limit: 10 });
@@ -32,17 +36,19 @@ test("recall_activity forwards the machine filter to the observation store", { s
   assert.equal(result.results[0].app, "Safari");
   const schema = registry.get("recall_activity").parameters;
   assert.ok(schema.properties.machine, "machine must be an advertised parameter");
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("recall_activity without machine returns rows from all machines", { skip: !hasSqlite }, async () => {
+test("recall_activity without machine returns rows from all machines", { skip: !hasSqlite }, async (t) => {
   const { dir, store } = await seededStore();
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   const registry = new ToolRegistry();
   registerCoreTools(registry, { observations: store });
   const { ok, result } = await registry.invoke("recall_activity", { limit: 10 });
   assert.equal(ok, true);
   assert.equal(result.count, 2);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 // Code-review finding: the activity text-index ref moved from a stable
@@ -50,9 +56,13 @@ test("recall_activity without machine returns rows from all machines", { skip: !
 // refs for activity rows already on disk from before this migration — a
 // machine-filtered text search over pre-upgrade capture history silently
 // returned zero hits even though the content is present in `texts`.
-test("machine-filtered text search still finds legacy-format ('App:Window') activity refs", { skip: !hasSqlite }, async () => {
+test("machine-filtered text search still finds legacy-format ('App:Window') activity refs", { skip: !hasSqlite }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "recall-mach-legacy-"));
   const store = new ObservationStore({ dir });
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   await store.ready;
   // Seed one row the OLD way: activity row + a texts row whose ref is the
   // pre-migration composite key, not the activity row's numeric id.
@@ -66,5 +76,4 @@ test("machine-filtered text search still finds legacy-format ('App:Window') acti
 
   const hits = await store.search({ query: "general", machine: "mac-old" });
   assert.ok(hits.length >= 1, "pre-migration composite-key ref must still be found under a machine filter");
-  fs.rmSync(dir, { recursive: true, force: true });
 });

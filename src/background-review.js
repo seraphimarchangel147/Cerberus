@@ -45,9 +45,17 @@ export class BackgroundReviewer {
       return { skipped: true, reason: "deterministic provider cannot review" };
     }
 
+    const model = cleanProfileString(turn?.modelProfile?.model);
+    const tier = cleanProfileString(
+      turn?.routingProfile?.tier ?? turn?.modelProfile?.tier
+    );
+    const task = cleanProfileString(turn?.routingProfile?.task) ?? "review";
+    const projectId = cleanProfileString(turn?.projectId) ?? "default";
     const result = await provider.generate({
       input: buildReviewPrompt(turn),
-      task: "review",
+      task,
+      ...(model ? { model } : {}),
+      ...(tier ? { tier } : {}),
       agent: { id: "background-review", name: "background-review" },
       memoryHits: [],
       messages: [],
@@ -59,6 +67,10 @@ export class BackgroundReviewer {
       context: {
         channel: "background-review",
         sessionId: turn.sessionId,
+        __projectId: projectId,
+        __projectRevision: Number.isSafeInteger(turn?.projectRevision)
+          ? turn.projectRevision
+          : 1,
         __advertisedTools: []
       },
       maxIterations: DEFAULT_BACKGROUND_REVIEW_MAX_ITERATIONS,
@@ -76,6 +88,7 @@ export class BackgroundReviewer {
     this.runtime?.events?.emit?.("background-review", {
       at: record.at,
       sessionId: turn.sessionId,
+      projectId,
       memoriesAdded: applied.memories.length,
       duplicatesSkipped: applied.duplicatesSkipped,
       skillTitle: applied.skill?.candidate?.title ?? null,
@@ -182,7 +195,10 @@ export function applyBackgroundReviewProposal({ runtime, proposal, turn = {} }) 
         title,
         rationale,
         draftBody,
-        context: { sessionId: turn.sessionId ?? null },
+        context: {
+          sessionId: turn.sessionId ?? null,
+          projectId: turn.projectId ?? "default"
+        },
         status: "pending"
       });
     }
@@ -257,8 +273,15 @@ function persistReview(file, turn, details) {
     at: nowIso(),
     sessionId: turn.sessionId ?? null,
     agentId: turn.agentId ?? null,
+    projectId: turn.projectId ?? "default",
     ...details
   };
   appendJsonLine(file, record);
   return record;
+}
+
+function cleanProfileString(value) {
+  if (typeof value !== "string") return null;
+  const cleaned = value.trim();
+  return cleaned ? cleaned.slice(0, 256) : null;
 }

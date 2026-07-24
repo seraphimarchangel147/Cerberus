@@ -16,10 +16,42 @@ function tempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-function makeTool(index) {
-  const runtime = { sessionIndex: index, tools: new ToolRegistry() };
+function makeTool(index, projects = null) {
+  const runtime = {
+    sessionIndex: index,
+    tools: new ToolRegistry({ projects }),
+    ...(projects ? { projects } : {})
+  };
   registerSessionSearchTool(runtime);
   return runtime;
+}
+
+function scopedProjects(bindings) {
+  const records = new Map(["default", "alpha", "beta"].map((id) => [id, {
+    id,
+    status: "active",
+    revision: 1,
+    workspaceRoot: process.cwd(),
+    policy: { toolPolicy: "full", allowedTools: ["*"] },
+    secretRefs: [],
+    activeSkills: [],
+    mcpGrants: [],
+    hookIds: [],
+    kanbanBoardId: id === "default" ? "default" : `project-${id}`,
+    modelProfile: {},
+    routingProfile: {}
+  }]));
+  return {
+    get(id) {
+      const project = records.get(String(id)) ?? null;
+      return project ? structuredClone(project) : null;
+    },
+    projectForSession(sessionId) {
+      const projectId = bindings.get(String(sessionId)) ?? "default";
+      const project = records.get(projectId) ?? null;
+      return project ? structuredClone(project) : null;
+    }
+  };
 }
 
 async function seed(index, count = 3) {
@@ -160,4 +192,72 @@ test("searcmcp_sessions forwards role, session, and time filters", async () => {
       until: "2026-07-21T23:59:59Z"
     }
   }]);
+});
+
+test("searcmcp_sessions confines results and requested sessions to the current project", async () => {
+  const rows = [
+    {
+      sessionId: "session-alpha",
+      ts: "2026-07-21T10:00:00.000Z",
+      role: "user",
+      snippet: "alpha private decision"
+    },
+    {
+      sessionId: "session-beta",
+      ts: "2026-07-21T11:00:00.000Z",
+      role: "user",
+      snippet: "beta private decision"
+    },
+    {
+      sessionId: "session-legacy",
+      ts: "2026-07-21T12:00:00.000Z",
+      role: "user",
+      snippet: "default private decision"
+    }
+  ];
+  const seenLimits = [];
+  const index = {
+    async search(_query, options) {
+      seenLimits.push(options.limit);
+      return options.sessionId
+        ? rows.filter((row) => row.sessionId === options.sessionId)
+        : rows;
+    }
+  };
+  const projects = scopedProjects(new Map([
+    ["session-alpha", "alpha"],
+    ["session-beta", "beta"]
+  ]));
+  const runtime = makeTool(index, projects);
+
+  const alpha = await runtime.tools.invoke(
+    "searcmcp_sessions",
+    { query: "private", limit: 2 },
+    { __projectId: "alpha", __projectRevision: 1 }
+  );
+  assert.equal(alpha.ok, true);
+  assert.deepEqual(alpha.result.hits.map((hit) => hit.sessionId), ["session-alpha"]);
+  assert.deepEqual(seenLimits, [16]);
+
+  const defaultResult = await runtime.tools.invoke(
+    "searcmcp_sessions",
+    { query: "private", limit: 2 },
+    { __projectId: "default", __projectRevision: 1 }
+  );
+  assert.equal(defaultResult.ok, true);
+  assert.deepEqual(
+    defaultResult.result.hits.map((hit) => hit.sessionId),
+    ["session-legacy"]
+  );
+
+  const foreign = await runtime.tools.invoke(
+    "searcmcp_sessions",
+    {
+      query: "private",
+      sessionId: "session-beta"
+    },
+    { __projectId: "alpha", __projectRevision: 1 }
+  );
+  assert.equal(foreign.ok, false);
+  assert.match(foreign.error, /outside the current project/u);
 });

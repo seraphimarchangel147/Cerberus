@@ -95,7 +95,8 @@ export class HookRegistry {
    */
   async runVeto(event, payload = {}, options = {}) {
     assertEventName(event, { wildcard: false });
-    const hooks = this._matching(event);
+    const hooks = this._matching(event)
+      .filter((hook) => projectHookEnabled(hook, payload));
     if (!hooks.length) return allowVerdict();
 
     const immutablePayload = freezeHookPayload(payload);
@@ -260,7 +261,9 @@ export class HookRegistry {
   }
 
   async _dispatchObservers(event, payload) {
-    for (const hook of this._matching(event)) {
+    for (const hook of this._matching(event).filter(
+      (candidate) => projectHookEnabled(candidate, payload)
+    )) {
       const timeoutMs = Math.min(hook.timeoutMs ?? this.perHookTimeoutMs, this.timeoutMs);
       try {
         await invokeWithTimeout(hook, payload, event, timeoutMs);
@@ -536,6 +539,23 @@ function assertEventName(event, { wildcard }) {
   if (!pattern.test(event)) {
     throw new Error(`Hook event '${event}' contains unsupported characters.`);
   }
+}
+
+function projectHookEnabled(hook, payload) {
+  if (hook?.builtin) return true;
+  const grants = payload?.projectHookIds;
+  if (!Array.isArray(grants)) return !isProjectTaggedPayload(payload);
+  return grants.includes("*") || grants.includes(hook.name);
+}
+
+function isProjectTaggedPayload(payload) {
+  const projectId = String(
+    payload?.projectId ?? payload?.__projectId ?? ""
+  ).trim().toLowerCase();
+  if (!projectId) return false;
+  return projectId !== "default"
+    || (Number.isSafeInteger(payload?.projectRevision) && payload.projectRevision > 0)
+    || (Number.isSafeInteger(payload?.__projectRevision) && payload.__projectRevision > 0);
 }
 
 function boundedInteger(value, fallback, minimum, maximum) {

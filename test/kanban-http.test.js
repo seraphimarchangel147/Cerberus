@@ -72,7 +72,7 @@ test("Kanban tools, HTTP routes, CLI client, and dashboard form one safe surface
       {
         title: unsafeTitle,
         body: unsafeBody,
-        board: "phase-2",
+        board: "default",
         boardName: `Phase <b>Two</b>`,
         assignee: `worker<&>`
       },
@@ -91,7 +91,7 @@ test("Kanban tools, HTTP routes, CLI client, and dashboard form one safe surface
     const listed = await fetchJson(
       base,
       authToken,
-      "/kanban?board=phase-2&status=backlog&limit=10"
+      "/kanban?board=default&status=backlog&limit=10"
     );
     assert.equal(listed.response.status, 200);
     assert.deepEqual(
@@ -101,9 +101,7 @@ test("Kanban tools, HTTP routes, CLI client, and dashboard form one safe surface
     assert.equal(listed.json.tasks.length, 1);
     assert.equal(listed.json.tasks[0].id, toolTask.id);
     assert.equal(listed.json.tasks[0].title, unsafeTitle);
-    assert.ok(listed.json.boards.some((board) => (
-      board.id === "phase-2" && board.name === "Phase <b>Two</b>"
-    )));
+    assert.ok(listed.json.boards.some((board) => board.id === "default"));
 
     const toolDetail = await fetchJson(
       base,
@@ -120,7 +118,7 @@ test("Kanban tools, HTTP routes, CLI client, and dashboard form one safe surface
         action: "create",
         title: "HTTP lifecycle task",
         body: "Exercise each dashboard action.",
-        board: "phase-2"
+        board: "default"
       }
     });
     assert.equal(created.response.status, 200);
@@ -204,7 +202,7 @@ test("Kanban tools, HTTP routes, CLI client, and dashboard form one safe surface
       remote: false
     });
     const cliList = await client.kanban({
-      board: "phase-2",
+        board: "default",
       status: "done",
       assignee: "agent-http",
       limit: 5
@@ -218,7 +216,7 @@ test("Kanban tools, HTTP routes, CLI client, and dashboard form one safe surface
 
     const cliCreated = await client.createKanban({
       title: "CLI-created Kanban task",
-      board: "phase-2"
+      board: "default"
     });
     assert.equal(cliCreated.ok, true, cliCreated.text);
     assert.equal(cliCreated.json.title, "CLI-created Kanban task");

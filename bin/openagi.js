@@ -17,7 +17,16 @@
 
 import readline from "node:readline";
 import { resolveDataDir } from "../src/data-dir.js";
-import { resolveTarget, CliClient, runDoctor, writeNodeConfig, clearNodeConfig, normalizeBase } from "../src/cli-client.js";
+import {
+  resolveTarget,
+  CliClient,
+  runDoctor,
+  writeNodeConfig,
+  clearNodeConfig,
+  normalizeBase,
+  readProjectSelection,
+  writeProjectSelection
+} from "../src/cli-client.js";
 
 const RESET = "\x1b[0m", DIM = "\x1b[2m", BOLD = "\x1b[1m", GREEN = "\x1b[32m", RED = "\x1b[31m", YELLOW = "\x1b[33m";
 const tty = process.stdout.isTTY;
@@ -46,6 +55,12 @@ function parseArgs(argv) {
     else if (a === "--board") flags.board = argv[++i];
     else if (a === "--assignee") flags.assignee = argv[++i];
     else if (a === "--body") flags.body = argv[++i];
+    else if (a === "--project") flags.project = argv[++i];
+    else if (a === "--id") flags.id = argv[++i];
+    else if (a === "--name") flags.name = argv[++i];
+    else if (a === "--instructions") flags.instructions = argv[++i];
+    else if (a === "--revision") flags.revision = argv[++i];
+    else if (a === "--include-archived") flags.includeArchived = true;
     else if (a === "-h" || a === "--help") flags.help = true;
     else positional.push(a);
   }
@@ -54,7 +69,8 @@ function parseArgs(argv) {
 
 function makeClient(flags) {
   const target = resolveTarget({ remote: flags.remote, token: flags.token });
-  return { client: new CliClient(target), target };
+  const projectId = flags.project ?? readProjectSelection();
+  return { client: new CliClient(target, { projectId }), target, projectId };
 }
 
 async function cmdServe(flags) {
@@ -418,6 +434,82 @@ async function cmdModels(flags) {
   return 0;
 }
 
+async function cmdProjects(positional, flags) {
+  const action = String(positional[0] ?? "list").toLowerCase();
+  const { client } = makeClient(flags);
+  let response;
+
+  if (action === "list") {
+    response = await client.projects({ includeArchived: flags.includeArchived });
+  } else if (action === "show") {
+    const id = positional[1] ?? flags.id;
+    if (!id) throw new Error("project show requires an id");
+    response = await client.project(id);
+  } else if (action === "create") {
+    const name = flags.name ?? positional.slice(1).join(" ").trim();
+    if (!name) throw new Error("project create requires a name");
+    response = await client.createProject({
+      ...(flags.id ? { id: flags.id } : {}),
+      name,
+      ...(flags.instructions ? { instructions: flags.instructions } : {})
+    });
+  } else if (action === "select") {
+    const id = positional[1] ?? flags.id;
+    if (!id) throw new Error("project select requires an id");
+    response = await client.selectProject(id);
+    if (response.ok) writeProjectSelection(id);
+  } else if (action === "update") {
+    const id = positional[1] ?? flags.id;
+    if (!id) throw new Error("project update requires an id");
+    const patch = {};
+    if (flags.name) patch.name = flags.name;
+    if (flags.instructions !== undefined) patch.instructions = flags.instructions;
+    if (Object.keys(patch).length === 0) {
+      throw new Error("project update requires --name or --instructions");
+    }
+    let revision = Number(flags.revision);
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      const current = await client.project(id);
+      if (!current.ok) response = current;
+      else revision = current.json.revision;
+    }
+    if (!response) response = await client.updateProject(id, patch, revision);
+  } else if (action === "archive") {
+    const id = positional[1] ?? flags.id;
+    if (!id) throw new Error("project archive requires an id");
+    let revision = Number(flags.revision);
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      const current = await client.project(id);
+      if (!current.ok) response = current;
+      else revision = current.json.revision;
+    }
+    if (!response) response = await client.archiveProject(id, revision);
+  } else {
+    throw new Error(`unknown project command: ${action}`);
+  }
+
+  if (!response.ok) {
+    const message = response.json?.error ?? response.error ?? `HTTP ${response.status}`;
+    if (flags.json) console.log(JSON.stringify(response.json ?? { error: message }, null, 2));
+    else console.error(c(RED, `project command failed: ${message}`));
+    return 1;
+  }
+  if (flags.json) {
+    console.log(JSON.stringify(response.json, null, 2));
+    return 0;
+  }
+  if (action === "list") {
+    for (const project of response.json?.projects ?? []) {
+      const marker = project.id === readProjectSelection() ? "*" : "-";
+      console.log(`${marker} ${project.id}  ${project.name}  ${project.status}`);
+    }
+  } else {
+    const project = response.json?.project ?? response.json;
+    console.log(`${project.id ?? positional[1]}: ${project.name ?? action} (${project.status ?? "selected"})`);
+  }
+  return 0;
+}
+
 function printHelp() {
   console.log(`${c(BOLD, "openagi")} — proactive local agent · CLI
 
@@ -442,6 +534,12 @@ ${c(BOLD, "Use it (local, or a remote main):")}
   openagi kanban <task-id>    show one Kanban task
   openagi kanban create <title> [--body T] [--board B] [--assignee A]
                               create coordinated work
+  openagi project list [--include-archived]
+  openagi project show <id>
+  openagi project create <name> [--id ID] [--instructions TEXT]
+  openagi project select <id>
+  openagi project update <id> [--name N] [--instructions TEXT] [--revision N]
+  openagi project archive <id> [--revision N]
 
 ${c(BOLD, "Turn this device into a node of a remote main:")}
   openagi pair <main-url> [--token T]    save the main as this device's target
@@ -461,7 +559,7 @@ ${c(BOLD, "Turn this device into a node of a remote main:")}
   openagi computer-server --token T      (macOS) serve screen capture + input to
                                          a remote main (powers the computer_* tools)
 
-${c(BOLD, "Global flags:")} --remote <url>  --token <token>  --json
+${c(BOLD, "Global flags:")} --remote <url>  --token <token>  --project <id>  --json
 
 ${c(DIM, "Target precedence: --remote > OPENAGI_REMOTE env > saved pairing > local daemon.")}`);
 }
@@ -489,6 +587,8 @@ async function main() {
       case "tick": return await cmdTick(flags);
       case "models": return await cmdModels(flags);
       case "kanban": return await cmdKanban(positional, flags);
+      case "project":
+      case "projects": return await cmdProjects(positional, flags);
       default:
         console.error(c(RED, `unknown command: ${cmd}`));
         printHelp();

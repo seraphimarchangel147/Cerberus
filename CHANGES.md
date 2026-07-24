@@ -697,3 +697,15 @@ SAFE PROVIDER CONTINUATION COMPLETE
 STRUCTURED CONTEXT LEDGER COMPLETE
 
 AGENT WORKSPACE PHASE 1 COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: project composition root (Codex)
+
+- Added a durable ProjectStore composition root with append-only JSONL events, atomic snapshots, revision-safe create/update/archive operations, immutable session bindings, project-owned workspaces, instructions, memory roots, secret references, skills, model and routing profiles, MCP grants, policy, hooks, schedules, Kanban boards, and artifacts.
+- Enforced project identity across AgentHost turns, provider requests, memory, context references, session discovery, code tools, checkpoints and rollback, cron execution, drafts, tool outputs, outreach, background review, skill replay, pending approvals, CLI, authenticated HTTP, SSE, and dashboard surfaces.
+- Added authoritative cross-process authorization reads, canonical project memory scopes, durable transcript-based binding repair, current-revision approval identities, capability and catalog revocation, custom-hook grants, and fail-closed project session validation.
+- Required independent project secret grants for native model credentials, MCP credential placeholders, code-shell exports, and secret administration; added deterministic symlink-swap revalidation and project-contained schedule identifiers.
+- Preserved legacy default-project behavior while restricting global administration to the default control plane and keeping nondefault storage roots, tools, skills, hooks, schedules, sessions, drafts, outputs, and credentials disjoint.
+- Added bounded persistence, append-uncertainty reconciliation, restart/corruption recovery, hostile-input validation, Windows-safe resource teardown, and per-process test data isolation that never touches the operator's live runtime tree.
+- Added project store, memory, session, code, cron, checkpoint, draft, output, outreach, replay, approval, capability, CLI, HTTP, SSE, dashboard, restart, concurrency, credential, and red-team boundary regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1441/1441 with zero failures and one intentional Windows permission-mode skip.
+PROJECT COMPOSITION ROOT COMPLETE

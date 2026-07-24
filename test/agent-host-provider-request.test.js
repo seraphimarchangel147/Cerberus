@@ -5,13 +5,23 @@ import path from "node:path";
 import test from "node:test";
 import { InMemoryAgentStore } from "../src/agent-store.js";
 import { AgentHost } from "../src/agent-host.js";
+import { ProjectStore } from "../src/project-store.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
 function makeHarness(options = {}) {
   const requests = [];
+  const toolPlanContexts = [];
   const store = new InMemoryAgentStore();
+  const tools = new ToolRegistry();
+  if (options.captureToolPlanContexts) {
+    const originalPlan = tools.toOpenAIToolPlan.bind(tools);
+    tools.toOpenAIToolPlan = (planOptions = {}) => {
+      toolPlanContexts.push(structuredClone(planOptions.context ?? {}));
+      return originalPlan(planOptions);
+    };
+  }
   const runtime = {
-    tools: new ToolRegistry(),
+    tools,
     memory: {
       retrieve: () => [],
       renderSessionMemorySnapshot: () => "",
@@ -30,6 +40,9 @@ function makeHarness(options = {}) {
       propagation: null
     })
   };
+  if (options.projects) runtime.projects = options.projects;
+  if (options.observations) runtime.observations = options.observations;
+  if (options.tasks) runtime.tasks = options.tasks;
   const modelProvider = {
     provider: "fixture",
     model: "fixture-model",
@@ -40,7 +53,16 @@ function makeHarness(options = {}) {
         input: request.input,
         messages: request.messages.map(({ role, content }) => ({ role, content })),
         images: request.images.map((image) => ({ ...image })),
-        requestShape: { ...request.context.__requestShape }
+        requestShape: { ...request.context.__requestShape },
+        instructions: request.instructions,
+        model: request.model ?? null,
+        tier: request.tier ?? null,
+        task: request.task ?? null,
+        memoryScope: request.context.__memoryScope ?? null,
+        turnContext: request.turnContext,
+        projectId: request.context.__projectId ?? null,
+        projectModelProfile: request.context.__projectModelProfile ?? null,
+        projectRoutingProfile: request.context.__projectRoutingProfile ?? null
       });
       return {
         provider: "fixture",
@@ -59,18 +81,228 @@ function makeHarness(options = {}) {
       };
     }
   };
+  Object.assign(modelProvider, options.modelProviderProperties ?? {});
   const host = new AgentHost({
     runtime,
     store,
     modelProvider,
     ...(options.workspaceDir ? { workspaceDir: options.workspaceDir } : {})
   });
-  return { host, requests, store };
+  return { host, requests, store, toolPlanContexts };
 }
 
 function durableMessages(store, sessionId) {
   return store.getSession(sessionId).messages.map(({ role, content }) => ({ role, content }));
 }
+
+function projectFixture(id = "release", overrides = {}) {
+  return {
+    id,
+    name: id === "default" ? "Default" : "Release",
+    status: "active",
+    revision: 4,
+    workspaceRoot: process.cwd(),
+    instructions: "",
+    policy: { toolPolicy: "full", allowedTools: ["*"] },
+    secretRefs: [],
+    activeSkills: [],
+    mcpGrants: [],
+    hookIds: [],
+    kanbanBoardId: id === "default" ? "default" : `project-${id}`,
+    modelProfile: {},
+    routingProfile: {},
+    ...overrides
+  };
+}
+
+function projectResolver(project) {
+  return {
+    hasSessionBinding: () => false,
+    resolveForSession: (_sessionId, options) => {
+      assert.equal(options.requestedProjectId, project.id);
+      return structuredClone(project);
+    }
+  };
+}
+
+function durableProjectStore(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-host-project-repair-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return new ProjectStore({
+    dataDir: path.join(root, "data"),
+    defaultWorkspaceRoot: path.join(root, "default-workspace")
+  });
+}
+
+test("AgentHost keeps user-global auto tasks in the default project", async () => {
+  const added = [];
+  const tasks = {
+    add(input) {
+      added.push(structuredClone(input));
+      return { id: "task-1", ...input };
+    }
+  };
+  const release = projectFixture("release");
+  const { host } = makeHarness({
+    projects: projectResolver(release),
+    tasks
+  });
+
+  await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "provider-request-project-task-boundary",
+    projectId: "release",
+    text: "remind me to publish the release notes tomorrow",
+    backgroundReview: false
+  });
+
+  assert.deepEqual(added, []);
+});
+
+test("AgentHost repairs a lost binding from the unique durable transcript project tag", async (t) => {
+  const projects = durableProjectStore(t);
+  const alpha = projects.create({ id: "alpha", name: "Alpha" });
+  const { host, requests, store } = makeHarness({ projects });
+  const sessionId = "lost-alpha-project-binding";
+  await store.appendMessage(sessionId, {
+    role: "user",
+    content: "Persisted alpha history.",
+    metadata: { projectId: alpha.id }
+  });
+  await store.appendMessage(sessionId, {
+    role: "assistant",
+    content: "Persisted alpha reply.",
+    metadata: { projectId: alpha.id }
+  });
+  assert.equal(projects.hasSessionBinding(sessionId), false);
+
+  const result = await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId,
+    text: "Continue in the original project.",
+    backgroundReview: false
+  });
+
+  assert.equal(result.project.id, "alpha");
+  assert.equal(requests[0].projectId, "alpha");
+  assert.equal(projects.hasSessionBinding(sessionId), true);
+  assert.equal(projects.projectForSession(sessionId).id, "alpha");
+});
+
+test("AgentHost rejects conflicting or mixed durable transcript project tags", async (t) => {
+  const projects = durableProjectStore(t);
+  projects.create({ id: "alpha", name: "Alpha" });
+  projects.create({ id: "beta", name: "Beta" });
+  const { host, requests, store } = makeHarness({ projects });
+
+  await store.appendMessage("conflicting-project-request", {
+    role: "user",
+    content: "Alpha only.",
+    metadata: { projectId: "alpha" }
+  });
+  await assert.rejects(
+    host.handleMessage({
+      channel: "local",
+      from: "creator",
+      sessionId: "conflicting-project-request",
+      projectId: "beta",
+      text: "Try to move this transcript.",
+      backgroundReview: false
+    }),
+    (error) => {
+      assert.equal(error.code, "PROJECT_BOUNDARY_VIOLATION");
+      assert.match(error.message, /transcript belongs to project 'alpha'/u);
+      return true;
+    }
+  );
+
+  await store.appendMessage("mixed-project-tags", {
+    role: "user",
+    content: "Alpha message.",
+    metadata: { projectId: "alpha" }
+  });
+  await store.appendMessage("mixed-project-tags", {
+    role: "assistant",
+    content: "Unexpected beta message.",
+    metadata: { projectId: "beta" }
+  });
+  await assert.rejects(
+    host.handleMessage({
+      channel: "local",
+      from: "creator",
+      sessionId: "mixed-project-tags",
+      text: "Do not choose either project.",
+      backgroundReview: false
+    }),
+    (error) => {
+      assert.equal(error.code, "PROJECT_BOUNDARY_VIOLATION");
+      assert.match(error.message, /mixed persisted project tags/u);
+      assert.deepEqual(error.projectIds, ["alpha", "beta"]);
+      return true;
+    }
+  );
+
+  assert.equal(projects.hasSessionBinding("conflicting-project-request"), false);
+  assert.equal(projects.hasSessionBinding("mixed-project-tags"), false);
+  assert.equal(requests.length, 0);
+});
+
+test("AgentHost rejects missing, archived, and malformed transcript projects", async (t) => {
+  const projects = durableProjectStore(t);
+  projects.create({ id: "archived", name: "Archived" });
+  projects.archive("archived");
+  const { host, requests, store } = makeHarness({ projects });
+  const cases = [
+    ["missing-project-tag", "missing", /Unknown project: missing/u],
+    ["archived-project-tag", "archived", /is archived/u],
+    ["malformed-project-tag", "../escape", /invalid persisted project tag/u]
+  ];
+
+  for (const [sessionId, projectId, expected] of cases) {
+    await store.appendMessage(sessionId, {
+      role: "user",
+      content: "Durable project history.",
+      metadata: { projectId }
+    });
+    await assert.rejects(
+      host.handleMessage({
+        channel: "local",
+        from: "creator",
+        sessionId,
+        text: "Continue this transcript.",
+        backgroundReview: false
+      }),
+      expected
+    );
+    assert.equal(projects.hasSessionBinding(sessionId), false);
+  }
+  assert.equal(requests.length, 0);
+});
+
+test("AgentHost reserves legacy default fallback for entirely untagged transcripts", async (t) => {
+  const projects = durableProjectStore(t);
+  const { host, requests, store } = makeHarness({ projects });
+  const sessionId = "pre-project-legacy-transcript";
+  await store.appendMessage(sessionId, {
+    role: "user",
+    content: "History from before project tags existed."
+  });
+
+  const result = await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId,
+    text: "Continue the legacy transcript.",
+    backgroundReview: false
+  });
+
+  assert.equal(result.project.id, "default");
+  assert.equal(requests[0].projectId, "default");
+  assert.equal(projects.hasSessionBinding(sessionId), true);
+  assert.equal(projects.projectForSession(sessionId).id, "default");
+});
 
 test("AgentHost sends a first turn exactly once while persisting the raw user message", async () => {
   const { host, requests, store } = makeHarness();
@@ -203,6 +435,258 @@ test("AgentHost gives an ephemeral turn one current input and no persisted histo
   assert.equal(requests[0].input, current);
   assert.deepEqual(requests[0].messages, []);
   assert.deepEqual(store.listSessions(), []);
+});
+
+test("AgentHost applies the active project model and routing profile", async () => {
+  const project = {
+    id: "release",
+    name: "Release",
+    status: "active",
+    revision: 4,
+    workspaceRoot: process.cwd(),
+    instructions: "Use the release verification checklist.",
+    policy: { toolPolicy: "full", allowedTools: ["*"] },
+    secretRefs: [],
+    activeSkills: [],
+    mcpGrants: [],
+    hookIds: [],
+    kanbanBoardId: "project-release",
+    modelProfile: { model: "fixture-project-model" },
+    routingProfile: { task: "code", tier: "mini" }
+  };
+  const projects = {
+    hasSessionBinding: () => false,
+    resolveForSession: (_sessionId, options) => {
+      assert.equal(options.requestedProjectId, "release");
+      return structuredClone(project);
+    }
+  };
+  const { host, requests } = makeHarness({ projects });
+
+  await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "project-provider-profile",
+    projectId: "release",
+    text: "Verify this release.",
+    ephemeral: true,
+    backgroundReview: false
+  });
+
+  assert.equal(requests[0].model, "fixture-project-model");
+  assert.equal(requests[0].tier, "mini");
+  assert.equal(requests[0].task, "code");
+  assert.equal(requests[0].projectId, "release");
+  assert.deepEqual(requests[0].projectModelProfile, project.modelProfile);
+  assert.deepEqual(requests[0].projectRoutingProfile, project.routingProfile);
+  assert.match(requests[0].instructions, /release verification checklist/u);
+});
+
+test("AgentHost fails closed on a nondefault project when no ProjectStore is bound", async () => {
+  const { host, requests } = makeHarness();
+
+  await assert.rejects(
+    host.handleMessage({
+      channel: "local",
+      from: "creator",
+      sessionId: "missing-project-store",
+      projectId: "alpha",
+      text: "Do not run in the default workspace.",
+      ephemeral: true,
+      backgroundReview: false
+    }),
+    (error) => {
+      assert.equal(error.code, "PROJECT_BOUNDARY_VIOLATION");
+      assert.match(error.message, /project store is unavailable/u);
+      return true;
+    }
+  );
+  assert.equal(requests.length, 0);
+
+  await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "explicit-default-without-store",
+    projectId: "default",
+    text: "Legacy default remains available.",
+    ephemeral: true,
+    backgroundReview: false
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].projectId, null);
+});
+
+test("AgentHost requires independent project grants for model credentials", async () => {
+  const deniedProject = projectFixture("release", { secretRefs: [] });
+  const denied = makeHarness({
+    projects: projectResolver(deniedProject),
+    modelProviderProperties: {
+      credentialEnvSecretName: "OPENAI_API_KEY"
+    }
+  });
+  await assert.rejects(
+    denied.host.handleMessage({
+      channel: "local",
+      from: "creator",
+      sessionId: "provider-secret-denied",
+      projectId: "release",
+      text: "Use the project model.",
+      ephemeral: true,
+      backgroundReview: false
+    }),
+    (error) => {
+      assert.equal(error.code, "PROJECT_BOUNDARY_VIOLATION");
+      assert.match(error.message, /OPENAI_API_KEY/u);
+      return true;
+    }
+  );
+  assert.equal(denied.requests.length, 0);
+
+  const allowedProject = projectFixture("release", {
+    secretRefs: ["OPENAI_API_KEY"]
+  });
+  const allowed = makeHarness({
+    projects: projectResolver(allowedProject),
+    modelProviderProperties: {
+      credentialEnvSecretName: "OPENAI_API_KEY"
+    }
+  });
+  await allowed.host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "provider-secret-allowed",
+    projectId: "release",
+    text: "Use the project model.",
+    ephemeral: true,
+    backgroundReview: false
+  });
+  assert.equal(allowed.requests.length, 1);
+});
+
+test("AgentHost keeps project memory roots exact and prefixes foreign scopes once", async () => {
+  const project = projectFixture("release");
+  const { host, requests } = makeHarness({
+    projects: projectResolver(project)
+  });
+  const cases = [
+    ["project:release", "project:release"],
+    ["project:release:subagent:worker", "project:release:subagent:worker"],
+    ["subagent:worker", "project:release:subagent:worker"],
+    ["project:beta", "project:release:project:beta"]
+  ];
+
+  for (let index = 0; index < cases.length; index += 1) {
+    const [requested, expected] = cases[index];
+    await host.handleMessage({
+      channel: "local",
+      from: "creator",
+      sessionId: `project-memory-scope-${index}`,
+      projectId: "release",
+      memoryScope: requested,
+      text: `Check memory scope ${index}.`,
+      ephemeral: true,
+      backgroundReview: false
+    });
+    assert.equal(requests.at(-1).memoryScope, expected);
+  }
+
+  const defaultHarness = makeHarness();
+  await assert.rejects(
+    defaultHarness.host.handleMessage({
+      channel: "local",
+      from: "creator",
+      sessionId: "default-cross-project-memory",
+      memoryScope: "project:release",
+      text: "Attempt cross-project memory.",
+      ephemeral: true,
+      backgroundReview: false
+    }),
+    (error) => {
+      assert.equal(error.code, "PROJECT_BOUNDARY_VIOLATION");
+      assert.match(error.message, /cannot enter a nondefault project memory scope/u);
+      return true;
+    }
+  );
+  assert.equal(defaultHarness.requests.length, 0);
+});
+
+test("AgentHost exposes user-global ambient OCR only to the default control plane", async () => {
+  const ambient = {
+    calls: 0,
+    async getRecentContext() {
+      this.calls += 1;
+      return {
+        apps: [{ app: "Private Editor", n: 2 }],
+        snippets: [{
+          app: "Private Editor",
+          window: "secret.txt",
+          at: "2026-07-24T12:34:00.000Z",
+          text: "ambient-private-marker"
+        }]
+      };
+    }
+  };
+  const defaultHarness = makeHarness({ observations: ambient });
+  await defaultHarness.host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "default-ambient",
+    text: "Where was I?",
+    ephemeral: true,
+    backgroundReview: false
+  });
+  assert.equal(ambient.calls, 1);
+  assert.match(defaultHarness.requests[0].turnContext, /ambient-private-marker/u);
+
+  const project = projectFixture("release");
+  const isolatedHarness = makeHarness({
+    projects: projectResolver(project),
+    observations: ambient
+  });
+  await isolatedHarness.host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "project-ambient",
+    projectId: "release",
+    text: "Where was I?",
+    ephemeral: true,
+    backgroundReview: false
+  });
+  assert.equal(ambient.calls, 1, "isolated project must not query the global OCR store");
+  assert.doesNotMatch(
+    isolatedHarness.requests[0].turnContext,
+    /ambient-private-marker/u
+  );
+});
+
+test("AgentHost passes authoritative project grants into every model tool plan", async () => {
+  const project = projectFixture("release", {
+    revision: 7,
+    activeSkills: ["release-check"],
+    mcpGrants: ["github"]
+  });
+  const { host, toolPlanContexts } = makeHarness({
+    projects: projectResolver(project),
+    captureToolPlanContexts: true
+  });
+
+  await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "project-tool-plan-context",
+    projectId: "release",
+    text: "Verify the release.",
+    ephemeral: true,
+    backgroundReview: false
+  });
+
+  assert.ok(toolPlanContexts.length >= 1);
+  for (const context of toolPlanContexts) {
+    assert.equal(context.__projectId, "release");
+    assert.equal(context.__projectRevision, 7);
+    assert.deepEqual(context.__projectMcpGrants, ["github"]);
+    assert.deepEqual(context.__projectActiveSkills, ["release-check"]);
+  }
 });
 
 test("AgentHost expands a current context reference without replacing its raw durable form", async (t) => {
