@@ -2302,18 +2302,33 @@ function renderApp() {
       color-scheme: light dark;
       /* Legacy tokens — kept so existing inline-styled components don't
          drift visually while we migrate them to the shadcn-vocab layer. */
-      --bg: #0e1411;
-      --panel: #161d19;
-      --panel-2: #1d2722;
-      --text: #e8efea;
-      --muted: #8da59a;
-      --line: #2a352f;
-      --accent: #6fe1b1;
-      --accent-soft: #14322a;
-      --user: #2c4338;
-      --assistant: #1d2722;
+      --bg: #050506;
+      --panel: #0c0d10;
+      --panel-2: #12141a;
+      --text: #e6e8ea;
+      --muted: #6e7681;
+      --line: #23262c;
+      --accent: #ff2b2b;
+      --accent-soft: rgba(255, 43, 43, 0.10);
+      --user: #1a0d0e;
+      --assistant: #12141a;
       --warn: #f0b454;
-      --err: #f08080;
+      --err: #ff5a4a;
+
+      /* ─── Cerberus / TRON:ARES extension tokens ─────────────────────────
+         Emissive red, chamfered HUD chrome. Red is glow + edge-light,
+         never large fills — keep the canvas near-black. */
+      --accent-glow: #ff5a4a;
+      --accent-deep: #7a0b0b;
+      --accent-line: #3a0f12;
+      --line-hot: #3a0f12;
+      --holo: #ff2b2b;
+      --holo-dim: rgba(255, 43, 43, 0.35);
+      --chamfer: 10px;
+      --font-display: "Bahnschrift", "DIN Alternate", "Franklin Gothic Medium", "Arial Narrow", "Segoe UI", sans-serif;
+      --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --glow-sm: 0 0 6px rgba(255, 43, 43, 0.45);
+      --glow-md: 0 0 14px rgba(255, 43, 43, 0.35);
 
       /* shadcn-vocab tokens. We've adopted the same names openclaw uses
          (which mirror shadcn) so future tabs / components have a stable
@@ -2324,10 +2339,10 @@ function renderApp() {
       --foreground: var(--text);
       --card: var(--panel);
       --card-foreground: var(--text);
-      --popover: #1a221d;
+      --popover: #12141a;
       --popover-foreground: var(--text);
       --primary: var(--accent);
-      --primary-foreground: #002219;
+      --primary-foreground: #0a0203;
       --secondary: var(--panel-2);
       --secondary-foreground: var(--text);
       --muted-bg: var(--panel-2);
@@ -2338,7 +2353,7 @@ function renderApp() {
       --destructive-foreground: #ffd9d4;
       --border: var(--line);
       --input: var(--panel-2);
-      --ring: rgba(111, 225, 177, 0.45);
+      --ring: rgba(255, 43, 43, 0.45);
 
       /* Spacing scale (4px grid) and radius / typography — used by
          the primitive classes below. */
@@ -2348,15 +2363,15 @@ function renderApp() {
       --space-4: 16px;
       --space-5: 24px;
       --space-6: 32px;
-      --radius-sm: 4px;
-      --radius: 8px;
-      --radius-lg: 12px;
+      --radius-sm: 2px;
+      --radius: 2px;
+      --radius-lg: 4px;
       --font-size-xs: 11px;
       --font-size-sm: 12px;
       --font-size-base: 14px;
       --font-size-lg: 16px;
-      --shadow-sm: 0 1px 2px rgba(0,0,0,.25);
-      --shadow: 0 4px 12px rgba(0,0,0,.30);
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.5);
+      --shadow: 0 4px 16px rgba(0,0,0,.55);
     }
     * { box-sizing: border-box; }
     body {
@@ -2488,9 +2503,13 @@ function renderApp() {
     }
     .composer textarea:focus { border-color: var(--accent); }
     .composer button {
-      background: var(--accent); color: #002219; border: 0;
-      padding: 9px 14px; border-radius: 8px; font-weight: 700; cursor: pointer;
+      background: var(--accent); color: #0a0203; border: 0;
+      padding: 9px 14px; border-radius: 2px; font-weight: 700; cursor: pointer;
+      clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+      letter-spacing: 0.08em; text-transform: uppercase; font-size: 12px;
+      transition: box-shadow .15s, filter .15s;
     }
+    .composer button:hover:not(:disabled) { filter: brightness(1.15); box-shadow: var(--glow-md); }
     .composer button:disabled { opacity: 0.5; cursor: not-allowed; }
 
     .pane { flex: 1; overflow: auto; padding: 24px 32px 60px; }
@@ -2517,11 +2536,11 @@ function renderApp() {
     .tier-pills button.active .count { color: var(--accent); }
     .mem-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; max-width: 1180px; margin: 0 auto; }
     .mem-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 140px; }
-    .mem-card.tier-short { border-left: 3px solid #6fe1b1; }
+    .mem-card.tier-short { border-left: 3px solid #ff2b2b; }
     .mem-card.tier-medium { border-left: 3px solid #f0b454; }
     .mem-card.tier-long { border-left: 3px solid #a98ef5; }
     .mem-head { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
-    .mem-head .badge.tier-short { background: rgba(111,225,177,0.12); color: #6fe1b1; border-color: rgba(111,225,177,0.3); }
+    .mem-head .badge.tier-short { background: rgba(255,43,43,0.12); color: #ff5a4a; border-color: rgba(255,43,43,0.3); }
     .mem-head .badge.tier-medium { background: rgba(240,180,84,0.12); color: #f0b454; border-color: rgba(240,180,84,0.3); }
     .mem-head .badge.tier-long { background: rgba(169,142,245,0.12); color: #a98ef5; border-color: rgba(169,142,245,0.3); }
     .mem-age { color: var(--muted); font-size: 11px; margin-left: auto; }
@@ -2532,7 +2551,7 @@ function renderApp() {
 
     /* OAuth banner */
     .warn-banner { border-color: var(--warn); background: rgba(240,180,84,0.08); margin: 12px 0; }
-    .btn-primary { background: var(--accent); color: #002219; padding: 8px 14px; border-radius: 6px; font-weight: 700; text-decoration: none; display: inline-block; }
+    .btn-primary { background: var(--accent); color: #0a0203; padding: 8px 14px; border-radius: 2px; font-weight: 700; text-decoration: none; display: inline-block; clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px); letter-spacing: 0.08em; text-transform: uppercase; font-size: 12px; }
     .btn-primary:hover { opacity: 0.9; }
     .row { display: flex; gap: 8px; align-items: center; }
     .row.between { justify-content: space-between; }
@@ -2710,6 +2729,130 @@ function renderApp() {
     }
     .page-chat .page-chat-send:hover:not(:disabled) { opacity: 0.9; }
     .page-chat .page-chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ═══ CERBERUS / TRON:ARES chrome layer ═══════════════════════════════
+       Chamfered HUD panels, corner ticks, emissive edges, scanline +
+       drifting-grid ambience. All motion is transform/opacity only and
+       gated behind prefers-reduced-motion. Red is glow, never fill. */
+
+    /* Chamfered corners on every panel family. The 1px border is clipped
+       along the diagonal, which reads as an intentional cut edge; corner
+       ticks (below) accent it on hover / active. */
+    .card, .ui-card, .mem-card, .ui-empty, .composer, .topbar .status .status-pill {
+      clip-path: polygon(var(--chamfer) 0, 100% 0, 100% calc(100% - var(--chamfer)), calc(100% - var(--chamfer)) 100%, 0 100%, 0 var(--chamfer));
+    }
+    .composer { clip-path: none; } /* keep the composer full-bleed at the bottom */
+
+    /* Corner tick brackets — top-left + bottom-right L-marks that light up
+       on hover. Pure pseudo-elements, no extra markup. */
+    .card, .ui-card, .mem-card { position: relative; }
+    .card::before, .ui-card::before, .mem-card::before,
+    .card::after, .ui-card::after, .mem-card::after {
+      content: ""; position: absolute; width: 10px; height: 10px;
+      border: 1px solid var(--accent); opacity: 0;
+      transition: opacity .18s ease; pointer-events: none;
+    }
+    .card::before, .ui-card::before, .mem-card::before {
+      top: 3px; left: 3px; border-right: 0; border-bottom: 0;
+    }
+    .card::after, .ui-card::after, .mem-card::after {
+      bottom: 3px; right: 3px; border-left: 0; border-top: 0;
+    }
+    .card:hover::before, .ui-card:hover::before, .mem-card:hover::before,
+    .card:hover::after, .ui-card:hover::after, .mem-card:hover::after { opacity: .9; }
+
+    /* Emissive edge on hover — a soft red edge-light, not a fill. */
+    .card, .ui-card, .mem-card { transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+    .card:hover, .ui-card:hover, .mem-card:hover {
+      border-color: var(--line-hot);
+      box-shadow: 0 0 0 1px rgba(255,43,43,.12), var(--glow-sm);
+    }
+
+    /* Display type — wide-tracked uppercase for headings + brand. */
+    .pane h2, .railnav .brand-name {
+      font-family: var(--font-display);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-weight: 600;
+    }
+    .pane h2 { font-size: 18px; }
+    .pane h3, .nav-group-label, .sidebar h2 {
+      font-family: var(--font-display);
+      letter-spacing: 0.16em;
+    }
+    /* Telemetry / numbers go monospace. */
+    .card .stat-value, .topbar .status, pre, code, .ui-kbd, .chip, .badge {
+      font-family: var(--font-mono);
+    }
+
+    /* HUD micro-label — tiny tracked serial line used on section headers. */
+    .hud-label {
+      font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.22em;
+      text-transform: uppercase; color: var(--muted); opacity: .7;
+    }
+
+    /* Status pills — emissive dot + tracked mono caps (ref-05 OFFLINE idiom). */
+    .topbar .status .status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em;
+      text-transform: uppercase; color: var(--muted);
+      background: var(--panel); border: 1px solid var(--line);
+      padding: 3px 10px;
+    }
+    .topbar .status .status-pill::before {
+      content: ""; width: 5px; height: 5px; border-radius: 50%;
+      background: var(--accent); box-shadow: var(--glow-sm);
+      animation: cerb-pulse 2.2s ease-in-out infinite;
+    }
+
+    /* Scanline + vignette overlay — static, GPU-cheap, pointer-transparent. */
+    body::after {
+      content: ""; position: fixed; inset: 0; z-index: 200; pointer-events: none;
+      background:
+        repeating-linear-gradient(0deg, rgba(255,255,255,.014) 0 1px, transparent 1px 3px),
+        radial-gradient(120% 90% at 50% 0%, transparent 55%, rgba(0,0,0,.5) 100%);
+    }
+
+    /* Ambient drifting circuit grid behind the whole app. Two layered
+       linear-gradient grids translate slowly (transform only). Paused for
+       reduced-motion users. */
+    body::before {
+      content: ""; position: fixed; inset: -120px; z-index: 0; pointer-events: none;
+      background:
+        linear-gradient(rgba(255,43,43,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,43,43,.045) 1px, transparent 1px),
+        linear-gradient(rgba(255,43,43,.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,43,43,.02) 1px, transparent 1px);
+      background-size: 96px 96px, 96px 96px, 24px 24px, 24px 24px;
+      animation: cerb-grid-drift 60s linear infinite;
+      opacity: .5;
+    }
+    .app { position: relative; z-index: 1; }
+    @keyframes cerb-grid-drift {
+      from { transform: translate3d(0, 0, 0); }
+      to   { transform: translate3d(96px, 96px, 0); }
+    }
+    @keyframes cerb-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .35; }
+    }
+
+    /* Panel materialise — scanline sweep + slight rise on tab switch.
+       Applied by the motion layer to the active pane (class .cerb-in). */
+    .cerb-in { animation: cerb-materialise .22s cubic-bezier(.2,.8,.3,1) both; }
+    @keyframes cerb-materialise {
+      0%   { opacity: 0; transform: translateY(6px); filter: brightness(1.6) saturate(1.4); }
+      60%  { opacity: 1; filter: brightness(1.15); }
+      100% { opacity: 1; transform: translateY(0); filter: none; }
+    }
+
+    /* Respect reduced motion — freeze the drift, pulse, and materialise. */
+    @media (prefers-reduced-motion: reduce) {
+      body::before { animation: none; }
+      .topbar .status .status-pill::before { animation: none; }
+      .cerb-in { animation: none; }
+      .card, .ui-card, .mem-card { transition: none; }
+    }
   </style>
 </head>
 <body>
