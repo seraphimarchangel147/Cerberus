@@ -715,6 +715,9 @@ export class SkillRegistry {
       });
     }
     try {
+      const nestedContext = { ...(context ?? {}) };
+      delete nestedContext.__confirmed;
+      delete nestedContext.__approval;
       const result = await provider.generate({
         input: rendered,
         agent: { id: agentName, name: agentName, systemPrompt: skill.systemPrompt ?? "" },
@@ -724,7 +727,7 @@ export class SkillRegistry {
         toolRegistry: this.runtime.tools,
         instructions,
         context: {
-          ...context,
+          ...nestedContext,
           skill: skill.name,
           ...(effectiveAllowed ? {
             __advertisedTools: effectiveAllowed,

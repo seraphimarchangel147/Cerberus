@@ -31,6 +31,8 @@ import { createSkillCandidateFromRecipe } from "./skill-materialize.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
+const EXACT_CATASTROPHIC_APPROVAL = Symbol("exact-catastrophic-approval");
+const EXACT_MANUAL_APPROVAL = Symbol("exact-manual-approval");
 const SEMANTIC_OUTCOME_TRACKED = Symbol("semantic-outcome-tracked");
 const REGISTRY_FAILURE_STATE = new WeakMap();
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
@@ -98,6 +100,7 @@ export class ToolRegistry {
     this.projects = options.projects ?? null;
     this.profiles = options.profiles ?? null;
     this.timeline = options.timeline ?? null;
+    this.startupBarrier = null;
     REGISTRY_FAILURE_STATE.set(this, {
       contextFailures: new WeakMap(),
       turnFailures: new Map(),
@@ -111,6 +114,12 @@ export class ToolRegistry {
     const metadata = { ...(tool.metadata ?? {}) };
     const source = normalizedToolSource(tool.source);
     const needsConfirmation = Boolean(tool.needsConfirmation);
+    const manualApproval = Boolean(tool.manualApproval);
+    if (manualApproval && !needsConfirmation) {
+      throw new TypeError(
+        `Tool ${tool.name} manualApproval requires needsConfirmation.`
+      );
+    }
     const sideEffects = tool.sideEffects !== false;
     const forwardInvocation = typeof tool.forwardInvocation === "function"
       ? tool.forwardInvocation
@@ -154,6 +163,10 @@ export class ToolRegistry {
       // When true, invoke() queues a pending action and suspends until the
       // user approves, denies, or the bounded approval window expires.
       needsConfirmation,
+      // Manual approval is stronger than the ordinary confirmation rail:
+      // auto-approve, caller-supplied __confirmed, and session-wide grants
+      // cannot satisfy it. Only the private suspended-action resume token can.
+      manualApproval,
       // Short human-readable summary used in the approval UI when the args
       // alone don't describe the action well. Optional fn(args) -> string.
       summarize: typeof tool.summarize === "function" ? tool.summarize : null,
@@ -218,6 +231,10 @@ export class ToolRegistry {
     this.timeline = timeline ?? null;
   }
 
+  bindStartupBarrier(barrier) {
+    this.startupBarrier = barrier ? Promise.resolve(barrier) : null;
+  }
+
   bindJobCoordinator(coordinator) {
     this.jobCoordinator = coordinator ?? null;
   }
@@ -263,6 +280,7 @@ export class ToolRegistry {
       parameters: tool.parameters,
       sideEffects: tool.sideEffects,
       needsConfirmation: tool.needsConfirmation,
+      manualApproval: tool.manualApproval,
       capability: tool.capability,
       approvalRevision: tool.approvalRevision,
       policy: {
@@ -621,7 +639,13 @@ export class ToolRegistry {
       ? operationContext.__onToolEvent
       : null;
     if (notify) {
-      try { notify({ phase: "start", name, args }); } catch { /* observer must not break tools */ }
+      try {
+        notify({
+          phase: "start",
+          name,
+          args: privateToolEventArgs(tool, args)
+        });
+      } catch { /* observer must not break tools */ }
     }
     let outcome;
     try {
@@ -631,7 +655,9 @@ export class ToolRegistry {
         operationContext,
         {
           preToolHooksPassed: internal.preToolHooksPassed,
-          failureTracking: tracking
+          failureTracking: tracking,
+          manualApprovalPassed: internal.manualApprovalPassed,
+          catastrophicApprovalPassed: internal.catastrophicApprovalPassed
         }
       );
       outcome = await this._finalizeInvocation(
@@ -992,6 +1018,29 @@ export class ToolRegistry {
         this.pendingActions.complete?.(action.id, { result: null, error });
         return { ok: false, error };
       }
+      const decisionActor = String(
+        decision.decider ?? decision.decidedBy ?? ""
+      ).trim();
+      if (
+        tool?.manualApproval === true
+        && (!decisionActor || decisionActor === "auto-approve")
+      ) {
+        const blocked = semanticToolError(
+          tool,
+          "This action requires an explicit human approval; auto-approve is insufficient.",
+          {
+            code: "manual_approval_required",
+            status: "blocked",
+            nextSteps: ["Create a new approval request and have a human approve it."]
+          }
+        );
+        this.pendingActions.complete?.(action.id, {
+          result: null,
+          error: blocked.error,
+          outcome: blocked.outcome
+        });
+        return blocked;
+      }
       const invokeResult = await this.invoke(
         name,
         args,
@@ -1006,7 +1055,9 @@ export class ToolRegistry {
         },
         makeInternalInvocation({
           preToolHooksPassed,
-          failureTracking
+          failureTracking,
+          manualApprovalPassed: tool?.manualApproval === true,
+          catastrophicApprovalPassed: action.severity === "catastrophic"
         })
       );
       this.pendingActions.complete?.(action.id, {
@@ -1045,11 +1096,31 @@ export class ToolRegistry {
     name,
     args,
     context = {},
-    { preToolHooksPassed = false, failureTracking = null } = {}
+    {
+      preToolHooksPassed = false,
+      failureTracking = null,
+      manualApprovalPassed = false,
+      catastrophicApprovalPassed = false
+    } = {}
   ) {
     const tool = this.tools.get(name);
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
+    }
+    if (tool.sideEffects && this.startupBarrier) {
+      try {
+        await this.startupBarrier;
+      } catch {
+        return semanticToolError(
+          tool,
+          "Runtime startup ownership reconciliation did not complete; mutating tools remain blocked.",
+          {
+            code: "runtime_startup_unreconciled",
+            status: "blocked",
+            changed: false
+          }
+        );
+      }
     }
     const projectScope = validateProjectScope(
       this.projects,
@@ -1141,7 +1212,14 @@ export class ToolRegistry {
       let hookDecision = { action: "allow" };
       try {
         hookDecision = await this.hooks?.beforeToolCall?.(
-          buildHookPayload({ name, args, context, tool, sessionAllowed })
+          buildHookPayload({
+            name,
+            args,
+            context,
+            tool,
+            sessionAllowed,
+            catastrophicApprovalPassed
+          })
         ) ?? hookDecision;
       } catch (error) {
         console.warn(
@@ -1168,7 +1246,8 @@ export class ToolRegistry {
             summary,
             reason,
             severity: "catastrophic",
-            approvalIdentity: this.approvalIdentity(name, context)
+            approvalIdentity: this.approvalIdentity(name, context),
+            privateInput: tool.metadata?.privateInput === true
           });
           return this._suspendForApproval(action, name, args, context, {
             preToolHooksPassed: false,
@@ -1201,7 +1280,24 @@ export class ToolRegistry {
     // sets after a human OKs the action). Scrutiny 'ask' turns extend this
     // to EVERY side-effecting tool, not just the always-gated ones.
     const scrutinyConfirm = context?.__scrutinyPolicy === "confirm" && tool.sideEffects;
-    if ((tool.needsConfirmation || scrutinyConfirm) && !context?.__confirmed && !sessionAllowed && this.pendingActions) {
+    const manualConfirm = tool.manualApproval === true && !manualApprovalPassed;
+    const ordinaryConfirm = (
+      (tool.needsConfirmation || scrutinyConfirm)
+      && !context?.__confirmed
+      && !sessionAllowed
+    );
+    if (manualConfirm && !this.pendingActions) {
+      return semanticToolError(
+        tool,
+        "This tool requires an explicit human approval, but no approval store is available.",
+        {
+          code: "manual_approval_unavailable",
+          status: "blocked",
+          changed: false
+        }
+      );
+    }
+    if ((manualConfirm || ordinaryConfirm) && this.pendingActions) {
       const summary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
       // Auto-approve mode (Story: hands-free operation). When enabled the
       // gate still records the action for the audit trail, but runs the
@@ -1209,14 +1305,15 @@ export class ToolRegistry {
       // POST /auto-approve, /autoapprove Discord command, or
       // OPENAGI_AUTO_APPROVE in .env. Default is ON — only an explicit
       // "0"/"false" disables it.
-      if (autoApproveEnabled()) {
+      if (autoApproveEnabled() && !manualConfirm) {
         const action = this.pendingActions.enqueue({
           toolName: name,
           args,
           context,
           summary,
           reason: context.__reason ?? null,
-          approvalIdentity: this.approvalIdentity(name, context)
+          approvalIdentity: this.approvalIdentity(name, context),
+          privateInput: tool.metadata?.privateInput === true
         });
         const invokeResult = await this.invoke(
           name,
@@ -1242,7 +1339,8 @@ export class ToolRegistry {
         context,
         summary,
         reason: context.__reason ?? null,
-        approvalIdentity: this.approvalIdentity(name, context)
+        approvalIdentity: this.approvalIdentity(name, context),
+        privateInput: tool.metadata?.privateInput === true
       });
       return this._suspendForApproval(action, name, args, context, {
         preToolHooksPassed,
@@ -1307,6 +1405,22 @@ export class ToolRegistry {
         return blocked;
       }
       context = postCheckpointAuthority.context;
+      if (catastrophicApprovalPassed) {
+        context = bindExactCatastrophicApproval(
+          context,
+          name,
+          args,
+          this.approvalIdentity(name, context)
+        );
+      }
+      if (manualApprovalPassed) {
+        context = bindExactManualApproval(
+          context,
+          name,
+          args,
+          this.approvalIdentity(name, context)
+        );
+      }
       if (tool.sideEffects && this.jobCoordinator?.acquireToolInvocation) {
         releaseJobLease = this.jobCoordinator.acquireToolInvocation(
           tool,
@@ -1399,26 +1513,39 @@ function normalizeInternalInvocation(token) {
   if (token === PRE_TOOL_HOOKS_PASSED) {
     return {
       preToolHooksPassed: true,
-      failureTracking: null
+      failureTracking: null,
+      manualApprovalPassed: false,
+      catastrophicApprovalPassed: false
     };
   }
   if (!token || token[INTERNAL_INVOCATION] !== true) {
     return {
       preToolHooksPassed: false,
-      failureTracking: null
+      failureTracking: null,
+      manualApprovalPassed: false,
+      catastrophicApprovalPassed: false
     };
   }
   return {
     preToolHooksPassed: token.preToolHooksPassed === true,
-    failureTracking: token.failureTracking ?? null
+    failureTracking: token.failureTracking ?? null,
+    manualApprovalPassed: token.manualApprovalPassed === true,
+    catastrophicApprovalPassed: token.catastrophicApprovalPassed === true
   };
 }
 
-function makeInternalInvocation({ preToolHooksPassed = false, failureTracking = null } = {}) {
+function makeInternalInvocation({
+  preToolHooksPassed = false,
+  failureTracking = null,
+  manualApprovalPassed = false,
+  catastrophicApprovalPassed = false
+} = {}) {
   return Object.freeze({
     [INTERNAL_INVOCATION]: true,
     preToolHooksPassed: preToolHooksPassed === true,
-    failureTracking
+    failureTracking,
+    manualApprovalPassed: manualApprovalPassed === true,
+    catastrophicApprovalPassed: catastrophicApprovalPassed === true
   });
 }
 
@@ -2397,7 +2524,14 @@ function defineOwnData(target, key, value) {
   });
 }
 
-function buildHookPayload({ name, args, context = {}, tool, sessionAllowed }) {
+function buildHookPayload({
+  name,
+  args,
+  context = {},
+  tool,
+  sessionAllowed,
+  catastrophicApprovalPassed = false
+}) {
   return {
     toolName: name,
     args: sanitizeForAudit(args ?? {}),
@@ -2417,9 +2551,90 @@ function buildHookPayload({ name, args, context = {}, tool, sessionAllowed }) {
     cwd: args?.cwd ?? null,
     sideEffects: tool?.sideEffects !== false,
     needsConfirmation: Boolean(tool?.needsConfirmation),
+    privateInput: tool?.metadata?.privateInput === true,
     confirmed: context?.__confirmed === true,
+    catastrophicApproved: catastrophicApprovalPassed === true,
     sessionAllowed: Boolean(sessionAllowed)
   };
+}
+
+function bindExactCatastrophicApproval(context, toolName, args, policyIdentity) {
+  const bound = cloneInvocationContext(context);
+  Object.defineProperty(bound, EXACT_CATASTROPHIC_APPROVAL, {
+    value: {
+      toolName,
+      args,
+      projectId: String(context?.__projectId ?? "default"),
+      sessionId: String(context?.sessionId ?? ""),
+      policyIdentity: String(policyIdentity ?? ""),
+      used: false
+    },
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return bound;
+}
+
+function bindExactManualApproval(context, toolName, args, policyIdentity) {
+  const bound = cloneInvocationContext(context);
+  Object.defineProperty(bound, EXACT_MANUAL_APPROVAL, {
+    value: {
+      toolName,
+      args,
+      projectId: String(context?.__projectId ?? "default"),
+      sessionId: String(context?.sessionId ?? ""),
+      policyIdentity: String(policyIdentity ?? ""),
+      used: false
+    },
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return bound;
+}
+
+function cloneInvocationContext(context) {
+  const source = context && typeof context === "object" ? context : {};
+  return Object.defineProperties(
+    {},
+    Object.getOwnPropertyDescriptors(source)
+  );
+}
+
+export function consumeExactCatastrophicApproval(context, toolName, args) {
+  const proof = context?.[EXACT_CATASTROPHIC_APPROVAL];
+  if (!exactApprovalMatches(proof, context, toolName, args)) return false;
+  proof.used = true;
+  return true;
+}
+
+export function hasExactCatastrophicApproval(context, toolName, args) {
+  return exactApprovalMatches(
+    context?.[EXACT_CATASTROPHIC_APPROVAL],
+    context,
+    toolName,
+    args
+  );
+}
+
+export function consumeExactManualApproval(context, toolName, args) {
+  const proof = context?.[EXACT_MANUAL_APPROVAL];
+  if (!exactApprovalMatches(proof, context, toolName, args)) return false;
+  proof.used = true;
+  return true;
+}
+
+function exactApprovalMatches(proof, context, toolName, args) {
+  return Boolean(
+    proof
+    && !proof.used
+    && proof.toolName === toolName
+    && proof.args === args
+    && proof.projectId === String(context?.__projectId ?? "default")
+    && proof.sessionId === String(context?.sessionId ?? "")
+    && proof.policyIdentity
+  );
 }
 
 function isTrustedCatastrophicBlock(decision) {
@@ -2444,6 +2659,20 @@ function appendApprovalNote(result, approval) {
     return { ...result, approvalNote };
   }
   return { value: result ?? null, approvalNote };
+}
+
+function privateToolEventArgs(tool, args) {
+  if (tool?.metadata?.privateInput !== true) return args;
+  const safe = sanitizeForAudit(args ?? {});
+  if (
+    safe
+    && typeof safe === "object"
+    && !Array.isArray(safe)
+    && Object.hasOwn(safe, "command")
+  ) {
+    safe.command = "[TERMINAL INPUT OMITTED]";
+  }
+  return safe;
 }
 
 function checkpointEvidence(capture) {

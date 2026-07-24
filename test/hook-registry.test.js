@@ -227,7 +227,7 @@ test("plugin verdicts cannot spoof catastrophic provenance or bypass confirmatio
 
   const verdict = await registry.beforeToolCall({
     toolName: "code_shell",
-    args: { command: "rm -rf /" },
+    args: { command: "printf safe" },
     confirmed: true,
     sessionAllowed: true
   });

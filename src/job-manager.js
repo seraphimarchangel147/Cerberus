@@ -397,6 +397,25 @@ export class JobManager {
     };
   }
 
+  acquireWorkspaceLease(context = {}, { ownerId } = {}) {
+    const project = authorizeContextProject(this.runtime, context, {
+      includeArchived: false,
+      requireSession: true
+    });
+    return reserveWorkspaceLease(this, project, ownerId);
+  }
+
+  acquireProjectWorkspaceLease(projectId, { ownerId } = {}) {
+    const id = String(projectId ?? "").trim().toLowerCase();
+    const project = this.runtime.projects?.authorize?.(id, {
+      includeArchived: false
+    });
+    if (!project || project.status !== "active") {
+      throw new Error(`Project '${id || "[invalid]"}' cannot hold a workspace lease.`);
+    }
+    return reserveWorkspaceLease(this, project, ownerId);
+  }
+
   _linkParentAbort(record, signal) {
     if (!signal?.addEventListener) return;
     const jobId = record.id;
@@ -932,6 +951,53 @@ export class JobManager {
   }
 }
 
+function reserveWorkspaceLease(manager, project, ownerId) {
+  const owner = String(ownerId ?? "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(owner)) {
+    throw new TypeError("Workspace lease ownerId is invalid.");
+  }
+  const required = [{
+    resource: `project/${project.id}/workspace`,
+    mode: "write"
+  }];
+  for (const record of manager.store.listAll({ limit: 2_000 })) {
+    if (
+      (record.status === "running" || record.status === "cancel_requested")
+      && lockSetsConflict(record.resourceLocks, required)
+    ) {
+      throw new Error(
+        `Workspace lease conflicts with active durable job '${record.id}'.`
+      );
+    }
+  }
+  const state = privateState(manager);
+  for (const lease of state.quarantined.values()) {
+    if (lockSetsConflict(lease.resourceLocks, required)) {
+      throw new Error("Workspace lease conflicts with a quarantined invocation.");
+    }
+  }
+  for (const lease of state.foreground.values()) {
+    if (lockSetsConflict(lease.resourceLocks, required)) {
+      throw new Error("Workspace lease conflicts with another active invocation.");
+    }
+  }
+  const leaseId = crypto.randomUUID();
+  state.foreground.set(leaseId, {
+    owner: manager,
+    ownerId: owner,
+    persistent: true,
+    resourceLocks: required
+  });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    state.foreground.delete(leaseId);
+    manager._scheduleDrain();
+    manager._releaseSchedulerLeaseIfIdle();
+  };
+}
+
 export function registerJobTools(registry, runtime) {
   registry.register({
     name: "job_start",
@@ -1045,6 +1111,9 @@ function normalizeJobStart(runtime, input, context) {
     const tool = runtime.tools.get(target);
     if (!tool || typeof tool.forwardInvocation === "function") {
       throw new Error(`Direct job target '${target}' is unavailable.`);
+    }
+    if (tool.metadata?.durableJob === false) {
+      throw new Error(`Direct job target '${target}' cannot run as a durable job.`);
     }
     directTool = tool;
     args = clonePlainJsonObject(source.arguments ?? {}, "job arguments");

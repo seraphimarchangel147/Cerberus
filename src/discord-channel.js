@@ -684,7 +684,10 @@ export class DiscordChannel {
     if (!action?.id || !channelId || this.approvalPrompts.has(action.id)) return null;
 
     const card = catastrophicApprovalEmbed(action);
-    const components = approvalComponents(action.id);
+    const manualApproval = runtime?.tools?.get?.(action.toolName)?.manualApproval === true;
+    const components = approvalComponents(action.id, {
+      allowSession: !manualApproval
+    });
     const message = await this.rest(`/channels/${channelId}/messages`, {
       method: "POST",
       body: { embeds: [card], components }
@@ -729,6 +732,15 @@ export class DiscordChannel {
     }
     if (choice === "session" && !action.context?.sessionId) {
       return this.replyToInteraction(interaction, "This action has no session to allow.");
+    }
+    if (
+      choice === "session"
+      && runtime.tools?.get?.(action.toolName)?.manualApproval === true
+    ) {
+      return this.replyToInteraction(
+        interaction,
+        "This action requires a one-time human approval."
+      );
     }
 
     const displayName = approvalDisplayName(interaction);
@@ -1038,14 +1050,21 @@ function isPendingApprovalInteraction(interaction) {
   return interaction?.type === 3 && /^pa:(?:approve|deny|session):/.test(String(interaction?.data?.custom_id ?? ""));
 }
 
-function approvalComponents(actionId) {
+function approvalComponents(actionId, { allowSession = true } = {}) {
+  const components = [
+    { type: 2, style: 3, label: "Approve Once", custom_id: `pa:approve:${actionId}` }
+  ];
+  if (allowSession) {
+    components.push(
+      { type: 2, style: 2, label: "Allow for session", custom_id: `pa:session:${actionId}` }
+    );
+  }
+  components.push(
+    { type: 2, style: 4, label: "Deny", custom_id: `pa:deny:${actionId}` }
+  );
   return [{
     type: 1,
-    components: [
-      { type: 2, style: 3, label: "Approve Once", custom_id: `pa:approve:${actionId}` },
-      { type: 2, style: 2, label: "Allow for session", custom_id: `pa:session:${actionId}` },
-      { type: 2, style: 4, label: "Deny", custom_id: `pa:deny:${actionId}` }
-    ]
+    components
   }];
 }
 

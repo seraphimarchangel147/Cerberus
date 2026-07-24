@@ -156,11 +156,17 @@ test("approval is resolved before checkpointing: queued calls capture nothing, c
   const queued = [];
   const captures = [];
   let handlerCalls = 0;
+  let resolveDecision;
+  const decisionPromise = new Promise((resolve) => {
+    resolveDecision = resolve;
+  });
   registry.bindPendingActions({
     enqueue(action) {
       queued.push(action);
-      return { id: "action-checkpoint", summary: action.summary };
-    }
+      return { ...action, id: "action-checkpoint" };
+    },
+    waitForDecision: () => decisionPromise,
+    complete: () => {}
   });
   registry.bindCheckpoints({
     async beforeToolCall(request) {
@@ -182,15 +188,21 @@ test("approval is resolved before checkpointing: queued calls capture nothing, c
   // process-wide auto-approve setting used by either required test lane.
   const args = { command: "rm -rf /" };
   const context = { sessionId: "session-confirm", __turnId: "turn-confirm" };
-  const pending = await registry.invoke("code_shell", args, context);
-  assert.equal(pending.ok, true);
-  assert.equal(pending.result.status, "awaiting_confirmation");
+  const invocation = registry.invoke("code_shell", args, context);
+  while (queued.length === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
   assert.equal(queued.length, 1);
   assert.equal(captures.length, 0, "queuing is not a mutation and must not create a checkpoint");
   assert.equal(handlerCalls, 0);
 
-  const confirmed = await registry.invoke("code_shell", args, { ...context, __confirmed: true });
-  assert.equal(confirmed.ok, true);
+  resolveDecision({
+    decision: "approve",
+    decider: "checkpoint-test",
+    approvedVia: "test"
+  });
+  const confirmed = await invocation;
+  assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
   assert.equal(captures.length, 1);
   assert.equal(captures[0].toolName, "code_shell");
   assert.deepEqual(captures[0].args, args);

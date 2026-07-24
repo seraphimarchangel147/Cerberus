@@ -4054,7 +4054,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
     // takes effect immediately.
     __setChannels(c) { channels = c; },
     get __heartbeatHandle() { return heartbeatHandle ?? undefined; },
-    listen() {
+    async listen() {
+      await runtime.terminalReconcilePromise;
       return new Promise((resolve) => {
         server.listen(port, host, () => {
           channels?.start();
@@ -4155,9 +4156,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         runtime.mcp?.disconnectAll?.().catch(() => {});
         server.close((error) => (error ? reject(error) : resolve()));
       });
-      await runtime.kanban?.close?.();
-      await runtime.observations?.close?.();
-      await runtime.sessionIndex?.close?.();
+      if (typeof runtime.close === "function") {
+        await runtime.close();
+      } else {
+        await runtime.kanban?.close?.();
+        await runtime.observations?.close?.();
+        await runtime.sessionIndex?.close?.();
+      }
     }
   };
 

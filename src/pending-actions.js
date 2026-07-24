@@ -144,13 +144,16 @@ export class PendingActionStore {
     summary,
     reason,
     severity,
-    approvalIdentity
+    approvalIdentity,
+    privateInput = false
   }) {
     if (!validToolName(toolName)) {
       throw new TypeError("Pending action toolName must be an ASCII tool name.");
     }
     const persistedContext = normalizeActionContext(serializableContext(context));
-    const argsReplayable = persistedArgumentsRemainExecutable(args);
+    const argsReplayable = privateInput === true
+      ? false
+      : persistedArgumentsRemainExecutable(args);
     const action = {
       id: createId("act"),
       toolName,
@@ -160,6 +163,7 @@ export class PendingActionStore {
       reason: reason ?? null,
       severity: severity ?? null,
       approvalIdentity: approvalIdentity ?? null,
+      ...(privateInput === true ? { privateInput: true } : {}),
       argsReplayable,
       status: "pending",
       createdAt: nowIso(),
@@ -660,7 +664,24 @@ function sanitizePendingPersistence(value) {
   if (Array.isArray(value)) {
     return value.map((item) => sanitizePendingPersistence(item));
   }
-  const sanitized = sanitizeForAudit(value);
+  let source = value;
+  if (isPlainObject(value) && value.privateInput === true) {
+    source = {
+      ...value,
+      args: { privateInput: "[OMITTED]" },
+      argsReplayable: false
+    };
+  } else if (isPlainObject(value?.action) && value.action.privateInput === true) {
+    source = {
+      ...value,
+      action: {
+        ...value.action,
+        args: { privateInput: "[OMITTED]" },
+        argsReplayable: false
+      }
+    };
+  }
+  const sanitized = sanitizeForAudit(source);
   if (!isPlainObject(value) || !isPlainObject(sanitized)) return sanitized;
   restoreSecretReferences(value.context, sanitized.context);
   restoreSecretReferences(value.action?.context, sanitized.action?.context);
@@ -751,6 +772,7 @@ function normalizePersistedAction(value, maxBytes) {
     || !validToolName(value.toolName)
     || !isPlainObject(value.args)
     || typeof value.argsReplayable !== "boolean"
+    || (value.privateInput !== undefined && typeof value.privateInput !== "boolean")
     || !["pending", "approved", "denied"].includes(value.status)
     || !validTimestamp(value.createdAt)
     || !validBoundedString(value.summary, 1000, { allowEmpty: false })
@@ -825,6 +847,7 @@ function normalizePersistedAction(value, maxBytes) {
     reason: value.reason,
     severity: value.severity,
     approvalIdentity: value.approvalIdentity,
+    ...(value.privateInput === true ? { privateInput: true } : {}),
     argsReplayable: value.argsReplayable,
     status: value.status,
     createdAt: value.createdAt,
@@ -1224,6 +1247,18 @@ function approvalReplayBlock(runtime, action) {
     return replayBlockedOutcome(
       "The durable job approval owner is no longer live; the target was not replayed outside its scheduler.",
       "job_approval_owner_unavailable"
+    );
+  }
+  if (runtime?.tools?.get?.(action.toolName)?.manualApproval === true) {
+    return replayBlockedOutcome(
+      "This manual-only approval lost its live invocation owner; create a new request for a human to approve.",
+      "manual_approval_owner_unavailable"
+    );
+  }
+  if (action.severity === "catastrophic") {
+    return replayBlockedOutcome(
+      "This catastrophic approval lost its live invocation owner; create a new exact request for a human to approve.",
+      "catastrophic_approval_owner_unavailable"
     );
   }
   if (action.argsReplayable === false) {

@@ -17,6 +17,14 @@ const CATASTROPHIC = [
   "rm --recursive --force /home/*",
   "rm -rf /mnt/c/Users",
   "rm -rf /tmp",
+  "rm -rf .",
+  "rm -rf /workspace",
+  "/bin/rm -rf /workspace/cache",
+  "command rm -rf ./",
+  "env SAFE=1 rm -rf /workspace",
+  "sh -c 'rm -rf /workspace'",
+  "git clean -fdx",
+  "eval 'rm -rf /workspace'",
   "wsl.exe --shutdown",
   "shutdown -h now",
   "reboot",
@@ -42,7 +50,7 @@ const CATASTROPHIC = [
   "boom(){ boom|boom& };boom"
 ];
 
-test("classifyCommand recognizes every catastrophic class, including bash wrapping", () => {
+test("classifyCommand recognizes every catastrophic class and shell wrapper", () => {
   for (const command of CATASTROPHIC) {
     const result = classifyCommand(command);
     assert.equal(result.catastrophic, true, command);

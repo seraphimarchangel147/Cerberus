@@ -54,6 +54,11 @@ import {
   WorkspaceTimelineStore,
   registerWorkspaceTimelineTools
 } from "./workspace-timeline-store.js";
+import { TerminalSessionStore } from "./terminal-session-store.js";
+import {
+  registerTerminalSessionTools,
+  TerminalSessionManager
+} from "./terminal-session-manager.js";
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
@@ -456,6 +461,27 @@ export class AbiRuntime {
       store: this.jobStore,
       ...(options.jobOptions ?? {})
     });
+    if (options.terminals === false) {
+      this.terminalStore = null;
+      this.terminals = null;
+    } else {
+      this.terminalStore = options.terminalStore ?? new TerminalSessionStore({
+        dataDir: secretsDataDir,
+        ...(options.terminalStoreOptions ?? {})
+      });
+      this.terminals = options.terminals ?? new TerminalSessionManager({
+        runtime: this,
+        store: this.terminalStore,
+        projects: this.projects,
+        profiles: this.profiles,
+        secrets: this.secrets,
+        timeline: this.timeline,
+        jobCoordinator: this.jobs,
+        env: options.env ?? process.env,
+        adapter: options.terminalAdapter,
+        ...(options.terminalOptions ?? {})
+      });
+    }
     // Computer-use log is always allocated so the dashboard can render the
     // log surface even when the feature is off (showing zero sessions).
     // The actual tools only register when OPENAGI_COMPUTER_USE=1.
@@ -801,6 +827,7 @@ export class AbiRuntime {
       registerSolutionRecipeTools(this.tools, this);
       registerSemanticBrowserTools(this.tools, this);
       registerWorkspaceTimelineTools(this.tools, this);
+      registerTerminalSessionTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
       // tests, and gated shell. Governed delegation registers separately.
       registerCodeTools(this.tools, this);
@@ -1636,6 +1663,9 @@ export class AbiRuntime {
         this.sessionIndex?.rebuildPromise
       ]);
       settled.push(...await Promise.allSettled([
+        this.terminals?.close?.()
+      ]));
+      settled.push(...await Promise.allSettled([
         this.jobs?.close?.(),
         this.kanban?.close?.(),
         this.artifacts?.close?.(),
@@ -1669,7 +1699,22 @@ export function createDefaultRuntime(options = {}) {
       { backfill: true }
     );
   }
-  runtime.jobs?.resume?.();
+  runtime.terminalReconcilePromise = Promise.resolve()
+    .then(() => runtime.terminals?.reconcile?.())
+    .then((result) => {
+      runtime.jobs?.resume?.();
+      return result;
+    })
+    .catch((error) => {
+      console.warn(
+        `[persistent-terminals] restart reconciliation failed: ${
+          String(error?.message ?? error ?? "unknown error").slice(0, 500)
+        }`
+      );
+      throw error;
+    });
+  runtime.tools?.bindStartupBarrier?.(runtime.terminalReconcilePromise);
+  void runtime.terminalReconcilePromise.catch(() => {});
   // First boot / backfill: when the session index is empty (missing DB, or a
   // DB file created empty), seed it from the transcripts already on disk.
   // Non-blocking and best-effort so a large history can't hold up startup;

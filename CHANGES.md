@@ -779,3 +779,16 @@ PROFILES AND GRANTS COMPLETE
 - Added project-scoped quota and garbage collection with recovery-before retention and explicit bounded safety debt, plus hostile persistence, cross-project, integrity, TOCTOU, opaque-transition, Windows case-fold, runtime, prompt, and both-policy regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1593/1594 tests with zero failures and one intentional Windows permission-mode skip.
 WORKSPACE TIMELINE COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: sandboxed persistent terminals (Codex)
+
+- Added opt-in project- and chat-scoped persistent terminal sessions for interactive shells, REPLs, debuggers, and bounded long-running work, with start, list, status, send, read, signal, and close agent tools documented in the system prompt.
+- Required explicit human approval for every session start and exact one-shot human approval for every catastrophic command; public confirmation fields, inherited approvals, session allowances, nested skill calls, and both auto-approval modes cannot forge or reuse authority.
+- Isolated sessions in digest-pinned local Docker containers with no image pulls, host networking, host fallback, added capabilities, writable root, or remote daemon; mounted only the authorized project workspace and enforced nonroot identity, process, CPU, memory, swap, file-descriptor, and temporary-storage limits.
+- Bounded global and per-project sessions, queued input, command count, lifetime input and output, live output rings, callback floods, idle time, and total lifetime; sanitized terminal control sequences and labeled every output slice as untrusted.
+- Kept raw commands off JSONL, snapshots, hooks, lifecycle events, transcripts, and pending-action persistence while rechecking managed and pattern-shaped secrets immediately before each serialized write and across fragmented output.
+- Added durable metadata through JSONL events and verified atomic snapshots, bounded journal compaction, cross-process locks, manager ownership leases, exact container labels, restart cursor continuity, orphan cleanup, and fail-closed startup reconciliation before any mutating tool or hosted listener becomes available.
+- Coordinated foreground, background-job, terminal, and workspace-timeline ownership; retained project quarantine until failed container removal is verified, rechecked live project and profile authority, and closed terminals before broader runtime teardown.
+- Added adapter, store, manager, policy, approval, privacy, resource-bound, revocation, restart, corruption, shutdown, prompt, setup, and both-policy regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1611/1612 tests with zero failures and one intentional Windows permission-mode skip.
+PERSISTENT TERMINALS COMPLETE

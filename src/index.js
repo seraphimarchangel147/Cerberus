@@ -93,6 +93,26 @@ export {
   WorkspaceTimelineStore,
   registerWorkspaceTimelineTools
 } from "./workspace-timeline-store.js";
+export {
+  TERMINAL_SESSION_STATUSES,
+  TerminalSessionConflictError,
+  TerminalSessionLeaseError,
+  TerminalSessionStore,
+  TerminalSessionStoreError,
+  isPinnedTerminalImage,
+  isTerminalSessionActive
+} from "./terminal-session-store.js";
+export {
+  DockerTerminalAdapter,
+  TerminalContainerError,
+  buildDockerTerminalRunArgs
+} from "./terminal-container-adapter.js";
+export {
+  DEFAULT_TERMINAL_LIMITS,
+  TerminalSessionManager,
+  TerminalSessionManagerError,
+  registerTerminalSessionTools
+} from "./terminal-session-manager.js";
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";
 export {
