@@ -120,13 +120,12 @@ test("cap overflow reserves all bridges and leaves every capped target reachable
     name: target,
     arguments: { value: "reachable" }
   }, context);
-  assert.deepEqual(call, {
-    ok: true,
-    result: {
-      name: target,
-      args: { value: "reachable" }
-    }
+  assert.equal(call.ok, true);
+  assert.deepEqual(call.result, {
+    name: target,
+    args: { value: "reachable" }
   });
+  assert.equal(call.outcome.status, "succeeded");
 });
 
 test("only shapes direct schemas but does not revoke always-direct or internal tools", async (t) => {

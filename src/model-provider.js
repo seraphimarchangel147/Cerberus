@@ -22,6 +22,11 @@ import {
   estimateContextTokens,
   markLiveContextSyntheticTurn
 } from "./memory-condenser.js";
+import {
+  semanticToolError,
+  snapshotToolValue,
+  toolFailureFingerprint
+} from "./tool-outcome.js";
 import { summarizeText } from "./utils.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
@@ -40,6 +45,7 @@ const DEFAULT_PROVIDER_MAX_RETRIES = 3;
 const DEFAULT_PROVIDER_RETRY_BASE_MS = 500;
 const MAX_PROVIDER_RETRY_DELAY_MS = 8000;
 const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 8000;
+const MIN_TRUNCATED_TOOL_OUTPUT_CHARS = 200;
 const DEFAULT_CONTEXT_COMPACT_CHARS = 120000;
 const DEFAULT_CONTEXT_KEEP_RECENT_HOPS = 4;
 const DEFAULT_CONTEXT_DIGEST_CHARS = 4000;
@@ -282,9 +288,12 @@ function applyIterationSettings(provider, options) {
   );
   provider.retrySleep = options.retrySleep;
   provider.retryRandom = options.retryRandom;
-  provider.maxToolOutputChars = positiveInteger(
-    options.maxToolOutputChars ?? process.env.OPENAGI_MAX_TOOL_OUTPUT_CHARS,
-    DEFAULT_MAX_TOOL_OUTPUT_CHARS
+  provider.maxToolOutputChars = Math.max(
+    MIN_TRUNCATED_TOOL_OUTPUT_CHARS,
+    positiveInteger(
+      options.maxToolOutputChars ?? process.env.OPENAGI_MAX_TOOL_OUTPUT_CHARS,
+      DEFAULT_MAX_TOOL_OUTPUT_CHARS
+    )
   );
   provider.contextCompactChars = positiveInteger(
     options.contextCompactChars ?? process.env.OPENAGI_CONTEXT_COMPACT_CHARS,
@@ -1065,30 +1074,119 @@ export function reconcileOrphanedToolCalls(conversation, format = "auto") {
 }
 
 export function capToolOutput(value, { maxChars = DEFAULT_MAX_TOOL_OUTPUT_CHARS, store } = {}) {
-  const output = JSON.stringify(value);
+  let safeValue;
+  try {
+    safeValue = snapshotToolValue(value);
+  } catch {
+    safeValue = semanticToolError(
+      null,
+      "Tool output could not be safely serialized.",
+      { code: "tool_result_not_serializable" }
+    );
+  }
+  const output = JSON.stringify(safeValue);
   if (typeof output !== "string" || output.length <= maxChars) {
     return { output, ref: null, truncated: false, originalChars: output?.length ?? 0 };
   }
+  if (
+    !Number.isInteger(Number(maxChars))
+    || Number(maxChars) < MIN_TRUNCATED_TOOL_OUTPUT_CHARS
+  ) {
+    throw new RangeError(
+      `maxChars must be at least ${MIN_TRUNCATED_TOOL_OUTPUT_CHARS} when tool output requires truncation.`
+    );
+  }
 
   let ref = null;
-  try { ref = (store ?? defaultToolOutputStore()).put(output); } catch { /* preview remains usable */ }
-  const target = Math.max(1, Math.trunc(maxChars));
-  let retained = Math.max(0, target - 100);
-  let marker = "";
-  for (let i = 0; i < 3; i += 1) {
-    const elided = Math.max(0, output.length - retained);
-    marker = `\n[...${elided} chars elided; full output ${ref ? `at ref:${ref}` : "unavailable"}...]\n`;
-    retained = Math.max(0, target - marker.length);
+  try {
+    const outputStore = store === undefined ? defaultToolOutputStore() : store;
+    if (typeof outputStore?.put === "function") ref = outputStore.put(output);
+  } catch {
+    // The bounded semantic preview remains usable without durable storage.
   }
-  const headChars = Math.ceil(retained / 2);
-  const tailChars = Math.floor(retained / 2);
-  const preview = `${output.slice(0, headChars)}${marker}${tailChars ? output.slice(-tailChars) : ""}`;
+  const target = Math.max(1, Math.trunc(maxChars));
+  const compactOutcome = compactToolOutcome(safeValue?.outcome);
+  const base = {
+    truncated: true,
+    originalChars: output.length,
+    ...(ref ? { ref } : {}),
+    ...(compactOutcome ? { outcome: compactOutcome } : {})
+  };
+  let previewChars = Math.max(0, target - JSON.stringify({ ...base, preview: "" }).length);
+  let encoded;
+  do {
+    const headChars = Math.ceil(previewChars / 2);
+    const tailChars = Math.floor(previewChars / 2);
+    const preview = `${output.slice(0, headChars)}${tailChars ? output.slice(-tailChars) : ""}`;
+    encoded = JSON.stringify({
+      ...base,
+      ...(preview ? { preview } : {})
+    });
+    previewChars = Math.max(0, previewChars - Math.max(1, encoded.length - target));
+  } while (encoded.length > target && previewChars > 0);
+  if (encoded.length > target) {
+    encoded = smallestValidTruncation(base, target);
+  }
   return {
-    output: preview.slice(0, target),
+    output: encoded,
     ref,
     truncated: true,
     originalChars: output.length
   };
+}
+
+function compactToolOutcome(outcome) {
+  if (!outcome || typeof outcome !== "object" || Array.isArray(outcome)) return null;
+  const references = Array.isArray(outcome.evidence)
+    ? outcome.evidence
+      .filter((item) => typeof item === "string")
+      .slice(0, 4)
+      .map((item) => item.slice(0, 120))
+    : [];
+  return {
+    status: String(outcome.status ?? "failed").slice(0, 16),
+    code: String(outcome.code ?? "tool_error").slice(0, 64),
+    changed: outcome.changed === true ? true : outcome.changed === false ? false : null,
+    ...(references.length > 0 ? { evidence: references } : {}),
+    verification: String(outcome.verification?.status ?? "not_requested").slice(0, 24)
+  };
+}
+
+function smallestValidTruncation(base, target) {
+  const candidates = [];
+  const outcome = base.outcome ? { ...base.outcome } : null;
+  if (outcome?.evidence) {
+    for (let keep = outcome.evidence.length; keep >= 0; keep -= 1) {
+      candidates.push({
+        ...base,
+        outcome: {
+          ...outcome,
+          ...(keep > 0 ? { evidence: outcome.evidence.slice(0, keep) } : {})
+        }
+      });
+    }
+  } else {
+    candidates.push(base);
+  }
+  if (outcome) {
+    candidates.push({
+      truncated: true,
+      ...(base.ref ? { ref: base.ref } : {}),
+      outcome: {
+        status: outcome.status,
+        code: outcome.code
+      }
+    });
+  }
+  candidates.push(
+    { truncated: true, ...(base.ref ? { ref: base.ref } : {}) },
+    { truncated: true }
+  );
+  for (const candidate of candidates) {
+    const encoded = JSON.stringify(candidate);
+    if (encoded.length <= target) return encoded;
+  }
+  return target >= 4 ? "null" : "0";
 }
 
 function transcriptChars(conversation) {
@@ -1718,6 +1816,7 @@ export class OpenAIResponsesProvider {
         ? []
         : toolRegistry?.toOpenAITools?.() ?? [];
     const toolCalls = [];
+    const completedToolCallIds = new Map();
 
     const deadline = this.now() + (maxTurnSeconds * 1000);
     const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
@@ -1802,10 +1901,12 @@ export class OpenAIResponsesProvider {
       successfulModelHops += 1;
       addProviderUsage(usageAccumulator, response?.usage);
       previousUsage = response?.usage ?? null;
-      const calls = extractFunctionCalls(response);
+      const callBatch = collectOpenAIFunctionCalls(response);
+      const calls = callBatch.calls;
       const responseText = extractResponseText(response);
       if (responseText) lastText = responseText;
-      const wantsContinuation = openAIWantsContinuation(response, calls);
+      const wantsContinuation = openAIWantsContinuation(response, calls)
+        || callBatch.notices.length > 0;
       if (!wantsContinuation) {
         const goalDecision = await evaluateGoalTurn({
           provider: this,
@@ -1846,15 +1947,21 @@ export class OpenAIResponsesProvider {
 
       // Append the assistant's function_call items so the model can see its own
       // last turn on the next hop (replaces what previous_response_id would've done).
-      for (const item of response.output ?? []) {
-        if (item.type === "function_call") {
+      for (const call of calls) {
+        if (!completedToolCallIds.has(call.call_id)) {
           conversationInput.push({
             type: "function_call",
-            call_id: item.call_id,
-            name: item.name,
-            arguments: item.arguments
+            call_id: call.call_id,
+            name: call.name,
+            arguments: call.arguments
           });
         }
+      }
+      if (callBatch.notices.length > 0) {
+        conversationInput.push({
+          role: "user",
+          content: providerToolProtocolNotice(callBatch.notices)
+        });
       }
 
       for (const call of calls) {
@@ -1862,32 +1969,69 @@ export class OpenAIResponsesProvider {
           stopReason = "goal-preempted";
           break iterationLoop;
         }
-        const parsedArgs = safeParseJson(call.arguments) ?? {};
+        const parsed = parseFunctionCallArguments(call.arguments);
+        const parsedArgs = parsed.value;
         let invocation;
-        try {
-          invocation = await withinTurn(this, deadline, () => (
-            toolRegistry?.invoke?.(call.name, parsedArgs, context)
-              ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
-          ), context);
-        } catch (error) {
-          if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
-          if (!deadlineExpired(this, deadline, error)) throw error;
-          stopReason = "turn-timeout";
-          break iterationLoop;
+        const duplicate = parsed.ok
+          ? duplicateToolCall(completedToolCallIds, call.call_id, call.name, parsedArgs)
+          : null;
+        if (duplicate) {
+          invocation = duplicate.invocation;
+        } else if (!parsed.ok) {
+          invocation = semanticToolError(
+            null,
+            "Tool arguments must be a valid JSON object; the tool was not invoked.",
+            { code: "invalid_tool_arguments" }
+          );
+        } else {
+          try {
+            invocation = await withinTurn(this, deadline, () => (
+              toolRegistry?.invoke?.(
+                call.name,
+                parsedArgs,
+                providerToolCallContext(context, call.call_id, call.name, parsedArgs)
+              )
+                ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
+            ), context);
+          } catch (error) {
+            if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
+            if (!deadlineExpired(this, deadline, error)) throw error;
+            stopReason = "turn-timeout";
+            break iterationLoop;
+          }
         }
-        goalContinuationRevision = revisionAfterGoalControlTool(
-          context,
-          call.name,
-          invocation,
-          goalContinuationRevision
-        );
+        if (!duplicate) {
+          rememberToolCall(completedToolCallIds, call.call_id, call.name, parsedArgs, invocation);
+        }
+        if (parsed.ok) {
+          goalContinuationRevision = revisionAfterGoalControlTool(
+            context,
+            call.name,
+            invocation,
+            goalContinuationRevision
+          );
+        }
         toolCalls.push({ name: call.name, arguments: parsedArgs, result: invocation });
-        const result = invocation.ok ? invocation.result : { error: invocation.error };
+        if (duplicate) {
+          conversationInput.push({
+            role: "user",
+            content: `[tool-protocol] Duplicate tool call id ${JSON.stringify(call.call_id)} was not dispatched again.`
+          });
+          continue;
+        }
+        const rawResult = invocation.ok ? invocation.result : null;
+        const result = modelVisibleToolInvocation(invocation);
         // A tool that returns a screenshot (computer_screenshot) carries the PNG
         // as base64. function_call_output is text-only, so the model can't see
         // it there — strip the bytes from the JSON output and re-attach them as
         // a real input_image in a following user turn so the model can ground on it.
-        const image = invocation.ok && result && typeof result === "object" && result.image && result.format ? result : null;
+        const image = invocation.ok
+          && rawResult
+          && typeof rawResult === "object"
+          && rawResult.image
+          && rawResult.format
+          ? rawResult
+          : null;
         if (image) {
           const { image: bytes, ...meta } = result;
           conversationInput.push({
@@ -2211,6 +2355,7 @@ export class AnthropicProvider {
     ];
 
     const toolCalls = [];
+    const completedToolCallIds = new Map();
     const deadline = this.now() + (maxTurnSeconds * 1000);
     const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
     let response;
@@ -2295,9 +2440,19 @@ export class AnthropicProvider {
       successfulModelHops += 1;
       addProviderUsage(usageAccumulator, response?.usage);
       previousUsage = response?.usage ?? null;
-      convo.push({ role: "assistant", content: response.content ?? [] });
+      const filteredToolContent = filterAnthropicToolContent(
+        response.content ?? [],
+        completedToolCallIds
+      );
+      const assistantContent = filteredToolContent.content.length > 0
+        ? filteredToolContent.content
+        : [{
+            type: "text",
+            text: "[tool-protocol] Invalid or duplicate tool calls were suppressed."
+          }];
+      convo.push({ role: "assistant", content: assistantContent });
 
-      const toolUses = (response.content ?? []).filter((c) => c.type === "tool_use");
+      const toolUses = assistantContent.filter((c) => c.type === "tool_use");
       const responseText = extractAnthropicText(response);
       if (responseText) lastText = responseText;
       const wantsContinuation = anthropicWantsContinuation(response, toolUses);
@@ -2344,31 +2499,61 @@ export class AnthropicProvider {
           stopReason = "goal-preempted";
           break iterationLoop;
         }
+        const parsedArgs = plainToolArguments(use.input);
         let invocation;
-        try {
-          invocation = await withinTurn(this, deadline, () => (
-            toolRegistry?.invoke?.(use.name, use.input ?? {}, context)
-              ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
-          ), context);
-        } catch (error) {
-          if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
-          if (!deadlineExpired(this, deadline, error)) throw error;
-          stopReason = "turn-timeout";
-          break iterationLoop;
+        if (!parsedArgs.ok) {
+          invocation = semanticToolError(
+            null,
+            "Tool arguments must be a JSON object; the tool was not invoked.",
+            { code: "invalid_tool_arguments" }
+          );
+        } else {
+          try {
+            invocation = await withinTurn(this, deadline, () => (
+              toolRegistry?.invoke?.(
+                use.name,
+                parsedArgs.value,
+                providerToolCallContext(context, use.id, use.name, parsedArgs.value)
+              )
+                ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
+            ), context);
+          } catch (error) {
+            if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
+            if (!deadlineExpired(this, deadline, error)) throw error;
+            stopReason = "turn-timeout";
+            break iterationLoop;
+          }
         }
-        goalContinuationRevision = revisionAfterGoalControlTool(
-          context,
+        rememberToolCall(
+          completedToolCallIds,
+          use.id,
           use.name,
-          invocation,
-          goalContinuationRevision
+          parsedArgs.ok ? parsedArgs.value : { invalidArguments: true },
+          invocation
         );
+        if (parsedArgs.ok) {
+          goalContinuationRevision = revisionAfterGoalControlTool(
+            context,
+            use.name,
+            invocation,
+            goalContinuationRevision
+          );
+        }
         toolCalls.push({ name: use.name, arguments: use.input, result: invocation });
         toolResults.push({
           type: "tool_result",
           tool_use_id: use.id,
-          content: modelToolOutput(this, context, invocation.ok ? invocation.result : { error: invocation.error }),
+          content: modelToolOutput(this, context, modelVisibleToolInvocation(invocation)),
           is_error: !invocation.ok
         });
+      }
+      if (filteredToolContent.notices.length > 0) {
+        const duplicateNotice = {
+          type: "text",
+          text: providerToolProtocolNotice(filteredToolContent.notices)
+        };
+        if (toolUses.length > 0) toolResults.push(duplicateNotice);
+        else convo.push({ role: "user", content: [duplicateNotice] });
       }
       if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
@@ -2800,14 +2985,7 @@ export function extractResponseText(response) {
 }
 
 export function extractFunctionCalls(response) {
-  if (!response?.output) return [];
-  return response.output
-    .filter((item) => item.type === "function_call")
-    .map((item) => ({
-      call_id: item.call_id,
-      name: item.name,
-      arguments: item.arguments
-    }));
+  return collectOpenAIFunctionCalls(response).calls;
 }
 
 function safeParseJson(value) {
@@ -2817,6 +2995,268 @@ function safeParseJson(value) {
   } catch {
     return null;
   }
+}
+
+function parseFunctionCallArguments(value) {
+  if (typeof value !== "string") return plainToolArguments(value);
+  try {
+    return plainToolArguments(JSON.parse(value));
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+function plainToolArguments(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, value: null };
+  }
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return { ok: false, value: null };
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Object.values(descriptors).some((descriptor) => !Object.hasOwn(descriptor, "value"))) {
+      return { ok: false, value: null };
+    }
+  } catch {
+    return { ok: false, value: null };
+  }
+  return { ok: true, value };
+}
+
+function toolCallSignature(name, args) {
+  if (!validProviderToolName(name)) return null;
+  try {
+    return toolFailureFingerprint(name, args ?? {});
+  } catch {
+    return null;
+  }
+}
+
+function duplicateToolCall(ledger, callId, name, args) {
+  const id = validProviderCallId(callId) ? callId : null;
+  const prior = id ? ledger.get(id) : null;
+  if (!prior) return null;
+  const signature = toolCallSignature(name, args);
+  const conflict = !signature || signature !== prior.signature;
+  return {
+    invocation: semanticToolError(
+      null,
+      conflict
+        ? "A provider reused a tool call id with different arguments; the call was not dispatched."
+        : "This provider tool call was already completed and was not dispatched again.",
+      {
+        code: conflict ? "tool_call_id_conflict" : "duplicate_tool_call_id",
+        status: "blocked",
+        changed: false,
+        evidence: prior.invocation?.outcome?.evidence ?? [],
+        nextSteps: ["Issue a new tool call with a fresh provider call id."]
+      }
+    )
+  };
+}
+
+function rememberToolCall(ledger, callId, name, args, invocation) {
+  const id = validProviderCallId(callId) ? callId : null;
+  if (!id || ledger.has(id)) return false;
+  const signature = toolCallSignature(name, args);
+  if (!signature) return false;
+  ledger.set(id, {
+    signature,
+    invocation
+  });
+  return true;
+}
+
+function providerToolCallContext(context, callId, name, args) {
+  if (!validProviderCallId(callId)) {
+    throw new TypeError("Provider tool call id is invalid.");
+  }
+  const id = callId;
+  const signature = toolCallSignature(name, args) ?? "unavailable";
+  const idempotencyKey = createHash("sha256")
+    .update(JSON.stringify([
+      String(context?.sessionId ?? ""),
+      id,
+      signature
+    ]))
+    .digest("hex");
+  return {
+    ...(context ?? {}),
+    __providerToolCallId: id,
+    __idempotencyKey: `provider_call_${idempotencyKey.slice(0, 32)}`
+  };
+}
+
+function filterAnthropicToolContent(content, completed) {
+  const filtered = [];
+  const notices = [];
+  const seen = new Map();
+  for (const block of Array.isArray(content) ? content : []) {
+    if (block?.type !== "tool_use") {
+      filtered.push(block);
+      continue;
+    }
+    if (!validProviderCallId(block.id) || !validProviderToolName(block.name)) {
+      notices.push("invalid_tool_call_identity");
+      continue;
+    }
+    const id = block.id;
+    const signature = toolCallSignature(block.name, block.input ?? {});
+    if (!signature) {
+      notices.push("invalid_tool_call_arguments");
+      continue;
+    }
+    const prior = completed.get(id) ?? seen.get(id);
+    if (prior) {
+      notices.push(
+        prior.signature === signature
+          ? "duplicate_tool_call_id"
+          : "tool_call_id_conflict"
+      );
+      continue;
+    }
+    seen.set(id, { signature });
+    filtered.push({
+      ...block,
+      id
+    });
+  }
+  return {
+    content: filtered,
+    notices
+  };
+}
+
+function collectOpenAIFunctionCalls(response) {
+  const calls = [];
+  const notices = [];
+  const seen = new Map();
+  for (const item of Array.isArray(response?.output) ? response.output : []) {
+    if (item?.type !== "function_call") continue;
+    if (!validProviderCallId(item.call_id) || !validProviderToolName(item.name)) {
+      notices.push("invalid_tool_call_identity");
+      continue;
+    }
+    const signature = rawOpenAIToolCallSignature(item.name, item.arguments);
+    if (!signature) {
+      notices.push("invalid_tool_call_arguments");
+      continue;
+    }
+    const prior = seen.get(item.call_id);
+    if (prior) {
+      notices.push(
+        prior.signature === signature
+          ? "duplicate_tool_call_id"
+          : "tool_call_id_conflict"
+      );
+      continue;
+    }
+    seen.set(item.call_id, { signature });
+    calls.push({
+      call_id: item.call_id,
+      name: item.name,
+      arguments: item.arguments
+    });
+  }
+  return {
+    calls,
+    notices
+  };
+}
+
+function rawOpenAIToolCallSignature(name, rawArguments) {
+  if (!validProviderToolName(name)) return null;
+  const type = typeof rawArguments;
+  if (
+    type !== "string"
+    && (rawArguments === null || type !== "object")
+  ) {
+    return null;
+  }
+  try {
+    if (type !== "string") {
+      return toolFailureFingerprint(name, rawArguments);
+    }
+    return createHash("sha256")
+      .update(name)
+      .update("\0")
+      .update(rawArguments)
+      .digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function validProviderCallId(value) {
+  return typeof value === "string"
+    && /^[\x21-\x7e]{1,240}$/u.test(value);
+}
+
+function validProviderToolName(value) {
+  return typeof value === "string"
+    && /^[A-Za-z0-9_.$:/-]{1,128}$/u.test(value);
+}
+
+function providerToolProtocolNotice(notices) {
+  const codes = [...new Set(
+    (Array.isArray(notices) ? notices : [])
+      .filter((code) => (
+        typeof code === "string"
+        && /^[a-z][a-z0-9_]{0,63}$/u.test(code)
+      ))
+  )].slice(0, 8);
+  return `[tool-protocol] Tool calls were not dispatched: ${codes.join(", ") || "invalid_tool_call"}. Issue a fresh call with a unique bounded id.`;
+}
+
+function modelVisibleToolInvocation(invocation) {
+  let safeInvocation;
+  try {
+    safeInvocation = snapshotToolValue(invocation);
+  } catch {
+    return {
+      error: "Tool execution returned an unsafe result.",
+      outcome: semanticToolError(
+        null,
+        "Tool output could not be safely serialized.",
+        { code: "tool_result_not_serializable" }
+      ).outcome
+    };
+  }
+  if (!safeInvocation || typeof safeInvocation !== "object") {
+    return { error: "Tool execution returned no result." };
+  }
+  if (!safeInvocation.outcome) {
+    return safeInvocation.ok
+      ? safeInvocation.result
+      : { error: safeInvocation.error };
+  }
+  if (!safeInvocation.ok) {
+    return {
+      error: safeInvocation.error,
+      outcome: safeInvocation.outcome
+    };
+  }
+  if (
+    safeInvocation.result
+    && typeof safeInvocation.result === "object"
+    && !Array.isArray(safeInvocation.result)
+  ) {
+    const {
+      outcome: toolResultOutcome,
+      ...legacyFields
+    } = safeInvocation.result;
+    return {
+      ...legacyFields,
+      ...(toolResultOutcome !== undefined ? { toolResultOutcome } : {}),
+      outcome: safeInvocation.outcome
+    };
+  }
+  return {
+    value: safeInvocation.result ?? null,
+    outcome: safeInvocation.outcome
+  };
 }
 
 function truncate(value, max) {

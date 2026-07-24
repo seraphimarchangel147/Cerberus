@@ -192,11 +192,12 @@ test("approval is resolved before checkpointing: queued calls capture nothing, c
   const confirmed = await registry.invoke("code_shell", args, { ...context, __confirmed: true });
   assert.equal(confirmed.ok, true);
   assert.equal(captures.length, 1);
-  assert.deepEqual(captures[0], {
-    toolName: "code_shell",
-    args,
-    context: { ...context, __confirmed: true }
-  });
+  assert.equal(captures[0].toolName, "code_shell");
+  assert.deepEqual(captures[0].args, args);
+  assert.equal(captures[0].context.sessionId, context.sessionId);
+  assert.equal(captures[0].context.__turnId, context.__turnId);
+  assert.equal(captures[0].context.__confirmed, true);
+  assert.match(captures[0].context.__operationReceipt, /^operation_/u);
   assert.equal(handlerCalls, 1);
 });
 
@@ -217,7 +218,9 @@ test("non-destructive tools create no checkpoints and a disabled store stays ine
     __turnId: "turn-read",
     __scrutinyPolicy: "read-only"
   });
-  assert.deepEqual(read, { ok: true, result: "unchanged" });
+  assert.equal(read.ok, true);
+  assert.equal(read.result, "unchanged");
+  assert.equal(read.outcome.status, "succeeded");
   assert.deepEqual(store.list(), []);
 
   const disabledDir = path.join(root, "disabled-checkpoints");
@@ -395,7 +398,9 @@ test("checkpoint core tools fail closed cleanly when the runtime store is disabl
     sessionId: "session-disabled",
     __scrutinyPolicy: "read-only"
   });
-  assert.deepEqual(listed, { ok: true, result: { enabled: false, checkpoints: [] } });
+  assert.equal(listed.ok, true);
+  assert.deepEqual(listed.result, { enabled: false, checkpoints: [] });
+  assert.equal(listed.outcome.status, "succeeded");
 
   const rollback = await registry.invoke("rollback", { checkpointId: "missing" }, { __confirmed: true });
   assert.equal(rollback.ok, false);

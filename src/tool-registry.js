@@ -10,10 +10,24 @@ import {
   registerToolSearchTools,
   toolSchemaBytes
 } from "./tool-search.js";
+import {
+  ensureSemanticToolEnvelope,
+  repeatedFailureEnvelope,
+  safeToolErrorDetails,
+  safeToolErrorMessage,
+  semanticToolError,
+  semanticToolResult,
+  snapshotToolValue,
+  toolFailureFingerprint
+} from "./tool-outcome.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
+const INTERNAL_INVOCATION = Symbol("internal-invocation");
+const SEMANTIC_OUTCOME_TRACKED = Symbol("semantic-outcome-tracked");
+const REGISTRY_FAILURE_STATE = new WeakMap();
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
+const MAX_TURN_FAILURE_SCOPES = 256;
 const TOOL_SEARCH_DISCOVERY_BRIDGES = new Set(["tool_search", "tool_describe"]);
 const TOOL_SEARCH_BRIDGE_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
 const CAPABILITY_FIELDS = new Set([
@@ -35,6 +49,35 @@ const CAPABILITY_COSTS = new Set(["none", "low", "medium", "high", "unknown"]);
 const CAPABILITY_AVAILABILITIES = new Set(["available", "conditional", "unavailable", "unknown"]);
 const CAPABILITY_MAX_EXAMPLES = 8;
 const CAPABILITY_MAX_EXAMPLE_BYTES = 8192;
+const KANBAN_DOMAIN_STATUSES = Object.freeze([
+  "backlog",
+  "in-progress",
+  "blocked",
+  "review",
+  "done"
+]);
+const TASK_DOMAIN_STATUSES = Object.freeze([
+  "pending",
+  "in_progress",
+  "blocked",
+  "completed",
+  "cancelled"
+]);
+const GOAL_DOMAIN_STATUSES = Object.freeze([
+  "active",
+  "paused",
+  "completed",
+  "cancelled",
+  "deferred",
+  "cleared",
+  "none"
+]);
+const DRAFT_DOMAIN_STATUSES = Object.freeze([
+  "pending",
+  "approved",
+  "discarded",
+  "sent"
+]);
 
 export class ToolRegistry {
   constructor(options = {}) {
@@ -44,6 +87,11 @@ export class ToolRegistry {
     this.sessionAllows = new Set();
     this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
     this.toolSearchController = options.toolSearchController ?? null;
+    REGISTRY_FAILURE_STATE.set(this, {
+      contextFailures: new WeakMap(),
+      turnFailures: new Map(),
+      activeOperations: new Map()
+    });
   }
 
   register(tool) {
@@ -78,6 +126,20 @@ export class ToolRegistry {
       // Short human-readable summary used in the approval UI when the args
       // alone don't describe the action well. Optional fn(args) -> string.
       summarize: typeof tool.summarize === "function" ? tool.summarize : null,
+      // Optional agent-loop semantics. These callbacks stay inside the
+      // registry and are never serialized into provider tool definitions.
+      normalizeOutcome: typeof tool.normalizeOutcome === "function"
+        ? tool.normalizeOutcome
+        : null,
+      verifyOutcome: typeof tool.verifyOutcome === "function"
+        ? tool.verifyOutcome
+        : null,
+      // Some tools expose a business-domain `status` field whose values can
+      // overlap with semantic execution states (for example a blocked Kanban
+      // card). Such values must be explicitly declared; undeclared
+      // `status: "blocked"` remains a failed/blocked execution.
+      domainResultStatuses: normalizeDomainResultStatuses(tool.domainResultStatuses),
+      approvalRevision: createId("tool_revision"),
       // Whether invoking this tool changes state anywhere (memory, tasks,
       // cron, outbound messages, external services). Defaults to TRUE — a
       // tool must explicitly declare sideEffects: false to count as
@@ -111,6 +173,26 @@ export class ToolRegistry {
 
   bindToolSearch(controller) {
     this.toolSearchController = controller ?? null;
+  }
+
+  approvalIdentity(name, context = {}) {
+    const tool = this.tools.get(name);
+    if (!tool) return null;
+    return toolFailureFingerprint("tool_approval", {
+      name: tool.name,
+      source: tool.source,
+      parameters: tool.parameters,
+      sideEffects: tool.sideEffects,
+      needsConfirmation: tool.needsConfirmation,
+      capability: tool.capability,
+      approvalRevision: tool.approvalRevision,
+      policy: {
+        scrutiny: context?.__scrutinyPolicy ?? null,
+        allowedTools: Array.isArray(context?.__allowedTools)
+          ? [...context.__allowedTools].map(String).sort()
+          : null
+      }
+    });
   }
 
   allowForSession(sessionId, toolName) {
@@ -286,6 +368,20 @@ export class ToolRegistry {
   // best-effort — a throwing observer must never break a tool call.
   async invoke(name, args, context = {}, internalToken = null) {
     const tool = this.tools.get(name);
+    try {
+      const safeArgs = snapshotToolValue(args ?? {});
+      if (!safeArgs || typeof safeArgs !== "object" || Array.isArray(safeArgs)) {
+        throw new TypeError("Tool arguments must be a plain JSON object.");
+      }
+      args = deepFreeze(safeArgs);
+    } catch (error) {
+      return this._finalizeInvocation(tool, name, null, context, {
+        ok: false,
+        blocked: tool?.sideEffects !== false,
+        code: "invalid_tool_arguments",
+        error: safeToolErrorMessage(error, "Tool arguments are not safe JSON.")
+      });
+    }
     const forwardInvocation = tool?.forwardInvocation;
     if (typeof forwardInvocation === "function") {
       let forwarded;
@@ -295,10 +391,18 @@ export class ToolRegistry {
           throw new TypeError(`Tool ${name} forwarding must be synchronous.`);
         }
       } catch (error) {
-        return { ok: false, error: error?.message ?? String(error) };
+        return this._finalizeInvocation(tool, name, args, context, {
+          ok: false,
+          code: "forwarding_error",
+          error: safeToolErrorMessage(error, `Tool ${name} forwarding failed.`)
+        });
       }
       if (forwarded?.error) {
-        return { ok: false, error: String(forwarded.error) };
+        return this._finalizeInvocation(tool, name, args, context, {
+          ok: false,
+          code: "forwarding_error",
+          error: String(forwarded.error)
+        });
       }
       const targetName = String(forwarded?.name ?? "").trim();
       const targetArgs = forwarded?.args;
@@ -313,16 +417,39 @@ export class ToolRegistry {
         || typeof target.forwardInvocation === "function"
         || !reachableThroughRadar
       ) {
-        return { ok: false, error: `Tool ${targetName || "(missing)"} is not available through tool_call.` };
+        return this._finalizeInvocation(tool, name, args, context, {
+          ok: false,
+          code: "forward_target_unavailable",
+          error: `Tool ${targetName || "(missing)"} is not available through tool_call.`
+        });
       }
       if (!targetArgs || typeof targetArgs !== "object" || Array.isArray(targetArgs)) {
-        return { ok: false, error: "tool_call arguments must resolve to an object." };
+        return this._finalizeInvocation(tool, name, args, context, {
+          ok: false,
+          code: "invalid_tool_arguments",
+          error: "tool_call arguments must resolve to an object."
+        });
       }
       // Unwrap before the bridge emits activity or crosses any policy rail.
       // The real tool name now traverses scope, scrutiny, hooks, approvals,
       // checkpoints, dispatch, post hooks, and activity exactly once. Reset
       // the internal hook token so a bridge can never smuggle a prior pass.
       return this.invoke(targetName, targetArgs, context, null);
+    }
+    const internal = normalizeInternalInvocation(internalToken);
+    const inheritedTracking = internal.failureTracking;
+    const tracking = inheritedTracking
+      ?? this._beginFailureTracking(name, args, context, tool);
+    const ownsTracking = !inheritedTracking && tracking?.reserved === true;
+    if (tracking?.blocked) {
+      return this._finalizeInvocation(
+        tool,
+        name,
+        args,
+        context,
+        tracking.blocked,
+        { tracking: null, markTracked: true }
+      );
     }
     if (tool?.preflight) {
       try {
@@ -331,19 +458,52 @@ export class ToolRegistry {
           throw new TypeError(`Tool ${name} preflight must be synchronous.`);
         }
       } catch (error) {
-        return { ok: false, error: error?.message ?? String(error) };
+        const outcome = await this._finalizeInvocation(tool, name, args, context, {
+          ok: false,
+          code: "preflight_error",
+          error: safeToolErrorMessage(error, `Tool ${name} preflight failed.`)
+        }, { tracking, markTracked: true });
+        if (ownsTracking) this._releaseFailureTracking(tracking);
+        return outcome;
       }
     }
-    const notify = typeof context?.__onToolEvent === "function" ? context.__onToolEvent : null;
+    const operationContext = tracking?.operationReceipt
+      ? {
+          ...(context ?? {}),
+          __operationReceipt: tracking.operationReceipt
+        }
+      : context;
+    const notify = typeof operationContext?.__onToolEvent === "function"
+      ? operationContext.__onToolEvent
+      : null;
     if (notify) {
       try { notify({ phase: "start", name, args }); } catch { /* observer must not break tools */ }
     }
-    const outcome = await this._invokeGated(
-      name,
-      args,
-      context,
-      internalToken === PRE_TOOL_HOOKS_PASSED
-    );
+    let outcome;
+    try {
+      const rawOutcome = await this._invokeGated(
+        name,
+        args,
+        operationContext,
+        {
+          preToolHooksPassed: internal.preToolHooksPassed,
+          failureTracking: tracking
+        }
+      );
+      outcome = await this._finalizeInvocation(
+        tool,
+        name,
+        args,
+        operationContext,
+        rawOutcome,
+        {
+          tracking: ownsTracking ? tracking : null,
+          markTracked: ownsTracking
+        }
+      );
+    } finally {
+      if (ownsTracking) this._releaseFailureTracking(tracking);
+    }
     if (notify) {
       try {
         notify({
@@ -351,14 +511,269 @@ export class ToolRegistry {
           name,
           ok: outcome.ok,
           error: outcome.ok ? null : (outcome.error ?? null),
-          pending: Boolean(outcome.ok && outcome.result?.status === "awaiting_confirmation")
+          pending: Boolean(outcome.outcome?.status === "pending"),
+          outcome: outcome.outcome
+            ? {
+                status: outcome.outcome.status,
+                code: outcome.outcome.code,
+                changed: outcome.outcome.changed,
+                artifacts: outcome.outcome.artifacts,
+                evidence: outcome.outcome.evidence,
+                verification: outcome.outcome.verification?.status ?? null
+              }
+            : null
         });
       } catch { /* observer must not break tools */ }
     }
     return outcome;
   }
 
-  async _suspendForApproval(action, name, args, context, { preToolHooksPassed = false } = {}) {
+  async _finalizeInvocation(
+    tool,
+    name,
+    args,
+    context,
+    value,
+    { tracking = null, markTracked = true } = {}
+  ) {
+    if (value?.[SEMANTIC_OUTCOME_TRACKED]) return value;
+    const semantic = await ensureSemanticToolEnvelope(
+      tool,
+      value,
+      args,
+      context,
+      classifyLegacyToolFailure(value)
+    );
+    if (tracking?.reserved) {
+      this._recordFailureOutcome(tracking, semantic);
+    }
+    try {
+      if (!markTracked) return semantic;
+      Object.defineProperty(semantic, SEMANTIC_OUTCOME_TRACKED, {
+        value: true,
+        enumerable: false
+      });
+    } catch {
+      // A custom frozen envelope still remains safe; it may only lose the
+      // nested-invocation duplicate-accounting optimization.
+    }
+    return semantic;
+  }
+
+  _failureScope(context) {
+    const state = REGISTRY_FAILURE_STATE.get(this);
+    if (!state) return null;
+    const turnId = String(context?.__turnId ?? context?.turnId ?? "").trim();
+    if (turnId) {
+      const key = failureTurnKey(context?.sessionId, turnId);
+      let scope = state.turnFailures.get(key);
+      if (!scope) {
+        scope = createFailureScope({ turnKey: key });
+        state.turnFailures.set(key, scope);
+        this._evictSettledFailureScopes(state);
+      } else {
+        state.turnFailures.delete(key);
+        state.turnFailures.set(key, scope);
+      }
+      return scope;
+    }
+    if (!context || typeof context !== "object") return null;
+    let scope = state.contextFailures.get(context);
+    if (!scope) {
+      scope = createFailureScope({ context });
+      state.contextFailures.set(context, scope);
+    }
+    return scope;
+  }
+
+  _failureFingerprint(name, args, tool) {
+    try {
+      return toolFailureFingerprint(name, args);
+    } catch (error) {
+      if (tool?.sideEffects !== false) {
+        throw new TypeError(
+          `Tool ${name} arguments cannot be safely fingerprinted: ${safeToolErrorMessage(error, "invalid arguments")}`
+        );
+      }
+      return null;
+    }
+  }
+
+  _beginFailureTracking(name, args, context, tool) {
+    let fingerprint;
+    try {
+      fingerprint = this._failureFingerprint(name, args, tool);
+    } catch (error) {
+      return {
+        blocked: semanticToolError(tool, error, {
+          code: "arguments_not_fingerprintable",
+          status: "blocked",
+          nextSteps: ["Send a bounded plain JSON object as the tool arguments."]
+        })
+      };
+    }
+    const state = REGISTRY_FAILURE_STATE.get(this);
+    const activeKey = fingerprint && tool?.sideEffects !== false
+      ? failureActiveKey(context, fingerprint)
+      : null;
+    if (activeKey && state?.activeOperations.has(activeKey)) {
+      return {
+        blocked: semanticToolError(tool, "An identical side-effecting tool call is already running.", {
+          code: "duplicate_in_flight",
+          status: "blocked",
+          nextSteps: ["Wait for the active operation receipt to settle before retrying."]
+        })
+      };
+    }
+    const scope = fingerprint ? this._failureScope(context) : null;
+    const prior = scope?.entries.get(fingerprint);
+    if (!scope || !fingerprint) return null;
+    if (scope.retired && !prior?.inFlight) {
+      return {
+        blocked: semanticToolError(tool, "This tool-call scope has already ended.", {
+          code: "turn_scope_closed",
+          status: "blocked",
+          nextSteps: ["Start a new turn before attempting another tool call."]
+        })
+      };
+    }
+    if (prior?.inFlight) {
+      return {
+        blocked: semanticToolError(tool, "An identical tool call is already running in this turn.", {
+          code: "duplicate_in_flight",
+          status: "blocked",
+          nextSteps: ["Wait for the active call or change the arguments."]
+        })
+      };
+    }
+    const resumingPending = prior?.envelope?.outcome?.status === "pending"
+      && context?.__confirmed === true;
+    if (prior?.envelope?.outcome?.status === "pending" && !resumingPending) {
+      return {
+        blocked: semanticToolError(tool, "An identical tool call is already pending.", {
+          code: "duplicate_pending",
+          status: "blocked",
+          nextSteps: ["Wait for the pending action to complete before retrying."]
+        })
+      };
+    }
+    const allowedAttempts = prior?.envelope?.outcome?.retryable === true ? 2 : 1;
+    if (prior && prior.attempts >= allowedAttempts && !resumingPending) {
+      return {
+        blocked: repeatedFailureEnvelope(prior.envelope, prior.attempts + 1)
+      };
+    }
+    scope.entries.set(fingerprint, {
+      attempts: prior?.attempts ?? 0,
+      envelope: prior?.envelope ?? null,
+      inFlight: true
+    });
+    const tracking = {
+      scope,
+      fingerprint,
+      reserved: true,
+      operationReceipt: createOperationReceipt(scope, fingerprint),
+      activeKey
+    };
+    if (activeKey) state.activeOperations.set(activeKey, tracking);
+    return tracking;
+  }
+
+  _recordFailureOutcome(tracking, envelope) {
+    const { scope, fingerprint } = tracking;
+    if (envelope?.ok === true && envelope?.outcome?.status !== "pending") {
+      scope.entries.delete(fingerprint);
+      return;
+    }
+    const previous = scope.entries.get(fingerprint);
+    scope.entries.set(fingerprint, {
+      attempts: (previous?.attempts ?? 0) + 1,
+      envelope: failureTrackerEnvelope(envelope),
+      inFlight: false
+    });
+  }
+
+  _releaseFailureTracking(tracking) {
+    if (!tracking?.reserved) return;
+    const state = REGISTRY_FAILURE_STATE.get(this);
+    if (
+      tracking.activeKey
+      && state?.activeOperations.get(tracking.activeKey) === tracking
+    ) {
+      state.activeOperations.delete(tracking.activeKey);
+    }
+    const current = tracking.scope.entries.get(tracking.fingerprint);
+    if (!current?.inFlight) {
+      if (tracking.scope.retired && !scopeHasInFlight(tracking.scope)) {
+        this._deleteFailureScope(tracking.scope);
+      }
+      return;
+    }
+    if ((current.attempts ?? 0) === 0 && !current.envelope) {
+      tracking.scope.entries.delete(tracking.fingerprint);
+    } else {
+      tracking.scope.entries.set(tracking.fingerprint, {
+        ...current,
+        inFlight: false
+      });
+    }
+    if (tracking.scope.retired && !scopeHasInFlight(tracking.scope)) {
+      this._deleteFailureScope(tracking.scope);
+    }
+  }
+
+  clearFailureScope(context = {}) {
+    const state = REGISTRY_FAILURE_STATE.get(this);
+    if (!state) return false;
+    const turnId = String(context?.__turnId ?? context?.turnId ?? "").trim();
+    const scopes = new Set();
+    if (turnId) {
+      const key = failureTurnKey(context?.sessionId, turnId);
+      const scope = state.turnFailures.get(key);
+      if (scope) scopes.add(scope);
+    }
+    if (context && typeof context === "object") {
+      const scope = state.contextFailures.get(context);
+      if (scope) scopes.add(scope);
+    }
+    for (const scope of scopes) {
+      scope.retired = true;
+      if (!scopeHasInFlight(scope)) this._deleteFailureScope(scope);
+    }
+    return scopes.size > 0;
+  }
+
+  _deleteFailureScope(scope) {
+    const state = REGISTRY_FAILURE_STATE.get(this);
+    if (!state || !scope) return false;
+    let deleted = false;
+    if (scope.turnKey) {
+      deleted = state.turnFailures.get(scope.turnKey) === scope
+        ? state.turnFailures.delete(scope.turnKey)
+        : false;
+    }
+    if (scope.context && state.contextFailures.get(scope.context) === scope) {
+      deleted = state.contextFailures.delete(scope.context) || deleted;
+    }
+    return deleted;
+  }
+
+  _evictSettledFailureScopes(state) {
+    if (state.turnFailures.size <= MAX_TURN_FAILURE_SCOPES) return;
+    for (const [key, scope] of state.turnFailures) {
+      if (state.turnFailures.size <= MAX_TURN_FAILURE_SCOPES) break;
+      if (scopeHasInFlight(scope)) continue;
+      state.turnFailures.delete(key);
+    }
+  }
+
+  async _suspendForApproval(
+    action,
+    name,
+    args,
+    context,
+    { preToolHooksPassed = false, failureTracking = null } = {}
+  ) {
     // Lightweight store doubles used by embedders may only implement the old
     // queue API. Preserve that contract while the real store provides the
     // Hermes-style suspend/resume rail.
@@ -396,8 +811,36 @@ export class ToolRegistry {
       // Honor its recorded completion rather than replaying the side effect.
       if (decision.completed) {
         return decision.error
-          ? { ok: false, error: decision.error }
-          : { ok: true, result: decision.result };
+          ? {
+              ok: false,
+              error: decision.error,
+              ...(decision.outcome ? { outcome: decision.outcome } : {})
+            }
+          : {
+              ok: true,
+              result: decision.result,
+              ...(decision.outcome ? { outcome: decision.outcome } : {})
+            };
+      }
+      if (
+        action.approvalIdentity
+        && action.approvalIdentity !== this.approvalIdentity(name, context)
+      ) {
+        const blocked = semanticToolError(
+          tool,
+          "The tool or approval policy changed while this action was pending.",
+          {
+            code: "approval_identity_changed",
+            status: "blocked",
+            nextSteps: ["Create a new approval request under the current runtime."]
+          }
+        );
+        this.pendingActions.complete?.(action.id, {
+          result: null,
+          error: blocked.error,
+          outcome: blocked.outcome
+        });
+        return blocked;
       }
       if (context?.__abortSignal?.aborted) {
         const error = "turn ended before the approved action could resume";
@@ -416,11 +859,15 @@ export class ToolRegistry {
             decider: decision.decider ?? decision.decidedBy ?? "user"
           }
         },
-        preToolHooksPassed ? PRE_TOOL_HOOKS_PASSED : null
+        makeInternalInvocation({
+          preToolHooksPassed,
+          failureTracking
+        })
       );
       this.pendingActions.complete?.(action.id, {
         result: invokeResult.ok ? invokeResult.result : null,
-        error: invokeResult.ok ? null : invokeResult.error
+        error: invokeResult.ok ? null : invokeResult.error,
+        outcome: invokeResult.outcome ?? null
       });
       return invokeResult;
     }
@@ -449,7 +896,12 @@ export class ToolRegistry {
     };
   }
 
-  async _invokeGated(name, args, context = {}, preToolHooksPassed = false) {
+  async _invokeGated(
+    name,
+    args,
+    context = {},
+    { preToolHooksPassed = false, failureTracking = null } = {}
+  ) {
     const tool = this.tools.get(name);
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
@@ -498,13 +950,20 @@ export class ToolRegistry {
           buildHookPayload({ name, args, context, tool, sessionAllowed })
         ) ?? hookDecision;
       } catch (error) {
-        console.warn(`[hooks] pre_tool_call registry failed open: ${error?.message ?? String(error)}`);
+        console.warn(
+          `[hooks] pre_tool_call registry failed open: ${safeToolErrorMessage(error, "hook callback failed")}`
+        );
       }
       if (hookDecision?.action === "block") {
         if (isTrustedCatastrophicBlock(hookDecision)) {
           const reason = hookDecision.reason ?? hookDecision.message ?? "catastrophic policy veto";
           if (!this.pendingActions) {
-            return { ok: false, error: `Catastrophic tool call requires human approval: ${reason}` };
+            return {
+              ok: false,
+              blocked: true,
+              code: "catastrophic_approval_required",
+              error: `Catastrophic tool call requires human approval: ${reason}`
+            };
           }
           const baseSummary = tool.summarize ? safeSummarize(tool.summarize, args) : `Run ${name}`;
           const summary = `${baseSummary ?? `Run ${name}`} [CATASTROPHIC: ${reason}]`;
@@ -514,19 +973,31 @@ export class ToolRegistry {
             context,
             summary,
             reason,
-            severity: "catastrophic"
+            severity: "catastrophic",
+            approvalIdentity: this.approvalIdentity(name, context)
           });
-          return this._suspendForApproval(action, name, args, context);
+          return this._suspendForApproval(action, name, args, context, {
+            preToolHooksPassed: false,
+            failureTracking
+          });
         }
         const error = hookDecision.message ?? `Tool ${name} was blocked by a pre_tool_call hook.`;
-        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+        const blocked = await ensureSemanticToolEnvelope(tool, {
           ok: false,
           error,
+          blocked: true,
+          code: "hook_blocked"
+        }, args, context, {
+          code: "hook_blocked",
+          status: "blocked"
+        });
+        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+          ...blocked,
           blocked: true,
           dispatched: false,
           blockedBy: hookDecision.blockedBy ?? null
         });
-        return { ok: false, error };
+        return blocked;
       }
       preToolHooksPassed = true;
     }
@@ -550,19 +1021,24 @@ export class ToolRegistry {
           args,
           context,
           summary,
-          reason: context.__reason ?? null
+          reason: context.__reason ?? null,
+          approvalIdentity: this.approvalIdentity(name, context)
         });
         const invokeResult = await this.invoke(
           name,
           args,
           { ...(context ?? {}), __confirmed: true },
-          PRE_TOOL_HOOKS_PASSED
+          makeInternalInvocation({
+            preToolHooksPassed: true,
+            failureTracking
+          })
         );
         this.pendingActions.decide?.(action.id, {
           decision: "approve",
           decidedBy: "auto-approve",
           result: invokeResult.ok ? invokeResult.result : null,
-          error: invokeResult.ok ? null : invokeResult.error
+          error: invokeResult.ok ? null : invokeResult.error,
+          outcome: invokeResult.outcome ?? null
         });
         return invokeResult;
       }
@@ -571,35 +1047,80 @@ export class ToolRegistry {
         args,
         context,
         summary,
-        reason: context.__reason ?? null
+        reason: context.__reason ?? null,
+        approvalIdentity: this.approvalIdentity(name, context)
       });
-      return this._suspendForApproval(action, name, args, context, { preToolHooksPassed });
+      return this._suspendForApproval(action, name, args, context, {
+        preToolHooksPassed,
+        failureTracking
+      });
     }
     const startedAt = Date.now();
     let dispatched = false;
+    let checkpointCapture = null;
     try {
-      await this.checkpoints?.beforeToolCall?.({
+      if (context?.__abortSignal?.aborted) {
+        return semanticToolError(tool, "Turn ended before tool dispatch.", {
+          code: "tool_dispatch_cancelled",
+          status: "blocked",
+          changed: false
+        });
+      }
+      checkpointCapture = await this.checkpoints?.beforeToolCall?.({
         toolName: name,
         args: args ?? {},
         context
       });
+      if (context?.__abortSignal?.aborted) {
+        const semantic = semanticToolError(tool, "Turn ended before tool dispatch.", {
+          code: "tool_dispatch_cancelled",
+          status: "blocked",
+          changed: false,
+          evidence: checkpointEvidence(checkpointCapture)
+        });
+        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+          ...semantic,
+          dispatched: false,
+          durationMs: Date.now() - startedAt
+        });
+        return semantic;
+      }
       dispatched = true;
       const result = await tool.handler(args ?? {}, context);
-      this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
-        ok: true,
+      const semantic = await semanticToolResult(
+        tool,
         result,
-        dispatched,
-        durationMs: Date.now() - startedAt
-      });
-      return { ok: true, result: appendApprovalNote(result, context?.__approval) };
-    } catch (error) {
+        args,
+        context,
+        {
+          evidence: checkpointEvidence(checkpointCapture)
+        }
+      );
+      if (semantic.ok && context?.__approval) {
+        semantic.result = appendApprovalNote(semantic.result, context.__approval);
+      }
       this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
-        ok: false,
-        error: error.message ?? String(error),
+        ...semantic,
         dispatched,
         durationMs: Date.now() - startedAt
       });
-      return { ok: false, error: error.message ?? String(error) };
+      return semantic;
+    } catch (error) {
+      const errorDetails = safeToolErrorDetails(error);
+      const semantic = semanticToolError(tool, errorDetails.message, {
+        code: errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
+          ? "checkpoint_target_ambiguous"
+          : "handler_error",
+        retryable: errorDetails.retryable,
+        changed: dispatched && tool?.sideEffects !== false ? null : false,
+        evidence: checkpointEvidence(checkpointCapture)
+      });
+      this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+        ...semantic,
+        dispatched,
+        durationMs: Date.now() - startedAt
+      });
+      return semantic;
     }
   }
 
@@ -613,6 +1134,81 @@ export class ToolRegistry {
       // Observer hooks are advisory and never alter a tool result.
     }
   }
+}
+
+function normalizeInternalInvocation(token) {
+  if (token === PRE_TOOL_HOOKS_PASSED) {
+    return {
+      preToolHooksPassed: true,
+      failureTracking: null
+    };
+  }
+  if (!token || token[INTERNAL_INVOCATION] !== true) {
+    return {
+      preToolHooksPassed: false,
+      failureTracking: null
+    };
+  }
+  return {
+    preToolHooksPassed: token.preToolHooksPassed === true,
+    failureTracking: token.failureTracking ?? null
+  };
+}
+
+function makeInternalInvocation({ preToolHooksPassed = false, failureTracking = null } = {}) {
+  return Object.freeze({
+    [INTERNAL_INVOCATION]: true,
+    preToolHooksPassed: preToolHooksPassed === true,
+    failureTracking
+  });
+}
+
+function normalizeDomainResultStatuses(value) {
+  if (!Array.isArray(value)) return Object.freeze([]);
+  const statuses = [];
+  for (const item of value) {
+    const status = String(item ?? "").trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(status)) {
+      throw new TypeError("Tool domainResultStatuses must contain bounded ASCII status names.");
+    }
+    if (!statuses.includes(status)) statuses.push(status);
+  }
+  return Object.freeze(statuses);
+}
+
+function failureTurnKey(sessionId, turnId) {
+  return JSON.stringify([String(sessionId ?? ""), String(turnId ?? "")]);
+}
+
+function failureActiveKey(context, fingerprint) {
+  const owner = String(
+    context?.sessionId
+    ?? context?.from
+    ?? context?.agentId
+    ?? ""
+  );
+  return JSON.stringify([owner, fingerprint]);
+}
+
+function createFailureScope({ turnKey = null, context = null } = {}) {
+  return {
+    entries: new Map(),
+    retired: false,
+    turnKey,
+    context,
+    operationNamespace: createId("operation")
+  };
+}
+
+function createOperationReceipt(scope, fingerprint) {
+  return `${scope.operationNamespace}_${fingerprint.slice(0, 24)}`;
+}
+
+function scopeHasInFlight(scope) {
+  for (const entry of scope?.entries?.values?.() ?? []) {
+    if (entry?.inFlight) return true;
+  }
+  return false;
 }
 
 function normalizedToolSource(value) {
@@ -926,6 +1522,10 @@ function publicToolDescriptor(tool) {
     preflight: _preflight,
     forwardInvocation: _forwardInvocation,
     summarize: _summarize,
+    normalizeOutcome: _normalizeOutcome,
+    verifyOutcome: _verifyOutcome,
+    domainResultStatuses: _domainResultStatuses,
+    approvalRevision: _approvalRevision,
     ...descriptor
   } = tool;
   return clonePublicValue(descriptor, new WeakSet());
@@ -990,6 +1590,8 @@ function buildHookPayload({ name, args, context = {}, tool, sessionAllowed }) {
     args: sanitizeForAudit(args ?? {}),
     sessionId: context?.sessionId ?? null,
     turnId: context?.__turnId ?? context?.turnId ?? null,
+    providerToolCallId: context?.__providerToolCallId ?? null,
+    operationReceipt: context?.__operationReceipt ?? context?.__idempotencyKey ?? null,
     agentId: context?.agentId ?? null,
     channel: context?.channel ?? null,
     from: context?.from ?? null,
@@ -1023,6 +1625,74 @@ function appendApprovalNote(result, approval) {
     return { ...result, approvalNote };
   }
   return { value: result ?? null, approvalNote };
+}
+
+function checkpointEvidence(capture) {
+  const checkpoints = Array.isArray(capture?.checkpoints)
+    ? capture.checkpoints
+    : [];
+  return checkpoints
+    .map((checkpoint) => String(checkpoint?.id ?? "").trim())
+    .filter(Boolean)
+    .map((id) => `checkpoint:${id}`);
+}
+
+function classifyLegacyToolFailure(value) {
+  if (value?.code) {
+    return {
+      code: String(value.code),
+      status: value?.blocked === true ? "blocked" : "failed"
+    };
+  }
+  const message = String(value?.error ?? "").toLowerCase();
+  if (message.startsWith("unknown tool:")) {
+    return { code: "unknown_tool", status: "failed" };
+  }
+  if (message.includes("outside this specialist")) {
+    return { code: "specialist_scope_blocked", status: "blocked" };
+  }
+  if (message.includes("scrutiny verdict")) {
+    return { code: "scrutiny_blocked", status: "blocked" };
+  }
+  if (message.includes("pre_tool_call hook")) {
+    return { code: "hook_blocked", status: "blocked" };
+  }
+  if (message.includes("awaiting approval") || message.includes("requires human approval")) {
+    return { code: "approval_required", status: "blocked" };
+  }
+  if (
+    message.includes("denied by")
+    || message.includes("timed out awaiting approval")
+    || message.includes("cancelled because the turn ended")
+  ) {
+    return { code: "approval_not_granted", status: "blocked" };
+  }
+  return { code: "tool_error", status: value?.blocked === true ? "blocked" : "failed" };
+}
+
+function failureTrackerEnvelope(value) {
+  const outcome = value?.outcome ?? {};
+  return {
+    ok: false,
+    error: "The previous identical tool call failed.",
+    outcome: {
+      status: ["failed", "blocked", "pending"].includes(outcome.status)
+        ? outcome.status
+        : "failed",
+      code: String(outcome.code ?? "tool_error").slice(0, 64),
+      retryable: outcome.retryable === true,
+      changed: outcome.changed === true ? true : outcome.changed === false ? false : null,
+      artifacts: [],
+      evidence: Array.isArray(outcome.evidence)
+        ? outcome.evidence.filter((item) => String(item).startsWith("checkpoint:")).slice(0, 16)
+        : [],
+      verification: {
+        status: String(outcome.verification?.status ?? "not_requested").slice(0, 32),
+        summary: null
+      },
+      nextSteps: []
+    }
+  };
 }
 
 function externalMemoryIdentity(context = {}) {
@@ -1981,6 +2651,7 @@ export function registerCoreTools(registry, runtime) {
   registry.register({
     name: "kanban_show",
     sideEffects: false,
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Show one local Kanban task with blockers, comments, run attempts, handoffs, links, and timestamps.",
     parameters: {
       type: "object",
@@ -2001,6 +2672,7 @@ export function registerCoreTools(registry, runtime) {
   registry.register({
     name: "kanban_list",
     sideEffects: false,
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "List local Kanban boards and tasks. Filter by board, status, or assignee.",
     parameters: {
       type: "object",
@@ -2023,6 +2695,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "kanban_create",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Create a task on the local multi-agent Kanban board. Assign it now when the intended worker is known; parent task ids become blockers.",
     parameters: {
       type: "object",
@@ -2055,6 +2728,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "kanban_complete",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Complete a Kanban task and write its structured completion handoff. Tasks with unresolved blockers cannot complete.",
     parameters: {
       type: "object",
@@ -2079,6 +2753,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "kanban_block",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Move a Kanban task to blocked. Optionally record parent task ids and a reason.",
     parameters: {
       type: "object",
@@ -2102,6 +2777,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "kanban_unblock",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Remove a Kanban task's blocking state. Pass blockerId to remove one dependency; omit it to clear every blocker.",
     parameters: {
       type: "object",
@@ -2120,6 +2796,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "kanban_comment",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Add a comment to a Kanban task. The author is derived from the trusted agent identity.",
     parameters: {
       type: "object",
@@ -2138,6 +2815,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "kanban_heartbeat",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Claim a Kanban task or update a worker run. state='start' appends a new attempt; later heartbeats update that run by runId.",
     parameters: {
       type: "object",
@@ -2169,6 +2847,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "kanban_link",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
     description: "Link a parent Kanban task to a child dependency. The child stays blocked until every parent task is done.",
     parameters: {
       type: "object",
@@ -2187,6 +2866,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "add_task",
+    domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Add a task to the user's todo list (default) or the agent's own queue. Use queue='agent' when YOU are committing to do this task yourself; use queue='user' when the human should do it. Buckets: today, this_week, this_month, this_quarter, this_year, someday, done — pick the one matching the realistic horizon.",
     parameters: {
       type: "object",
@@ -2238,6 +2918,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "complete_task",
+    domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Mark a task as completed. Moves it to the 'done' bucket.",
     parameters: {
       type: "object",
@@ -2256,6 +2937,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "move_task",
+    domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Update a task — change bucket, priority, status, due date, etc. without completing it.",
     parameters: {
       type: "object",
@@ -2281,6 +2963,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "add_goal",
+    domainResultStatuses: GOAL_DOMAIN_STATUSES,
     description: "Create a Goal that tasks can be grouped under for rollup tracking. Goals have a title, optional description, optional dueDate, and optional parentGoalId (goals can nest, e.g. a quarter goal contains monthly goals).",
     parameters: {
       type: "object",
@@ -2328,6 +3011,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "link_task_to_goal",
+    domainResultStatuses: TASK_DOMAIN_STATUSES,
     description: "Link an existing task to a goal so it counts toward that goal's rollup progress. Pass goalId=null to unlink. Use after creating a related task without specifying parentGoalId at creation time.",
     parameters: {
       type: "object",
@@ -2344,6 +3028,7 @@ export function registerCoreTools(registry, runtime) {
   registry.register({
     name: "goal_status",
     sideEffects: false,
+    domainResultStatuses: GOAL_DOMAIN_STATUSES,
     description: "Show the persistent goal-mode state for this session, including status, turn budget, and the latest judge result.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args, context) => {
@@ -2357,6 +3042,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "pause_goal",
+    domainResultStatuses: GOAL_DOMAIN_STATUSES,
     description: "Pause automatic work on the active goal for this session without deleting its state.",
     parameters: {
       type: "object",
@@ -2376,6 +3062,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "resume_goal",
+    domainResultStatuses: GOAL_DOMAIN_STATUSES,
     description: "Resume automatic work on the paused goal for this session, subject to its remaining turn budget.",
     parameters: {
       type: "object",
@@ -2395,6 +3082,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "clear_goal",
+    domainResultStatuses: GOAL_DOMAIN_STATUSES,
     description: "Clear goal mode for this session and stop automatic continuation. The persisted audit history is retained.",
     parameters: {
       type: "object",
@@ -2466,6 +3154,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "save_draft",
+    domainResultStatuses: DRAFT_DOMAIN_STATUSES,
     description: "Save a draft artifact (email, message, doc, outline, reply) for the user to review — instead of sending or publishing it. THIS IS HOW YOU COMPLETE DRAFT-ONLY WORK: produce the content, save it here, and the user reviews/approves/edits it later. Never send, publish, or schedule the content yourself; saving a draft does NOT send it. Link it to the originating task via taskId.",
     parameters: {
       type: "object",

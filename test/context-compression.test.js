@@ -28,9 +28,10 @@ test("oversized tool output is capped with a retrievable ref", (t) => {
 
   assert.equal(capped.truncated, true);
   assert.ok(capped.output.length <= 220);
-  assert.match(capped.output, /chars elided; full output at ref:out_[a-f0-9]{16}/);
-  assert.match(capped.output, /HEAD-/);
-  assert.match(capped.output, /-TAIL/);
+  const preview = JSON.parse(capped.output);
+  assert.match(preview.ref, /^out_[a-f0-9]{16}$/u);
+  assert.match(preview.preview, /HEAD-/u);
+  assert.match(preview.preview, /-TAIL/u);
   assert.equal(store.read(capped.ref, { maxChars: 5000 }).content, full);
   assert.throws(() => store.read("../secret"), /invalid tool-output ref/i);
 });
@@ -47,6 +48,44 @@ test("under-cap tool output remains byte-identical", (t) => {
     originalChars: expected.length
   });
   assert.deepEqual(fs.readdirSync(store.dir), []);
+});
+
+test("truncated tool output stays valid JSON and retains semantic receipts", (t) => {
+  const store = makeStore(t);
+  const capped = capToolOutput({
+    body: "x".repeat(2000),
+    outcome: {
+      status: "failed",
+      code: "remote_failed",
+      retryable: false,
+      changed: null,
+      artifacts: [],
+      evidence: ["checkpoint:cp_receipt"],
+      verification: { status: "failed", summary: "not observed" },
+      nextSteps: []
+    }
+  }, {
+    maxChars: 240,
+    store
+  });
+
+  const visible = JSON.parse(capped.output);
+  assert.equal(visible.truncated, true);
+  assert.equal(visible.ref, capped.ref);
+  assert.equal(visible.outcome.status, "failed");
+  assert.equal(visible.outcome.code, "remote_failed");
+  assert.deepEqual(visible.outcome.evidence, ["checkpoint:cp_receipt"]);
+  assert.ok(capped.output.length <= 240);
+});
+
+test("unsafe tiny truncation budgets fail before dropping semantic receipts", () => {
+  assert.throws(
+    () => capToolOutput(
+      { body: "x".repeat(2000), outcome: { status: "failed", code: "remote_failed" } },
+      { maxChars: 199, store: null }
+    ),
+    /at least 200/u
+  );
 });
 
 test("over-budget transcript becomes a recap plus verbatim recent complete hops", () => {
@@ -122,7 +161,7 @@ test("later hops receive a capped tool result whose full value is retrievable", 
   });
 
   const output = bodies[1].input.find((item) => item.type === "function_call_output").output;
-  const ref = /ref:(out_[a-f0-9]{16})/.exec(output)?.[1];
+  const ref = JSON.parse(output).ref;
   assert.ok(ref);
   assert.equal(store.read(ref, { maxChars: 5000 }).content, JSON.stringify(fullValue));
 });
@@ -158,7 +197,7 @@ test("Anthropic tool_result blocks use the same capped ref path", async (t) => {
 
   const blocks = bodies[1].messages.flatMap((message) => Array.isArray(message.content) ? message.content : []);
   const output = blocks.find((block) => block.type === "tool_result").content;
-  const ref = /ref:(out_[a-f0-9]{16})/.exec(output)?.[1];
+  const ref = JSON.parse(output).ref;
   assert.ok(ref);
   assert.equal(store.read(ref, { maxChars: 5000 }).content, JSON.stringify(fullValue));
 });

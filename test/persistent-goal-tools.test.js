@@ -108,8 +108,9 @@ test("goal controls fail safely outside a session", async () => {
   const { registry } = createHarness();
   for (const name of ["goal_status", "pause_goal", "resume_goal", "clear_goal"]) {
     const result = await registry.invoke(name, {});
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
     assert.match(result.result.error, /requires a session/);
+    assert.equal(result.outcome.status, "failed");
   }
 });
 

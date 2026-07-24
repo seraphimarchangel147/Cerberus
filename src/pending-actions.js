@@ -4,6 +4,7 @@ import { ensureDir, writeJsonAtomic, readJsonFile, appendJsonLine } from "./file
 import { createId, nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { sanitizeForAudit } from "./redact.js";
+import { safeToolErrorMessage, snapshotToolValue } from "./tool-outcome.js";
 
 // File-backed queue of agent-initiated actions awaiting human approval.
 // When the agent invokes a tool flagged `needsConfirmation: true`, the
@@ -23,6 +24,7 @@ export class PendingActionStore {
     this.events = null;
     this._loadSnapshot();
     this._replayJournal();
+    this._reconcileInterruptedApprovals();
   }
 
   /// Late-bound: hosted-interface creates the event bus, then calls this
@@ -41,7 +43,16 @@ export class PendingActionStore {
     return this.actions.get(id) ?? null;
   }
 
-  enqueue({ toolName, args, context, summary, reason, severity }) {
+  enqueue({
+    toolName,
+    args,
+    context,
+    summary,
+    reason,
+    severity,
+    approvalIdentity
+  }) {
+    const argsReplayable = persistedArgumentsRemainExecutable(args);
     const action = {
       id: createId("act"),
       toolName,
@@ -50,6 +61,8 @@ export class PendingActionStore {
       summary: summary ?? `Run ${toolName}`,
       reason: reason ?? null,
       severity: severity ?? null,
+      approvalIdentity: approvalIdentity ?? null,
+      argsReplayable,
       status: "pending",
       createdAt: nowIso(),
       decidedAt: null,
@@ -59,7 +72,8 @@ export class PendingActionStore {
       decider: null,
       deciderDisplayName: null,
       result: null,
-      error: null
+      error: null,
+      outcome: null
     };
     attachRuntimeState(action);
     this.actions.set(action.id, action);
@@ -79,7 +93,16 @@ export class PendingActionStore {
     return action;
   }
 
-  decide(id, { decision, decidedBy, approvedVia, decider, deciderDisplayName, result, error }) {
+  decide(id, {
+    decision,
+    decidedBy,
+    approvedVia,
+    decider,
+    deciderDisplayName,
+    result,
+    error,
+    outcome
+  }) {
     const action = this.actions.get(id);
     if (!action) return null;
     if (action.status !== "pending") return action;
@@ -91,6 +114,7 @@ export class PendingActionStore {
     if (deciderDisplayName !== undefined) action.deciderDisplayName = deciderDisplayName;
     if (result !== undefined) action.result = result;
     if (error !== undefined) action.error = error;
+    if (outcome !== undefined) action.outcome = outcome;
     if (decision === "deny" || result !== undefined || error !== undefined) {
       action.completedAt = nowIso();
     }
@@ -106,7 +130,8 @@ export class PendingActionStore {
       decider: action.decider,
       deciderDisplayName: action.deciderDisplayName,
       result,
-      error
+      error,
+      outcome
     });
     action._resolveDecision?.({
       decision: action.status === "approved" ? "approve" : "deny",
@@ -115,12 +140,13 @@ export class PendingActionStore {
       decider: action.decider,
       completed: Boolean(action.completedAt),
       result: action.result,
-      error: action.error
+      error: action.error,
+      ...(action.outcome ? { outcome: action.outcome } : {})
     });
     if (action.completedAt) {
       action._resolveCompletion?.(action.status === "approved" && !action.error
-        ? { ok: true, result: action.result }
-        : { ok: false, error: action.error ?? "denied" });
+        ? semanticCompletion(true, action)
+        : semanticCompletion(false, action));
     }
     // Broadcast the decision so the Discord activity feed (and SSE dashboard)
     // can show approvals/denials/auto-approvals — not just enqueues.
@@ -146,14 +172,32 @@ export class PendingActionStore {
         decidedBy: action.decidedBy,
         completed: Boolean(action.completedAt),
         result: action.result,
-        error: action.error
+        error: action.error,
+        ...(action.outcome ? { outcome: action.outcome } : {})
       });
     }
     attachRuntimeState(action);
     action._waiting = true;
     let timer;
     const timeout = new Promise((resolve) => {
-      timer = setTimeoutFn(() => resolve({ decision: "timeout" }), Math.max(0, Number(timeoutMs) || 0));
+      timer = setTimeoutFn(() => {
+        const current = this.actions.get(id);
+        if (!current || current.status !== "pending") {
+          resolve(current ? decisionSnapshot(current) : { decision: "deny", error: "unknown action" });
+          return;
+        }
+
+        // Resolve the timeout contender first, then synchronously make the
+        // durable state terminal. Promise callbacks cannot interleave with
+        // this callback, so a later approval observes "denied" and cannot
+        // win after the timeout has already fired.
+        resolve({ decision: "timeout" });
+        this.decide(id, {
+          decision: "deny",
+          decidedBy: "timeout",
+          error: "approval timed out"
+        });
+      }, Math.max(0, Number(timeoutMs) || 0));
     });
     let onAbort;
     const contenders = [action._decisionPromise, timeout];
@@ -175,22 +219,22 @@ export class PendingActionStore {
     return this.actions.get(id)?._waiting === true;
   }
 
-  complete(id, { result, error } = {}) {
+  complete(id, { result, error, outcome } = {}) {
     const action = this.actions.get(id);
     if (!action || action.status !== "approved" || action.completedAt) return action ?? null;
     action.result = result ?? null;
     action.error = error ?? null;
+    action.outcome = outcome ?? null;
     action.completedAt = nowIso();
     this._appendJournal({
       op: "complete",
       id,
       completedAt: action.completedAt,
       result: action.result,
-      error: action.error
+      error: action.error,
+      outcome: action.outcome
     });
-    action._resolveCompletion?.(action.error
-      ? { ok: false, error: action.error }
-      : { ok: true, result: action.result });
+    action._resolveCompletion?.(semanticCompletion(!action.error, action));
     return action;
   }
 
@@ -199,9 +243,7 @@ export class PendingActionStore {
     if (!action) return Promise.resolve({ ok: false, error: "unknown action" });
     if (action.status === "denied") return Promise.resolve({ ok: false, error: action.error ?? "denied" });
     if (action.completedAt || action.result !== null || action.error !== null) {
-      return Promise.resolve(action.error
-        ? { ok: false, error: action.error }
-        : { ok: true, result: action.result });
+      return Promise.resolve(semanticCompletion(!action.error, action));
     }
     attachRuntimeState(action);
     return action._completionPromise;
@@ -259,6 +301,7 @@ export class PendingActionStore {
           if (event.deciderDisplayName !== undefined) a.deciderDisplayName = event.deciderDisplayName;
           if (event.result !== undefined) a.result = event.result;
           if (event.error !== undefined) a.error = event.error;
+          if (event.outcome !== undefined) a.outcome = event.outcome;
         }
       } else if (event.op === "complete" && event.id) {
         const a = this.actions.get(event.id);
@@ -266,14 +309,82 @@ export class PendingActionStore {
           a.completedAt = event.completedAt;
           a.result = event.result ?? null;
           a.error = event.error ?? null;
+          a.outcome = event.outcome ?? null;
         }
       }
+    }
+  }
+
+  _reconcileInterruptedApprovals() {
+    for (const action of this.actions.values()) {
+      if (action.status !== "approved" || action.completedAt) continue;
+
+      // Approval is durable, but execution completion is not. Replaying a
+      // possibly non-idempotent tool would risk applying the side effect
+      // twice, so recovery records an explicit terminal uncertainty instead.
+      action.result = null;
+      action.error = interruptedApprovalError();
+      action.outcome = interruptedApprovalOutcome();
+      action.completedAt = nowIso();
+      this._appendJournal({
+        op: "complete",
+        id: action.id,
+        completedAt: action.completedAt,
+        result: action.result,
+        error: action.error,
+        outcome: action.outcome
+      });
     }
   }
 
   _appendJournal(event) {
     appendJsonLine(this._journalPath(), sanitizeForAudit(event));
   }
+}
+
+function decisionSnapshot(action) {
+  return {
+    decision: action.status === "approved" ? "approve" : "deny",
+    decidedBy: action.decidedBy,
+    approvedVia: action.approvedVia,
+    decider: action.decider,
+    completed: Boolean(action.completedAt),
+    result: action.result,
+    error: action.error,
+    ...(action.outcome ? { outcome: action.outcome } : {})
+  };
+}
+
+function interruptedApprovalError() {
+  return "Approved action was recovered without a completion record; execution was not replayed because its side effects are unknown.";
+}
+
+function interruptedApprovalOutcome() {
+  return {
+    status: "blocked",
+    code: "approval_completion_interrupted",
+    retryable: false,
+    changed: null,
+    artifacts: [],
+    evidence: [],
+    verification: {
+      status: "failed",
+      summary: "Approval was recorded, but tool completion was not."
+    },
+    nextSteps: [
+      "Inspect the target system before creating a new action."
+    ]
+  };
+}
+
+function semanticCompletion(ok, action) {
+  const completion = ok
+    ? { ok: true, result: action.result }
+    : { ok: false, error: action.error ?? "denied" };
+  if (action.outcome && typeof action.outcome === "object") {
+    completion.outcome = action.outcome;
+  }
+  return completion;
 }
 
 function attachRuntimeState(action) {
@@ -306,6 +417,23 @@ export async function approvePendingAction(runtime, id, decision = {}) {
   }
 
   const suspended = store.hasDecisionWaiter?.(id) === true;
+  if (!suspended) {
+    const replayBlock = approvalReplayBlock(runtime, action);
+    if (replayBlock) {
+      store.decide(id, {
+        decision: "deny",
+        decidedBy: "approval-reconciliation",
+        error: replayBlock.error,
+        outcome: replayBlock.outcome
+      });
+      return {
+        ok: false,
+        error: replayBlock.error,
+        outcome: replayBlock.outcome,
+        status: 409
+      };
+    }
+  }
   store.decide(id, {
     decision: "approve",
     decidedBy: decision.decidedBy ?? "user",
@@ -328,11 +456,15 @@ export async function approvePendingAction(runtime, id, decision = {}) {
       }
     });
   } catch (error) {
-    invokeResult = { ok: false, error: error.message ?? String(error) };
+    invokeResult = {
+      ok: false,
+      error: safeToolErrorMessage(error, "Approved tool execution failed.")
+    };
   }
   store.complete?.(id, {
     result: invokeResult.ok ? invokeResult.result : null,
-    error: invokeResult.ok ? null : invokeResult.error
+    error: invokeResult.ok ? null : invokeResult.error,
+    outcome: invokeResult.outcome ?? null
   });
   return invokeResult;
 }
@@ -347,6 +479,69 @@ function serializableContext(ctx) {
     channel: ctx.channel ?? null,
     from: ctx.from ?? null,
     target: ctx.target ?? null,
-    ...(ctx.__turnId ? { __turnId: String(ctx.__turnId) } : {})
+    ...(ctx.__turnId ? { __turnId: String(ctx.__turnId) } : {}),
+    ...(ctx.__scrutinyPolicy
+      ? { __scrutinyPolicy: String(ctx.__scrutinyPolicy) }
+      : {}),
+    ...(Array.isArray(ctx.__allowedTools)
+      ? { __allowedTools: ctx.__allowedTools.map(String) }
+      : {})
+  };
+}
+
+function persistedArgumentsRemainExecutable(args) {
+  try {
+    const snapshot = snapshotToolValue(args ?? {});
+    const sanitized = sanitizeForAudit(snapshot);
+    return JSON.stringify(snapshot) === JSON.stringify(sanitized);
+  } catch {
+    return false;
+  }
+}
+
+function approvalReplayBlock(runtime, action) {
+  if (action.argsReplayable === false) {
+    return replayBlockedOutcome(
+      "Pending action arguments were redacted at rest and cannot be replayed safely.",
+      "approval_arguments_redacted"
+    );
+  }
+  if (typeof runtime?.tools?.approvalIdentity === "function") {
+    const currentIdentity = runtime.tools.approvalIdentity(
+      action.toolName,
+      action.context ?? {}
+    );
+    if (
+      !action.approvalIdentity
+      || !currentIdentity
+      || currentIdentity !== action.approvalIdentity
+    ) {
+      return replayBlockedOutcome(
+        "The approved tool or policy identity changed; create a new action under the current runtime.",
+        "approval_identity_changed"
+      );
+    }
+  }
+  return null;
+}
+
+function replayBlockedOutcome(error, code) {
+  return {
+    error,
+    outcome: {
+      status: "blocked",
+      code,
+      retryable: false,
+      changed: null,
+      artifacts: [],
+      evidence: [],
+      verification: {
+        status: "not_requested",
+        summary: null
+      },
+      nextSteps: [
+        "Inspect the target state and create a new approval request."
+      ]
+    }
   };
 }

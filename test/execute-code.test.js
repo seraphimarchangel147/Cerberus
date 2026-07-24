@@ -24,9 +24,13 @@ function makeHarness() {
   return { dir, pendingActions, runtime, tools };
 }
 
-async function execute(tools, code, context = {}, timeoutMs) {
+async function execute(tools, code, context = {}, timeoutMs, { allowFailure = false } = {}) {
   const outcome = await tools.invoke("execute_code", { code, ...(timeoutMs ? { timeoutMs } : {}) }, context);
-  assert.equal(outcome.ok, true, outcome.error);
+  assert.equal(outcome.ok, !allowFailure, outcome.error);
+  if (allowFailure) {
+    assert.equal(outcome.outcome.status, "failed");
+    assert.ok(outcome.result && typeof outcome.result === "object");
+  }
   return outcome.result;
 }
 
@@ -60,7 +64,13 @@ test("execute_code stops an infinite loop even after an async tool boundary", as
   const startedAt = Date.now();
   // Leave enough room for worker startup under the full suite's CPU load;
   // the loop itself still proves the main-thread wall clock can hard-stop it.
-  const result = await execute(tools, "await callTool('unit_value', {}); while (true) {}", {}, 250);
+  const result = await execute(
+    tools,
+    "await callTool('unit_value', {}); while (true) {}",
+    {},
+    250,
+    { allowFailure: true }
+  );
 
   assert.equal(result.timedOut, true);
   assert.equal(result.toolCallsMade, 1);
@@ -75,7 +85,7 @@ test("execute_code stops at fifty nested tool calls with a clear error", async (
     for (let i = 0; i <= ${EXECUTE_CODE_LIMITS.maxToolCalls}; i += 1) {
       await callTool("unit_value", {});
     }
-  `, { sessionId: "execute-cap" }, 2_000);
+  `, { sessionId: "execute-cap" }, 2_000, { allowFailure: true });
 
   assert.equal(result.toolCallsMade, EXECUTE_CODE_LIMITS.maxToolCalls);
   assert.equal(result.timedOut, false);
@@ -101,7 +111,7 @@ test("execute_code cannot carry wrapper approval past the catastrophic gate", as
     // This approval belongs to execute_code itself and must not authorize the
     // nested shell call. The integration deliberately strips it on re-entry.
     __confirmed: true
-  }, 2_000);
+  }, 2_000, { allowFailure: true });
   let action;
   for (let i = 0; i < 200 && !action; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -127,7 +137,13 @@ test("execute_code caps stdout at 64 KiB and marks truncation", async () => {
 
 test("execute_code rejects ghost characters before stdout reaches model context", async () => {
   const { tools } = makeHarness();
-  const result = await execute(tools, "console.log(String.fromCodePoint(0x0430));");
+  const result = await execute(
+    tools,
+    "console.log(String.fromCodePoint(0x0430));",
+    {},
+    undefined,
+    { allowFailure: true }
+  );
 
   assert.equal(result.stdout, "");
   assert.match(result.error, /suspicious character U\+0430/);

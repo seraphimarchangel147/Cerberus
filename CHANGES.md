@@ -651,3 +651,15 @@ TYPED TOOL CAPABILITIES COMPLETE
 - Reduced the current full-core advertised schema from 31,227 to 7,918 bytes while preserving exact-name reachability for all 42 omitted tools.
 - Added cap, reachability, ranking, scope, policy, immutability, provider-parity, and byte-reduction regressions in both approval lanes.
 REACHABILITY TOOL RADAR COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: semantic tool outcomes and repair (Codex)
+
+- Added one provider-visible outcome contract for success, failure, blocked, and pending calls, including stable codes, mutation state, artifacts, evidence, verification, retryability, and concrete repair steps.
+- Made raw tool failures monotonic, reserved verification for explicit verifiers, kept checkpoint receipts on every post-dispatch failure, and safely isolated domain statuses such as blocked Kanban cards from execution failures.
+- Added descriptor-safe bounded argument fingerprints and result snapshots; accessors, proxies, cycles, BigInt values, malformed side-effect arguments, and unsafe callback results now fail closed without running attacker-controlled properties.
+- Prevented unchanged non-idempotent retries, concurrent duplicate operations across turn cleanup and provider timeouts, duplicate pending calls, and repeated OpenAI or Anthropic call ids while propagating stable idempotency and operation receipts to handlers and hooks.
+- Made oversized model-visible tool output valid bounded JSON with retrievable full-output references and compact semantic receipts instead of slicing JSON into an invalid fragment.
+- Made approvals first-writer-wins across timeout races, terminal and non-replaying after uncertain restart recovery, and bound to the original tool/policy identity; redacted at-rest arguments can only execute through their live suspended owner.
+- Added cross-platform test launchers plus semantic, provider, approval, concurrency, hostile-data, receipt, truncation, Kanban-domain, checkpoint, and policy regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1168/1168 in the canonical WSL clone with no environment pinning.
+SEMANTIC TOOL OUTCOMES COMPLETE

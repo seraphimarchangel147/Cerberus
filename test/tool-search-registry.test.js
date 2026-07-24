@@ -178,10 +178,9 @@ test("tool_call unwraps before activity, hooks, checkpoints, and dispatch", asyn
     __onToolEvent: (event) => activity.push(event)
   });
 
-  assert.deepEqual(outcome, {
-    ok: true,
-    result: { ...directResult, value: "ready" }
-  });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(outcome.result, { ...directResult, value: "ready" });
+  assert.equal(outcome.outcome.status, "succeeded");
   assert.deepEqual(preHooks, ["mcp_ship_report"]);
   assert.deepEqual(postHooks, ["mcp_ship_report"]);
   assert.deepEqual(checkpoints, ["mcp_ship_report"]);
@@ -225,7 +224,10 @@ test("tool_call policy veto is evaluated against only the real target name", asy
     arguments: {}
   });
 
-  assert.deepEqual(result, { ok: false, error: "blocked plugin_danger" });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "blocked plugin_danger");
+  assert.equal(result.outcome.status, "blocked");
+  assert.equal(result.outcome.code, "hook_blocked");
   assert.deepEqual(preHooks, ["plugin_danger"]);
   assert.deepEqual(postHooks, ["plugin_danger"]);
   assert.equal(dispatched, 0);

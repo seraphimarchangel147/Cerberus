@@ -693,6 +693,7 @@ export class AgentHost {
       turnAbortController.abort(error);
       throw error;
     } finally {
+      toolRegistry?.clearFailureScope?.(modelContext);
       inputAbortSignal?.removeEventListener?.("abort", onInputAbort);
     }
 
