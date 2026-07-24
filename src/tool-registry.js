@@ -9,6 +9,7 @@ import {
   projectAllows,
   projectMemoryScope
 } from "./project-store.js";
+import { profileCapabilityBoundaryError } from "./capability-profile-store.js";
 import {
   TOOL_SEARCH_BRIDGE_NAMES,
   ToolSearchController,
@@ -95,6 +96,7 @@ export class ToolRegistry {
     this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
     this.toolSearchController = options.toolSearchController ?? null;
     this.projects = options.projects ?? null;
+    this.profiles = options.profiles ?? null;
     REGISTRY_FAILURE_STATE.set(this, {
       contextFailures: new WeakMap(),
       turnFailures: new Map(),
@@ -207,6 +209,10 @@ export class ToolRegistry {
     this.projects = projects ?? null;
   }
 
+  bindProfiles(profiles) {
+    this.profiles = profiles ?? null;
+  }
+
   bindJobCoordinator(coordinator) {
     this.jobCoordinator = coordinator ?? null;
   }
@@ -226,6 +232,24 @@ export class ToolRegistry {
           : this.projects.get(projectId, { includeArchived: true });
       } catch {
         currentProject = null;
+      }
+    }
+    let currentProfile = null;
+    if (
+      currentProject
+      && typeof this.profiles?.resolve === "function"
+    ) {
+      try {
+        currentProfile = this.profiles.resolve(
+          currentProject.id,
+          context?.sessionId ?? null
+        );
+      } catch {
+        currentProfile = {
+          active: true,
+          locked: true,
+          identity: "unavailable"
+        };
       }
     }
     return toolFailureFingerprint("tool_approval", {
@@ -264,7 +288,10 @@ export class ToolRegistry {
         ),
         projectHookIds: sortedProjectGrants(
           currentProject?.hookIds ?? context?.__projectHookIds
-        )
+        ),
+        capabilityProfileActive: currentProfile?.active ?? false,
+        capabilityProfileLocked: currentProfile?.locked ?? false,
+        capabilityProfileIdentity: currentProfile?.identity ?? null
       }
     });
   }
@@ -305,9 +332,17 @@ export class ToolRegistry {
   // advertised is STILL invokable via run_mcp_tool + discoverable via
   // list_mcp_tools — no capability is lost, just the direct function affordance.
   modelToolPlan(options = {}) {
-    const projectContext = options.context ?? {};
+    const projectContext = authorizeToolPlanContext(
+      this.projects,
+      this.profiles,
+      options.context ?? {}
+    );
     const listed = this.list({ readOnly: options.readOnly === true })
-      .filter((tool) => !projectToolBoundaryError(tool, projectContext));
+      .filter((tool) => !projectToolBoundaryError(tool, projectContext))
+      .filter((tool) => !profileCapabilityBoundaryError(
+        tool,
+        projectContext.__capabilityProfileResolution
+      ));
     const only = Array.isArray(options.only) ? new Set(options.only.map(String)) : null;
     const narrowed = only
       ? listed.filter((tool) => only.has(tool.name))
@@ -458,7 +493,11 @@ export class ToolRegistry {
         error: safeToolErrorMessage(error, "Tool arguments are not safe JSON.")
       });
     }
-    const projectScope = validateProjectScope(this.projects, context);
+    const projectScope = validateProjectScope(
+      this.projects,
+      context,
+      this.profiles
+    );
     if (projectScope.error) {
       return this._finalizeInvocation(tool, name, args, context, {
         ok: false,
@@ -468,6 +507,20 @@ export class ToolRegistry {
       });
     }
     context = authorizedProjectContext(context, projectScope.project);
+    const profileScope = authorizeProfileContext(
+      this.profiles,
+      context,
+      projectScope.project
+    );
+    if (profileScope.error) {
+      return this._finalizeInvocation(tool, name, args, context, {
+        ok: false,
+        blocked: true,
+        code: "capability_profile_invalid",
+        error: profileScope.error
+      });
+    }
+    context = profileScope.context;
     const forwardInvocation = tool?.forwardInvocation;
     if (typeof forwardInvocation === "function") {
       let forwarded;
@@ -993,7 +1046,11 @@ export class ToolRegistry {
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
     }
-    const projectScope = validateProjectScope(this.projects, context);
+    const projectScope = validateProjectScope(
+      this.projects,
+      context,
+      this.profiles
+    );
     if (projectScope.error) {
       return {
         ok: false,
@@ -1003,6 +1060,32 @@ export class ToolRegistry {
       };
     }
     context = authorizedProjectContext(context, projectScope.project);
+    const profileScope = authorizeProfileContext(
+      this.profiles,
+      context,
+      projectScope.project
+    );
+    if (profileScope.error) {
+      return {
+        ok: false,
+        blocked: true,
+        code: "capability_profile_invalid",
+        error: profileScope.error
+      };
+    }
+    context = profileScope.context;
+    const freshProfileBoundaryError = profileCapabilityBoundaryError(
+      tool,
+      context?.__capabilityProfileResolution
+    );
+    if (freshProfileBoundaryError) {
+      return {
+        ok: false,
+        blocked: true,
+        code: "capability_profile_denied",
+        error: freshProfileBoundaryError
+      };
+    }
     // Specialist bounds: a propagated specialist may only call tools inside
     // its allowlist (its scoped MCP tools + the core set agent-host grants).
     // Same advisory-list / enforced-gate split as the scrutiny policies.
@@ -1166,6 +1249,14 @@ export class ToolRegistry {
     let checkpointCapture = null;
     let releaseJobLease = null;
     try {
+      const dispatchAuthority = refreshToolInvocationAuthority(
+        this.projects,
+        this.profiles,
+        tool,
+        context
+      );
+      if (dispatchAuthority.error) return dispatchAuthority.error;
+      context = dispatchAuthority.context;
       if (context?.__abortSignal?.aborted) {
         return semanticToolError(tool, "Turn ended before tool dispatch.", {
           code: "tool_dispatch_cancelled",
@@ -1192,6 +1283,25 @@ export class ToolRegistry {
         });
         return semantic;
       }
+      const postCheckpointAuthority = refreshToolInvocationAuthority(
+        this.projects,
+        this.profiles,
+        tool,
+        context
+      );
+      if (postCheckpointAuthority.error) {
+        const blocked = {
+          ...postCheckpointAuthority.error,
+          evidence: checkpointEvidence(checkpointCapture)
+        };
+        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+          ...blocked,
+          dispatched: false,
+          durationMs: Date.now() - startedAt
+        });
+        return blocked;
+      }
+      context = postCheckpointAuthority.context;
       if (tool.sideEffects && this.jobCoordinator?.acquireToolInvocation) {
         releaseJobLease = this.jobCoordinator.acquireToolInvocation(
           tool,
@@ -1338,8 +1448,24 @@ function sortedProjectGrants(value) {
     : null;
 }
 
-function validateProjectScope(projects, context) {
-  const projectId = String(context?.__projectId ?? "").trim();
+function validateProjectScope(projects, context, profiles = null) {
+  let projectId = String(context?.__projectId ?? "").trim();
+  let inferredDefault = false;
+  if (!projectId && typeof profiles?.hasBinding === "function") {
+    try {
+      if (profiles.hasBinding(DEFAULT_PROJECT_ID, context?.sessionId ?? null)) {
+        projectId = DEFAULT_PROJECT_ID;
+        inferredDefault = true;
+      }
+    } catch (error) {
+      return {
+        project: null,
+        error: `Default capability profile cannot be verified: ${
+          error?.message ?? String(error)
+        }`
+      };
+    }
+  }
   if (!projectId) return { project: null, error: null };
   if (!projects || (
     typeof projects.authorize !== "function"
@@ -1378,6 +1504,9 @@ function validateProjectScope(projects, context) {
     return { project: null, error: `Project '${projectId}' is archived.` };
   }
   const expectedRevision = context?.__projectRevision;
+  if (inferredDefault && expectedRevision == null) {
+    return { project, error: null };
+  }
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
     return {
       project: null,
@@ -1391,6 +1520,103 @@ function validateProjectScope(projects, context) {
     };
   }
   return { project, error: null };
+}
+
+function authorizeToolPlanContext(projects, profiles, context) {
+  if (!profiles || typeof profiles.resolve !== "function") return context;
+  const projectScope = validateProjectScope(projects, context, profiles);
+  if (projectScope.error) {
+    return {
+      ...(context ?? {}),
+      __allowedTools: [],
+      __scrutinyPolicy: "none",
+      __capabilityProfileResolution: {
+        active: true,
+        locked: true,
+        reason: projectScope.error,
+        toolGrants: []
+      }
+    };
+  }
+  const authorized = authorizedProjectContext(context, projectScope.project);
+  const profileScope = authorizeProfileContext(
+    profiles,
+    authorized,
+    projectScope.project
+  );
+  if (!profileScope.error) return profileScope.context;
+  return {
+    ...authorized,
+    __allowedTools: [],
+    __scrutinyPolicy: "none",
+    __capabilityProfileResolution: {
+      active: true,
+      locked: true,
+      reason: profileScope.error,
+      toolGrants: []
+    }
+  };
+}
+
+function refreshToolInvocationAuthority(projects, profiles, tool, context) {
+  const projectScope = validateProjectScope(projects, context, profiles);
+  if (projectScope.error) {
+    return {
+      context,
+      error: {
+        ok: false,
+        blocked: true,
+        code: "project_scope_invalid",
+        error: projectScope.error
+      }
+    };
+  }
+  let authorized = authorizedProjectContext(context, projectScope.project);
+  const profileScope = authorizeProfileContext(
+    profiles,
+    authorized,
+    projectScope.project
+  );
+  if (profileScope.error) {
+    return {
+      context: authorized,
+      error: {
+        ok: false,
+        blocked: true,
+        code: "capability_profile_invalid",
+        error: profileScope.error
+      }
+    };
+  }
+  authorized = profileScope.context;
+  const boundaryError = profileCapabilityBoundaryError(
+    tool,
+    authorized?.__capabilityProfileResolution
+  );
+  if (boundaryError) {
+    return {
+      context: authorized,
+      error: {
+        ok: false,
+        blocked: true,
+        code: "capability_profile_denied",
+        error: boundaryError
+      }
+    };
+  }
+  const projectBoundary = projectToolBoundaryError(tool, authorized);
+  if (projectBoundary) {
+    return {
+      context: authorized,
+      error: {
+        ok: false,
+        blocked: true,
+        code: "project_capability_denied",
+        error: projectBoundary
+      }
+    };
+  }
+  return { context: authorized, error: null };
 }
 
 function authorizedProjectContext(context, project) {
@@ -1443,6 +1669,79 @@ function authorizedProjectContext(context, project) {
       project.policy?.toolPolicy
     )
   };
+}
+
+function authorizeProfileContext(profiles, context, project) {
+  if (!project || !profiles || typeof profiles.resolve !== "function") {
+    return { context, error: null };
+  }
+  let resolution;
+  try {
+    resolution = profiles.resolve(project.id, context?.sessionId ?? null);
+  } catch (error) {
+    return {
+      context,
+      error: `Capability profile for project '${project.id}' cannot be verified: ${
+        error?.message ?? String(error)
+      }`
+    };
+  }
+  if (!resolution?.active) {
+    return {
+      context: {
+        ...(context ?? {}),
+        __capabilityProfileResolution: resolution ?? null,
+        __capabilityProfileIdentity: null
+      },
+      error: null
+    };
+  }
+  const profileTools = Array.isArray(resolution.toolGrants)
+    ? resolution.toolGrants
+    : [];
+  const inheritedTools = Array.isArray(context?.__allowedTools)
+    ? context.__allowedTools
+    : null;
+  const allowedTools = inheritedTools
+    ? intersectGrantLists(inheritedTools, profileTools)
+    : [...profileTools];
+  const projectSkills = Array.isArray(project.activeSkills)
+    ? project.activeSkills
+    : [];
+  const profileSkills = Array.isArray(resolution.activeSkills)
+    ? resolution.activeSkills
+    : [];
+  const activeSkills = intersectGrantLists(projectSkills, profileSkills);
+  return {
+    context: {
+      ...(context ?? {}),
+      __allowedTools: allowedTools,
+      __projectActiveSkills: activeSkills,
+      __projectModelProfile: {
+        ...structuredClone(project.modelProfile ?? {}),
+        ...structuredClone(resolution.modelProfile ?? {})
+      },
+      __projectRoutingProfile: {
+        ...structuredClone(project.routingProfile ?? {}),
+        ...structuredClone(resolution.routingProfile ?? {})
+      },
+      __capabilityProfileResolution: structuredClone(resolution),
+      __capabilityProfileIdentity: resolution.identity ?? null
+    },
+    error: null
+  };
+}
+
+function intersectGrantLists(left, right) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  const aWildcard = a.includes("*");
+  const bWildcard = b.includes("*");
+  if (aWildcard && bWildcard) return ["*"];
+  if (aWildcard) return [...new Set(b)].sort();
+  if (bWildcard) return [...new Set(a)].sort();
+  const allowed = new Set(b);
+  return [...new Set(a.filter((item) => allowed.has(item)))].sort();
 }
 
 function stricterProjectToolPolicy(left, right) {
@@ -4956,6 +5255,616 @@ export function registerCoreTools(registry, runtime) {
   });
 
   return registry;
+}
+
+export function registerCapabilityProfileTools(registry, runtime) {
+  if (!runtime?.profiles) return registry;
+  const deferred = { toolSearch: "deferred" };
+  const profileProperties = {
+    name: { type: "string", minLength: 1, maxLength: 200 },
+    persona: {
+      type: "string",
+      maxLength: 24000,
+      description: "Optional stable persona instructions. Plain data only."
+    },
+    modelProfile: {
+      type: "object",
+      additionalProperties: true,
+      description: "Credential-free model choices."
+    },
+    routingProfile: {
+      type: "object",
+      additionalProperties: true,
+      description: "Credential-free routing choices."
+    },
+    activeSkills: capabilityGrantArraySchema(
+      "Skills made visible by this profile; bodies remain unloaded until use_skill."
+    ),
+    toolGrants: capabilityGrantArraySchema(
+      "Exact tools granted directly by this profile."
+    ),
+    capabilityBundleIds: {
+      type: "array",
+      maxItems: 256,
+      uniqueItems: true,
+      items: capabilityIdSchema("Capability bundle id.")
+    }
+  };
+  const bundleProperties = {
+    name: { type: "string", minLength: 1, maxLength: 200 },
+    description: { type: "string", maxLength: 2000 },
+    toolGrants: capabilityGrantArraySchema(
+      "Exact tools contributed while this bundle is enabled."
+    ),
+    access: capabilityAccessToolSchema()
+  };
+
+  registry.register({
+    name: "profile_list",
+    metadata: deferred,
+    sideEffects: false,
+    description: "List named capability profiles in the current project without loading any skill bodies.",
+    parameters: {
+      type: "object",
+      properties: {
+        includeRevoked: { type: "boolean" }
+      },
+      additionalProperties: false
+    },
+    handler: (args, context) => ({
+      profiles: runtime.profiles.listProfiles({
+        projectId: capabilityProjectId(runtime, context, "Profile listing"),
+        includeRevoked: args.includeRevoked === true
+      })
+    })
+  });
+
+  registry.register({
+    name: "profile_get",
+    metadata: deferred,
+    sideEffects: false,
+    description: "Inspect one named project profile, its skill and tool grants, and its project/session bindings.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Profile id."),
+        includeRevoked: { type: "boolean" }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    handler: (args, context) => runtime.profiles.getProfile(
+      capabilityProjectId(runtime, context, "Profile inspection"),
+      args.id,
+      { includeRevoked: args.includeRevoked !== false }
+    )
+  });
+
+  registry.register({
+    name: "profile_create",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Create a named project profile. Creation does not activate it or enable any capability bundle.",
+    summarize: ({ id }) => `Create capability profile ${boundedCapabilityId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Profile id."),
+        ...profileProperties
+      },
+      required: [
+        "id",
+        "name",
+        "activeSkills",
+        "toolGrants",
+        "capabilityBundleIds"
+      ],
+      additionalProperties: false
+    },
+    handler: (args, context) => runtime.profiles.createProfile(
+      capabilityProjectId(runtime, context, "Profile creation"),
+      args,
+      { actor: capabilityActor(context) }
+    )
+  });
+
+  registry.register({
+    name: "profile_update",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Revision-safely edit a named profile. It remains inactive until separately bound, and revoked profiles cannot be edited.",
+    summarize: ({ id }) => `Update capability profile ${boundedCapabilityId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Profile id."),
+        expectedRevision: { type: "integer", minimum: 1 },
+        ...profileProperties
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    handler: ({ id, ...patch }, context) => runtime.profiles.updateProfile(
+      capabilityProjectId(runtime, context, "Profile update"),
+      id,
+      patch,
+      { actor: capabilityActor(context) }
+    )
+  });
+
+  registry.register({
+    name: "profile_activate",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Bind or clear an active profile for the current project or one project-owned session. Explicit human approval is required because this changes live authority.",
+    summarize: ({ id, scope }) => (
+      `${id ? "Activate" : "Clear"} ${scope ?? "session"} capability profile ${boundedCapabilityId(id)}`
+    ),
+    parameters: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          maxLength: 64,
+          description: "Profile id, or an empty string to clear the binding."
+        },
+        scope: { type: "string", enum: ["project", "session"] },
+        sessionId: {
+          type: "string",
+          maxLength: 512,
+          description: "Required for session scope; defaults to the current session."
+        },
+        expectedBindingProfileId: {
+          type: "string",
+          maxLength: 64,
+          description: "Current bound profile id, or empty when unbound. Prevents lost updates."
+        },
+        expectedProfileRevision: {
+          type: "integer",
+          minimum: 1,
+          description: "Required when activating a profile; its current revision."
+        }
+      },
+      required: ["id", "scope", "expectedBindingProfileId"],
+      additionalProperties: false
+    },
+    handler: (args, context) => {
+      assertManualCapabilityApproval(context, "Profile activation");
+      if (
+        String(args.id ?? "").trim()
+        && (!Number.isSafeInteger(args.expectedProfileRevision)
+          || args.expectedProfileRevision < 1)
+      ) {
+        throw new Error(
+          "expectedProfileRevision is required when activating a profile."
+        );
+      }
+      const projectId = capabilityProjectId(runtime, context, "Profile activation");
+      if (args.scope === "project") {
+        return runtime.profiles.bindProjectProfile(projectId, args.id, {
+          expectedBindingProfileId: args.expectedBindingProfileId,
+          expectedProfileRevision: args.expectedProfileRevision,
+          actor: capabilityActor(context)
+        });
+      }
+      const sessionId = String(args.sessionId ?? context?.sessionId ?? "").trim();
+      if (!sessionId) throw new Error("sessionId is required for session profile activation.");
+      return runtime.profiles.bindSessionProfile(
+        projectId,
+        sessionId,
+        args.id,
+        {
+          expectedBindingProfileId: args.expectedBindingProfileId,
+          expectedProfileRevision: args.expectedProfileRevision,
+          actor: capabilityActor(context)
+        }
+      );
+    }
+  });
+
+  registry.register({
+    name: "profile_revoke",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Permanently revoke a profile revision. Existing bindings become deny-all until an operator explicitly selects or clears a profile.",
+    summarize: ({ id }) => `Revoke capability profile ${boundedCapabilityId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Profile id."),
+        expectedRevision: { type: "integer", minimum: 1 }
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    handler: (args, context) => {
+      assertManualCapabilityApproval(context, "Profile revocation");
+      return runtime.profiles.revokeProfile(
+        capabilityProjectId(runtime, context, "Profile revocation"),
+        args.id,
+        {
+          expectedRevision: args.expectedRevision,
+          actor: capabilityActor(context)
+        }
+      );
+    }
+  });
+
+  registry.register({
+    name: "capability_bundle_list",
+    metadata: deferred,
+    sideEffects: false,
+    description: "List reusable project-scoped capability bundles and whether each is disabled, enabled, or revoked.",
+    parameters: {
+      type: "object",
+      properties: {
+        includeRevoked: { type: "boolean" }
+      },
+      additionalProperties: false
+    },
+    handler: (args, context) => ({
+      bundles: runtime.profiles.listBundles({
+        projectId: capabilityProjectId(runtime, context, "Capability bundle listing"),
+        includeRevoked: args.includeRevoked === true
+      })
+    })
+  });
+
+  registry.register({
+    name: "capability_bundle_create",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Create a disabled capability bundle with explicit filesystem, network, secret, subprocess, API, UI, and hook declarations.",
+    summarize: ({ id }) => `Create disabled capability bundle ${boundedCapabilityId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Capability bundle id."),
+        ...bundleProperties
+      },
+      required: ["id", "name", "toolGrants", "access"],
+      additionalProperties: false
+    },
+    handler: (args, context) => runtime.profiles.createBundle(
+      capabilityProjectId(runtime, context, "Capability bundle creation"),
+      args,
+      { actor: capabilityActor(context) }
+    )
+  });
+
+  registry.register({
+    name: "capability_bundle_update",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Revision-safely edit a capability bundle. Every permission edit automatically disables it for fresh review.",
+    summarize: ({ id }) => `Update and disable capability bundle ${boundedCapabilityId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Capability bundle id."),
+        expectedRevision: { type: "integer", minimum: 1 },
+        ...bundleProperties
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    handler: ({ id, ...patch }, context) => runtime.profiles.updateBundle(
+      capabilityProjectId(runtime, context, "Capability bundle update"),
+      id,
+      patch,
+      { actor: capabilityActor(context) }
+    )
+  });
+
+  registry.register({
+    name: "capability_bundle_enable",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Enable or disable one exact capability bundle revision. Explicit human approval is required; hands-free auto-approval cannot grant authority.",
+    summarize: ({ id, enabled }) => (
+      `${enabled ? "Enable" : "Disable"} capability bundle ${boundedCapabilityId(id)}`
+    ),
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Capability bundle id."),
+        expectedRevision: { type: "integer", minimum: 1 },
+        enabled: { type: "boolean" }
+      },
+      required: ["id", "expectedRevision", "enabled"],
+      additionalProperties: false
+    },
+    handler: (args, context) => {
+      assertManualCapabilityApproval(context, "Capability bundle activation");
+      return runtime.profiles.setBundleEnabled(
+        capabilityProjectId(runtime, context, "Capability bundle activation"),
+        args.id,
+        args.enabled,
+        {
+          expectedRevision: args.expectedRevision,
+          actor: capabilityActor(context)
+        }
+      );
+    }
+  });
+
+  registry.register({
+    name: "capability_bundle_revoke",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Permanently revoke a capability bundle so every referencing profile loses its tools and declared access on the next gate check.",
+    summarize: ({ id }) => `Revoke capability bundle ${boundedCapabilityId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: capabilityIdSchema("Capability bundle id."),
+        expectedRevision: { type: "integer", minimum: 1 }
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    handler: (args, context) => {
+      assertManualCapabilityApproval(context, "Capability bundle revocation");
+      return runtime.profiles.revokeBundle(
+        capabilityProjectId(runtime, context, "Capability bundle revocation"),
+        args.id,
+        {
+          expectedRevision: args.expectedRevision,
+          actor: capabilityActor(context)
+        }
+      );
+    }
+  });
+
+  registry.register({
+    name: "capability_audit",
+    metadata: deferred,
+    sideEffects: false,
+    description: "Read the bounded project-scoped audit trail for profile and capability-grant mutations.",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 500 }
+      },
+      additionalProperties: false
+    },
+    handler: (args, context) => ({
+      events: runtime.profiles.history({
+        projectId: capabilityProjectId(runtime, context, "Capability audit"),
+        limit: args.limit ?? 100
+      })
+    })
+  });
+
+  if (runtime.skillImports) {
+    registry.register({
+      name: "skill_import_list",
+      metadata: deferred,
+      sideEffects: false,
+      description: "List review-only ZIP or local-Git skill import candidates. Quarantined code is not loaded or executable.",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
+            type: "string",
+            enum: ["pending", "approved", "rejected"]
+          },
+          includeResolved: { type: "boolean" }
+        },
+        additionalProperties: false
+      },
+      handler: (args, context) => ({
+        imports: runtime.skillImports.list({
+          projectId: capabilityProjectId(runtime, context, "Skill import listing"),
+          status: args.status ?? null,
+          includeResolved: args.includeResolved !== false
+        })
+      })
+    });
+
+    registry.register({
+      name: "skill_import_stage",
+      metadata: deferred,
+      needsConfirmation: true,
+      capability: {
+        resources: ["filesystem"]
+      },
+      description: "Copy a ZIP or already-present local Git checkout from the default-project workspace into inert review quarantine. This never runs Git, hooks, filters, package managers, or imported scripts.",
+      summarize: ({ kind, sourcePath }) => (
+        `Stage ${String(kind ?? "").slice(0, 8)} skill import from ${String(sourcePath ?? "").slice(0, 160)}`
+      ),
+      parameters: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["zip", "git"] },
+          sourcePath: { type: "string", minLength: 1, maxLength: 4096 },
+          sourceLabel: { type: "string", maxLength: 500 }
+        },
+        required: ["kind", "sourcePath"],
+        additionalProperties: false
+      },
+      handler: (args, context) => runtime.skillImports.stage({
+        ...args,
+        projectId: capabilityProjectId(runtime, context, "Skill import staging")
+      }, {
+        actor: capabilityActor(context)
+      })
+    });
+
+    registry.register({
+      name: "skill_import_review",
+      metadata: deferred,
+      sideEffects: false,
+      capability: {
+        resources: ["filesystem"]
+      },
+      description: "Inspect inert import metadata or one bounded quarantined file as explicitly untrusted review data.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", pattern: "^skill_import_[a-f0-9]{16}$" },
+          file: { type: "string", maxLength: 1024 }
+        },
+        required: ["id"],
+        additionalProperties: false
+      },
+      handler: (args, context) => runtime.skillImports.review(args.id, {
+        projectId: capabilityProjectId(runtime, context, "Skill import review"),
+        file: args.file ?? null
+      })
+    });
+
+    registry.register({
+      name: "skill_import_approve",
+      metadata: deferred,
+      needsConfirmation: true,
+      capability: {
+        resources: ["filesystem"]
+      },
+      description: "Approve one exact quarantined import revision and atomically materialize it as a user skill. A real human approval is mandatory; auto-approve cannot load imported code.",
+      summarize: ({ id }) => `Approve quarantined skill import ${boundedImportId(id)}`,
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", pattern: "^skill_import_[a-f0-9]{16}$" },
+          expectedRevision: { type: "integer", minimum: 1 }
+        },
+        required: ["id", "expectedRevision"],
+        additionalProperties: false
+      },
+      handler: (args, context) => {
+        assertManualCapabilityApproval(context, "Skill import approval");
+        return runtime.skillImports.approve(args.id, {
+          projectId: capabilityProjectId(runtime, context, "Skill import approval"),
+          expectedRevision: args.expectedRevision
+        }, {
+          actor: capabilityActor(context)
+        });
+      }
+    });
+
+    registry.register({
+      name: "skill_import_reject",
+      metadata: deferred,
+      needsConfirmation: true,
+      description: "Reject an exact quarantined skill import revision while retaining its audit record and inert bytes.",
+      summarize: ({ id }) => `Reject quarantined skill import ${boundedImportId(id)}`,
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", pattern: "^skill_import_[a-f0-9]{16}$" },
+          expectedRevision: { type: "integer", minimum: 1 },
+          reason: { type: "string", minLength: 1, maxLength: 2000 }
+        },
+        required: ["id", "expectedRevision", "reason"],
+        additionalProperties: false
+      },
+      handler: (args, context) => {
+        assertManualCapabilityApproval(context, "Skill import rejection");
+        return runtime.skillImports.reject(args.id, {
+          projectId: capabilityProjectId(runtime, context, "Skill import rejection"),
+          expectedRevision: args.expectedRevision,
+          reason: args.reason
+        }, {
+          actor: capabilityActor(context)
+        });
+      }
+    });
+  }
+
+  return registry;
+}
+
+function capabilityGrantArraySchema(description) {
+  return {
+    type: "array",
+    maxItems: 256,
+    uniqueItems: true,
+    description,
+    items: {
+      type: "string",
+      minLength: 1,
+      maxLength: 128,
+      pattern: "^[A-Za-z0-9*][A-Za-z0-9_.:/*-]{0,127}$"
+    }
+  };
+}
+
+function capabilityIdSchema(description) {
+  return {
+    type: "string",
+    minLength: 1,
+    maxLength: 64,
+    pattern: "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$",
+    description
+  };
+}
+
+function capabilityAccessToolSchema() {
+  return {
+    type: "object",
+    description: "Every access class must be explicitly declared.",
+    properties: {
+      filesystem: { type: "string", enum: ["none", "read", "write"] },
+      network: { type: "boolean" },
+      secrets: { type: "boolean" },
+      subprocess: { type: "boolean" },
+      api: { type: "boolean" },
+      ui: { type: "boolean" },
+      hooks: { type: "boolean" }
+    },
+    required: [
+      "filesystem",
+      "network",
+      "secrets",
+      "subprocess",
+      "api",
+      "ui",
+      "hooks"
+    ],
+    additionalProperties: false
+  };
+}
+
+function capabilityProjectId(runtime, context, operation) {
+  return requireProjectControlIdentity(runtime.projects, context, operation)
+    ?? DEFAULT_PROJECT_ID;
+}
+
+function capabilityActor(context) {
+  return context?.__approval?.decider
+    ?? context?.__approval?.decidedBy
+    ?? context?.from
+    ?? context?.agentId
+    ?? "agent";
+}
+
+function assertManualCapabilityApproval(context, operation) {
+  const approval = context?.__approval;
+  const decider = String(
+    approval?.decider ?? approval?.decidedBy ?? ""
+  ).trim();
+  if (!approval || !decider || decider === "auto-approve") {
+    const error = new Error(
+      `${operation} requires an explicit human approval; auto-approve is insufficient.`
+    );
+    error.code = "CAPABILITY_MANUAL_APPROVAL_REQUIRED";
+    throw error;
+  }
+}
+
+function boundedCapabilityId(value) {
+  const id = String(value ?? "").trim();
+  return /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(id)
+    ? id
+    : "[invalid-id]";
+}
+
+function boundedImportId(value) {
+  const id = String(value ?? "").trim();
+  return /^skill_import_[a-f0-9]{16}$/.test(id)
+    ? id
+    : "[invalid-import]";
 }
 
 export function registerSolutionRecipeTools(registry, runtime) {

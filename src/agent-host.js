@@ -453,7 +453,7 @@ export class AgentHost {
         legacySession = transcriptProject.legacySession;
       }
     }
-    const project = this.runtime.projects?.resolveForSession
+    let project = this.runtime.projects?.resolveForSession
       ? this.runtime.projects.resolveForSession(sessionId, {
           requestedProjectId,
           legacySession,
@@ -474,6 +474,15 @@ export class AgentHost {
           modelProfile: {},
           routingProfile: {}
         };
+    let capabilityProfileResolution = null;
+    if (
+      this.runtime.profiles
+      && typeof this.runtime.profiles.applyToProject === "function"
+    ) {
+      const applied = this.runtime.profiles.applyToProject(project, sessionId);
+      project = applied.project;
+      capabilityProfileResolution = applied.resolution;
+    }
     assertProjectProviderSecrets(project, turnProvider);
     const durableJobId = verifyAgentHostJobContext(
       this.runtime,
@@ -832,7 +841,12 @@ export class AgentHost {
           __projectId: project.id,
           __projectRevision: project.revision ?? 1,
           __projectMcpGrants: [...(project.mcpGrants ?? [])],
-          __projectActiveSkills: [...(project.activeSkills ?? [])]
+          __projectActiveSkills: [...(project.activeSkills ?? [])],
+          __capabilityProfileResolution: capabilityProfileResolution
+            ? structuredClone(capabilityProfileResolution)
+            : null,
+          __capabilityProfileIdentity:
+            capabilityProfileResolution?.identity ?? null
         }
       : {};
     const planScrutinyPolicy = toolPolicy === "read-only"
@@ -999,7 +1013,12 @@ export class AgentHost {
         __projectHookIds: [...(project.hookIds ?? [])],
         __projectKanbanBoardId: project.kanbanBoardId ?? "default",
         __projectModelProfile: structuredClone(project.modelProfile ?? {}),
-        __projectRoutingProfile: structuredClone(project.routingProfile ?? {})
+        __projectRoutingProfile: structuredClone(project.routingProfile ?? {}),
+        __capabilityProfileResolution: capabilityProfileResolution
+          ? structuredClone(capabilityProfileResolution)
+          : null,
+        __capabilityProfileIdentity:
+          capabilityProfileResolution?.identity ?? null
       } : {}),
       __continuationEligible: Boolean(
         !ephemeral
@@ -1036,7 +1055,11 @@ export class AgentHost {
         referenceOptions.homeDir = project.workspaceRoot;
       }
       const providerInput = await expandContextReferences(text, referenceOptions);
-      const providerInstructions = this.instructionsForAgent(agent, project);
+      const providerInstructions = this.instructionsForAgent(
+        agent,
+        project,
+        capabilityProfileResolution
+      );
       const providerImages = Array.isArray(input.images) ? input.images : [];
       modelContext.__requestShape = requestShapeTelemetry({
         history: providerHistory,
@@ -1363,6 +1386,21 @@ export class AgentHost {
 
     const createdAt = nowIso();
     let targetBound = false;
+    let targetProfileBound = false;
+    let sourceSessionProfile = null;
+    if (typeof this.runtime.profiles?.resolve === "function") {
+      const resolution = this.runtime.profiles.resolve(
+        project.id,
+        sourceSessionId
+      );
+      if (
+        resolution?.active
+        && !resolution.locked
+        && resolution.binding === "session"
+      ) {
+        sourceSessionProfile = resolution;
+      }
+    }
     let branched;
     try {
       if (typeof this.runtime.projects?.resolveForSession === "function") {
@@ -1373,6 +1411,22 @@ export class AgentHost {
           actor: "session:branch"
         });
         targetBound = true;
+      }
+      if (
+        sourceSessionProfile
+        && typeof this.runtime.profiles?.bindSessionProfile === "function"
+      ) {
+        this.runtime.profiles.bindSessionProfile(
+          project.id,
+          targetSessionId,
+          sourceSessionProfile.profileId,
+          {
+            expectedBindingProfileId: null,
+            expectedProfileRevision: sourceSessionProfile.profileRevision,
+            actor: "session:branch"
+          }
+        );
+        targetProfileBound = true;
       }
       branched = await this.store.createSessionBranch(sourceSessionId, {
         messageId,
@@ -1387,6 +1441,25 @@ export class AgentHost {
           targetPersisted = this.store.hasSession(targetSessionId);
         } catch {
           // A corrupt or unverifiable transcript must retain its binding.
+        }
+      }
+      if (
+        targetProfileBound
+        && !targetPersisted
+        && typeof this.runtime.profiles?.bindSessionProfile === "function"
+      ) {
+        try {
+          this.runtime.profiles.bindSessionProfile(
+            project.id,
+            targetSessionId,
+            null,
+            {
+              expectedBindingProfileId: sourceSessionProfile.profileId,
+              actor: "session:branch:rollback"
+            }
+          );
+        } catch {
+          // The original branch failure remains authoritative.
         }
       }
       if (
@@ -1729,10 +1802,19 @@ export class AgentHost {
   // STATIC persona + standing instructions only. The provider appends the
   // separately frozen session memory block; volatile retrieval hits and
   // scrutiny remain in turnContextForAgent() below.
-  instructionsForAgent(agent, project = null) {
+  instructionsForAgent(agent, project = null, capabilityProfile = null) {
     const projectInstructions = String(project?.instructions ?? "").trim();
     const projectBlock = projectInstructions
       ? `\n\nProject instructions for ${project.name} (${project.id}):\n${projectInstructions}`
+      : "";
+    const persona = String(capabilityProfile?.persona ?? "").trim();
+    const profileBlock = capabilityProfile?.active
+      ? capabilityProfile.locked
+        ? `\n\nCapability profile '${capabilityProfile.profileId ?? "missing"}' is locked. Do not attempt tool use until an operator selects an active profile.`
+        : [
+            `\n\nActive capability profile: ${capabilityProfile.profileName} (${capabilityProfile.profileId}, ${capabilityProfile.binding}-scoped).`,
+            persona ? `Profile persona:\n${persona}` : ""
+          ].filter(Boolean).join("\n")
       : "";
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
@@ -1741,7 +1823,7 @@ Your job is to help through the ABI loop:
 2. Use memory deliberately. When the user CORRECTS something you previously stored or said (a time, a name, a decision, a preference), call correct_memory with the corrected fact — never just remember a second conflicting version.
 3. Propagate bounded specialists only when repeated or novel high-risk work justifies it.
 
-Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}`;
+Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}`;
   }
 
   // Per-turn [context] block prepended to the latest user message (see

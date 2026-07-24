@@ -757,3 +757,15 @@ ARTIFACT CANVAS COMPLETE
 - Added persistence, concurrency, corruption, evidence, trust-reset, fact separation, stale-index, vector-isolation, secret-redaction, project-boundary, HTTP, SSE, prompt, and review-path regressions in both approval lanes.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1551/1552 tests with zero failures and one intentional Windows permission-mode skip.
 SOLUTION RECIPES COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: profiles and capability grants (Codex)
+
+- Added durable project- and session-scoped profiles for persona instructions, model and routing choices, progressively disclosed active skills, exact tool grants, and disabled-by-default capability bundles.
+- Bound every sensitive tool invocation to one enabled bundle that grants both the exact tool and its complete filesystem, network, secret, subprocess, API, UI, or hook access; unrelated grants cannot be combined to manufacture authority.
+- Enforced fresh profile resolution in provider catalogs, direct and radar-dispatched calls, asynchronous hook and checkpoint boundaries, approval identities, project application, and session branches, with revoked or corrupt authority failing closed.
+- Added revision-safe profile, bundle, and binding administration through deferred agent tools plus authenticated HTTP, metadata-only events, audit history, explicit-human escalation gates, and deny-all preservation for empty grants.
+- Added inert ZIP and local-checkout skill quarantine with bounded static parsing, traversal, link, device, archive, credential, CRC, collision, Unicode, and decompression defenses; imported code cannot load before exact human-approved atomic materialization.
+- Pinned import approvals to candidate and project revisions, stamped durable import lineage and finite tool allowlists, kept arbitrary function patching unsupported, and made both authority journals append-only with atomic snapshots and corruption-safe writes.
+- Added profile, bundle, race, CAS, branch, catalog, prompt, HTTP auth, import, project-boundary, persistence, corruption, and hostile-package regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1573/1574 tests with zero failures and one intentional Windows permission-mode skip.
+PROFILES AND GRANTS COMPLETE

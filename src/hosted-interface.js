@@ -289,6 +289,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const setupActive = isFirstRun();
       const setupRoutes = pathname === "/setup" || pathname === "/setup/save" || pathname === "/setup/test";
       const secretsRoute = pathname === "/secrets" || pathname.startsWith("/secrets/");
+      const capabilityAdminRoute = (
+        pathname === "/profiles"
+        || pathname.startsWith("/profiles/")
+        || pathname === "/capability-bundles"
+        || pathname.startsWith("/capability-bundles/")
+        || pathname === "/skill-imports"
+        || pathname.startsWith("/skill-imports/")
+      );
 
       if (setupActive && method === "GET" && pathname === "/") {
         res.writeHead(302, { Location: "/setup" });
@@ -315,8 +323,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // The rest of the local-only API retains its backwards-compatible
         // auth-disabled mode. The secrets surface is different: it must never
         // become anonymously reachable because OPENAGI_AUTH_TOKEN is absent.
-        const auth = secretsRoute && !authToken
-          ? { ok: false, reason: "OPENAGI_AUTH_TOKEN is required for the secrets API" }
+        const auth = (secretsRoute || capabilityAdminRoute) && !authToken
+          ? {
+              ok: false,
+              reason: secretsRoute
+                ? "OPENAGI_AUTH_TOKEN is required for the secrets API"
+                : "OPENAGI_AUTH_TOKEN is required for capability administration"
+            }
           : checkAuth(req, url, authToken);
         if (!auth.ok) {
           // Browsers (Accept: text/html) get the login form on ANY failed GET,
@@ -670,6 +683,476 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             error.code === "PROJECT_REVISION_CONFLICT" ? 409 : 400,
             { error: error.message, code: error.code ?? null }
           );
+        }
+      }
+
+      // Named profiles, project-scoped capability grants, and inert skill
+      // import quarantine. These administration routes require a configured
+      // auth token even when the rest of the legacy local API is auth-less.
+      if (method === "GET" && pathname === "/profiles/audit") {
+        if (!runtime.profiles?.history) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            events: runtime.profiles.history({
+              projectId: project.id,
+              limit: url.searchParams.has("limit")
+                ? Number(url.searchParams.get("limit"))
+                : 100
+            })
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/profiles/activate") {
+        if (!runtime.profiles?.bindProjectProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const profileId = body?.id == null || body.id === ""
+            ? null
+            : body.id;
+          if (!Object.hasOwn(body ?? {}, "expectedBindingProfileId")) {
+            throw new TypeError("expectedBindingProfileId is required.");
+          }
+          if (
+            profileId
+            && (
+              !Number.isSafeInteger(body?.expectedProfileRevision)
+              || body.expectedProfileRevision < 1
+            )
+          ) {
+            throw new TypeError(
+              "expectedProfileRevision is required when activating a profile."
+            );
+          }
+          const bindingContext = {
+            expectedBindingProfileId: body.expectedBindingProfileId,
+            expectedProfileRevision: body.expectedProfileRevision,
+            actor: "http:POST:/profiles/activate"
+          };
+          const resolution = body?.scope === "project"
+            ? runtime.profiles.bindProjectProfile(
+                project.id,
+                profileId,
+                bindingContext
+              )
+            : body?.scope === "session"
+              ? runtime.profiles.bindSessionProfile(
+                  project.id,
+                  body?.sessionId,
+                  profileId,
+                  bindingContext
+                )
+              : (() => {
+                  throw new TypeError("scope must be project or session.");
+                })();
+          events.emit("capability-profile", {
+            op: profileId ? "activate" : "clear",
+            projectId: project.id,
+            profileId,
+            scope: body.scope,
+            sessionId: body.scope === "session" ? body.sessionId : null
+          });
+          return sendJson(res, 200, resolution);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && pathname === "/profiles") {
+        if (!runtime.profiles?.listProfiles) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            profiles: runtime.profiles.listProfiles({
+              projectId: project.id,
+              includeRevoked: url.searchParams.get("revoked") === "1"
+            }),
+            active: runtime.profiles.resolve(
+              project.id,
+              url.searchParams.get("sessionId") || null
+            )
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/profiles") {
+        if (!runtime.profiles?.createProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const profile = runtime.profiles.createProfile(
+            project.id,
+            body ?? {},
+            { actor: "http:POST:/profiles" }
+          );
+          events.emit("capability-profile", {
+            op: "create",
+            projectId: project.id,
+            profileId: profile.id,
+            revision: profile.revision
+          });
+          return sendJson(res, 201, profile);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/profiles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.getProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/profiles/".length));
+        try {
+          const profile = runtime.profiles.getProfile(project.id, id, {
+            includeRevoked: true
+          });
+          return profile
+            ? sendJson(res, 200, profile)
+            : sendJson(res, 404, { error: "unknown profile" });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/profiles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.updateProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(pathname.slice("/profiles/".length));
+        try {
+          const profile = runtime.profiles.updateProfile(
+            project.id,
+            id,
+            body ?? {},
+            { actor: "http:PATCH:/profiles" }
+          );
+          events.emit("capability-profile", {
+            op: "update",
+            projectId: project.id,
+            profileId: profile.id,
+            revision: profile.revision
+          });
+          return sendJson(res, 200, profile);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/profiles\/[^/]+\/revoke$/u.test(pathname)) {
+        if (!runtime.profiles?.revokeProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/profiles/".length, -"/revoke".length)
+        );
+        try {
+          const profile = runtime.profiles.revokeProfile(project.id, id, {
+            expectedRevision: body?.expectedRevision,
+            actor: "http:POST:/profiles/revoke"
+          });
+          events.emit("capability-profile", {
+            op: "revoke",
+            projectId: project.id,
+            profileId: profile.id,
+            revision: profile.revision
+          });
+          return sendJson(res, 200, profile);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+
+      if (method === "GET" && pathname === "/capability-bundles") {
+        if (!runtime.profiles?.listBundles) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            bundles: runtime.profiles.listBundles({
+              projectId: project.id,
+              includeRevoked: url.searchParams.get("revoked") === "1"
+            })
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/capability-bundles") {
+        if (!runtime.profiles?.createBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const bundle = runtime.profiles.createBundle(
+            project.id,
+            body ?? {},
+            { actor: "http:POST:/capability-bundles" }
+          );
+          events.emit("capability-bundle", {
+            op: "create",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 201, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/capability-bundles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.getBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/capability-bundles/".length)
+        );
+        try {
+          const bundle = runtime.profiles.getBundle(project.id, id, {
+            includeRevoked: true
+          });
+          return bundle
+            ? sendJson(res, 200, bundle)
+            : sendJson(res, 404, { error: "unknown capability bundle" });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/capability-bundles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.updateBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/capability-bundles/".length)
+        );
+        try {
+          const bundle = runtime.profiles.updateBundle(
+            project.id,
+            id,
+            body ?? {},
+            { actor: "http:PATCH:/capability-bundles" }
+          );
+          events.emit("capability-bundle", {
+            op: "update",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 200, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/capability-bundles\/[^/]+\/enable$/u.test(pathname)
+      ) {
+        if (!runtime.profiles?.setBundleEnabled) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice(
+            "/capability-bundles/".length,
+            -"/enable".length
+          )
+        );
+        try {
+          const bundle = runtime.profiles.setBundleEnabled(
+            project.id,
+            id,
+            body?.enabled,
+            {
+              expectedRevision: body?.expectedRevision,
+              actor: "http:POST:/capability-bundles/enable"
+            }
+          );
+          events.emit("capability-bundle", {
+            op: body?.enabled ? "enable" : "disable",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 200, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/capability-bundles\/[^/]+\/revoke$/u.test(pathname)
+      ) {
+        if (!runtime.profiles?.revokeBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice(
+            "/capability-bundles/".length,
+            -"/revoke".length
+          )
+        );
+        try {
+          const bundle = runtime.profiles.revokeBundle(project.id, id, {
+            expectedRevision: body?.expectedRevision,
+            actor: "http:POST:/capability-bundles/revoke"
+          });
+          events.emit("capability-bundle", {
+            op: "revoke",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 200, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+
+      if (method === "GET" && pathname === "/skill-imports") {
+        if (!runtime.skillImports?.list) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            imports: runtime.skillImports.list({
+              projectId: project.id,
+              status: url.searchParams.get("status") || null,
+              includeResolved: url.searchParams.get("resolved") !== "0"
+            })
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/skill-imports") {
+        if (!runtime.skillImports?.stage) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const candidate = runtime.skillImports.stage({
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            actor: "http:POST:/skill-imports"
+          });
+          events.emit("skill-import", {
+            op: "stage",
+            projectId: project.id,
+            candidateId: candidate.id,
+            revision: candidate.revision,
+            status: candidate.status,
+            skillName: candidate.skillName
+          });
+          return sendJson(res, 201, candidate);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/skill-imports\/[^/]+$/u.test(pathname)) {
+        if (!runtime.skillImports?.review) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/skill-imports/".length));
+        try {
+          return sendJson(res, 200, runtime.skillImports.review(id, {
+            projectId: project.id,
+            file: url.searchParams.get("file")
+          }));
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/skill-imports\/[^/]+\/approve$/u.test(pathname)
+      ) {
+        if (!runtime.skillImports?.approve) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/skill-imports/".length, -"/approve".length)
+        );
+        try {
+          const candidate = runtime.skillImports.approve(id, {
+            projectId: project.id,
+            expectedRevision: body?.expectedRevision
+          }, {
+            actor: "http:POST:/skill-imports/approve"
+          });
+          events.emit("skill-import", {
+            op: "approve",
+            projectId: project.id,
+            candidateId: candidate.id,
+            revision: candidate.revision,
+            status: candidate.status,
+            skillName: candidate.skillName
+          });
+          return sendJson(res, 200, candidate);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/skill-imports\/[^/]+\/reject$/u.test(pathname)
+      ) {
+        if (!runtime.skillImports?.reject) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/skill-imports/".length, -"/reject".length)
+        );
+        try {
+          const candidate = runtime.skillImports.reject(id, {
+            projectId: project.id,
+            expectedRevision: body?.expectedRevision,
+            reason: body?.reason
+          }, {
+            actor: "http:POST:/skill-imports/reject"
+          });
+          events.emit("skill-import", {
+            op: "reject",
+            projectId: project.id,
+            candidateId: candidate.id,
+            revision: candidate.revision,
+            status: candidate.status,
+            skillName: candidate.skillName
+          });
+          return sendJson(res, 200, candidate);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
         }
       }
 
@@ -4140,6 +4623,50 @@ function sendRecipeHttpError(res, error) {
   ) {
     return sendJson(res, 400, {
       error: error.message,
+      ...(code ? { code } : {})
+    });
+  }
+  throw error;
+}
+
+function sendCapabilityHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  const message = String(error?.message ?? "capability administration failed");
+  if (/^Unknown (?:profile|capability bundle|skill import)/u.test(message)) {
+    return sendJson(res, 404, {
+      error: "unknown capability resource",
+      ...(code ? { code } : {})
+    });
+  }
+  if (
+    code.includes("REVISION")
+    || code.includes("STALE")
+    || code.includes("CONFLICT")
+  ) {
+    return sendJson(res, 409, {
+      error: message,
+      code: code || "CAPABILITY_REVISION_CONFLICT"
+    });
+  }
+  if (
+    code.includes("BOUNDARY")
+    || code === "PROJECT_BOUNDARY_VIOLATION"
+  ) {
+    return sendJson(res, 403, {
+      error: message,
+      ...(code ? { code } : {})
+    });
+  }
+  if (error instanceof RangeError) {
+    return sendJson(res, 413, { error: message });
+  }
+  if (
+    error instanceof TypeError
+    || code.startsWith("CAPABILITY_")
+    || code.startsWith("SKILL_IMPORT_")
+  ) {
+    return sendJson(res, 400, {
+      error: message,
       ...(code ? { code } : {})
     });
   }

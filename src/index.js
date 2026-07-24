@@ -50,6 +50,25 @@ export {
 export { GoalStore } from "./goal-store.js";
 export { KanbanStore, KANBAN_COLUMNS } from "./kanban-store.js";
 export {
+  CAPABILITY_ACCESS_FIELDS,
+  CAPABILITY_BUNDLE_STATUSES,
+  FILESYSTEM_ACCESS,
+  PROFILE_STATUSES,
+  CapabilityProfileBoundaryError,
+  CapabilityProfileRevisionError,
+  CapabilityProfileStore,
+  emptyCapabilityAccess,
+  profileCapabilityBoundaryError,
+  requiredToolAccess
+} from "./capability-profile-store.js";
+export {
+  SKILL_IMPORT_KINDS,
+  SKILL_IMPORT_STATUSES,
+  SkillImportBoundaryError,
+  SkillImportRevisionError,
+  SkillImportStore
+} from "./skill-import-store.js";
+export {
   DEFAULT_PROJECT_ID,
   PROJECT_STATUSES,
   ProjectBoundaryError,
@@ -205,6 +224,7 @@ export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";
 export {
   registerCoreTools,
+  registerCapabilityProfileTools,
   registerSemanticBrowserTools,
   registerSolutionRecipeTools,
   SEMANTIC_BROWSER_TOOL_NAMES,

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { InMemoryAgentStore } from "../src/agent-store.js";
 import { AgentHost } from "../src/agent-host.js";
+import { CapabilityProfileStore } from "../src/capability-profile-store.js";
 import { ProjectStore } from "../src/project-store.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
@@ -41,6 +42,7 @@ function makeHarness(options = {}) {
     })
   };
   if (options.projects) runtime.projects = options.projects;
+  if (options.profiles) runtime.profiles = options.profiles;
   if (options.observations) runtime.observations = options.observations;
   if (options.tasks) runtime.tasks = options.tasks;
   const modelProvider = {
@@ -62,7 +64,9 @@ function makeHarness(options = {}) {
         turnContext: request.turnContext,
         projectId: request.context.__projectId ?? null,
         projectModelProfile: request.context.__projectModelProfile ?? null,
-        projectRoutingProfile: request.context.__projectRoutingProfile ?? null
+        projectRoutingProfile: request.context.__projectRoutingProfile ?? null,
+        capabilityProfile:
+          request.context.__capabilityProfileResolution ?? null
       });
       return {
         provider: "fixture",
@@ -480,6 +484,57 @@ test("AgentHost applies the active project model and routing profile", async () 
   assert.deepEqual(requests[0].projectModelProfile, project.modelProfile);
   assert.deepEqual(requests[0].projectRoutingProfile, project.routingProfile);
   assert.match(requests[0].instructions, /release verification checklist/u);
+});
+
+test("AgentHost applies named project profiles to persona, routing, skills, and tool plans", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-host-named-profile-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const projects = new ProjectStore({
+    dataDir,
+    defaultWorkspaceRoot: workspace
+  });
+  const profiles = new CapabilityProfileStore({ dataDir, projects });
+  profiles.createProfile("default", {
+    id: "concise-review",
+    name: "Concise review",
+    persona: "Use terse, evidence-linked review notes.",
+    modelProfile: { model: "profile-model" },
+    routingProfile: { task: "review", tier: "mini" },
+    activeSkills: [],
+    toolGrants: [],
+    capabilityBundleIds: []
+  }, { actor: "operator" });
+  profiles.bindProjectProfile("default", "concise-review", {
+    actor: "operator"
+  });
+  const { host, requests, toolPlanContexts } = makeHarness({
+    projects,
+    profiles,
+    captureToolPlanContexts: true
+  });
+
+  await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "named-profile-session",
+    text: "Explain the current status.",
+    backgroundReview: false
+  });
+
+  assert.equal(requests[0].model, "profile-model");
+  assert.equal(requests[0].task, "review");
+  assert.equal(requests[0].tier, "mini");
+  assert.match(requests[0].instructions, /Active capability profile: Concise review/u);
+  assert.match(requests[0].instructions, /terse, evidence-linked/u);
+  assert.equal(requests[0].capabilityProfile.profileId, "concise-review");
+  assert.ok(toolPlanContexts.length >= 1);
+  assert.ok(toolPlanContexts.every((context) => (
+    context.__capabilityProfileIdentity
+    === requests[0].capabilityProfile.identity
+  )));
 });
 
 test("AgentHost fails closed on a nondefault project when no ProjectStore is bound", async () => {

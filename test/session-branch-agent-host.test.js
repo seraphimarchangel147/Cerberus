@@ -9,6 +9,7 @@ import {
   FileBackedAgentStore,
   InMemoryAgentStore
 } from "../src/agent-store.js";
+import { CapabilityProfileStore } from "../src/capability-profile-store.js";
 import { ProjectStore } from "../src/project-store.js";
 
 function harness(t, options = {}) {
@@ -22,6 +23,7 @@ function harness(t, options = {}) {
     defaultWorkspaceRoot: workspace
   });
   projects.create({ id: "alpha", name: "Alpha" });
+  const profiles = new CapabilityProfileStore({ dataDir, projects });
   const store = options.fileBacked
     ? new FileBackedAgentStore({ dir: path.join(dataDir, "agent-host") })
     : new InMemoryAgentStore();
@@ -30,6 +32,7 @@ function harness(t, options = {}) {
   const hooks = [];
   const runtime = {
     projects,
+    profiles,
     events,
     hooks: {
       notify(type, payload) {
@@ -61,6 +64,7 @@ function harness(t, options = {}) {
     host,
     indexed,
     projects,
+    profiles,
     store,
     workspace
   };
@@ -260,4 +264,40 @@ test("AgentHost cannot branch a source through another project", async (t) => {
     { code: "PROJECT_BOUNDARY_VIOLATION" }
   );
   assert.deepEqual(h.projects.sessionsForProject("beta"), []);
+});
+
+test("AgentHost branches inherit the exact session profile", async (t) => {
+  const h = harness(t);
+  const sourceSessionId = "source:profile";
+  h.projects.resolveForSession(sourceSessionId, {
+    requestedProjectId: "alpha",
+    bind: true
+  });
+  h.profiles.createProfile("alpha", {
+    id: "reviewer",
+    name: "Reviewer",
+    activeSkills: [],
+    toolGrants: [],
+    capabilityBundleIds: []
+  }, { actor: "test" });
+  h.profiles.bindSessionProfile("alpha", sourceSessionId, "reviewer", {
+    expectedBindingProfileId: null,
+    expectedProfileRevision: 1,
+    actor: "test"
+  });
+  await h.store.appendMessage(sourceSessionId, {
+    id: "msg_profile",
+    role: "user",
+    content: "profile-bound source",
+    metadata: { projectId: "alpha" }
+  });
+  const result = await h.host.branchSession({
+    sourceSessionId,
+    messageId: "msg_profile",
+    projectId: "alpha"
+  });
+  const resolution = h.profiles.resolve("alpha", result.sessionId);
+  assert.equal(resolution.binding, "session");
+  assert.equal(resolution.profileId, "reviewer");
+  assert.equal(resolution.profileRevision, 1);
 });

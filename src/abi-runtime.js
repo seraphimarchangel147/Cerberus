@@ -46,6 +46,8 @@ import { TaskStore } from "./task-store.js";
 import { GoalStore } from "./goal-store.js";
 import { KanbanStore } from "./kanban-store.js";
 import { ProjectStore } from "./project-store.js";
+import { CapabilityProfileStore } from "./capability-profile-store.js";
+import { SkillImportStore } from "./skill-import-store.js";
 import { createOptionalSemanticBrowserService } from "./semantic-browser.js";
 import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 import { HookRegistry } from "./hook-registry.js";
@@ -76,6 +78,7 @@ import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
 import {
   registerCoreTools,
+  registerCapabilityProfileTools,
   registerSolutionRecipeTools,
   registerSemanticBrowserTools,
   ToolRegistry
@@ -380,6 +383,17 @@ export class AbiRuntime {
       defaultWorkspaceRoot: options.workspaceDir ?? process.cwd(),
       ...(options.projectOptions ?? {})
     });
+    this.profiles = options.profiles ?? new CapabilityProfileStore({
+      dataDir: secretsDataDir,
+      projects: this.projects,
+      ...(options.profileOptions ?? {})
+    });
+    this.skillImports = options.skillImports ?? new SkillImportStore({
+      dataDir: secretsDataDir,
+      projects: this.projects,
+      runtime: this,
+      ...(options.skillImportOptions ?? {})
+    });
     this.scrutiny = options.scrutiny ?? (options.scrutinyMode === "single"
       ? new DirectionalAdaptiveScrutiny(options.scrutinyOptions)
       : new ScrutinyPanel(options.scrutinyOptions));
@@ -396,6 +410,7 @@ export class AbiRuntime {
     this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks });
     this.tools.bindHooks?.(this.hooks);
     this.tools.bindProjects?.(this.projects);
+    this.tools.bindProfiles?.(this.profiles);
     this.mcp.bindToolRegistry(this.tools);
     const checkpointOptIn = options.checkpointOptions?.enabled
       ?? checkpointsEnabled(options.env ?? process.env);
@@ -769,6 +784,7 @@ export class AbiRuntime {
         dailyAt: "04:30"
       });
       registerCoreTools(this.tools, this);
+      registerCapabilityProfileTools(this.tools, this);
       registerSolutionRecipeTools(this.tools, this);
       registerSemanticBrowserTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,

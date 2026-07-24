@@ -213,6 +213,10 @@ export class SkillRegistry {
       createdBy: skill.createdBy,
       createdAt: skill.createdAt,
       sourceSuggestionId: skill.sourceSuggestionId,
+      sourceImportId: skill.sourceImportId,
+      sourceImportHash: skill.sourceImportHash,
+      sourceImportKind: skill.sourceImportKind,
+      ownerProjectId: skill.ownerProjectId,
       allowedTools: skill.allowedTools,
       body: skill.body,
       linkedFiles: skill.linkedFiles ?? [],
@@ -860,6 +864,10 @@ function parseSkill(filePath, dir) {
     // this skill (set by skill-materialize.js when the user accepts
     // a category=skill proposal). null for hand-authored skills.
     sourceSuggestionId: meta.sourceSuggestionId ?? null,
+    sourceImportId: meta.sourceImportId ?? null,
+    sourceImportHash: meta.sourceImportHash ?? null,
+    sourceImportKind: meta.sourceImportKind ?? null,
+    ownerProjectId: meta.ownerProjectId ?? null,
     createdBy: meta.createdBy ?? null,
     createdAt: meta.createdAt ?? null,
     linkedFiles: scanLinkedFiles(dir),
