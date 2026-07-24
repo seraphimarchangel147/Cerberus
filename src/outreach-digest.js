@@ -8,12 +8,12 @@ function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
 const STILL_WAITING_AGE_MS = 48 * 60 * 60 * 1000;
 const STILL_WAITING_NUDGE_MS = 24 * 60 * 60 * 1000;
 
-export function composeDigest(store, config, { now = new Date() } = {}) {
+export function composeDigest(store, config, { now = new Date(), projectId = "default" } = {}) {
   if (config.inQuietHours(now)) return null;
-  const pending = store.list({ status: "unseen" })
+  const pending = store.list({ status: "unseen", projectId })
     .filter((i) => !i.needsDecision && config.digestTypes.includes(i.type));
 
-  const stillWaiting = store.list({ status: "seen" }).filter((i) => {
+  const stillWaiting = store.list({ status: "seen", projectId }).filter((i) => {
     if (i.type !== "skill") return false;
     const age = now.getTime() - Date.parse(i.createdAt ?? "");
     if (!Number.isFinite(age) || age < STILL_WAITING_AGE_MS) return false;
@@ -35,14 +35,15 @@ export function composeDigest(store, config, { now = new Date() } = {}) {
   }
 
   const item = store.append({
+    projectId,
     type: "digest",
     title: `Your queue: ${parts.join(" · ")}`,
     summary: lines.join("\n"),
     needsDecision: false,
     actions: ["review", "dismiss"]
   });
-  store.markSeen(pending.map((i) => i.id));
-  store.markNudged?.(stillWaiting.map((i) => i.id), { now });
+  store.markSeen(pending.map((i) => i.id), { projectId });
+  store.markNudged?.(stillWaiting.map((i) => i.id), { now, projectId });
   return item;
 }
 

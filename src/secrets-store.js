@@ -30,6 +30,78 @@ const LOCK_RETRY_MS = 10;
 const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
 const DEFAULT_STALE_LOCK_MS = 60_000;
 const LOCK_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+const STORE_REDACTION_SNAPSHOTS = new WeakMap();
+const MAX_STORE_REDACTION_RECORDS = 512;
+
+// Exposes only a bounded, ephemeral projection loaded by this concrete store.
+// The WeakMap witness cannot be forged by duck-typed stores or by constructing
+// a filesystem-lazy SecretsStore without loading its authoritative snapshot.
+export function secretsStoreRedactionSnapshot(store) {
+  if (!(store instanceof SecretsStore)) return null;
+  const cached = STORE_REDACTION_SNAPSHOTS.get(store);
+  if (!cached) return null;
+  const currentIdentity = secretsSnapshotFileIdentity(cached.path);
+  if (!currentIdentity || currentIdentity !== cached.identity) {
+    return Object.freeze({
+      ...cached.snapshot,
+      overflow: true
+    });
+  }
+  return cached.snapshot;
+}
+
+function rememberSecretsStoreRedactions(store, snapshot) {
+  const allowedNames = [];
+  const records = [];
+  let overflow = false;
+  for (const name of store.allowlist) {
+    if (allowedNames.length >= MAX_STORE_REDACTION_RECORDS) {
+      overflow = true;
+      break;
+    }
+    allowedNames.push(name);
+  }
+  for (const [name, record] of Object.entries(snapshot.secrets ?? {})) {
+    if (!store.allowlist.has(name) || typeof record?.value !== "string" || !record.value) {
+      continue;
+    }
+    if (records.length >= MAX_STORE_REDACTION_RECORDS) {
+      overflow = true;
+      break;
+    }
+    records.push(Object.freeze({
+      name,
+      value: record.value
+    }));
+  }
+  const publicSnapshot = Object.freeze({
+    allowedNames: Object.freeze(allowedNames),
+    records: Object.freeze(records),
+    overflow
+  });
+  const snapshotPath = store.snapshotPath;
+  STORE_REDACTION_SNAPSHOTS.set(store, Object.freeze({
+    identity: secretsSnapshotFileIdentity(snapshotPath),
+    path: snapshotPath,
+    snapshot: publicSnapshot
+  }));
+}
+
+function secretsSnapshotFileIdentity(snapshotPath) {
+  try {
+    const stats = fs.statSync(snapshotPath, { bigint: true });
+    if (!stats.isFile()) return null;
+    return [
+      stats.dev,
+      stats.ino,
+      stats.size,
+      stats.mtimeNs,
+      stats.ctimeNs
+    ].join(":");
+  } catch {
+    return null;
+  }
+}
 
 export class SecretsStore {
   constructor({
@@ -319,6 +391,7 @@ export class SecretsStore {
       this.allowlist
     );
     this.#secureFile(this.snapshotPath);
+    rememberSecretsStoreRedactions(this, snapshot);
     return { snapshot, migrated: false };
   }
 
@@ -345,6 +418,10 @@ export class SecretsStore {
     this.#assertSafeFileOrAbsent(this.snapshotPath);
     writeJsonAtomic(this.snapshotPath, snapshot, 0o600);
     this.#secureFile(this.snapshotPath);
+    // Persistence is the authoritative commit point. Refresh the private
+    // witness before fallible environment hydration or projection work so a
+    // partially reported mutation can never leave redaction state stale.
+    rememberSecretsStoreRedactions(this, snapshot);
   }
 
   #writeEnvProjection(snapshot) {
@@ -376,6 +453,7 @@ export class SecretsStore {
     for (const [name, record] of this.#configuredEntries(snapshot)) {
       this.env[name] = record.value;
     }
+    rememberSecretsStoreRedactions(this, snapshot);
   }
 
   #configuredEntries(snapshot) {

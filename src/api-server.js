@@ -32,6 +32,8 @@ const INBOUND_CREDENTIAL_HEADERS = new Set([
 ]);
 const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 const CLEAN_HEADER_VALUE_RE = /^[\x20-\x7e]*$/u;
+const PROJECT_ID_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/u;
+const DEFAULT_PROJECT_ID = "default";
 
 class HttpRequestError extends Error {
   constructor(status, message, code, type = "invalid_request_error") {
@@ -65,10 +67,16 @@ export function createApiServer(runtimeOrOptions = {}, maybeOptions) {
     ? options.createId
     : () => `chatcmpl-${randomUUID().replaceAll("-", "")}`;
   const log = typeof options.log === "function" ? options.log : () => {};
+  const projects = options.projectStore
+    ?? options.projects
+    ?? runtime?.projects
+    ?? agentHost.runtime?.projects
+    ?? null;
 
   const server = http.createServer((req, res) => {
     handleApiRequest(req, res, {
       agentHost,
+      projects,
       apiKey,
       maxBodyBytes,
       now,
@@ -271,6 +279,7 @@ async function handleApiRequest(req, res, context) {
   }
 
   const body = await readJsonBody(req, context.maxBodyBytes);
+  const project = resolveApiProject(req, body, context.projects);
   const text = lastUserText(body.messages);
   if (!text) {
     throw new HttpRequestError(
@@ -280,7 +289,7 @@ async function handleApiRequest(req, res, context) {
     );
   }
   if (body.stream === true) {
-    await handleStreamingCompletion(req, res, body, text, context);
+    await handleStreamingCompletion(req, res, body, text, project, context);
     return;
   }
 
@@ -296,12 +305,14 @@ async function handleApiRequest(req, res, context) {
       from: "api-client",
       agentId: context.agentId,
       sessionId: `api:${randomUUID()}`,
+      projectId: project.id,
       text,
       ephemeral: true,
       abortSignal: abortController.signal,
       metadata: {
         apiModel: cleanModelName(body.model),
-        apiStream: false
+        apiStream: false,
+        projectId: project.id
       }
     });
     sendJson(res, 200, completionResponse(result, body, context));
@@ -310,7 +321,7 @@ async function handleApiRequest(req, res, context) {
   }
 }
 
-async function handleStreamingCompletion(req, res, body, text, context) {
+async function handleStreamingCompletion(req, res, body, text, project, context) {
   const id = context.createId();
   const created = unixSeconds(context.now());
   const model = cleanModelName(body.model) || "openagi";
@@ -335,6 +346,7 @@ async function handleStreamingCompletion(req, res, body, text, context) {
       from: "api-client",
       agentId: context.agentId,
       sessionId: `api:${randomUUID()}`,
+      projectId: project.id,
       text,
       ephemeral: true,
       abortSignal: abortController.signal,
@@ -364,7 +376,8 @@ async function handleStreamingCompletion(req, res, body, text, context) {
       },
       metadata: {
         apiModel: cleanModelName(body.model),
-        apiStream: true
+        apiStream: true,
+        projectId: project.id
       }
     });
     const finalText = String(result?.reply ?? "");
@@ -905,6 +918,82 @@ function localRequestUrl(req) {
   } catch {
     throw new HttpRequestError(400, "Request URL is invalid.", "invalid_request");
   }
+}
+
+function resolveApiProject(req, body, projects) {
+  const selectors = [
+    ...projectSelectorValues(req.headers["x-openagi-project"]),
+    ...projectSelectorValues(body?.projectId)
+  ].map(cleanProjectSelector);
+  const unique = [...new Set(selectors)];
+  if (unique.length > 1) {
+    throw new HttpRequestError(
+      400,
+      "Conflicting project selections.",
+      "project_conflict"
+    );
+  }
+  const projectId = unique[0] ?? DEFAULT_PROJECT_ID;
+  if (!projects || (
+    typeof projects.authorize !== "function"
+    && typeof projects.get !== "function"
+  )) {
+    if (projectId === DEFAULT_PROJECT_ID) return { id: DEFAULT_PROJECT_ID };
+    throw new HttpRequestError(
+      404,
+      "The requested project is unavailable.",
+      "project_not_found"
+    );
+  }
+
+  let project;
+  try {
+    project = typeof projects.authorize === "function"
+      ? projects.authorize(projectId, { includeArchived: false })
+      : projects.get(projectId, { includeArchived: false });
+  } catch {
+    throw new HttpRequestError(
+      400,
+      "The project selection is invalid.",
+      "invalid_project"
+    );
+  }
+  if (
+    !project
+    || project.id !== projectId
+    || project.status !== "active"
+  ) {
+    throw new HttpRequestError(
+      404,
+      "The requested project is unavailable.",
+      "project_not_found"
+    );
+  }
+  return project;
+}
+
+function projectSelectorValues(value) {
+  if (value === undefined || value === null || value === "") return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function cleanProjectSelector(value) {
+  if (typeof value !== "string") {
+    throw new HttpRequestError(
+      400,
+      "The project selection is invalid.",
+      "invalid_project"
+    );
+  }
+  const projectId = value.trim().toLowerCase();
+  if (!PROJECT_ID_RE.test(projectId)) {
+    throw new HttpRequestError(
+      400,
+      "The project selection is invalid.",
+      "invalid_project"
+    );
+  }
+  return projectId;
 }
 
 function enabledFlag(value) {

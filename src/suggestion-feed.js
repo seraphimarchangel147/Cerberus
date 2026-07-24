@@ -20,7 +20,7 @@ const ENVELOPE_FIELDS = [
   "draftBody", "taskQueue", "taskBucket", "mcpId", "mcpRegister",
   "context", "resolvedAt", "note", "source",
   // Miner-only fields surface as-is so the UI can show count + confidence
-  "sequence", "fingerprint", "proposal", "judgeBypass"
+  "sequence", "fingerprint", "proposal", "judgeBypass", "projectId", "recipe"
 ];
 
 /// Walk all three source dirs and return suggestions normalized to one
@@ -91,6 +91,7 @@ function normalize(raw, filePath, forceSource = null) {
     if (raw.id.startsWith("prop_")) source = "observer";
     else if (raw.id.startsWith("sug_")) source = "pattern-miner";
     else if (raw.id.startsWith("ses_")) source = "session-miner";
+    else if (raw.id.startsWith("rcp_")) source = "recipe-memory";
     else source = "unknown";
   }
   // Story 10: proactive-observer in long-horizon mode tags its persisted
@@ -98,6 +99,7 @@ function normalize(raw, filePath, forceSource = null) {
   // That overrides our id-prefix guess so the dashboard can distinguish
   // "noticed something just now" from "noticed a multi-day thread."
   if (raw.source === "weekly-observer") source = "weekly-observer";
+  if (raw.source === "recipe-memory") source = "recipe-memory";
   if (source === "observer" || source === "weekly-observer") {
     return pickEnvelope({ ...raw, source });
   }
@@ -116,6 +118,8 @@ function normalize(raw, filePath, forceSource = null) {
     fingerprint: raw.fingerprint ?? null,
     proposal: raw.proposal ?? null,
     judgeBypass: raw.judgeBypass ?? false,
+    projectId: raw.projectId ?? null,
+    recipe: raw.recipe ?? null,
     resolvedAt: raw.resolvedAt ?? null,
     source
   });

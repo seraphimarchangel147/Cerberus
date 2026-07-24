@@ -129,7 +129,14 @@ export class CronScheduler {
   }
 
   listJobs() {
-    return [...this.jobs.values()].sort((a, b) => a.nextRunAt.localeCompare(b.nextRunAt));
+    return [...this.jobs.values()].sort((left, right) => {
+      const leftRun = typeof left.nextRunAt === "string" ? left.nextRunAt : null;
+      const rightRun = typeof right.nextRunAt === "string" ? right.nextRunAt : null;
+      if (leftRun === null && rightRun !== null) return 1;
+      if (leftRun !== null && rightRun === null) return -1;
+      const byRun = (leftRun ?? "").localeCompare(rightRun ?? "");
+      return byRun || String(left.id).localeCompare(String(right.id));
+    });
   }
 
   dueJobs(now = new Date()) {

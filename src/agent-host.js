@@ -1,4 +1,5 @@
 import path from "node:path";
+import { types as utilTypes } from "node:util";
 import { InMemoryAgentStore } from "./agent-store.js";
 import { createModelProvider } from "./model-provider.js";
 import { createId, nowIso } from "./utils.js";
@@ -7,9 +8,19 @@ import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZ
 import { autoApproveEnabled } from "./tool-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
-import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
+import { TOOL_SEARCH_BRIDGE_NAMES } from "./tool-search.js";
 import { expandContextReferences } from "./context-references.js";
 import { siblingNames, legionUserId, legionMember, LEGION_MEMBERS } from "./legion-siblings.js";
+import {
+  createConversationContentIdentity,
+  createConversationLineageIdentity
+} from "./responses-continuation.js";
+import {
+  DEFAULT_PROJECT_ID,
+  ProjectBoundaryError,
+  projectAllows,
+  projectMemoryScope
+} from "./project-store.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -47,6 +58,7 @@ const TOOL_SEARCH_BRIDGE_NAME_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
 const DEFAULT_BACKGROUND_REVIEW_SNAPSHOT_WAIT_MS = 5000;
 const DEFAULT_BACKGROUND_REVIEW_FLUSH_MS = 60_000;
 const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
+const RESPONSES_CONTINUATION_METADATA_KEY = "responsesContinuationV1";
 
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
@@ -66,14 +78,26 @@ export const CONSENT_PHRASE_PATTERNS = Object.freeze([
 const STOP_OR_DELAY_RE = /\b(?:stop|wait|hold on|pause|cancel|not yet|do not|don't|never mind)\b/iu;
 const CHAT_AUTHOR_PREFIX_RE = /^\[[^\]\r\n]{1,100}\]\s*/u;
 
-export function toolSearchBridgesActive(tools, env = process.env) {
-  if (resolveToolSearchMode(env) === "off") return false;
+export function toolSearchBridgesActive(tools, _env = process.env) {
   const names = new Set(
     (Array.isArray(tools) ? tools : [])
       .map((tool) => String(tool?.name ?? ""))
       .filter((name) => TOOL_SEARCH_BRIDGE_NAME_SET.has(name))
   );
   return TOOL_SEARCH_BRIDGE_NAMES.every((name) => names.has(name));
+}
+
+function openAIToolPlan(toolRegistry, options = {}) {
+  if (typeof toolRegistry?.toOpenAIToolPlan === "function") {
+    return toolRegistry.toOpenAIToolPlan(options);
+  }
+  const tools = toolRegistry?.toOpenAITools?.(options) ?? [];
+  return {
+    active: toolSearchBridgesActive(tools),
+    tools,
+    omittedNames: Object.freeze([]),
+    notice: toolRegistry?.modelToolOverflowNotice?.(options) ?? null
+  };
 }
 
 function normalizedDirectReply(value) {
@@ -87,6 +111,135 @@ export function hasImperativeToolIntent(value) {
 export function resolveChatMaxIterations(env = process.env) {
   const parsed = Number(env.OPENAGI_CHAT_MAX_ITERATIONS);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_CHAT_MAX_ITERATIONS;
+}
+
+export function providerHistoryBeforeCurrentTurn(messages, currentMessageId) {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  const lastIndex = messages.length - 1;
+  const matchedIndex = messages.findIndex(
+    (message) => message?.id && message.id === currentMessageId
+  );
+  if (matchedIndex >= 0 && matchedIndex !== lastIndex) {
+    throw new Error("Current user turn is not the final session message.");
+  }
+  const current = messages[lastIndex];
+  if (matchedIndex < 0 && current?.role !== "user") {
+    throw new Error("Session append did not return the current user turn last.");
+  }
+  return messages.slice(0, lastIndex);
+}
+
+function freshResponsesContinuationMetadata({
+  lineageId = createConversationLineageIdentity([]),
+  headMessageId = null
+} = {}) {
+  return {
+    version: 1,
+    incarnation: createId("continuation"),
+    epoch: 0,
+    headMessageId: typeof headMessageId === "string" && headMessageId
+      ? headMessageId
+      : null,
+    lineageId
+  };
+}
+
+function validResponsesContinuationMetadata(value) {
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || utilTypes.isProxy(value)
+  ) {
+    return false;
+  }
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const read = (key) => {
+      const descriptor = descriptors[key];
+      return descriptor && Object.hasOwn(descriptor, "value")
+        ? descriptor.value
+        : undefined;
+    };
+    const version = read("version");
+    const incarnation = read("incarnation");
+    const epoch = read("epoch");
+    const headMessageId = read("headMessageId");
+    const lineageId = read("lineageId");
+    return Boolean(
+      version === 1
+      && typeof incarnation === "string"
+      && incarnation.length > 0
+      && Number.isSafeInteger(epoch)
+      && epoch >= 0
+      && (headMessageId === null || typeof headMessageId === "string")
+      && typeof lineageId === "string"
+      && /^[a-f0-9]{64}$/u.test(lineageId)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sameResponsesContinuationMetadata(left, right) {
+  return Boolean(
+    validResponsesContinuationMetadata(left)
+    && validResponsesContinuationMetadata(right)
+    && left.incarnation === right.incarnation
+    && left.epoch === right.epoch
+    && left.headMessageId === right.headMessageId
+    && left.lineageId === right.lineageId
+  );
+}
+
+function jsonUtf8Bytes(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+  } catch {
+    return 0;
+  }
+}
+
+function requestShapeTelemetry({
+  history,
+  currentInput,
+  images,
+  instructions,
+  visibleTools,
+  toolRegistry,
+  allowedToolNames,
+  readOnly,
+  toolsEligible
+}) {
+  const visible = Array.isArray(visibleTools) ? visibleTools : [];
+  const visibleNames = new Set(visible.map((tool) => tool?.name).filter(Boolean));
+  const allowed = Array.isArray(allowedToolNames)
+    ? new Set(allowedToolNames)
+    : null;
+  const eligible = toolsEligible && typeof toolRegistry?.list === "function"
+    ? toolRegistry.list({ readOnly }).filter((tool) => !allowed || allowed.has(tool.name))
+    : [];
+  const deferred = eligible.filter((tool) => !visibleNames.has(tool.name));
+  const deferredSchemas = deferred.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters
+  }));
+  return Object.freeze({
+    historyMessageCount: Array.isArray(history) ? history.length : 0,
+    historyBytes: jsonUtf8Bytes(history),
+    currentTurnCount: 1,
+    currentInputBytes: Buffer.byteLength(String(currentInput ?? ""), "utf8"),
+    imageCount: Array.isArray(images) ? images.length : 0,
+    instructionBytes: Buffer.byteLength(String(instructions ?? ""), "utf8"),
+    visibleToolCount: visible.length,
+    visibleSchemaBytes: jsonUtf8Bytes(visible),
+    deferredToolCount: deferred.length,
+    deferredSchemaBytes: jsonUtf8Bytes(deferredSchemas)
+  });
 }
 
 export function isConversationalTurn({ channel, verdict, detectedTask, text, isSpecialist = false }) {
@@ -177,7 +330,7 @@ export class AgentHost {
       console.warn(`[openagi] background review failed: ${error?.message ?? String(error)}`);
     });
     this.lastBackgroundReview = null;
-    this.activeHookSessions = new Set();
+    this.activeHookSessions = new Map();
     this.sessionMemorySnapshots = new Map();
     this.backgroundReviewPromises = new Map();
     this.backgroundReviewRescanSessions = new Set();
@@ -245,12 +398,148 @@ export class AgentHost {
       }
     }
 
+    const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
     const agent = this.store.getAgent(agentId);
     const isSpecialist = agent.role === "specialist";
+    let requestedProjectId = input.projectId ?? input.metadata?.projectId ?? null;
+    if (
+      !this.runtime.projects
+      && requestedProjectId != null
+      && String(requestedProjectId).trim()
+      && String(requestedProjectId).trim().toLowerCase() !== DEFAULT_PROJECT_ID
+    ) {
+      throw new ProjectBoundaryError(
+        `Project '${String(requestedProjectId).trim()}' cannot be used because the project store is unavailable.`,
+        { requestedProjectId: String(requestedProjectId).trim() }
+      );
+    }
+    let legacySession = false;
+    let hasProjectBinding = false;
+    if (!ephemeral && this.runtime.projects) {
+      try {
+        hasProjectBinding = Boolean(
+          this.runtime.projects.hasSessionBinding?.(sessionId)
+        );
+      } catch (error) {
+        throw new ProjectBoundaryError(
+          `Project binding for session '${sessionId}' cannot be verified.`,
+          { sessionId, cause: error?.message ?? String(error) }
+        );
+      }
+    }
+    if (!ephemeral && this.runtime.projects && !hasProjectBinding) {
+      let existingSession;
+      try {
+        existingSession = this.store.getSession(sessionId);
+      } catch (error) {
+        throw new ProjectBoundaryError(
+          `Transcript project for session '${sessionId}' cannot be verified.`,
+          { sessionId, cause: error?.message ?? String(error) }
+        );
+      }
+      const transcriptProject = projectIdentityFromTranscript(
+        existingSession?.messages,
+        sessionId
+      );
+      if (transcriptProject.projectId) {
+        const explicitProjectId = requestedProjectId == null
+          || (typeof requestedProjectId === "string" && requestedProjectId.trim() === "")
+          ? null
+          : normalizeAgentHostProjectId(requestedProjectId, "requested project");
+        if (explicitProjectId && explicitProjectId !== transcriptProject.projectId) {
+          throw new ProjectBoundaryError(
+            `Session '${sessionId}' transcript belongs to project '${transcriptProject.projectId}', not '${explicitProjectId}'.`,
+            {
+              sessionId,
+              projectId: transcriptProject.projectId,
+              requestedProjectId: explicitProjectId
+            }
+          );
+        }
+        // The durable message tag is authoritative after a binding record is
+        // lost. resolveForSession validates that the project still exists and
+        // is active before atomically restoring the binding.
+        requestedProjectId = transcriptProject.projectId;
+      } else {
+        legacySession = transcriptProject.legacySession;
+      }
+    }
+    let project = this.runtime.projects?.resolveForSession
+      ? this.runtime.projects.resolveForSession(sessionId, {
+          requestedProjectId,
+          legacySession,
+          bind: !ephemeral,
+          actor: `${channel}:${from}`
+        })
+      : {
+          id: DEFAULT_PROJECT_ID,
+          name: "Default",
+          workspaceRoot: this.workspaceDir,
+          instructions: "",
+          policy: { toolPolicy: "full", allowedTools: ["*"] },
+          secretRefs: ["*"],
+          activeSkills: ["*"],
+          mcpGrants: ["*"],
+          hookIds: ["*"],
+          kanbanBoardId: "default",
+          modelProfile: {},
+          routingProfile: {}
+        };
+    let capabilityProfileResolution = null;
+    if (
+      this.runtime.profiles
+      && typeof this.runtime.profiles.applyToProject === "function"
+    ) {
+      const applied = this.runtime.profiles.applyToProject(project, sessionId);
+      project = applied.project;
+      capabilityProfileResolution = applied.resolution;
+    }
+    assertProjectProviderSecrets(project, turnProvider);
+    const durableJobId = verifyAgentHostJobContext(
+      this.runtime,
+      input,
+      project,
+      channel
+    );
     const requestedMemoryScope = String(input.memoryScope ?? "").trim();
-    const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
-    const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
+    const baseMemoryScope = projectMemoryScope(
+      project,
+      isSpecialist ? agent.id : null
+    );
+    const projectMemoryRoot = `project:${project.id}`;
+    if (
+      requestedMemoryScope
+      && project.id === DEFAULT_PROJECT_ID
+      && requestedMemoryScope.startsWith("project:")
+    ) {
+      throw new ProjectBoundaryError(
+        "The default project cannot enter a nondefault project memory scope.",
+        { projectId: project.id, requestedMemoryScope }
+      );
+    }
+    const memoryScope = !requestedMemoryScope
+      ? baseMemoryScope
+      : project.id === DEFAULT_PROJECT_ID
+        ? requestedMemoryScope
+        : (
+            requestedMemoryScope === projectMemoryRoot
+            || requestedMemoryScope.startsWith(`${projectMemoryRoot}:`)
+          )
+          ? requestedMemoryScope
+          : `${projectMemoryRoot}:${requestedMemoryScope}`;
     const turnId = String(input.__turnId ?? input.turnId ?? createId("turn"));
+    let continuationSessionMetadata = null;
+    if (!ephemeral && typeof this.store.ensureSessionMetadata === "function") {
+      try {
+        continuationSessionMetadata = await this.store.ensureSessionMetadata(
+          sessionId,
+          RESPONSES_CONTINUATION_METADATA_KEY,
+          () => freshResponsesContinuationMetadata()
+        );
+      } catch {
+        // Continuation metadata is an optimization; chat remains stateless.
+      }
+    }
     const sessionMemorySnapshot = await this.sessionMemorySnapshotFor(
       sessionId,
       memoryScope,
@@ -281,27 +570,116 @@ export class AgentHost {
     // Auto-task detection — if the user said "remind me to X" / "todo: X" /
     // "I need to X", create a task in the user queue without requiring them
     // to invoke add_task. Best-effort; failures don't block the chat reply.
-    if (!ephemeral && this.runtime?.tasks?.add && agentId === "main" && channel !== "autopilot" && channel !== "subagent") {
+    if (
+      !ephemeral
+      && project.id === DEFAULT_PROJECT_ID
+      && this.runtime?.tasks?.add
+      && agentId === "main"
+      && channel !== "autopilot"
+      && channel !== "subagent"
+    ) {
       if (detectedTask) {
         try {
           this.runtime.tasks.add(
-            { title: detectedTask.title, sourceMeta: { sessionId, snippet: text.slice(0, 200), trigger: detectedTask.trigger } },
+            {
+              title: detectedTask.title,
+              sourceMeta: {
+                sessionId,
+                projectId: project.id,
+                snippet: text.slice(0, 200),
+                trigger: detectedTask.trigger
+              }
+            },
             { source: "chat", queue: "user" }
           );
         } catch { /* swallow */ }
       }
     }
 
+    const currentMessageId = createId("msg");
     const sessionBefore = ephemeral
-      ? { id: sessionId, messages: [{ role: "user", content: text }] }
+      ? {
+          id: sessionId,
+          messages: [{
+            id: currentMessageId,
+            role: "user",
+            content: text,
+            agentId,
+            channel,
+            from,
+            metadata: {
+              ...(input.metadata ?? {}),
+              projectId: project.id
+            }
+          }]
+        }
       : await this.store.appendMessage(sessionId, {
+          id: currentMessageId,
           role: "user",
           content: text,
           agentId,
           channel,
           from,
-          metadata: input.metadata ?? {}
+          metadata: {
+            ...(input.metadata ?? {}),
+            projectId: project.id
+          }
         });
+    const providerHistory = providerHistoryBeforeCurrentTurn(
+      sessionBefore.messages,
+      currentMessageId
+    );
+    let continuationHistoryIdentity = null;
+    let continuationCurrentContentIdentity = null;
+    if (!ephemeral) {
+      try {
+        continuationHistoryIdentity = createConversationLineageIdentity(providerHistory);
+        continuationCurrentContentIdentity = createConversationContentIdentity(text);
+        const historyHeadMessageId = providerHistory.at(-1)?.id ?? null;
+        if (
+          !validResponsesContinuationMetadata(continuationSessionMetadata)
+          || continuationSessionMetadata.headMessageId !== historyHeadMessageId
+          || continuationSessionMetadata.lineageId !== continuationHistoryIdentity
+        ) {
+          const observed = continuationSessionMetadata;
+          const replacement = freshResponsesContinuationMetadata({
+            lineageId: continuationHistoryIdentity,
+            headMessageId: historyHeadMessageId
+          });
+          if (typeof this.store.updateSessionMetadata === "function") {
+            continuationSessionMetadata = await this.store.updateSessionMetadata(
+              sessionId,
+              RESPONSES_CONTINUATION_METADATA_KEY,
+              (current) => {
+                if (sameResponsesContinuationMetadata(current, observed)) {
+                  return replacement;
+                }
+                if (
+                  !validResponsesContinuationMetadata(current)
+                  && !validResponsesContinuationMetadata(observed)
+                ) {
+                  return replacement;
+                }
+                return current;
+              }
+            );
+          } else {
+            continuationSessionMetadata = null;
+          }
+        }
+        if (
+          !validResponsesContinuationMetadata(continuationSessionMetadata)
+          || continuationSessionMetadata.headMessageId !== historyHeadMessageId
+          || continuationSessionMetadata.lineageId !== continuationHistoryIdentity
+        ) {
+          continuationSessionMetadata = null;
+        }
+      } catch {
+        // Continuation is an optimization. Unsafe or unbounded transcript
+        // identity input falls back to the existing stateless request path.
+        continuationSessionMetadata = null;
+      }
+    }
 
     if (lifecycle) {
       lifecycle.base = {
@@ -312,9 +690,16 @@ export class AgentHost {
         sessionKey: sessionId,
         turnId,
         agentId,
+        projectId: project.id,
+        projectRevision: project.revision ?? 1,
+        projectHookIds: [...(project.hookIds ?? [])],
         message: text
       };
-      this.activeHookSessions.add(sessionId);
+      this.activeHookSessions.set(sessionId, {
+        projectId: project.id,
+        projectRevision: project.revision ?? 1,
+        projectHookIds: [...(project.hookIds ?? [])]
+      });
       if (sessionBefore.messages.length === 1) {
         this._notifyHook("session:start", lifecycle.base);
       }
@@ -335,7 +720,20 @@ export class AgentHost {
       try { this.runtime.outcomes?.resolveByUserFollowup?.(sessionId, text); } catch { /* best effort */ }
     }
 
-    const signal = await this.messageToSignal({ text, channel, from, agent, sessionId, metadata: input.metadata ?? {}, scrutinyOverrides: input.scrutinyOverrides ?? null });
+    const signal = await this.messageToSignal({
+      text,
+      channel,
+      from,
+      agent,
+      sessionId,
+      memoryScope,
+      projectId: project.id,
+      metadata: {
+        ...(input.metadata ?? {}),
+        projectId: project.id
+      },
+      scrutinyOverrides: input.scrutinyOverrides ?? null
+    });
     const output = this.runtime.processSignal(signal, {
       scope: memoryScope,
       parentSpecialistId: isSpecialist ? agent.id : null,
@@ -373,7 +771,11 @@ export class AgentHost {
     const localToolPolicy = policyForVerdict(localVerdict);
     // Delegated/headless turns receive the parent policy as a ceiling. Taking
     // the stricter rank lets a child become more cautious, never less cautious.
-    const toolPolicy = stricterToolPolicy(localToolPolicy, input.scrutinyPolicyCeiling);
+    const delegatedCeiling = stricterToolPolicy(
+      input.scrutinyPolicyCeiling,
+      project.policy?.toolPolicy
+    );
+    const toolPolicy = stricterToolPolicy(localToolPolicy, delegatedCeiling);
     const scrutinyCeilingApplied = toolPolicy !== localToolPolicy;
     const verdict = scrutinyCeilingApplied ? verdictForPolicy(toolPolicy) : localVerdict;
     const overrideReasons = [];
@@ -422,46 +824,103 @@ export class AgentHost {
     const requestedAllowedToolNames = Array.isArray(input.allowedTools)
       ? [...new Set(input.allowedTools.filter((name) => typeof name === "string" && name))]
       : null;
-    let allowedToolNames = requestedAllowedToolNames;
+    const projectAllowedToolNames = Array.isArray(project.policy?.allowedTools)
+      && !project.policy.allowedTools.includes("*")
+      ? [...project.policy.allowedTools]
+      : null;
+    let allowedToolNames = projectAllowedToolNames
+      ? requestedAllowedToolNames
+        ? projectAllowedToolNames.filter((name) => requestedAllowedToolNames.includes(name))
+        : projectAllowedToolNames
+      : requestedAllowedToolNames;
     if (isSpecialist) {
       const scoped = agent.metadata?.specialist?.allowedTools ?? [];
       const specialistAllowed = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
-      allowedToolNames = requestedAllowedToolNames
-        ? specialistAllowed.filter((name) => requestedAllowedToolNames.includes(name))
+      // Project, request, and specialist restrictions are cumulative. The
+      // specialist scope must never replace a narrower project allowlist.
+      allowedToolNames = allowedToolNames
+        ? specialistAllowed.filter((name) => allowedToolNames.includes(name))
         : specialistAllowed;
     }
 
     // The fast lane trims schemas only. Side-effect and scope enforcement
     // below remains authoritative even for core tools advertised on a watch
-    // or ignore turn.
-    let tools = toolPolicy === "none" && !conversational
-      ? []
-      : (toolRegistry?.toOpenAITools?.(
-          conversational ? { only: CHAT_CORE_TOOLS } : { readOnly: toolPolicy === "read-only" }
-        ) ?? []);
+    // or ignore turn. Project capability context must also shape the initial
+    // wildcard plan so ungranted MCP/skill metadata never reaches the model.
+    const projectToolPlanContext = this.runtime.projects
+      ? {
+          __projectId: project.id,
+          __projectRevision: project.revision ?? 1,
+          __projectMcpGrants: [...(project.mcpGrants ?? [])],
+          __projectActiveSkills: [...(project.activeSkills ?? [])],
+          __capabilityProfileResolution: capabilityProfileResolution
+            ? structuredClone(capabilityProfileResolution)
+            : null,
+          __capabilityProfileIdentity:
+            capabilityProfileResolution?.identity ?? null
+        }
+      : {};
+    const planScrutinyPolicy = toolPolicy === "read-only"
+      ? "read-only"
+      : toolPolicy === "none"
+        ? "none"
+        : null;
+    let toolPlan = toolPolicy === "none" && !conversational
+      ? { active: false, tools: [], omittedNames: Object.freeze([]), notice: null }
+      : openAIToolPlan(
+          toolRegistry,
+          conversational
+            ? {
+                only: CHAT_CORE_TOOLS,
+                readOnly: toolPolicy === "read-only",
+                context: {
+                  ...projectToolPlanContext,
+                  __scrutinyPolicy: planScrutinyPolicy
+                }
+              }
+            : {
+                readOnly: toolPolicy === "read-only",
+                context: {
+                  ...projectToolPlanContext,
+                  __scrutinyPolicy: planScrutinyPolicy
+                }
+              }
+        );
+    let tools = toolPlan.tools;
     // Embedders may supply a custom registry with none of OpenAGI's named
     // chat-core tools. Preserve their historical watch behavior rather than
     // silently advertising nothing; the production registry never needs this
     // fallback because it owns every name in CHAT_CORE_TOOLS.
     const chatCoreUnavailable = conversational && tools.length === 0 && toolPolicy === "read-only";
     if (chatCoreUnavailable) {
-      tools = toolRegistry?.toOpenAITools?.({ readOnly: true }) ?? [];
+      toolPlan = openAIToolPlan(toolRegistry, {
+        readOnly: true,
+        context: {
+          ...projectToolPlanContext,
+          __scrutinyPolicy: "read-only"
+        }
+      });
+      tools = toolPlan.tools;
     }
-    const toolOverflowNotice = toolPolicy === "none" && !conversational
-      ? null
-      : toolRegistry?.modelToolOverflowNotice?.() ?? null;
 
     if (allowedToolNames) {
       const scopedNames = conversational && !chatCoreUnavailable
         ? CHAT_CORE_TOOLS.filter((name) => allowedToolNames.includes(name))
         : allowedToolNames;
-      tools = toolPolicy === "none" && !conversational
-        ? []
-        : (toolRegistry?.toOpenAITools?.({
+      toolPlan = toolPolicy === "none" && !conversational
+        ? { active: false, tools: [], omittedNames: Object.freeze([]), notice: null }
+        : openAIToolPlan(toolRegistry, {
             only: scopedNames,
-            readOnly: toolPolicy === "read-only"
-          }) ?? []);
+            readOnly: toolPolicy === "read-only",
+            context: {
+              ...projectToolPlanContext,
+              __allowedTools: allowedToolNames,
+              __scrutinyPolicy: planScrutinyPolicy
+            }
+          });
+      tools = toolPlan.tools;
     }
+    const toolOverflowNotice = toolPlan.notice ?? null;
     const toolSearchActive = toolSearchBridgesActive(
       tools,
       toolRegistry?.toolSearchController?.env ?? process.env
@@ -485,7 +944,10 @@ export class AgentHost {
     if (channel !== "subagent" && this.runtime.vectorStore) {
       try {
         const rawHits = await this.runtime.vectorStore.search("principle", text, { limit: 10, minScore: 0.1 });
-        intuitions = filterPrincipleHits(rawHits, this.runtime.memory, { limit: 3 });
+        intuitions = filterPrincipleHits(rawHits, this.runtime.memory, {
+          limit: 3,
+          scope: memoryScope
+        });
       } catch { /* best effort */ }
     }
 
@@ -493,8 +955,16 @@ export class AgentHost {
     // the last 10 minutes. Lets the agent ground its replies in what the
     // user is actually doing, not just what they typed. Best-effort —
     // failures fall through silently so chat keeps working without capture.
+    // Ambient capture is user-global rather than project-owned. Only the
+    // default control plane may place OCR/window text in a model prompt.
     let ambientContext = null;
-    if (channel !== "autopilot" && channel !== "cron" && channel !== "subagent" && this.runtime.observations?.getRecentContext) {
+    if (
+      project.id === DEFAULT_PROJECT_ID
+      && channel !== "autopilot"
+      && channel !== "cron"
+      && channel !== "subagent"
+      && this.runtime.observations?.getRecentContext
+    ) {
       try {
         ambientContext = await this.runtime.observations.getRecentContext({ minutes: 10, maxChars: 1500, maxSnippets: 6 });
       } catch { /* swallow */ }
@@ -534,6 +1004,7 @@ export class AgentHost {
       target: from,
       agentId,
       sessionId,
+      projectId: project.id,
       // Channel-native tools such as speak need the destination selected by
       // the inbound adapter, not the user's id stored in `from`.
       channelId: input.metadata?.channelId ?? null,
@@ -551,8 +1022,44 @@ export class AgentHost {
       // does not read this field.
       __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
       __toolSearchActive: toolSearchActive,
+      // Exact request-local radar universe used to build `tools` above.
+      // Discovery and forwarding intersect it with enforced policy/scope.
+      __toolRadarOmitted: toolPlan.omittedNames,
       __memoryScope: memoryScope,
+      ...(this.runtime.projects ? {
+        __projectId: project.id,
+        __projectRevision: project.revision ?? 1,
+        __projectWorkspaceDir: project.workspaceRoot,
+        __projectSecretRefs: [...(project.secretRefs ?? [])],
+        __projectActiveSkills: [...(project.activeSkills ?? [])],
+        __projectMcpGrants: [...(project.mcpGrants ?? [])],
+        __projectHookIds: [...(project.hookIds ?? [])],
+        __projectKanbanBoardId: project.kanbanBoardId ?? "default",
+        __projectModelProfile: structuredClone(project.modelProfile ?? {}),
+        __projectRoutingProfile: structuredClone(project.routingProfile ?? {}),
+        __capabilityProfileResolution: capabilityProfileResolution
+          ? structuredClone(capabilityProfileResolution)
+          : null,
+        __capabilityProfileIdentity:
+          capabilityProfileResolution?.identity ?? null
+      } : {}),
+      __continuationEligible: Boolean(
+        !ephemeral
+        && continuationHistoryIdentity
+        && continuationCurrentContentIdentity
+        && validResponsesContinuationMetadata(continuationSessionMetadata)
+      ),
+      __continuationHistoryIdentity: continuationHistoryIdentity,
+      __continuationCurrentContentIdentity: continuationCurrentContentIdentity,
+      __continuationContextEpoch: continuationSessionMetadata?.epoch ?? null,
+      __continuationSessionIncarnation: continuationSessionMetadata?.incarnation ?? null,
+      __continuationHeadMessageId: continuationSessionMetadata?.headMessageId ?? null,
       __turnId: turnId,
+      __jobId: durableJobId,
+      __budgetEnvelope: input.budgetEnvelope ?? null,
+      __turnDeadline: Number.isFinite(input.turnDeadline)
+        ? input.turnDeadline
+        : null,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,
       __abortSignal: turnAbortController.signal,
       __turnAbortController: turnAbortController,
@@ -563,22 +1070,57 @@ export class AgentHost {
 
     let modelResult;
     try {
-      const providerInput = await expandContextReferences(text, {
-        workspaceDir: this.workspaceDir,
+      const referenceOptions = {
+        workspaceDir: project.workspaceRoot ?? this.workspaceDir,
         signal: turnAbortController.signal
+      };
+      if (project.id !== DEFAULT_PROJECT_ID) {
+        referenceOptions.homeDir = project.workspaceRoot;
+      }
+      const providerInput = await expandContextReferences(text, referenceOptions);
+      const providerInstructions = this.instructionsForAgent(
+        agent,
+        project,
+        capabilityProfileResolution
+      );
+      const providerImages = Array.isArray(input.images) ? input.images : [];
+      modelContext.__requestShape = requestShapeTelemetry({
+        history: providerHistory,
+        currentInput: providerInput,
+        images: providerImages,
+        instructions: providerInstructions,
+        visibleTools: tools,
+        toolRegistry,
+        allowedToolNames,
+        readOnly: toolPolicy === "read-only",
+        toolsEligible: toolPolicy !== "none" || conversational
       });
+      const defaultTask = (channel === "autopilot" || channel === "cron")
+        ? "autopilot"
+        : "chat";
+      const profileModel = cleanProfileString(project.modelProfile?.model);
+      const profileTier = cleanProfileString(
+        project.routingProfile?.tier ?? project.modelProfile?.tier
+      );
+      const profileTask = cleanProfileString(project.routingProfile?.task)
+        ?? defaultTask;
       modelResult = await turnProvider.generate({
         input: providerInput,
         agent,
         // Route by what the call IS, so model tiering applies: autonomous pulses
         // (autopilot/cron) are cheap "anything to do?" work; everything else is
         // user-facing chat. Both default to the base model until tiers/pins are set.
-        task: (channel === "autopilot" || channel === "cron") ? "autopilot" : "chat",
+        task: profileTask,
+        ...(profileModel ? { model: profileModel } : {}),
+        ...(profileTier ? { tier: profileTier } : {}),
         scrutiny: effectiveScrutiny,
         memoryHits: memoryHitsForModel,
-        messages: sessionBefore.messages,
-        images: Array.isArray(input.images) ? input.images : [],
-        instructions: this.instructionsForAgent(agent),
+        // The current message is already carried by `input` after context
+        // reference expansion. Provider history must contain only earlier
+        // turns or both paid paths serialize the current user content twice.
+        messages: providerHistory,
+        images: providerImages,
+        instructions: providerInstructions,
         sessionMemorySnapshot,
         turnContext: this.turnContextForAgent(effectiveOutput, memoryHitsForModel, intuitions, ambientContext, input.metadata?.screenContext ?? null, toolOverflowNotice, { channel, metadata: input.metadata ?? null }, fastLane),
         tools,
@@ -592,6 +1134,7 @@ export class AgentHost {
       turnAbortController.abort(error);
       throw error;
     } finally {
+      toolRegistry?.clearFailureScope?.(modelContext);
       inputAbortSignal?.removeEventListener?.("abort", onInputAbort);
     }
 
@@ -606,6 +1149,7 @@ export class AgentHost {
       scrutinyDimensions: output.scrutiny.dimensions,
       toolCalls: (modelResult.toolCalls ?? []).map((c) => ({ name: c.name, ok: c.result?.ok ?? false })),
       metadata: {
+        projectId: project.id,
         specialistId: agent.role === "specialist" ? agent.id : null,
         signalSummary: signal.summary,
         scrutinyScore: output.scrutiny.score,
@@ -625,33 +1169,93 @@ export class AgentHost {
       }
     }) ?? null;
 
-    const sessionAfter = ephemeral
-      ? { id: sessionId, messages: [{ role: "user", content: text }, { role: "assistant", content: modelResult.text }] }
-      : await this.store.appendMessage(sessionId, {
-          role: "assistant",
-          content: modelResult.text,
-          agentId,
-          channel,
-          from: "openagi",
-          metadata: {
-            provider: modelResult.provider,
-            model: modelResult.model,
-            responseId: modelResult.id,
-            iterations: modelResult.iterations ?? null,
-            maxIterations: modelResult.maxIterations ?? null,
-            stopReason: modelResult.stopReason ?? null,
-            outputId: output.id,
-            outcomeId: outcomeRecord?.id ?? null,
-            conversational,
-            backgroundReview: input.backgroundReview !== false,
-            memoryScope,
-            toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
-              name: call.name,
-              arguments: sanitizeForAudit(call.arguments),
-              ok: call.result?.ok ?? false
-            }))
+    const continuationCandidate = modelResult.__responsesContinuationCandidate ?? null;
+    let sessionAfter;
+    try {
+      sessionAfter = ephemeral
+        ? { id: sessionId, messages: [{ role: "user", content: text }, { role: "assistant", content: modelResult.text }] }
+        : await this.store.appendMessage(sessionId, {
+            role: "assistant",
+            content: modelResult.text,
+            agentId,
+            channel,
+            from: "openagi",
+            metadata: {
+              provider: modelResult.provider,
+              model: modelResult.model,
+              responseId: modelResult.id,
+              usage: modelResult.usage ?? null,
+              requestShape: modelContext.__requestShape,
+              iterations: modelResult.iterations ?? null,
+              maxIterations: modelResult.maxIterations ?? null,
+              stopReason: modelResult.stopReason ?? null,
+              outputId: output.id,
+              outcomeId: outcomeRecord?.id ?? null,
+              conversational,
+              backgroundReview: input.backgroundReview !== false,
+              projectId: project.id,
+              memoryScope,
+              toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
+                name: call.name,
+                arguments: sanitizeForAudit(call.arguments),
+                ok: call.result?.ok ?? false
+              }))
+            }
+          });
+    } catch (error) {
+      turnProvider.abandonResponsesContinuation?.(continuationCandidate);
+      throw error;
+    }
+
+    if (
+      !ephemeral
+      && validResponsesContinuationMetadata(continuationSessionMetadata)
+      && typeof this.store.updateSessionMetadata === "function"
+    ) {
+      let nextContinuationMetadata = null;
+      try {
+        const assistantMessageId = sessionAfter.messages.at(-1)?.id ?? null;
+        const nextLineageId = createConversationLineageIdentity(sessionAfter.messages);
+        const proposed = {
+          ...continuationSessionMetadata,
+          epoch: continuationSessionMetadata.epoch + 1,
+          headMessageId: assistantMessageId,
+          lineageId: nextLineageId
+        };
+        const updated = await this.store.updateSessionMetadata(
+          sessionId,
+          RESPONSES_CONTINUATION_METADATA_KEY,
+          (current) => {
+            const latestHead = this.store.getSession(sessionId).messages.at(-1)?.id ?? null;
+            if (
+              latestHead === assistantMessageId
+              && sameResponsesContinuationMetadata(current, continuationSessionMetadata)
+            ) {
+              return proposed;
+            }
+            return current;
           }
+        );
+        if (sameResponsesContinuationMetadata(updated, proposed)) {
+          nextContinuationMetadata = updated;
+        }
+      } catch {
+        // A stale or failed metadata update keeps the provider continuation
+        // uncommitted. The durable transcript remains authoritative.
+      }
+      if (nextContinuationMetadata && continuationCandidate) {
+        turnProvider.commitResponsesContinuation?.(continuationCandidate, {
+          messages: sessionAfter.messages,
+          contextEpoch: nextContinuationMetadata.epoch,
+          sessionIncarnation: nextContinuationMetadata.incarnation,
+          headMessageId: nextContinuationMetadata.headMessageId
         });
+      } else {
+        turnProvider.abandonResponsesContinuation?.(continuationCandidate);
+      }
+    } else {
+      turnProvider.abandonResponsesContinuation?.(continuationCandidate);
+    }
 
     if (outcomeRecord) outcomeRecord.refId = sessionAfter.messages.at(-1)?.id ?? null;
 
@@ -681,6 +1285,7 @@ export class AgentHost {
           metadata: {
             sessionId,
             agentId,
+            projectId: project.id,
             outputId: output.id
           }
         },
@@ -697,13 +1302,20 @@ export class AgentHost {
       agent,
       session: {
         id: sessionAfter.id,
-        messageCount: sessionAfter.messages.length
+        messageCount: sessionAfter.messages.length,
+        projectId: project.id
+      },
+      project: {
+        id: project.id,
+        name: project.name
       },
       reply: modelResult.text,
       toolCalls: (modelResult.toolCalls ?? []).map((c) => ({ name: c.name, ok: c.result?.ok ?? false })),
       model: {
+        id: modelResult.id ?? null,
         provider: modelResult.provider,
         model: modelResult.model,
+        usage: modelResult.usage ?? null,
         configured: turnProvider.isConfigured?.() ?? true,
         iterations: modelResult.iterations ?? null,
         maxIterations: modelResult.maxIterations ?? null,
@@ -719,11 +1331,17 @@ export class AgentHost {
     const previousSessionId = String(input.sessionId ?? "").trim();
     if (!previousSessionId) throw new Error("resetSession requires sessionId");
     const sessionId = String(input.nextSessionId ?? createId("session"));
+    const activeProject = this.activeHookSessions.get(previousSessionId) ?? null;
     const base = {
       channel: input.channel ?? "local",
       platform: input.channel ?? "local",
       userId: input.from ?? "user",
-      agentId: input.agentId ?? "main"
+      agentId: input.agentId ?? "main",
+      projectId: input.projectId ?? activeProject?.projectId ?? "default",
+      projectRevision: input.projectRevision ?? activeProject?.projectRevision ?? 1,
+      projectHookIds: Array.isArray(input.projectHookIds)
+        ? [...input.projectHookIds]
+        : [...(activeProject?.projectHookIds ?? [])]
     };
     const review = this.queueBackgroundReviewForSession(previousSessionId, base);
     if (review) this.trackSessionReviewDependency(sessionId, review);
@@ -733,12 +1351,193 @@ export class AgentHost {
     return { previousSessionId, sessionId };
   }
 
+  async branchSession(options = {}) {
+    const input = plainBranchRequest(options);
+    const sourceSessionId = boundedBranchIdentifier(
+      input.sourceSessionId,
+      "sourceSessionId",
+      2048
+    );
+    const messageId = boundedBranchIdentifier(
+      input.messageId ?? input.throughMessageId,
+      "messageId",
+      512
+    );
+
+    const selectedProjectId = input.projectId == null
+      ? this.runtime.projects?.projectForSession?.(sourceSessionId)?.id ?? DEFAULT_PROJECT_ID
+      : input.projectId;
+    const projectId = normalizeAgentHostProjectId(
+      selectedProjectId,
+      "branch project id"
+    );
+    const project = typeof this.runtime.projects?.authorize === "function"
+      ? this.runtime.projects.authorize(projectId, {
+          sessionId: sourceSessionId,
+          includeArchived: false
+        })
+      : projectId === DEFAULT_PROJECT_ID
+        ? {
+            id: DEFAULT_PROJECT_ID,
+            revision: 1,
+            hookIds: []
+          }
+        : null;
+    if (!project) {
+      throw new ProjectBoundaryError("Unknown session.", {
+        sourceSessionId,
+        projectId
+      });
+    }
+
+    if (typeof this.store?.createSessionBranch !== "function") {
+      throw new Error("Agent session store does not support branching.");
+    }
+    let targetSessionId = null;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const candidate = createId("session");
+      if (typeof this.store.hasSession === "function" && this.store.hasSession(candidate)) {
+        continue;
+      }
+      if (this.runtime.projects?.hasSessionBinding?.(candidate)) continue;
+      targetSessionId = candidate;
+      break;
+    }
+    if (!targetSessionId) {
+      throw new Error("Unable to allocate a unique branch session id.");
+    }
+
+    const createdAt = nowIso();
+    let targetBound = false;
+    let targetProfileBound = false;
+    let sourceSessionProfile = null;
+    if (typeof this.runtime.profiles?.resolve === "function") {
+      const resolution = this.runtime.profiles.resolve(
+        project.id,
+        sourceSessionId
+      );
+      if (
+        resolution?.active
+        && !resolution.locked
+        && resolution.binding === "session"
+      ) {
+        sourceSessionProfile = resolution;
+      }
+    }
+    let branched;
+    try {
+      if (typeof this.runtime.projects?.resolveForSession === "function") {
+        this.runtime.projects.resolveForSession(targetSessionId, {
+          requestedProjectId: project.id,
+          legacySession: false,
+          bind: true,
+          actor: "session:branch"
+        });
+        targetBound = true;
+      }
+      if (
+        sourceSessionProfile
+        && typeof this.runtime.profiles?.bindSessionProfile === "function"
+      ) {
+        this.runtime.profiles.bindSessionProfile(
+          project.id,
+          targetSessionId,
+          sourceSessionProfile.profileId,
+          {
+            expectedBindingProfileId: null,
+            expectedProfileRevision: sourceSessionProfile.profileRevision,
+            actor: "session:branch"
+          }
+        );
+        targetProfileBound = true;
+      }
+      branched = await this.store.createSessionBranch(sourceSessionId, {
+        messageId,
+        targetSessionId,
+        projectId: project.id,
+        createdAt
+      });
+    } catch (error) {
+      let targetPersisted = true;
+      if (typeof this.store?.hasSession === "function") {
+        try {
+          targetPersisted = this.store.hasSession(targetSessionId);
+        } catch {
+          // A corrupt or unverifiable transcript must retain its binding.
+        }
+      }
+      if (
+        targetProfileBound
+        && !targetPersisted
+        && typeof this.runtime.profiles?.bindSessionProfile === "function"
+      ) {
+        try {
+          this.runtime.profiles.bindSessionProfile(
+            project.id,
+            targetSessionId,
+            null,
+            {
+              expectedBindingProfileId: sourceSessionProfile.profileId,
+              actor: "session:branch:rollback"
+            }
+          );
+        } catch {
+          // The original branch failure remains authoritative.
+        }
+      }
+      if (
+        targetBound
+        && !targetPersisted
+        && typeof this.runtime.projects?.unbindSession === "function"
+      ) {
+        try {
+          this.runtime.projects.unbindSession(project.id, targetSessionId, {
+            actor: "session:branch:rollback"
+          });
+        } catch {
+          // The original branch failure remains authoritative.
+        }
+      }
+      throw error;
+    }
+    const target = branched?.session ?? branched;
+    const messages = Array.isArray(target?.messages)
+      ? target.messages
+      : this.store.getSession(targetSessionId).messages;
+    if (this.runtime.sessionIndex?.indexMessage) {
+      await Promise.allSettled(messages.map((message) => (
+        this.runtime.sessionIndex.indexMessage(
+          targetSessionId,
+          message?.agentId ?? input.agentId ?? "main",
+          message
+        )
+      )));
+    }
+    const event = {
+      projectId: project.id,
+      sourceSessionId,
+      sessionId: targetSessionId,
+      messageId,
+      messageCount: messages.length,
+      at: createdAt
+    };
+    try { this.runtime.events?.emit?.("session-branched", event); } catch { /* advisory */ }
+    this._notifyHook("session:branch", event);
+    return {
+      ...event,
+      projectRevision: this.runtime.projects?.authorize?.(project.id, {
+        sessionId: targetSessionId,
+        includeArchived: false
+      })?.revision ?? project.revision ?? 1
+    };
+  }
+
   async endActiveHookSessions(reason = "gateway-close") {
     const pending = new Set(this.backgroundReviewPromises.values());
-    for (const sessionId of this.activeHookSessions) {
-      const review = this.queueBackgroundReviewForSession(sessionId, {});
+    for (const [sessionId, projectScope] of this.activeHookSessions) {
+      const review = this.queueBackgroundReviewForSession(sessionId, projectScope);
       if (review) pending.add(review);
-      this._notifyHook("session:end", { sessionId, reason });
+      this._notifyHook("session:end", { sessionId, reason, ...projectScope });
     }
     this.activeHookSessions.clear();
     return boundedAllSettled([...pending], this.backgroundReviewFlushMs);
@@ -809,6 +1608,17 @@ export class AgentHost {
   prepareBackgroundReviewForSession(sessionId, defaults = {}) {
     let session;
     try { session = this.store.getSession(sessionId); } catch { return null; }
+    let project = null;
+    if (this.runtime.projects?.projectForSession) {
+      try {
+        project = this.runtime.projects.projectForSession(sessionId);
+      } catch {
+        // Archived, corrupt, or otherwise unresolved bindings fail closed:
+        // auxiliary review must never fall back into the default project.
+        return null;
+      }
+      if (!project) return null;
+    }
     const messages = Array.isArray(session?.messages) ? session.messages : [];
     const start = backgroundReviewStartIndex(messages, session?.metadata?.[BACKGROUND_REVIEW_WATERMARK_KEY]);
     const lastAssistantIndex = findLastIndex(messages, (message, index) => (
@@ -832,11 +1642,25 @@ export class AgentHost {
     const lastAssistant = assistants.at(-1);
     const reviewedMessageCount = lastAssistantIndex + 1;
     const reviewedLastMessageId = messages[lastAssistantIndex]?.id ?? null;
+    const agentId = lastAssistant?.agentId ?? defaults.agentId ?? "main";
+    let specialistId = null;
+    try {
+      if (this.store.getAgent(agentId)?.role === "specialist") specialistId = agentId;
+    } catch {
+      // A missing agent record keeps the project root as the safe fallback.
+    }
     return {
       turn: {
         sessionId,
-        agentId: lastAssistant?.agentId ?? defaults.agentId ?? "main",
-        memoryScope: lastAssistant?.metadata?.memoryScope ?? "main",
+        agentId,
+        memoryScope: lastAssistant?.metadata?.memoryScope
+          ?? (project ? projectMemoryScope(project, specialistId) : "main"),
+        ...(project ? {
+          projectId: project.id,
+          projectRevision: project.revision ?? 1,
+          modelProfile: structuredClone(project.modelProfile ?? {}),
+          routingProfile: structuredClone(project.routingProfile ?? {})
+        } : {}),
         userText: users.at(-1)?.content ?? "",
         assistantText: lastAssistant?.content ?? "",
         toolCalls,
@@ -876,7 +1700,17 @@ export class AgentHost {
     Promise.resolve(review).then(cleanup, cleanup);
   }
 
-  async messageToSignal({ text, channel, from, agent, sessionId, metadata, scrutinyOverrides = null }) {
+  async messageToSignal({
+    text,
+    channel,
+    from,
+    agent,
+    sessionId,
+    memoryScope = "main",
+    projectId = DEFAULT_PROJECT_ID,
+    metadata,
+    scrutinyOverrides = null
+  }) {
     const lower = text.toLowerCase();
     const asksToRemember = REMEMBER_RE.test(lower);
     const asksToSchedule = SCHEDULE_RE.test(lower);
@@ -889,7 +1723,9 @@ export class AgentHost {
       text,
       memorySystem: this.runtime.memory ?? null,
       vectorStore: this.runtime.vectorStore ?? null,
-      outcomeStore: this.runtime.outcomes ?? null
+      outcomeStore: this.runtime.outcomes ?? null,
+      memoryScope,
+      projectId
     });
 
     const taskType = asksToSpecialize ? "specialization-candidate" : "adaptation-review";
@@ -989,7 +1825,20 @@ export class AgentHost {
   // STATIC persona + standing instructions only. The provider appends the
   // separately frozen session memory block; volatile retrieval hits and
   // scrutiny remain in turnContextForAgent() below.
-  instructionsForAgent(agent) {
+  instructionsForAgent(agent, project = null, capabilityProfile = null) {
+    const projectInstructions = String(project?.instructions ?? "").trim();
+    const projectBlock = projectInstructions
+      ? `\n\nProject instructions for ${project.name} (${project.id}):\n${projectInstructions}`
+      : "";
+    const persona = String(capabilityProfile?.persona ?? "").trim();
+    const profileBlock = capabilityProfile?.active
+      ? capabilityProfile.locked
+        ? `\n\nCapability profile '${capabilityProfile.profileId ?? "missing"}' is locked. Do not attempt tool use until an operator selects an active profile.`
+        : [
+            `\n\nActive capability profile: ${capabilityProfile.profileName} (${capabilityProfile.profileId}, ${capabilityProfile.binding}-scoped).`,
+            persona ? `Profile persona:\n${persona}` : ""
+          ].filter(Boolean).join("\n")
+      : "";
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
 Your job is to help through the ABI loop:
@@ -997,7 +1846,7 @@ Your job is to help through the ABI loop:
 2. Use memory deliberately. When the user CORRECTS something you previously stored or said (a time, a name, a decision, a preference), call correct_memory with the corrected fact — never just remember a second conflicting version.
 3. Propagate bounded specialists only when repeated or novel high-risk work justifies it.
 
-Answer the user plainly. If a specialist was created, mention its name and scope.`;
+Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}`;
   }
 
   // Per-turn [context] block prepended to the latest user message (see
@@ -1194,12 +2043,17 @@ async function boundedAllSettled(promises, timeoutMs) {
   ));
 }
 
-export function filterPrincipleHits(hits, memory, { limit = 3, now = Date.now() } = {}) {
+export function filterPrincipleHits(
+  hits,
+  memory,
+  { limit = 3, now = Date.now(), scope = null } = {}
+) {
   const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
   const out = [];
   for (const hit of hits ?? []) {
     const item = memory?.items?.get?.(hit.id);
     if (!item) continue;
+    if (scope && item.scope !== scope) continue;
     if (item.metadata?.supersededBy) continue;
     const quarantineUntil = item.metadata?.quarantineUntil;
     if (quarantineUntil && new Date(quarantineUntil).getTime() > nowMs) continue;
@@ -1302,6 +2156,167 @@ export function formatLegionContextBlock(channelContext, env = process.env) {
   lines.push("- Off-Discord lane (works even if Discord is down): call send_message(channel:\"mailbox\", target:\"<sibling>\", text:...) to append a structured, ID-bearing JSON record to `~/.legion/mailbox/<sibling>.jsonl`; read your own `~/.legion/mailbox/azazel.jsonl`. Canonical roster: `~/.legion/roster.json`; protocol: `~/.legion/README.md`. Never put secrets there.");
   lines.push("- If a task needs another agent (e.g. Seraphim runs the Hermes gateway, Ziz runs the Rust zerohermes harness), reach out over the sibling lane instead of saying you have no way to contact them.");
   return lines.join("\n");
+}
+
+function plainBranchRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("branchSession requires an options object.");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("branchSession options must be a plain object.");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((descriptor) => !Object.hasOwn(descriptor, "value"))) {
+    throw new TypeError("branchSession options cannot contain accessors.");
+  }
+  const allowed = new Set([
+    "sourceSessionId",
+    "messageId",
+    "throughMessageId",
+    "projectId",
+    "agentId"
+  ]);
+  if (Object.keys(descriptors).some((key) => !allowed.has(key))) {
+    throw new TypeError("branchSession options contain an unsupported field.");
+  }
+  if (
+    Object.hasOwn(descriptors, "messageId")
+    && Object.hasOwn(descriptors, "throughMessageId")
+  ) {
+    throw new TypeError("branchSession accepts only one message selector.");
+  }
+  return Object.fromEntries(
+    Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value])
+  );
+}
+
+function boundedBranchIdentifier(value, label, maxLength) {
+  if (typeof value !== "string") {
+    throw new TypeError(`${label} must be a string.`);
+  }
+  const text = value.trim();
+  if (
+    text.length < 1
+    || text.length > maxLength
+    || /[\u0000-\u001f\u007f]/u.test(text)
+  ) {
+    throw new TypeError(`${label} is invalid.`);
+  }
+  return text;
+}
+
+function cleanProfileString(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= 200 ? normalized : null;
+}
+
+function assertProjectProviderSecrets(project, provider) {
+  if (!project || project.id === DEFAULT_PROJECT_ID) return;
+  const required = new Set();
+  const direct = String(provider?.credentialEnvSecretName ?? "").trim();
+  if (direct) required.add(direct);
+  try {
+    for (const credential of provider?.credentialPool?.snapshot?.().credentials ?? []) {
+      const name = String(credential?.secretName ?? "").trim();
+      if (name) required.add(name);
+    }
+  } catch {
+    throw new ProjectBoundaryError(
+      `Model credentials for project '${project.id}' cannot be verified.`,
+      { projectId: project.id }
+    );
+  }
+  for (const secretName of required) {
+    if (projectAllows(project.secretRefs, secretName)) continue;
+    throw new ProjectBoundaryError(
+      `Model provider requires secret reference '${secretName}' which is not granted to project '${project.id}'.`,
+      { projectId: project.id, secretName }
+    );
+  }
+}
+
+const AGENT_HOST_PROJECT_ID_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
+
+function verifyAgentHostJobContext(runtime, input, project, channel) {
+  if (input?.jobId == null || input.jobId === "") return null;
+  if (channel !== "subagent" || input.origin !== "job") {
+    throw new ProjectBoundaryError("Durable job identity is invalid for this turn.");
+  }
+  const id = String(input.jobId);
+  if (!/^job_[a-f0-9]{16}$/.test(id)) {
+    throw new ProjectBoundaryError("Durable job identity is malformed.");
+  }
+  let record;
+  try {
+    record = runtime.jobStore?.get?.(id, {
+      projectId: project.id
+    });
+  } catch {
+    throw new ProjectBoundaryError("Durable job identity is outside this project.");
+  }
+  if (
+    !record
+    || record.kind !== "subagent"
+    || !["running", "cancel_requested"].includes(record.status)
+  ) {
+    throw new ProjectBoundaryError("Durable job identity is not an active subagent job.");
+  }
+  return id;
+}
+
+function normalizeAgentHostProjectId(value, field = "project id") {
+  if (typeof value !== "string") {
+    throw new TypeError(`${field} must be a string.`);
+  }
+  const projectId = value.trim().toLowerCase();
+  if (!AGENT_HOST_PROJECT_ID_RE.test(projectId)) {
+    throw new ProjectBoundaryError(`Invalid ${field}: ${projectId || "(empty)"}.`);
+  }
+  return projectId;
+}
+
+function projectIdentityFromTranscript(messages, sessionId) {
+  if (!Array.isArray(messages)) {
+    throw new ProjectBoundaryError(
+      `Transcript project for session '${sessionId}' cannot be verified.`,
+      { sessionId }
+    );
+  }
+  const projectIds = new Set();
+  let tagged = false;
+  for (const message of messages) {
+    const metadata = message?.metadata;
+    if (
+      !metadata
+      || typeof metadata !== "object"
+      || !Object.hasOwn(metadata, "projectId")
+    ) {
+      continue;
+    }
+    tagged = true;
+    try {
+      projectIds.add(
+        normalizeAgentHostProjectId(metadata.projectId, "persisted transcript project id")
+      );
+    } catch (error) {
+      throw new ProjectBoundaryError(
+        `Session '${sessionId}' has an invalid persisted project tag.`,
+        { sessionId, cause: error?.message ?? String(error) }
+      );
+    }
+  }
+  if (projectIds.size > 1) {
+    throw new ProjectBoundaryError(
+      `Session '${sessionId}' has mixed persisted project tags.`,
+      { sessionId, projectIds: [...projectIds].sort() }
+    );
+  }
+  return {
+    projectId: projectIds.values().next().value ?? null,
+    legacySession: messages.length > 0 && !tagged
+  };
 }
 
 // Maps a provider class to a short user-facing label. Avoids leaking

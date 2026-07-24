@@ -284,12 +284,12 @@ test("all nine Kanban tools are wired, classified, invokable, and documented", a
   };
   const parent = await call("kanban_create", {
     title: "Tool parent",
-    board: "tool-board",
+    board: "default",
     assignee: "tool-worker"
   });
   const child = await call("kanban_create", {
     title: "Tool child",
-    board: "tool-board"
+    board: "default"
   });
   const linked = await call("kanban_link", {
     parentId: parent.id,
@@ -316,7 +316,7 @@ test("all nine Kanban tools are wired, classified, invokable, and documented", a
   assert.equal(commented.comment.author, "tool-worker");
   const shown = await call("kanban_show", { taskId: parent.id });
   assert.equal(shown.id, parent.id);
-  const listed = await call("kanban_list", { board: "tool-board" });
+  const listed = await call("kanban_list", { board: "default" });
   assert.deepEqual(listed.columns, KANBAN_COLUMNS);
   assert.equal(listed.tasks.length, 2);
   const completed = await call("kanban_complete", {

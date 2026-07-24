@@ -28,10 +28,15 @@ test("sibling send prefixes Ziz's raw Discord mention and resolves his channel",
     text: "routing check"
   });
 
+  // The sibling lane now also carries project/session provenance so a
+  // cross-agent send is attributable and project-scoped like every other
+  // channel delivery (merged with the project-composition-root work).
   assert.deepEqual(calls, [{
     channel: "discord",
     target: "1488300124395540501",
-    text: "<@1487563271753040063> routing check"
+    text: "<@1487563271753040063> routing check",
+    sessionId: null,
+    projectId: "default"
   }]);
   assert.equal(result.delivered, true);
   assert.equal(result.mention, "<@1487563271753040063>");

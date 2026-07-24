@@ -45,13 +45,30 @@ import { ProactiveObserver } from "./proactive-observer.js";
 import { TaskStore } from "./task-store.js";
 import { GoalStore } from "./goal-store.js";
 import { KanbanStore } from "./kanban-store.js";
+import { ProjectStore } from "./project-store.js";
+import { CapabilityProfileStore } from "./capability-profile-store.js";
+import { SkillImportStore } from "./skill-import-store.js";
+import { createOptionalSemanticBrowserService } from "./semantic-browser.js";
 import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
+import {
+  WorkspaceTimelineStore,
+  registerWorkspaceTimelineTools
+} from "./workspace-timeline-store.js";
+import { TerminalSessionStore } from "./terminal-session-store.js";
+import {
+  registerTerminalSessionTools,
+  TerminalSessionManager
+} from "./terminal-session-manager.js";
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
+import { JobStore } from "./job-store.js";
+import { JobManager, registerJobTools } from "./job-manager.js";
 import { ComputerUseLog } from "./computer-use-log.js";
 import { ClarificationStore } from "./clarification-store.js";
 import { DraftStore } from "./draft-store.js";
+import { ArtifactCanvasStore } from "./artifact-canvas.js";
+import { SolutionRecipeStore } from "./solution-recipe-store.js";
 import { registerComputerUseTools, isComputerUseEnabled } from "./integrations/computer-use.js";
 import { SuggestionFeedback } from "./suggestion-feedback.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
@@ -68,7 +85,13 @@ import { composeDigest, deliverDigest } from "./outreach-digest.js";
 import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
-import { registerCoreTools, ToolRegistry } from "./tool-registry.js";
+import {
+  registerCoreTools,
+  registerCapabilityProfileTools,
+  registerSolutionRecipeTools,
+  registerSemanticBrowserTools,
+  ToolRegistry
+} from "./tool-registry.js";
 import { registerCodeTools } from "./code-tools.js";
 import { registerDefaultWorkflows, WorkflowRegistry } from "./workflow-registry.js";
 import { applyPersona } from "./persona.js";
@@ -130,6 +153,7 @@ function guardCronModelPin(runtime, job) {
     jobId: job?.id ?? null,
     jobName: job?.name ?? "Scheduled job",
     sessionId: job?.input?.sessionId ?? null,
+    projectId: job?.input?.projectId ?? "default",
     reason: check.reason,
     expected: check.expected,
     current: check.current
@@ -147,6 +171,79 @@ function guardCronModelPin(runtime, job) {
     current: check.current,
     alert
   };
+}
+
+function resolveCronProject(runtime, job) {
+  const input = job?.input ?? {};
+  const projectId = input.projectId ?? "default";
+  if (
+    typeof runtime.projects?.authorize !== "function"
+    && typeof runtime.projects?.get !== "function"
+  ) {
+    return projectId === "default"
+      ? { projectId, project: null }
+      : {
+          error: {
+            skipped: true,
+            blocked: true,
+            reason: "project-unavailable",
+            projectId
+          }
+        };
+  }
+  const project = typeof runtime.projects.authorize === "function"
+    ? runtime.projects.authorize(projectId, { includeArchived: false })
+    : runtime.projects.get(projectId, { includeArchived: false });
+  if (!project) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "project-unavailable",
+        projectId
+      }
+    };
+  }
+  if (
+    projectId !== "default"
+    && !Number.isSafeInteger(input.projectRevision)
+  ) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "project-revision-required",
+        projectId
+      }
+    };
+  }
+  if (
+    Number.isSafeInteger(input.projectRevision)
+    && input.projectRevision !== project.revision
+  ) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "project-revision-changed",
+        projectId
+      }
+    };
+  }
+  if (
+    projectId !== "default"
+    && !project.scheduleIds.includes(job.id)
+  ) {
+    return {
+      error: {
+        skipped: true,
+        blocked: true,
+        reason: "schedule-outside-project",
+        projectId
+      }
+    };
+  }
+  return { projectId, project };
 }
 
 function nextSundayEvening() {
@@ -217,6 +314,56 @@ export function resolveExternalMemoryProvider(options = {}) {
   }
 }
 
+function resolveSemanticBrowser(runtime, options, {
+  dataDir,
+  workspaceDir
+} = {}) {
+  if (Object.hasOwn(options, "semanticBrowser")) {
+    if (options.semanticBrowser === false || options.semanticBrowser === null) {
+      return null;
+    }
+    if (!options.semanticBrowser || typeof options.semanticBrowser !== "object") {
+      throw new TypeError("semanticBrowser must be a service object, false, or null.");
+    }
+    return options.semanticBrowser;
+  }
+
+  const semanticBrowserOptions = options.semanticBrowserOptions
+    && typeof options.semanticBrowserOptions === "object"
+    && !Array.isArray(options.semanticBrowserOptions)
+    ? options.semanticBrowserOptions
+    : {};
+  const factoryOptions = {
+    ...semanticBrowserOptions,
+    runtime,
+    projects: runtime.projects,
+    secrets: runtime.secrets,
+    env: options.env ?? process.env,
+    dataDir,
+    workspaceDir
+  };
+  if (Object.hasOwn(options, "semanticBrowserAdapter")) {
+    factoryOptions.adapter = options.semanticBrowserAdapter;
+  }
+  if (Object.hasOwn(options, "semanticBrowserAdapterFactory")) {
+    factoryOptions.adapterFactory = options.semanticBrowserAdapterFactory;
+  }
+
+  const created = typeof options.semanticBrowserFactory === "function"
+    ? options.semanticBrowserFactory(factoryOptions)
+    : createOptionalSemanticBrowserService(factoryOptions);
+  if (created && typeof created.then === "function") {
+    throw new TypeError("semanticBrowserFactory must return a service synchronously.");
+  }
+  if (created == null && typeof options.semanticBrowserFactory !== "function") {
+    return null;
+  }
+  if (!created || typeof created !== "object") {
+    throw new TypeError("semanticBrowserFactory returned no service.");
+  }
+  return created;
+}
+
 export class AbiRuntime {
   constructor(options = {}) {
     this.context = {
@@ -244,6 +391,30 @@ export class AbiRuntime {
       allowlist: SETUP_FIELDS,
       env: options.env ?? process.env
     });
+    this.projects = options.projects ?? new ProjectStore({
+      dataDir: secretsDataDir,
+      defaultWorkspaceRoot: options.workspaceDir ?? process.cwd(),
+      ...(options.projectOptions ?? {})
+    });
+    this.profiles = options.profiles ?? new CapabilityProfileStore({
+      dataDir: secretsDataDir,
+      projects: this.projects,
+      ...(options.profileOptions ?? {})
+    });
+    this.timeline = options.timeline === false
+      ? null
+      : options.timeline ?? new WorkspaceTimelineStore({
+          dataDir: secretsDataDir,
+          projects: this.projects,
+          workspaceDir: options.workspaceDir ?? process.cwd(),
+          ...(options.timelineOptions ?? {})
+        });
+    this.skillImports = options.skillImports ?? new SkillImportStore({
+      dataDir: secretsDataDir,
+      projects: this.projects,
+      runtime: this,
+      ...(options.skillImportOptions ?? {})
+    });
     this.scrutiny = options.scrutiny ?? (options.scrutinyMode === "single"
       ? new DirectionalAdaptiveScrutiny(options.scrutinyOptions)
       : new ScrutinyPanel(options.scrutinyOptions));
@@ -259,6 +430,9 @@ export class AbiRuntime {
       ?? new HookRegistry({ dataDir: options.dataDir, ...(options.hookOptions ?? {}) });
     this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks });
     this.tools.bindHooks?.(this.hooks);
+    this.tools.bindProjects?.(this.projects);
+    this.tools.bindProfiles?.(this.profiles);
+    this.tools.bindTimeline?.(this.timeline);
     this.mcp.bindToolRegistry(this.tools);
     const checkpointOptIn = options.checkpointOptions?.enabled
       ?? checkpointsEnabled(options.env ?? process.env);
@@ -282,6 +456,36 @@ export class AbiRuntime {
     this.toolOutputs = options.toolOutputs ?? new ToolOutputStore({
       dir: options.dataDir ? path.join(options.dataDir, "tool-outputs") : undefined
     });
+    this.jobStore = options.jobStore ?? new JobStore({
+      dataDir: options.dataDir,
+      ...(options.jobStoreOptions ?? {})
+    });
+    this.jobs = options.jobs ?? new JobManager({
+      runtime: this,
+      store: this.jobStore,
+      ...(options.jobOptions ?? {})
+    });
+    if (options.terminals === false) {
+      this.terminalStore = null;
+      this.terminals = null;
+    } else {
+      this.terminalStore = options.terminalStore ?? new TerminalSessionStore({
+        dataDir: secretsDataDir,
+        ...(options.terminalStoreOptions ?? {})
+      });
+      this.terminals = options.terminals ?? new TerminalSessionManager({
+        runtime: this,
+        store: this.terminalStore,
+        projects: this.projects,
+        profiles: this.profiles,
+        secrets: this.secrets,
+        timeline: this.timeline,
+        jobCoordinator: this.jobs,
+        env: options.env ?? process.env,
+        adapter: options.terminalAdapter,
+        ...(options.terminalOptions ?? {})
+      });
+    }
     // Computer-use log is always allocated so the dashboard can render the
     // log surface even when the feature is off (showing zero sessions).
     // The actual tools only register when OPENAGI_COMPUTER_USE=1.
@@ -310,6 +514,14 @@ export class AbiRuntime {
     this.vectorStore = options.vectorStore ?? new VectorStore({ embedder: this.embedder, ...(options.vectorStoreOptions ?? {}) });
     if (typeof this.propagation.bindVectorStore === "function") this.propagation.bindVectorStore(this.vectorStore);
     if (typeof this.memory.bindVectorStore === "function") this.memory.bindVectorStore(this.vectorStore);
+    this.recipes = options.recipes ?? new SolutionRecipeStore({
+      runtime: this,
+      projects: this.projects,
+      vectorStore: this.vectorStore,
+      embedder: this.embedder,
+      dataDir: secretsDataDir,
+      ...(options.recipeOptions ?? {})
+    });
     this.specialistRouter = options.specialistRouter ?? new SpecialistRouter({ vectorStore: this.vectorStore, ...(options.routerOptions ?? {}) });
     this.condenser = options.condenser ?? new MemoryCondenser({ runtime: this, ...(options.condenserOptions ?? {}) });
     this.scrutinyFitter = options.scrutinyFitter ?? new ScrutinyFitter({
@@ -355,6 +567,15 @@ export class AbiRuntime {
       runtime: this,
       dir: options.dataDir ? `${options.dataDir}/drafts` : undefined
     });
+    this.artifacts = options.artifacts ?? new ArtifactCanvasStore({
+      runtime: this,
+      projects: this.projects,
+      dataDir: secretsDataDir,
+      dir: options.dataDir
+        ? path.join(options.dataDir, "drafts", "canvas")
+        : undefined,
+      ...(options.artifactOptions ?? {})
+    });
     // Proactive outreach: store + mapper that turn existing runtime events
     // (drafts, suggestions, pending actions, clarifications) into a single
     // outreach feed. The event bus is late-bound by hosted-interface.js (this
@@ -371,6 +592,10 @@ export class AbiRuntime {
       if (this.events) this.outreachMapper.attach();
     }
     this.skillReplay = options.skillReplay ?? new SkillReplay({ runtime: this, dataDir: options.dataDir, ...(options.skillReplayOptions ?? {}) });
+    this.semanticBrowser = resolveSemanticBrowser(this, options, {
+      dataDir: secretsDataDir,
+      workspaceDir: options.workspaceDir ?? process.cwd()
+    });
     this.outputs = [];
     this.feedback = [];
     // Overlap guard state for tick(): the hosted-interface ticker fires
@@ -602,12 +827,18 @@ export class AbiRuntime {
         dailyAt: "04:30"
       });
       registerCoreTools(this.tools, this);
+      registerCapabilityProfileTools(this.tools, this);
+      registerSolutionRecipeTools(this.tools, this);
+      registerSemanticBrowserTools(this.tools, this);
+      registerWorkspaceTimelineTools(this.tools, this);
+      registerTerminalSessionTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
       // tests, and gated shell. Governed delegation registers separately.
       registerCodeTools(this.tools, this);
       // A VM script can compact multi-step tool work, but every nested call
       // re-enters this same registry so scrutiny and catastrophic gates hold.
       registerExecuteCodeTool(this);
+      registerJobTools(this.tools, this);
       registerDelegateTaskTool(this);
       registerSessionSearchTool(this);
       registerTtsTool(this, { dataDir: options.dataDir });
@@ -1241,6 +1472,8 @@ export class AbiRuntime {
     if (!this.agentHost) return { skipped: true, reason: "agent-host-disabled" };
     const pinFailure = guardCronModelPin(this, job);
     if (pinFailure) return pinFailure;
+    const projectScope = resolveCronProject(this, job);
+    if (projectScope.error) return projectScope.error;
     // Cheap gate (no tokens): a queue-draining pulse must NOT spend a base-model
     // call when there's nothing committed to do. Jobs opt in via
     // input.requireQueuedWork; scheduled review prompts (weekly-harsh-review)
@@ -1268,16 +1501,27 @@ export class AbiRuntime {
       from: "autopilot",
       agentId: input.agentId ?? "main",
       sessionId,
+      projectId: projectScope.projectId,
       text: prompt,
       scrutinyOverrides,
       metadata: {
         scheduledJobId: job.id,
         scheduledJobName: job.name,
-        firedAt: nowIso()
+        firedAt: nowIso(),
+        projectId: projectScope.projectId
       },
       origin: "autopilot"
     });
     result.autopilot = true;
+    if (input.oneShot) {
+      this.cron.removeJob(job.id);
+      this.projects?.detachResource?.(
+        projectScope.projectId,
+        "scheduleIds",
+        job.id,
+        { actor: "runtime:autopilot-one-shot" }
+      );
+    }
     return result;
   }
 
@@ -1316,13 +1560,21 @@ export class AbiRuntime {
     const pinFailure = guardCronModelPin(this, job);
     if (pinFailure) return pinFailure;
     const input = job.input ?? {};
+    const projectScope = resolveCronProject(this, job);
+    if (projectScope.error) return projectScope.error;
+    const projectId = projectScope.projectId;
     const result = await this.agentHost.handleMessage({
       channel: input.channel ?? "cron",
       from: input.target ?? "cron",
       agentId: input.agentId ?? "main",
       sessionId: input.sessionId,
+      projectId,
       text: input.prompt ?? "(empty scheduled prompt)",
-      metadata: { scheduledJobId: job.id, scheduledJobName: job.name },
+      metadata: {
+        scheduledJobId: job.id,
+        scheduledJobName: job.name,
+        projectId
+      },
       origin: "cron"
     });
     if (isSilentCronOutput(result.reply)) {
@@ -1341,6 +1593,12 @@ export class AbiRuntime {
     }
     if (input.oneShot) {
       this.cron.removeJob(job.id);
+      this.projects?.detachResource?.(
+        projectId,
+        "scheduleIds",
+        job.id,
+        { actor: "runtime:cron-one-shot" }
+      );
     }
     return result;
   }
@@ -1392,8 +1650,38 @@ export class AbiRuntime {
             agents: this.agentHost.store.listAgents().length,
             sessions: this.agentHost.store.listSessions().length
           }
-        : null
+        : null,
+      projects: {
+        selected: this.projects?.selected?.()?.id ?? null,
+        active: this.projects?.list?.().length ?? 0
+      }
     };
+  }
+
+  async close() {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = (async () => {
+      this.tunnelWatcher?.stop?.();
+      const settled = await Promise.allSettled([
+        this.mcp?.disconnectAll?.(),
+        this.sessionIndex?.rebuildPromise
+      ]);
+      settled.push(...await Promise.allSettled([
+        this.terminals?.close?.()
+      ]));
+      settled.push(...await Promise.allSettled([
+        this.jobs?.close?.(),
+        this.kanban?.close?.(),
+        this.artifacts?.close?.(),
+        Promise.resolve().then(() => this.timeline?.close?.()),
+        this.semanticBrowser?.closeAll?.(),
+        this.observations?.close?.(),
+        this.sessionIndex?.close?.()
+      ]));
+      const failure = settled.find((result) => result.status === "rejected");
+      if (failure) throw failure.reason;
+    })();
+    return this.closePromise;
   }
 }
 
@@ -1406,6 +1694,7 @@ export function createDefaultRuntime(options = {}) {
         runtime,
         store: options.agentStore,
         storeOptions: options.agentStoreOptions,
+        workspaceDir: options.workspaceDir,
         modelProvider: options.modelProvider,
         modelProviderOptions: { ...(options.modelProviderOptions ?? {}), budgetGuard: runtime.budget }
       });
@@ -1414,6 +1703,22 @@ export function createDefaultRuntime(options = {}) {
       { backfill: true }
     );
   }
+  runtime.terminalReconcilePromise = Promise.resolve()
+    .then(() => runtime.terminals?.reconcile?.())
+    .then((result) => {
+      runtime.jobs?.resume?.();
+      return result;
+    })
+    .catch((error) => {
+      console.warn(
+        `[persistent-terminals] restart reconciliation failed: ${
+          String(error?.message ?? error ?? "unknown error").slice(0, 500)
+        }`
+      );
+      throw error;
+    });
+  runtime.tools?.bindStartupBarrier?.(runtime.terminalReconcilePromise);
+  void runtime.terminalReconcilePromise.catch(() => {});
   // First boot / backfill: when the session index is empty (missing DB, or a
   // DB file created empty), seed it from the transcripts already on disk.
   // Non-blocking and best-effort so a large history can't hold up startup;

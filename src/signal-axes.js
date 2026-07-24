@@ -1,4 +1,5 @@
 import { clamp, tokenize, tokenOverlapScore } from "./utils.js";
+import { canReadMemoryScope } from "./memory-system.js";
 
 // C2: measured scrutiny axes. Deterministic per-signal heuristics computed
 // from the message text plus stores the runtime already maintains — the
@@ -113,7 +114,14 @@ export function deriveSpecialistScope(text, domain = "general") {
  *   impact     — max(keyword bump 0.72, 0.3 + 0.3 * specificity).
  *   confidence — 0.7 baseline, 0.5 when the message ends with a question mark.
  */
-export async function measureAxes({ text, memorySystem = null, vectorStore = null, outcomeStore = null }) {
+export async function measureAxes({
+  text,
+  memorySystem = null,
+  vectorStore = null,
+  outcomeStore = null,
+  scope = null,
+  projectId = null
+}) {
   const raw = String(text ?? "");
   const lower = raw.toLowerCase();
   const asksToRemember = REMEMBER_RE.test(lower);
@@ -123,13 +131,28 @@ export async function measureAxes({ text, memorySystem = null, vectorStore = nul
   let bestMatch = null;
   if (typeof vectorStore?.search === "function") {
     try {
-      const hits = await vectorStore.search("principle", raw, { limit: 1, minScore: 0 });
-      if (hits.length > 0) bestMatch = clamp(hits[0].score);
+      const hits = await vectorStore.search("principle", raw, {
+        limit: scope ? 20 : 1,
+        minScore: 0
+      });
+      const hit = scope
+        ? hits.find((candidate) => {
+            const item = memorySystem?.items?.get?.(candidate.id);
+            return Boolean(
+              item
+              && !item.metadata?.supersededBy
+              && canReadMemoryScope(scope, item.scope)
+            );
+          })
+        : hits[0];
+      if (hit) bestMatch = clamp(hit.score);
     } catch { /* fall through to the next novelty source */ }
   }
   if (bestMatch === null && memorySystem?.items instanceof Map && memorySystem.items.size > 0) {
     let top = 0;
     for (const item of memorySystem.items.values()) {
+      if (scope && !canReadMemoryScope(scope, item.scope)) continue;
+      if (item.metadata?.supersededBy) continue;
       const score = tokenOverlapScore(raw, item.content ?? "");
       if (score > top) top = score;
     }
@@ -143,7 +166,13 @@ export async function measureAxes({ text, memorySystem = null, vectorStore = nul
   if (typeof outcomeStore?.recent === "function") {
     const words = contentWords(raw).join(" ");
     if (words) {
-      for (const outcome of outcomeStore.recent(200)) {
+      for (const outcome of outcomeStore.recent(projectId ? 1000 : 200)) {
+        if (
+          projectId
+          && (outcome?.metadata?.projectId ?? "default") !== projectId
+        ) {
+          continue;
+        }
         const summary = outcome?.metadata?.signalSummary;
         if (typeof summary !== "string" || summary === "") continue;
         if (tokenOverlapScore(words, contentWords(summary).join(" ")) >= 0.6) similarPastCount += 1;

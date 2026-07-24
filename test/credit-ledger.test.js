@@ -50,6 +50,153 @@ test("analytics groups by day, model, activity", () => {
   assert.deepEqual(a.byDay.map((d) => d.date), ["2026-06-05", "2026-06-06"]);
 });
 
+test("analytics summarizes token and content-free efficiency totals", () => {
+  const L = tmpLedger();
+  const now = new Date("2026-06-06T12:00:00.000Z");
+  L.record(entry({
+    at: "2026-06-06T09:00:00.000Z",
+    provider: "openai",
+    tokens: { input: 100, output: 20, cacheRead: 30, cacheWrite: 40 },
+    efficiency: {
+      requestBytes: 500,
+      toolCount: 2,
+      toolSuccessCount: 2,
+      toolFailureCount: 0,
+      toolSchemaBytes: 200,
+      visibleSchemaBytes: 80,
+      deferredSchemaBytes: 120,
+      visibleToolCount: 5,
+      deferredToolCount: 7,
+      compression: true,
+      stopReason: "completed",
+      latencyMs: 120
+    }
+  }), { now });
+  L.record(entry({
+    at: "2026-06-06T10:00:00.000Z",
+    provider: "anthropic",
+    tokens: { input: 50, output: 10, cacheRead: 5, cacheWrite: 0 },
+    efficiency: {
+      requestBytes: 250,
+      toolCount: 1,
+      toolSuccessCount: 0,
+      toolFailureCount: 1,
+      toolSchemaBytes: 100,
+      visibleSchemaBytes: 40,
+      deferredSchemaBytes: 60,
+      visibleToolCount: 3,
+      deferredToolCount: 4,
+      compression: false,
+      stopReason: "iteration-cap",
+      latencyMs: 80
+    }
+  }), { now });
+
+  const analytics = L.analytics({ days: 30, now });
+  assert.deepEqual(analytics.tokens, {
+    input: 150,
+    output: 30,
+    cacheRead: 35,
+    cacheWrite: 40
+  });
+  assert.deepEqual(
+    analytics.byProvider.map(({ provider, calls }) => ({ provider, calls })),
+    [
+      { provider: "anthropic", calls: 1 },
+      { provider: "openai", calls: 1 }
+    ]
+  );
+  assert.deepEqual(analytics.efficiency, {
+    requestBytes: 750,
+    toolCount: 3,
+    toolSuccessCount: 2,
+    toolFailureCount: 1,
+    toolSchemaBytes: 300,
+    visibleSchemaBytes: 120,
+    deferredSchemaBytes: 180,
+    visibleToolCount: 8,
+    deferredToolCount: 11,
+    compression: 1,
+    latencyMs: 200,
+    stopReasons: {
+      completed: 1,
+      "iteration-cap": 1
+    }
+  });
+});
+
+test("efficiency rows are bounded, typed, and ignore arbitrary content", () => {
+  const L = tmpLedger();
+  const row = L.record(entry({
+    efficiency: {
+      requestBytes: -1,
+      toolCount: Number.POSITIVE_INFINITY,
+      toolSuccessCount: -2,
+      toolFailureCount: "2",
+      toolSchemaBytes: "25",
+      visibleSchemaBytes: "10",
+      deferredSchemaBytes: 15.8,
+      visibleToolCount: 3.9,
+      deferredToolCount: -4,
+      compression: "yes",
+      stopReason: "secret user-supplied text",
+      latencyMs: 10 ** 15,
+      message: "must never land in the efficiency envelope"
+    }
+  }));
+
+  assert.equal(row.efficiency.requestBytes, 0);
+  assert.equal(row.efficiency.toolCount, 0);
+  assert.equal(row.efficiency.toolSuccessCount, 0);
+  assert.equal(row.efficiency.toolFailureCount, 2);
+  assert.equal(row.efficiency.toolSchemaBytes, 25);
+  assert.equal(row.efficiency.visibleSchemaBytes, 10);
+  assert.equal(row.efficiency.deferredSchemaBytes, 15);
+  assert.equal(row.efficiency.visibleToolCount, 3);
+  assert.equal(row.efficiency.deferredToolCount, 0);
+  assert.equal(row.efficiency.compression, false);
+  assert.equal(row.efficiency.stopReason, null);
+  assert.ok(Number.isSafeInteger(row.efficiency.latencyMs));
+  assert.ok(row.efficiency.latencyMs > 0);
+  assert.doesNotMatch(JSON.stringify(row.efficiency), /must never|secret user/);
+});
+
+test("analytics keeps pre-efficiency ledger rows compatible", () => {
+  const L = tmpLedger();
+  const now = new Date("2026-06-06T12:00:00.000Z");
+  fs.writeFileSync(L.storePath, JSON.stringify({
+    at: "2026-06-06T08:00:00.000Z",
+    model: "legacy",
+    usd: 0.01,
+    channel: "chat",
+    tokens: { input: 9, output: 4, cacheRead: 2, cacheWrite: 1 },
+    tools: ["legacy_tool"]
+  }) + "\n");
+
+  const analytics = L.analytics({ days: 30, now });
+  assert.equal(analytics.totalCalls, 1);
+  assert.deepEqual(analytics.tokens, {
+    input: 9,
+    output: 4,
+    cacheRead: 2,
+    cacheWrite: 1
+  });
+  assert.deepEqual(analytics.efficiency, {
+    requestBytes: 0,
+    toolCount: 0,
+    toolSuccessCount: 0,
+    toolFailureCount: 0,
+    toolSchemaBytes: 0,
+    visibleSchemaBytes: 0,
+    deferredSchemaBytes: 0,
+    visibleToolCount: 0,
+    deferredToolCount: 0,
+    compression: 0,
+    latencyMs: 0,
+    stopReasons: {}
+  });
+});
+
 test("compacts when the file exceeds the byte threshold, keeping the window", () => {
   const L = tmpLedger({ compactBytes: 1 });
   L.record(entry({ at: "2026-05-01T10:00:00.000Z" }), { now: new Date("2026-06-06T10:00:00.000Z") });

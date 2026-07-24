@@ -16,16 +16,26 @@ export class ChannelManager {
     this.dir = options.dir ?? path.join(resolveDataDir(), "channels");
     ensureDir(this.dir);
     this.eventsPath = path.join(this.dir, "events.jsonl");
+    this.deliverableOptions = options.deliverableOptions ?? {};
+    const deliverableScope = (context = {}) => scopedDeliverableOptions(
+      this.runtime,
+      this.deliverableOptions,
+      context
+    );
     const testMode = process.env.OPENAGI_TEST === "1";
     this.telegram = new TelegramChannel({
       agentHost: this.agentHost,
       dir: path.join(this.dir, "telegram"),
-      token: testMode ? null : (options.telegramToken ?? process.env.TELEGRAM_BOT_TOKEN)
+      token: testMode ? null : (options.telegramToken ?? process.env.TELEGRAM_BOT_TOKEN),
+      deliverableOptions: this.deliverableOptions,
+      deliverableScope
     });
     this.discord = new DiscordChannel({
       agentHost: this.agentHost,
       dir: path.join(this.dir, "discord"),
-      token: testMode ? null : (options.discordToken ?? process.env.DISCORD_BOT_TOKEN)
+      token: testMode ? null : (options.discordToken ?? process.env.DISCORD_BOT_TOKEN),
+      deliverableOptions: this.deliverableOptions,
+      deliverableScope
     });
     if (this.runtime) this.runtime.channels = this;
   }
@@ -36,6 +46,7 @@ export class ChannelManager {
       from: body.from ?? "user",
       agentId: body.agentId ?? "main",
       sessionId: body.sessionId,
+      projectId: body.projectId ?? body.metadata?.projectId ?? null,
       text: body.text ?? body.message,
       images: Array.isArray(body.images) ? body.images : [],
       metadata: body.metadata ?? {},
@@ -49,12 +60,27 @@ export class ChannelManager {
     return this.telegram.handleUpdate(update);
   }
 
-  async deliver({ channel, target, text, sessionId = null, refId = null }) {
+  async deliver({
+    channel,
+    target,
+    text,
+    sessionId = null,
+    projectId = null,
+    refId = null
+  }) {
     if (!channel || !text) throw new Error("deliver requires channel and text");
     appendJsonLine(this.eventsPath, { at: nowIso(), op: "deliver", channel, target, text: String(text).slice(0, 400) });
     let result;
-    if (channel === "telegram") result = await this.telegram.deliverAgentReply(target, text);
-    else if (channel === "discord") result = await this.discord.deliverAgentReply(target, text);
+    const deliveryContext = { sessionId, projectId };
+    if (channel === "telegram") {
+      result = await this.telegram.deliverAgentReply(target, text, deliveryContext);
+    } else if (channel === "discord") {
+      result = await this.discord.deliverAgentReply(
+        target,
+        text,
+        { deliveryContext }
+      );
+    }
     else if (channel === "local" || channel === "cron") {
       result = { delivered: false, reason: `channel ${channel} has no outbound transport (read from /sessions or stream /events)` };
     } else {
@@ -101,6 +127,9 @@ export class TelegramChannel {
     this.pollTimer = null;
     this.fetch = options.fetch ?? globalThis.fetch;
     this.deliverableOptions = options.deliverableOptions ?? {};
+    this.deliverableScope = typeof options.deliverableScope === "function"
+      ? options.deliverableScope
+      : null;
     ensureDir(this.dir);
     this.state = readJsonFile(this.statePath, { offset: 0 });
     // Pairing security: only chats that completed "/pair <code>" may talk to
@@ -165,7 +194,10 @@ export class TelegramChannel {
     });
 
     if (this.token) {
-      await this.deliverAgentReply(chatId, result.reply);
+      await this.deliverAgentReply(chatId, result.reply, {
+        sessionId: result.session?.id ?? null,
+        projectId: result.project?.id ?? null
+      });
     }
 
     return result;
@@ -188,11 +220,14 @@ export class TelegramChannel {
     return body;
   }
 
-  async deliverAgentReply(chatId, text) {
+  async deliverAgentReply(chatId, text, deliveryContext = {}) {
     const original = String(text ?? "");
     let candidates = [];
     try {
-      candidates = await scanDeliverables(original, this.deliverableOptions);
+      const scopedOptions = this.deliverableScope
+        ? this.deliverableScope(deliveryContext)
+        : this.deliverableOptions;
+      candidates = await scanDeliverables(original, scopedOptions);
       if (!Array.isArray(candidates)) candidates = [];
     } catch (error) {
       this.logDeliverableFailure("scan", null, error);
@@ -306,6 +341,39 @@ export class TelegramChannel {
 
     return { updates: body.result?.length ?? 0 };
   }
+}
+
+function scopedDeliverableOptions(runtime, base, context) {
+  const sessionId = typeof context?.sessionId === "string"
+    ? context.sessionId.trim()
+    : "";
+  let projectId = typeof context?.projectId === "string"
+    ? context.projectId.trim().toLowerCase()
+    : "";
+  if (!projectId && sessionId && typeof runtime?.projects?.projectForSession === "function") {
+    projectId = runtime.projects.projectForSession(sessionId)?.id ?? "";
+  }
+  projectId ||= "default";
+  let project = null;
+  if (typeof runtime?.projects?.authorize === "function") {
+    project = runtime.projects.authorize(projectId, {
+      ...(sessionId ? { sessionId } : {}),
+      includeArchived: false
+    });
+  } else if (typeof runtime?.projects?.get === "function") {
+    project = runtime.projects.get(projectId, { includeArchived: false });
+  }
+  if (projectId !== "default" && !project) {
+    const error = new Error("Deliverable scope is outside the active project.");
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  return {
+    ...(base ?? {}),
+    projectId,
+    workspaceRoot: project?.workspaceRoot ?? base?.workspaceRoot,
+    artifactStore: runtime?.artifacts ?? base?.artifactStore
+  };
 }
 
 function telegramDeliverableRoute(candidate) {

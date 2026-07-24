@@ -5,7 +5,10 @@ import {
   compressLiveContext,
   contextCompressionTrigger,
   contextInputTokens,
-  estimateContextTokens
+  createContextLedgerCandidate,
+  estimateContextTokens,
+  previewContextLedger,
+  restoreContextLedger
 } from "../src/memory-condenser.js";
 
 test("contextInputTokens keeps OpenAI totals whole and sums Anthropic cache fields", () => {
@@ -240,7 +243,8 @@ test("compressLiveContext bounds provided summaries and falls back deterministic
     maxDigestChars: 96,
     summarizer: async () => "z".repeat(1000)
   });
-  assert.equal(long.summarySource, "provided");
+  assert.equal(long.summarySource, "deterministic");
+  assert.equal(long.digest.overview, undefined);
   assert.ok(long.marker.length <= 96);
 
   const failedA = await compressLiveContext(conversation, {
@@ -251,6 +255,7 @@ test("compressLiveContext bounds provided summaries and falls back deterministic
   const failedB = await compressLiveContext(conversation, { keepRecentTurns: 2, maxDigestChars: 96 });
   assert.equal(failedA.summarySource, "deterministic");
   assert.equal(failedA.marker, failedB.marker);
+  assert.equal(long.marker, failedB.marker);
 });
 
 test("compressLiveContext returns an independent working copy when no prefix is eligible", async () => {
@@ -318,6 +323,199 @@ test("user-authored continuation text retains normal recent-turn provenance", as
   assert.equal(result.compressed, true);
   assert.deepEqual(result.conversation[0], current);
   assert.match(result.conversation[1].content, /^\[context summary\]/);
+});
+
+test("context-ledger candidates structure and redact older execution state", async () => {
+  const exactSecret = "context-ledger-exact-canary";
+  const patternedSecret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+  const current = {
+    role: "user",
+    content: [{ type: "input_text", text: "Current input must remain byte-for-byte." }],
+    metadata: { requestId: "current-1" }
+  };
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "text", text: "Recent answer must remain exact." }]
+  };
+  const conversation = [
+    {
+      role: "user",
+      content: `Build a verified report from the old data. api_key=${patternedSecret} ${"objective ".repeat(30)}`
+    },
+    {
+      role: "user",
+      content: `Approved: go ahead with the report. ${"authorization ".repeat(20)}`
+    },
+    {
+      type: "reasoning",
+      reasoning_summary: `private top-level reasoning ${exactSecret}`
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: `private reasoning ${exactSecret}` },
+        { type: "text", text: `I decided to write the report after checking the evidence. ${"decision ".repeat(20)}` },
+        {
+          type: "tool_use",
+          id: "write-1",
+          name: "write_file",
+          input: {
+            path: "/tmp/report.md",
+            token: exactSecret,
+            reasoning: `private tool rationale ${exactSecret}`
+          }
+        }
+      ]
+    },
+    {
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: "write-1",
+        content: {
+          ok: true,
+          path: "/tmp/report.md",
+          authorization: `Bearer ${exactSecret}`
+        }
+      }]
+    },
+    {
+      role: "assistant",
+      content: `Next I will verify the saved report. ${"follow-up ".repeat(20)}`
+    },
+    recentAssistant,
+    current
+  ];
+  const before = structuredClone(conversation);
+
+  const candidate = await createContextLedgerCandidate(conversation, {
+    format: "anthropic",
+    keepRecentTurns: 2,
+    maxDigestChars: 1600,
+    redactValues: [exactSecret]
+  });
+
+  assert.equal(candidate.compressed, true);
+  assert.equal(candidate.digest.version, 1);
+  assert.ok(candidate.digest.objective.length > 0);
+  assert.ok(candidate.digest.authorization.length > 0);
+  assert.ok(candidate.digest.decisions.length > 0);
+  assert.ok(candidate.digest.toolReceipts.some((item) => /write_file completed/.test(item)));
+  assert.ok(candidate.digest.changes.some((item) => /write_file/.test(item)));
+  assert.ok(candidate.digest.artifacts.includes("/tmp/report.md"));
+  assert.ok(candidate.digest.next.some((item) => /Next I will verify/.test(item)));
+  assert.deepEqual(candidate.conversation.slice(-2), [recentAssistant, current]);
+  assert.deepEqual(conversation, before, "candidate preparation must not mutate durable history");
+
+  const publicCandidate = JSON.stringify({
+    digest: candidate.digest,
+    marker: candidate.marker
+  });
+  assert.doesNotMatch(publicCandidate, /context-ledger-exact-canary/);
+  assert.doesNotMatch(publicCandidate, /sk-abcdefghijklmnopqrstuvwxyz123456/);
+  assert.doesNotMatch(publicCandidate, /private reasoning|private tool rationale|private top-level reasoning/);
+  assert.match(publicCandidate, /\[REDACTED\]/);
+});
+
+test("optional summarizers receive redacted bounded input and cannot reintroduce known secrets", async () => {
+  const secret = "summarizer-exact-secret";
+  const conversation = [
+    {
+      role: "user",
+      content: `Analyze this older payload: ${secret}. ${"x".repeat(500)}`
+    },
+    {
+      role: "assistant",
+      content: `Decision made. ${"y".repeat(500)}`
+    },
+    { role: "assistant", content: "recent" },
+    { role: "user", content: "current" }
+  ];
+
+  const candidate = await previewContextLedger(conversation, {
+    keepRecentTurns: 2,
+    maxDigestChars: 600,
+    redactValues: [secret],
+    summarizer: async (prefix, metadata) => {
+      const received = JSON.stringify({ prefix, metadata });
+      return [
+        metadata.ledger.version === 1 ? "version-one" : "version-mismatch",
+        received.includes("summarizer-exact-secret")
+          ? "SUMMARIZER_INPUT_LEAK"
+          : "input-safe",
+        "Auxiliary overview reflected summarizer-exact-secret"
+      ].join(" ");
+    }
+  });
+
+  assert.equal(candidate.compressed, true);
+  assert.equal(candidate.summarySource, "provided");
+  assert.match(candidate.digest.overview, /version-one/u);
+  assert.match(candidate.digest.overview, /input-safe/u);
+  assert.doesNotMatch(candidate.digest.overview, /SUMMARIZER_INPUT_LEAK/u);
+  assert.doesNotMatch(candidate.digest.overview, /summarizer-exact-secret/);
+  assert.match(candidate.digest.overview, /\[REDACTED\]/);
+});
+
+test("preview restore returns an independent byte-equivalent original", async () => {
+  const current = {
+    role: "user",
+    content: [{ type: "input_text", text: "exact current input" }],
+    metadata: { stable: true }
+  };
+  const conversation = [
+    { role: "user", content: `old-${"a".repeat(400)}` },
+    { role: "assistant", content: `old-${"b".repeat(400)}` },
+    { role: "assistant", content: "recent answer" },
+    current
+  ];
+  const before = structuredClone(conversation);
+  const preview = await previewContextLedger(conversation, {
+    keepRecentTurns: 2,
+    maxDigestChars: 200
+  });
+
+  assert.equal(preview.compressed, true);
+  assert.ok(preview.preview.savedChars > 0);
+  assert.deepEqual(preview.conversation.at(-1), current);
+  preview.conversation.at(-1).content[0].text = "mutated preview only";
+
+  const restored = restoreContextLedger(preview);
+  assert.deepEqual(restored, before);
+  assert.notEqual(restored, conversation);
+  assert.notEqual(restored.at(-1), conversation.at(-1));
+  assert.equal(
+    restoreContextLedger(JSON.parse(JSON.stringify(preview))),
+    null,
+    "the private restore snapshot never crosses JSON boundaries"
+  );
+});
+
+test("context-ledger preparation fails open on hostile values", async () => {
+  const hostile = { role: "user" };
+  Object.defineProperty(hostile, "content", {
+    enumerable: true,
+    get() {
+      throw new Error("hostile getter must not escape");
+    }
+  });
+  const conversation = [
+    hostile,
+    { role: "assistant", content: "recent" },
+    { role: "user", content: "current" }
+  ];
+
+  let candidate;
+  await assert.doesNotReject(async () => {
+    candidate = await createContextLedgerCandidate(conversation, {
+      keepRecentTurns: 2
+    });
+  });
+  assert.equal(candidate.compressed, false);
+  assert.equal(candidate.failedOpen, true);
+  assert.equal(candidate.conversation.length, conversation.length);
+  assert.equal(candidate.conversation.at(-1).content, "current");
+  assert.doesNotThrow(() => restoreContextLedger(candidate));
 });
 
 function deepFreeze(value) {

@@ -188,7 +188,7 @@ test("timeout disables the card but deliberately leaves the action pending", asy
   assert.ok(timeoutEdit.body.components[0].components.every((button) => button.disabled));
 });
 
-test("Allow for session executes once and lets the same tool/session skip later cards", async (t) => {
+test("Allow for session executes once but never suppresses a later catastrophic card", async (t) => {
   const harness = createHarness(t);
   const { action, invocation } = await enqueueCatastrophic(harness);
   await dispatch(harness.channel, interactionFor(harness, action, "session"));
@@ -196,13 +196,19 @@ test("Allow for session executes once and lets the same tool/session skip later 
   assert.deepEqual(harness.executions, ["wsl --shutdown"]);
   assert.equal(harness.tools.isAllowedForSession("discord:guild:10001", "code_shell"), true);
 
-  const second = await harness.tools.invoke(
+  const secondInvocation = harness.tools.invoke(
     "code_shell",
     { command: "wsl --shutdown" },
     { sessionId: "discord:guild:10001", channel: "discord" }
   );
-  assert.equal(second.ok, true);
-  assert.equal(second.result.exitCode, 0);
-  assert.deepEqual(harness.executions, ["wsl --shutdown", "wsl --shutdown"]);
-  assert.equal(approvalPosts(harness).length, 1, "session allowance suppresses a second card");
+  await waitFor(() => harness.pendingActions.list({ status: "pending" }).length === 1);
+  await waitFor(() => approvalPosts(harness).length === 2);
+  const secondAction = harness.pendingActions.list({ status: "pending" })[0];
+  assert.deepEqual(harness.executions, ["wsl --shutdown"]);
+  harness.pendingActions.decide(secondAction.id, {
+    decision: "deny",
+    decidedBy: "test"
+  });
+  assert.equal((await secondInvocation).ok, false);
+  assert.equal(approvalPosts(harness).length, 2);
 });

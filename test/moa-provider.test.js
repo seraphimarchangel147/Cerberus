@@ -391,10 +391,9 @@ test("the direct aggregator retains the normal provider tool loop", async () => 
   assert.equal(result.model, "tools");
   assert.equal(result.toolCalls.length, 1);
   assert.equal(result.toolCalls[0].name, "combine_fact");
-  assert.deepEqual(result.toolCalls[0].result, {
-    ok: true,
-    result: { doubled: 14 }
-  });
+  assert.equal(result.toolCalls[0].result.ok, true);
+  assert.deepEqual(result.toolCalls[0].result.result, { doubled: 14 });
+  assert.equal(result.toolCalls[0].result.outcome.status, "succeeded");
 });
 
 test("abort cancels the reference barrier and never starts aggregation", async () => {

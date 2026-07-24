@@ -16,9 +16,10 @@ test("defaults to ~/.openagi when OPENAGI_DATA_DIR is unset", () => {
 
 test("honors OPENAGI_DATA_DIR as an absolute path", () => {
   const prev = process.env.OPENAGI_DATA_DIR;
-  process.env.OPENAGI_DATA_DIR = "/tmp/openagi-test";
+  const absolute = path.join(path.parse(process.cwd()).root, "tmp", "openagi-test");
+  process.env.OPENAGI_DATA_DIR = absolute;
   _resetDataDirCache();
-  assert.equal(resolveDataDir(), "/tmp/openagi-test");
+  assert.equal(resolveDataDir(), absolute);
   if (prev !== undefined) process.env.OPENAGI_DATA_DIR = prev; else delete process.env.OPENAGI_DATA_DIR;
   _resetDataDirCache();
 });

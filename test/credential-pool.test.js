@@ -10,6 +10,8 @@ import {
   CredentialPoolExhaustedError,
   classifyCredentialFailure,
   createCredentialPoolRegistry,
+  credentialLeaseIdentity,
+  credentialPoolRedactionSnapshot,
   loadCredentialPoolConfig
 } from "../src/credential-pool.js";
 
@@ -430,6 +432,30 @@ test("secrets store resolution, leases, events, state, and inspection never seri
   assert.match(safeSurfaces, /promptCacheReset/);
 });
 
+test("credential lease identities bind the live secret without exposing a public fingerprint", () => {
+  const firstPool = pool({
+    credentials: [{ id: "first-label", secretName: "POOL_KEY_ONE" }],
+    env: { POOL_KEY_ONE: "shared-live-secret" }
+  });
+  const secondPool = pool({
+    credentials: [{ id: "second-label", secretName: "POOL_KEY_ONE" }],
+    env: { POOL_KEY_ONE: "shared-live-secret" }
+  });
+  const first = firstPool.acquire();
+  const equivalent = secondPool.acquire();
+  const identity = credentialLeaseIdentity(first);
+  assert.match(identity, /^[a-f0-9]{64}$/);
+  assert.equal(credentialLeaseIdentity(first), identity);
+  assert.equal(credentialLeaseIdentity(equivalent), identity);
+  firstPool.syncCredential(first.id, "rotated-live-secret");
+  assert.notEqual(credentialLeaseIdentity(firstPool.acquire()), identity);
+  assert.throws(
+    () => credentialLeaseIdentity({ ...first }),
+    /CredentialLease/
+  );
+  assert.equal(identity.includes("shared-live-secret"), false);
+});
+
 test("failure classification reads ProviderError-style status and nested body messages", () => {
   assert.deepEqual(
     classifyCredentialFailure({ status: 429, message: "usage limit reached" }),
@@ -450,4 +476,23 @@ test("failure classification reads ProviderError-style status and nested body me
     classifyCredentialFailure({ status: 401, message: "expired" }),
     { kind: "auth", status: 401, retrySame: false }
   );
+});
+
+test("private redaction snapshots are bounded before materialization", () => {
+  const credentials = Array.from({ length: 520 }, (_, index) => ({
+    id: `bounded-${index}`,
+    secretName: `BOUNDED_KEY_${index}`
+  }));
+  const env = Object.fromEntries(credentials.map((entry, index) => [
+    entry.secretName,
+    `bounded-value-${index}`
+  ]));
+  const credentialPool = pool({ credentials, env });
+  for (let index = 0; index < credentials.length; index += 1) {
+    credentialPool.acquire();
+  }
+
+  const snapshot = credentialPoolRedactionSnapshot(credentialPool);
+  assert.equal(snapshot.records.length, 512);
+  assert.equal(snapshot.overflow, true);
 });

@@ -126,7 +126,7 @@ test("hook payload mutation cannot alter live handler arguments", async () => {
   assert.match(warnings.join("\n"), /attempted-mutator/);
 });
 
-test("generic veto and handler failures are observable without changing their outcomes", async () => {
+test("generic veto and handler failures are observable with semantic outcomes", async () => {
   const hooks = new HookRegistry({ loadConfig: false, log: () => {} });
   const posts = [];
   hooks.register({
@@ -145,14 +145,16 @@ test("generic veto and handler failures are observable without changing their ou
   tools.register({ name: "blocked_tool", handler: async () => "never" });
   tools.register({ name: "failing_tool", handler: async () => { throw new Error("handler failed"); } });
 
-  assert.deepEqual(await tools.invoke("blocked_tool", {}), {
-    ok: false,
-    error: "blocked for maintenance"
-  });
-  assert.deepEqual(await tools.invoke("failing_tool", {}), {
-    ok: false,
-    error: "handler failed"
-  });
+  const blocked = await tools.invoke("blocked_tool", {});
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error, "blocked for maintenance");
+  assert.equal(blocked.outcome.status, "blocked");
+  assert.equal(blocked.outcome.code, "hook_blocked");
+  const failed = await tools.invoke("failing_tool", {});
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error, "handler failed");
+  assert.equal(failed.outcome.status, "failed");
+  assert.equal(failed.outcome.code, "handler_error");
   await hooks.flush();
 
   assert.equal(posts.length, 2);

@@ -128,6 +128,9 @@ export class DiscordChannel {
     this.restFetch = options.fetch ?? globalThis.fetch;
     this.restSleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.deliverableOptions = options.deliverableOptions ?? {};
+    this.deliverableScope = typeof options.deliverableScope === "function"
+      ? options.deliverableScope
+      : null;
   }
 
   status() {
@@ -474,7 +477,11 @@ export class DiscordChannel {
       if (replyText && replyText !== "(no text)") {
         await this.deliverAgentReply(message.channel_id, replyText, {
           replyToId: message.id,
-          replyStream
+          replyStream,
+          deliveryContext: {
+            sessionId: result.session?.id ?? null,
+            projectId: result.project?.id ?? null
+          }
         });
       } else {
         // Never end a pinged turn in silence — surface the actual stop reason.
@@ -494,12 +501,15 @@ export class DiscordChannel {
   async deliverAgentReply(
     channelId,
     text,
-    { replyToId = null, replyStream = null } = {}
+    { replyToId = null, replyStream = null, deliveryContext = {} } = {}
   ) {
     const original = String(text ?? "");
     let candidates = [];
     try {
-      candidates = await scanDeliverables(original, this.deliverableOptions);
+      const scopedOptions = this.deliverableScope
+        ? this.deliverableScope(deliveryContext)
+        : this.deliverableOptions;
+      candidates = await scanDeliverables(original, scopedOptions);
       if (!Array.isArray(candidates)) candidates = [];
     } catch (error) {
       this.logDeliverableFailure("scan", null, error);
@@ -690,7 +700,10 @@ export class DiscordChannel {
     if (!action?.id || !channelId || this.approvalPrompts.has(action.id)) return null;
 
     const card = catastrophicApprovalEmbed(action);
-    const components = approvalComponents(action.id);
+    const manualApproval = runtime?.tools?.get?.(action.toolName)?.manualApproval === true;
+    const components = approvalComponents(action.id, {
+      allowSession: !manualApproval
+    });
     const message = await this.rest(`/channels/${channelId}/messages`, {
       method: "POST",
       body: { embeds: [card], components }
@@ -735,6 +748,15 @@ export class DiscordChannel {
     }
     if (choice === "session" && !action.context?.sessionId) {
       return this.replyToInteraction(interaction, "This action has no session to allow.");
+    }
+    if (
+      choice === "session"
+      && runtime.tools?.get?.(action.toolName)?.manualApproval === true
+    ) {
+      return this.replyToInteraction(
+        interaction,
+        "This action requires a one-time human approval."
+      );
     }
 
     const displayName = approvalDisplayName(interaction);
@@ -1044,14 +1066,21 @@ function isPendingApprovalInteraction(interaction) {
   return interaction?.type === 3 && /^pa:(?:approve|deny|session):/.test(String(interaction?.data?.custom_id ?? ""));
 }
 
-function approvalComponents(actionId) {
+function approvalComponents(actionId, { allowSession = true } = {}) {
+  const components = [
+    { type: 2, style: 3, label: "Approve Once", custom_id: `pa:approve:${actionId}` }
+  ];
+  if (allowSession) {
+    components.push(
+      { type: 2, style: 2, label: "Allow for session", custom_id: `pa:session:${actionId}` }
+    );
+  }
+  components.push(
+    { type: 2, style: 4, label: "Deny", custom_id: `pa:deny:${actionId}` }
+  );
   return [{
     type: 1,
-    components: [
-      { type: 2, style: 3, label: "Approve Once", custom_id: `pa:approve:${actionId}` },
-      { type: 2, style: 2, label: "Allow for session", custom_id: `pa:session:${actionId}` },
-      { type: 2, style: 4, label: "Deny", custom_id: `pa:deny:${actionId}` }
-    ]
+    components
   }];
 }
 

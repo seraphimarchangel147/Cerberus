@@ -57,6 +57,66 @@ test("novelty: read-only memory overlap fallback never reinforces items", async 
   assert.deepEqual(after, before, "measurement must not mutate memory strength");
 });
 
+test("project axes ignore other projects' memory, vectors, and outcomes", async () => {
+  const { MemorySystem } = await import("../src/index.js");
+  const memory = new MemorySystem();
+  const beta = memory.remember({
+    source: "test",
+    scope: "project:beta",
+    content: "reconcile stripe invoices for acme",
+    tags: []
+  });
+  memory.remember({
+    source: "test",
+    scope: "project:alpha",
+    content: "prepare release notes",
+    tags: []
+  });
+  const vectorStore = {
+    search: async () => [
+      { id: beta.id, score: 0.99, text: beta.content }
+    ]
+  };
+  const outcomeStore = {
+    recent: () => [
+      ...Array.from({ length: 8 }, () => ({
+        metadata: {
+          projectId: "beta",
+          signalSummary: "reconcile stripe invoices for acme"
+        }
+      })),
+      {
+        metadata: {
+          projectId: "alpha",
+          signalSummary: "prepare release notes"
+        }
+      }
+    ]
+  };
+
+  const alpha = await measureAxes({
+    text: "reconcile stripe invoices for acme",
+    memorySystem: memory,
+    vectorStore,
+    outcomeStore,
+    scope: "project:alpha",
+    projectId: "alpha"
+  });
+  const betaAxes = await measureAxes({
+    text: "reconcile stripe invoices for acme",
+    memorySystem: memory,
+    vectorStore,
+    outcomeStore,
+    scope: "project:beta",
+    projectId: "beta"
+  });
+
+  assert.equal(alpha.novelty, 1);
+  assert.equal(alpha.repetition, 0.2);
+  assert.ok(betaAxes.novelty < 0.02);
+  assert.equal(betaAxes.repetition, 1);
+});
+
 test("impact: tracks specificity unless a remember/automate keyword fires", async () => {
   const vague = await measureAxes({ text: "hello there" });
   const specific = await measureAxes({ text: "move 3 files into /Users/me/projects/reports and update budget.json" });

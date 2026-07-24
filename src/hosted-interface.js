@@ -1,6 +1,7 @@
 import http from "node:http";
 import fsSync from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createDefaultRuntime } from "./abi-runtime.js";
 import { resolveDataDir } from "./data-dir.js";
@@ -24,6 +25,25 @@ import { readNodeConfig } from "./cli-client.js";
 import { redactKnownValues, sanitizeForAudit } from "./redact.js";
 import { approvePendingAction } from "./pending-actions.js";
 import { isModelProviderId } from "./model-router.js";
+import { projectAllows, projectMemoryScope } from "./project-store.js";
+
+const MAX_JOB_HTTP_BODY_BYTES = 256 * 1024;
+const MAX_JOB_HTTP_LIST_LIMIT = 100;
+const MAX_JOB_HTTP_WAIT_MS = 30_000;
+const MAX_JOB_HTTP_RESULT_CHARS = 50_000;
+const MAX_JOB_HTTP_RESULT_OFFSET = 64 * 1024 * 1024;
+const HTTP_JOB_ID_RE = /^job_[a-f0-9]{16}$/;
+const HTTP_JOB_SESSION_RE = /^[\x21-\x7E]{1,512}$/;
+const HTTP_JOB_STATUSES = new Set([
+  "queued",
+  "running",
+  "cancel_requested",
+  "cancelled",
+  "succeeded",
+  "failed",
+  "interrupted"
+]);
+const HTTP_JOB_KINDS = new Set(["tool", "direct-tool", "subagent"]);
 
 function isHostedMoaProvider(provider) {
   const id = String(provider?.provider ?? provider?.name ?? "").trim().toLowerCase();
@@ -97,50 +117,115 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   const dataDir = options.dataDir ?? resolveDataDir();
   const nodeRegistry = options.nodeRegistry ?? new NodeRegistry({ dir: options.nodesDir ?? path.join(dataDir, "nodes") });
   const nodesCachePath = path.join(dataDir, "nodes", "cache.json");
+  const hostedSessionsRequireProjectStore =
+    typeof runtime.projects?.projectForSession === "function";
 
-  const events = new EventEmitter();
-  events.setMaxListeners(50);
+  const events = runtime.events
+    && typeof runtime.events.on === "function"
+    && typeof runtime.events.emit === "function"
+    ? runtime.events
+    : new EventEmitter();
+  events.setMaxListeners?.(50);
 
   const sseClients = new Set();
   function broadcast(event, data) {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const res of sseClients) {
-      try { res.write(payload); } catch { /* dropped */ }
+    const eventProjectId = eventProject(data) ?? "default";
+    for (const client of sseClients) {
+      if (eventProjectId !== client.projectId) continue;
+      try { client.res.write(payload); } catch { /* dropped */ }
     }
   }
-  events.on("message", (data) => broadcast("message", data));
-  events.on("cron", (data) => broadcast("cron", data));
-  events.on("mcp", (data) => broadcast("mcp", data));
-  events.on("tunnel", (data) => broadcast("tunnel", data));
-  events.on("replay", (data) => broadcast("replay", data));
-  events.on("skill-candidate", (data) => broadcast("skill-candidate", data));
-  events.on("miner-result", (data) => broadcast("miner-result", data));
-  events.on("cron-catchup", (data) => broadcast("cron-catchup", data));
-  events.on("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
-  events.on("cron-interrupted", (data) => broadcast("cron-interrupted", data));
-  events.on("cron-model-mismatch", (data) => broadcast("cron-model-mismatch", data));
-  events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
-  events.on("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
-  events.on("task-updated", (data) => broadcast("task-updated", data));
-  events.on("kanban-updated", (data) => broadcast("kanban-updated", data));
-  events.on("kanban-status", (data) => broadcast("kanban-status", data));
-  events.on("clarification-created", (data) => broadcast("clarification-created", data));
-  events.on("clarification-resolved", (data) => broadcast("clarification-resolved", data));
-  events.on("draft-created", (data) => broadcast("draft-created", data));
-  events.on("draft-resolved", (data) => broadcast("draft-resolved", data));
-  events.on("task-reminder", (data) => broadcast("task-reminder", data));
-  events.on("task-auto-changed", (data) => broadcast("task-auto-changed", data));
-  events.on("pending-action", (data) => broadcast("pending-action", sanitizeForAudit(data)));
-  events.on("daily-recap", (data) => broadcast("daily-recap", data));
-  events.on("daily-plan", (data) => broadcast("daily-plan", data));
-  events.on("task-unblocked", (data) => broadcast("task-unblocked", data));
+  function broadcastProjectChange(data) {
+    const payload = `event: project\ndata: ${JSON.stringify(data)}\n\n`;
+    const changedProjectId = eventProject(data) ?? "default";
+    for (const client of sseClients) {
+      if (
+        client.projectId !== "default"
+        && client.projectId !== changedProjectId
+      ) {
+        continue;
+      }
+      try { client.res.write(payload); } catch { /* dropped */ }
+    }
+  }
+  let previousProjectChange = null;
+  let hostedProjectChange = null;
+  if (runtime.projects) {
+    previousProjectChange = runtime.projects.onChange;
+    hostedProjectChange = (data) => {
+      try { previousProjectChange?.(data); } finally { events.emit("project", data); }
+    };
+    runtime.projects.onChange = hostedProjectChange;
+  }
+  const ownedEventListeners = [];
+  function bindHostedEvent(type, listener) {
+    events.on(type, listener);
+    ownedEventListeners.push({ type, listener });
+  }
+  bindHostedEvent("project", (data) => broadcastProjectChange(data));
+  bindHostedEvent("message", (data) => broadcast("message", data));
+  bindHostedEvent("cron", (data) => broadcast("cron", data));
+  bindHostedEvent("mcp", (data) => broadcast("mcp", data));
+  bindHostedEvent("tunnel", (data) => broadcast("tunnel", data));
+  bindHostedEvent("replay", (data) => broadcast("replay", data));
+  bindHostedEvent("skill-candidate", (data) => broadcast("skill-candidate", data));
+  bindHostedEvent("miner-result", (data) => broadcast("miner-result", data));
+  bindHostedEvent("cron-catchup", (data) => broadcast("cron-catchup", data));
+  bindHostedEvent("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
+  bindHostedEvent("cron-interrupted", (data) => broadcast("cron-interrupted", data));
+  bindHostedEvent("cron-model-mismatch", (data) => broadcast("cron-model-mismatch", data));
+  bindHostedEvent("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
+  bindHostedEvent("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
+  bindHostedEvent("task-updated", (data) => broadcast("task-updated", data));
+  bindHostedEvent("kanban-updated", (data) => broadcast("kanban-updated", data));
+  bindHostedEvent("kanban-status", (data) => broadcast("kanban-status", data));
+  bindHostedEvent("clarification-created", (data) => broadcast("clarification-created", data));
+  bindHostedEvent("clarification-resolved", (data) => broadcast("clarification-resolved", data));
+  bindHostedEvent("draft-created", (data) => broadcast("draft-created", data));
+  bindHostedEvent("draft-resolved", (data) => broadcast("draft-resolved", data));
+  for (const type of ["artifact-created", "artifact-updated", "artifact-restored"]) {
+    bindHostedEvent(type, (data) => broadcast("artifact", {
+      event: type,
+      ...data
+    }));
+  }
+  for (const type of [
+    "recipe-proposed",
+    "recipe-edited",
+    "recipe-verified",
+    "recipe-failed",
+    "recipe-superseded",
+    "recipe-deleted",
+    "recipe-reindexed"
+  ]) {
+    bindHostedEvent(type, (data) => broadcast("recipe", {
+      event: type,
+      ...data
+    }));
+  }
+  bindHostedEvent("session-branched", (data) => broadcast("session-branched", data));
+  bindHostedEvent("task-reminder", (data) => broadcast("task-reminder", data));
+  bindHostedEvent("task-auto-changed", (data) => broadcast("task-auto-changed", data));
+  bindHostedEvent("pending-action", (data) => broadcast("pending-action", sanitizeForAudit(data)));
+  bindHostedEvent("pending-action-decided", (data) => (
+    broadcast("pending-action-decided", sanitizeForAudit(data))
+  ));
+  bindHostedEvent("daily-recap", (data) => broadcast("daily-recap", data));
+  bindHostedEvent("daily-plan", (data) => broadcast("daily-plan", data));
+  bindHostedEvent("task-unblocked", (data) => broadcast("task-unblocked", data));
+  bindHostedEvent("job", (data) => {
+    const status = jobSseStatusView(data);
+    if (status) broadcast("job", status);
+  });
   if (runtime.skillReplay) runtime.skillReplay.bindEvents(events);
   if (runtime.pendingActions?.bindEvents) runtime.pendingActions.bindEvents(events);
   if (runtime.computerUseLog?.bindEvents) runtime.computerUseLog.bindEvents(events);
-  events.on("computer-use", (data) => broadcast("computer-use", data));
-  events.on("outreach", (data) => broadcast("outreach", data));
-  events.on("outreach-resolved", (data) => broadcast("outreach-resolved", data));
-  events.on("background-review", (data) => broadcast("background-review", data));
+  if (runtime.jobs?.bindEvents) runtime.jobs.bindEvents(events);
+  bindHostedEvent("computer-use", (data) => broadcast("computer-use", data));
+  bindHostedEvent("outreach", (data) => broadcast("outreach", data));
+  bindHostedEvent("outreach-resolved", (data) => broadcast("outreach-resolved", data));
+  bindHostedEvent("background-review", (data) => broadcast("background-review", data));
 
   // Expose the bus to runtime subsystems (pattern miner, session miner) so
   // they can emit "skill-candidate" without holding a reference to this
@@ -166,7 +251,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       at: new Date().toISOString(),
       jobId: interruptedJob.runningJobId,
       jobName: interruptedJob.jobName,
-      startedAt: interruptedJob.startedAt
+      startedAt: interruptedJob.startedAt,
+      projectId: interruptedJob.projectId ?? "default",
+      projectRevision: interruptedJob.projectRevision ?? null
     });
   }
 
@@ -191,6 +278,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const result = await original(input);
       events.emit("message", {
         sessionId: result.session.id,
+        projectId: result.project?.id ?? result.session?.projectId ?? "default",
         agent: result.agent,
         reply: result.reply,
         toolCalls: result.output?.scrutiny?.action ? [] : []
@@ -215,6 +303,29 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const setupActive = isFirstRun();
       const setupRoutes = pathname === "/setup" || pathname === "/setup/save" || pathname === "/setup/test";
       const secretsRoute = pathname === "/secrets" || pathname.startsWith("/secrets/");
+      const capabilityAdminRoute = (
+        pathname === "/profiles"
+        || pathname.startsWith("/profiles/")
+        || pathname === "/capability-bundles"
+        || pathname.startsWith("/capability-bundles/")
+        || pathname === "/skill-imports"
+        || pathname.startsWith("/skill-imports/")
+      );
+      // Project-scoped data surfaces added by the agent-workspace work. These
+      // carry per-project artifacts, durable job control, and procedural
+      // recipes, so they are authenticated rather than loopback-trusted —
+      // otherwise any local process could read or drive another project.
+      // Channel pairing is included: a pairing code is a bearer credential that
+      // binds a new remote device, so it must never be mintable anonymously.
+      const projectDataRoute = (
+        pathname === "/artifacts"
+        || pathname.startsWith("/artifacts/")
+        || pathname === "/jobs"
+        || pathname.startsWith("/jobs/")
+        || pathname === "/recipes"
+        || pathname.startsWith("/recipes/")
+        || pathname.startsWith("/channels/telegram/pairing-code")
+      );
 
       if (setupActive && method === "GET" && pathname === "/") {
         res.writeHead(302, { Location: "/setup" });
@@ -243,13 +354,27 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // fabric and secrets API keep their protection. This is what removes
       // the sign-in page for the local Cerberus dashboard.
       const loopbackTrusted = isLoopbackPeer(req);
-      if (!isPublicRoute(pathname) && !setupBypass && !loopbackTrusted) {
+      // Loopback trust must NOT extend to the credential surfaces. Secrets and
+      // capability administration stay authenticated even for a local peer:
+      // any process on this box (or a browser coerced into a local request)
+      // would otherwise read/write managed secrets and grant capabilities
+      // anonymously. These two routes always fall through to the auth gate.
+      const trustBypassAllowed = loopbackTrusted
+        && !secretsRoute
+        && !capabilityAdminRoute
+        && !projectDataRoute;
+      if (!isPublicRoute(pathname) && !setupBypass && !trustBypassAllowed) {
         const authToken = getAuthToken();
         // The rest of the local-only API retains its backwards-compatible
         // auth-disabled mode. The secrets surface is different: it must never
         // become anonymously reachable because OPENAGI_AUTH_TOKEN is absent.
-        const auth = secretsRoute && !authToken
-          ? { ok: false, reason: "OPENAGI_AUTH_TOKEN is required for the secrets API" }
+        const auth = (secretsRoute || capabilityAdminRoute) && !authToken
+          ? {
+              ok: false,
+              reason: secretsRoute
+                ? "OPENAGI_AUTH_TOKEN is required for the secrets API"
+                : "OPENAGI_AUTH_TOKEN is required for capability administration"
+            }
           : checkAuth(req, url, authToken);
         if (!auth.ok) {
           // Browsers (Accept: text/html) get the login form on ANY failed GET,
@@ -289,6 +414,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // Setup wizard handlers — work both during first-run (auth-bypassed)
       // and after-auth (so users can re-edit env from the dashboard's Settings).
       if (method === "GET" && pathname === "/setup") {
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          null,
+          "Setup administration"
+        );
         // Re-runs prefill from the live env: the existing auth token is
         // KEPT (a re-run used to silently rotate it on save), provider/
         // model/budget show their current values, and already-set secrets
@@ -297,6 +429,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname === "/setup/save") {
         const body = await readJson(req);
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Setup administration"
+        );
         let result;
         try {
           result = saveEnv({
@@ -324,6 +463,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname === "/setup/test") {
         const body = await readJson(req);
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Setup administration"
+        );
         if (!channels) return sendSecretsJson(res, 503, { error: "agent-host-disabled" });
         try {
           // ephemeral: the connectivity test must not seed a session, task,
@@ -351,11 +497,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
         }
         try {
+          const project = requireRequestProject(runtime, req, url);
           const secrets = runtime.secrets
             .listSecrets({ decidedBy: "http:GET:/secrets" })
+            .filter((entry) => projectAllows(
+              project.secretRefs,
+              entry.name ?? entry.key
+            ))
             .map((entry) => publicSecretMetadata(entry));
           return sendSecretsJson(res, 200, { secrets });
-        } catch {
+        } catch (error) {
+          if (error?.code === "PROJECT_BOUNDARY_VIOLATION") throw error;
           return sendSecretsJson(res, 500, { error: "secrets-unavailable" });
         }
       }
@@ -372,6 +524,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendSecretsJson(res, 400, { error: "name and non-blank string value are required" });
         }
         try {
+          const project = requireRequestProject(runtime, req, url, body);
+          if (project.id !== "default") {
+            return sendSecretsJson(
+              res,
+              403,
+              { error: "Secret updates are default-project only" }
+            );
+          }
+          if (!projectAllows(project.secretRefs, name)) {
+            return sendSecretsJson(res, 403, { error: "secret is outside the current project" });
+          }
           const stored = runtime.secrets.setSecret(name, body.value, {
             decidedBy: "http:POST:/secrets"
           });
@@ -385,6 +548,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendSecretsJson(res, 503, { error: "secrets-unavailable" });
         }
         const name = decodeURIComponent(pathname.slice("/secrets/".length)).trim();
+        const project = requireRequestProject(runtime, req, url);
+        if (!projectAllows(project.secretRefs, name)) {
+          return sendSecretsJson(res, 403, { error: "secret is outside the current project" });
+        }
+        if (project.id !== "default") {
+          return sendSecretsJson(
+            res,
+            403,
+            { error: "Secret deletion is default-project only" }
+          );
+        }
         // Removing the live auth token would make checkAuth enter its legacy
         // auth-disabled mode for every other route in this running process.
         // Rotation via POST remains available; remote deletion does not.
@@ -418,16 +592,625 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // (cron records + inputs, channel state, etc.) used to be public
         // here; it now requires auth (Tier-1 hardening, 2026-07).
         const authed = checkAuth(req, url, getAuthToken()).ok;
-        return sendJson(res, 200, authed
-          ? { ok: true, firstRun: isFirstRun(), status: runtime.status() }
-          : { ok: true, firstRun: isFirstRun() });
+        if (!authed) {
+          return sendJson(res, 200, { ok: true, firstRun: isFirstRun() });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        return sendJson(
+          res,
+          200,
+          project.id === "default"
+            ? { ok: true, firstRun: isFirstRun(), status: runtime.status() }
+            : {
+                ok: true,
+                firstRun: isFirstRun(),
+                status: {
+                  agentHost: runtime.agentHost
+                    ? {
+                        provider: project.modelProfile?.provider
+                          ?? runtime.agentHost.modelProvider?.constructor?.name
+                          ?? null,
+                        providerConfigured:
+                          runtime.agentHost.modelProvider?.isConfigured?.() ?? false
+                      }
+                    : null,
+                  project: {
+                    id: project.id,
+                    status: project.status,
+                    revision: project.revision
+                  }
+                }
+              }
+        );
       }
-      if (method === "GET" && pathname === "/memory") return sendJson(res, 200, runtime.memory.snapshot());
+      if (method === "GET" && pathname === "/projects") {
+        const requestProject = requireRequestProject(runtime, req, url);
+        const projects = runtime.projects?.list?.({
+          includeArchived: url.searchParams.get("archived") === "1"
+        }) ?? [];
+        return sendJson(res, 200, {
+          projects: requestProject.id === "default"
+            ? projects
+            : projects.filter((project) => project.id === requestProject.id)
+        });
+      }
+      if (method === "POST" && pathname === "/projects") {
+        const body = await readJson(req);
+        try {
+          requireDefaultRequestProject(
+            runtime,
+            req,
+            url,
+            body,
+            "Project creation"
+          );
+          const project = runtime.projects.create(body, {
+            actor: "http:POST:/projects"
+          });
+          return sendJson(res, 201, project);
+        } catch (error) {
+          if (error?.code === "PROJECT_BOUNDARY_VIOLATION") throw error;
+          return sendJson(res, 400, { error: error.message, code: error.code ?? null });
+        }
+      }
+      if (pathname.match(/^\/projects\/[^/]+$/)) {
+        const id = decodeURIComponent(pathname.split("/")[2]);
+        if (method === "GET") {
+          const requestProject = requireRequestProject(runtime, req, url);
+          if (requestProject.id !== "default" && requestProject.id !== id) {
+            return sendJson(res, 404, { error: "unknown project" });
+          }
+          const project = runtime.projects?.get?.(id);
+          return project
+            ? sendJson(res, 200, project)
+            : sendJson(res, 404, { error: "unknown project" });
+        }
+        if (method === "PATCH") {
+          const body = await readJson(req);
+          try {
+            requireDefaultRequestProject(
+              runtime,
+              req,
+              url,
+              body,
+              "Project updates"
+            );
+            const project = runtime.projects.update(id, body.patch ?? body, {
+              expectedRevision: body.expectedRevision,
+              actor: "http:PATCH:/projects"
+            });
+            return sendJson(res, 200, project);
+          } catch (error) {
+            if (error?.code === "PROJECT_BOUNDARY_VIOLATION") throw error;
+            return sendJson(
+              res,
+              error.code === "PROJECT_REVISION_CONFLICT" ? 409 : 400,
+              { error: error.message, code: error.code ?? null }
+            );
+          }
+        }
+      }
+      if (method === "POST" && pathname.match(/^\/projects\/[^/]+\/select$/)) {
+        const id = decodeURIComponent(pathname.split("/")[2]);
+        const requestProject = requireRequestProject(runtime, req, url);
+        if (requestProject.id !== "default" && requestProject.id !== id) {
+          return sendJson(res, 404, { error: "unknown or archived project" });
+        }
+        const project = runtime.projects?.get?.(id, { includeArchived: false });
+        return project
+          ? sendJson(res, 200, {
+              project,
+              selection: "client-local",
+              message: "Send X-OpenAGI-Project on project-scoped requests."
+            })
+          : sendJson(res, 404, { error: "unknown or archived project" });
+      }
+      if (method === "POST" && pathname.match(/^\/projects\/[^/]+\/archive$/)) {
+        const id = decodeURIComponent(pathname.split("/")[2]);
+        const body = await readJson(req).catch(() => ({}));
+        try {
+          requireDefaultRequestProject(
+            runtime,
+            req,
+            url,
+            body,
+            "Project archival"
+          );
+          const project = runtime.projects.archive(id, {
+            expectedRevision: body.expectedRevision,
+            actor: "http:POST:/projects/archive"
+          });
+          return sendJson(res, 200, project);
+        } catch (error) {
+          if (error?.code === "PROJECT_BOUNDARY_VIOLATION") throw error;
+          return sendJson(
+            res,
+            error.code === "PROJECT_REVISION_CONFLICT" ? 409 : 400,
+            { error: error.message, code: error.code ?? null }
+          );
+        }
+      }
+
+      // Named profiles, project-scoped capability grants, and inert skill
+      // import quarantine. These administration routes require a configured
+      // auth token even when the rest of the legacy local API is auth-less.
+      if (method === "GET" && pathname === "/profiles/audit") {
+        if (!runtime.profiles?.history) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            events: runtime.profiles.history({
+              projectId: project.id,
+              limit: url.searchParams.has("limit")
+                ? Number(url.searchParams.get("limit"))
+                : 100
+            })
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/profiles/activate") {
+        if (!runtime.profiles?.bindProjectProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const profileId = body?.id == null || body.id === ""
+            ? null
+            : body.id;
+          if (!Object.hasOwn(body ?? {}, "expectedBindingProfileId")) {
+            throw new TypeError("expectedBindingProfileId is required.");
+          }
+          if (
+            profileId
+            && (
+              !Number.isSafeInteger(body?.expectedProfileRevision)
+              || body.expectedProfileRevision < 1
+            )
+          ) {
+            throw new TypeError(
+              "expectedProfileRevision is required when activating a profile."
+            );
+          }
+          const bindingContext = {
+            expectedBindingProfileId: body.expectedBindingProfileId,
+            expectedProfileRevision: body.expectedProfileRevision,
+            actor: "http:POST:/profiles/activate"
+          };
+          const resolution = body?.scope === "project"
+            ? runtime.profiles.bindProjectProfile(
+                project.id,
+                profileId,
+                bindingContext
+              )
+            : body?.scope === "session"
+              ? runtime.profiles.bindSessionProfile(
+                  project.id,
+                  body?.sessionId,
+                  profileId,
+                  bindingContext
+                )
+              : (() => {
+                  throw new TypeError("scope must be project or session.");
+                })();
+          events.emit("capability-profile", {
+            op: profileId ? "activate" : "clear",
+            projectId: project.id,
+            profileId,
+            scope: body.scope,
+            sessionId: body.scope === "session" ? body.sessionId : null
+          });
+          return sendJson(res, 200, resolution);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && pathname === "/profiles") {
+        if (!runtime.profiles?.listProfiles) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            profiles: runtime.profiles.listProfiles({
+              projectId: project.id,
+              includeRevoked: url.searchParams.get("revoked") === "1"
+            }),
+            active: runtime.profiles.resolve(
+              project.id,
+              url.searchParams.get("sessionId") || null
+            )
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/profiles") {
+        if (!runtime.profiles?.createProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const profile = runtime.profiles.createProfile(
+            project.id,
+            body ?? {},
+            { actor: "http:POST:/profiles" }
+          );
+          events.emit("capability-profile", {
+            op: "create",
+            projectId: project.id,
+            profileId: profile.id,
+            revision: profile.revision
+          });
+          return sendJson(res, 201, profile);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/profiles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.getProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/profiles/".length));
+        try {
+          const profile = runtime.profiles.getProfile(project.id, id, {
+            includeRevoked: true
+          });
+          return profile
+            ? sendJson(res, 200, profile)
+            : sendJson(res, 404, { error: "unknown profile" });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/profiles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.updateProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(pathname.slice("/profiles/".length));
+        try {
+          const profile = runtime.profiles.updateProfile(
+            project.id,
+            id,
+            body ?? {},
+            { actor: "http:PATCH:/profiles" }
+          );
+          events.emit("capability-profile", {
+            op: "update",
+            projectId: project.id,
+            profileId: profile.id,
+            revision: profile.revision
+          });
+          return sendJson(res, 200, profile);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/profiles\/[^/]+\/revoke$/u.test(pathname)) {
+        if (!runtime.profiles?.revokeProfile) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/profiles/".length, -"/revoke".length)
+        );
+        try {
+          const profile = runtime.profiles.revokeProfile(project.id, id, {
+            expectedRevision: body?.expectedRevision,
+            actor: "http:POST:/profiles/revoke"
+          });
+          events.emit("capability-profile", {
+            op: "revoke",
+            projectId: project.id,
+            profileId: profile.id,
+            revision: profile.revision
+          });
+          return sendJson(res, 200, profile);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+
+      if (method === "GET" && pathname === "/capability-bundles") {
+        if (!runtime.profiles?.listBundles) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            bundles: runtime.profiles.listBundles({
+              projectId: project.id,
+              includeRevoked: url.searchParams.get("revoked") === "1"
+            })
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/capability-bundles") {
+        if (!runtime.profiles?.createBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const bundle = runtime.profiles.createBundle(
+            project.id,
+            body ?? {},
+            { actor: "http:POST:/capability-bundles" }
+          );
+          events.emit("capability-bundle", {
+            op: "create",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 201, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/capability-bundles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.getBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/capability-bundles/".length)
+        );
+        try {
+          const bundle = runtime.profiles.getBundle(project.id, id, {
+            includeRevoked: true
+          });
+          return bundle
+            ? sendJson(res, 200, bundle)
+            : sendJson(res, 404, { error: "unknown capability bundle" });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/capability-bundles\/[^/]+$/u.test(pathname)) {
+        if (!runtime.profiles?.updateBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/capability-bundles/".length)
+        );
+        try {
+          const bundle = runtime.profiles.updateBundle(
+            project.id,
+            id,
+            body ?? {},
+            { actor: "http:PATCH:/capability-bundles" }
+          );
+          events.emit("capability-bundle", {
+            op: "update",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 200, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/capability-bundles\/[^/]+\/enable$/u.test(pathname)
+      ) {
+        if (!runtime.profiles?.setBundleEnabled) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice(
+            "/capability-bundles/".length,
+            -"/enable".length
+          )
+        );
+        try {
+          const bundle = runtime.profiles.setBundleEnabled(
+            project.id,
+            id,
+            body?.enabled,
+            {
+              expectedRevision: body?.expectedRevision,
+              actor: "http:POST:/capability-bundles/enable"
+            }
+          );
+          events.emit("capability-bundle", {
+            op: body?.enabled ? "enable" : "disable",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 200, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/capability-bundles\/[^/]+\/revoke$/u.test(pathname)
+      ) {
+        if (!runtime.profiles?.revokeBundle) {
+          return sendJson(res, 503, { error: "capability profiles unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice(
+            "/capability-bundles/".length,
+            -"/revoke".length
+          )
+        );
+        try {
+          const bundle = runtime.profiles.revokeBundle(project.id, id, {
+            expectedRevision: body?.expectedRevision,
+            actor: "http:POST:/capability-bundles/revoke"
+          });
+          events.emit("capability-bundle", {
+            op: "revoke",
+            projectId: project.id,
+            bundleId: bundle.id,
+            revision: bundle.revision,
+            status: bundle.status
+          });
+          return sendJson(res, 200, bundle);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+
+      if (method === "GET" && pathname === "/skill-imports") {
+        if (!runtime.skillImports?.list) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, {
+            imports: runtime.skillImports.list({
+              projectId: project.id,
+              status: url.searchParams.get("status") || null,
+              includeResolved: url.searchParams.get("resolved") !== "0"
+            })
+          });
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/skill-imports") {
+        if (!runtime.skillImports?.stage) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const candidate = runtime.skillImports.stage({
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            actor: "http:POST:/skill-imports"
+          });
+          events.emit("skill-import", {
+            op: "stage",
+            projectId: project.id,
+            candidateId: candidate.id,
+            revision: candidate.revision,
+            status: candidate.status,
+            skillName: candidate.skillName
+          });
+          return sendJson(res, 201, candidate);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/skill-imports\/[^/]+$/u.test(pathname)) {
+        if (!runtime.skillImports?.review) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/skill-imports/".length));
+        try {
+          return sendJson(res, 200, runtime.skillImports.review(id, {
+            projectId: project.id,
+            file: url.searchParams.get("file")
+          }));
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/skill-imports\/[^/]+\/approve$/u.test(pathname)
+      ) {
+        if (!runtime.skillImports?.approve) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/skill-imports/".length, -"/approve".length)
+        );
+        try {
+          const candidate = runtime.skillImports.approve(id, {
+            projectId: project.id,
+            expectedRevision: body?.expectedRevision
+          }, {
+            actor: "http:POST:/skill-imports/approve"
+          });
+          events.emit("skill-import", {
+            op: "approve",
+            projectId: project.id,
+            candidateId: candidate.id,
+            revision: candidate.revision,
+            status: candidate.status,
+            skillName: candidate.skillName
+          });
+          return sendJson(res, 200, candidate);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/skill-imports\/[^/]+\/reject$/u.test(pathname)
+      ) {
+        if (!runtime.skillImports?.reject) {
+          return sendJson(res, 503, { error: "skill import quarantine unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/skill-imports/".length, -"/reject".length)
+        );
+        try {
+          const candidate = runtime.skillImports.reject(id, {
+            projectId: project.id,
+            expectedRevision: body?.expectedRevision,
+            reason: body?.reason
+          }, {
+            actor: "http:POST:/skill-imports/reject"
+          });
+          events.emit("skill-import", {
+            op: "reject",
+            projectId: project.id,
+            candidateId: candidate.id,
+            revision: candidate.revision,
+            status: candidate.status,
+            skillName: candidate.skillName
+          });
+          return sendJson(res, 200, candidate);
+        } catch (error) {
+          return sendCapabilityHttpError(res, error);
+        }
+      }
+
+      if (method === "GET" && pathname === "/memory") {
+        const project = requireRequestProject(runtime, req, url);
+        return sendJson(res, 200, projectMemorySnapshot(runtime.memory, project));
+      }
       if (method === "POST" && pathname === "/memory/remember") {
         // Direct memory import (auth-gated) — for migrations from another
         // agent, bulk seeding, or integrations. Body: { content, tags?,
         // importance?, scope?, source?, replaceIds? }. Mirrors `remember`.
         const body = await readJson(req);
+        const project = requireRequestProject(runtime, req, url, body);
         const content = String(body?.content ?? "").trim();
         if (!content) return sendJson(res, 400, { error: "content required" });
         if (body.replaceIds !== undefined && !Array.isArray(body.replaceIds)) {
@@ -446,13 +1229,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           const item = runtime.memory.remember(
             {
               source: body.source ?? "import",
-              scope: body.scope ?? "main",
+              scope: projectMemoryScope(project),
               content,
               tags: ["import", ...(Array.isArray(body.tags) ? body.tags : [])],
               risk: importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45,
               specificity: 0.7,
               repetition: 0.4,
-              novelty: 0.5
+              novelty: 0.5,
+              metadata: { projectId: project.id }
             },
             {
               source: "memory-import",
@@ -482,38 +1266,173 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           throw error;
         }
       }
-      if (method === "GET" && pathname === "/agents") return sendJson(res, 200, runtime.agentHost?.store.listAgents() ?? runtime.propagation.list());
+      if (method === "GET" && pathname === "/agents") {
+        requireDefaultRequestProject(runtime, req, url, null, "Agent administration");
+        return sendJson(
+          res,
+          200,
+          runtime.agentHost?.store.listAgents() ?? runtime.propagation.list()
+        );
+      }
       if (method === "GET" && pathname === "/specialists") {
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          null,
+          "Specialist administration"
+        );
         const includeRetired = url.searchParams.get("retired") === "1";
         return sendJson(res, 200, runtime.propagation.list({ includeRetired }));
       }
       if (method === "POST" && pathname.match(/^\/specialists\/[^/]+\/retire$/)) {
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          null,
+          "Specialist administration"
+        );
         const id = decodeURIComponent(pathname.split("/")[2]);
         const sp = runtime.propagation.retire(id, "manual");
         if (!sp) return sendJson(res, 404, { error: "unknown-specialist" });
         return sendJson(res, 200, sp);
       }
-      if (method === "GET" && pathname === "/sessions") return sendJson(res, 200, runtime.agentHost?.store.listSessions() ?? []);
+      if (method === "GET" && pathname === "/sessions") {
+        const project = requireRequestProject(runtime, req, url);
+        assertHostedProjectStoreAvailable(
+          runtime,
+          hostedSessionsRequireProjectStore
+        );
+        const sessionStore = runtime.agentHost?.store;
+        const sessions = (sessionStore?.listSessions() ?? [])
+          .filter((session) => {
+            try {
+              assertHostedSessionProject(
+                runtime,
+                sessionStore,
+                session.id,
+                project,
+                { projectStoreRequired: hostedSessionsRequireProjectStore }
+              );
+              return true;
+            } catch {
+              return false;
+            }
+          });
+        return sendJson(res, 200, sessions);
+      }
       if (method === "POST" && pathname === "/sessions/reset") {
         if (typeof runtime.agentHost?.resetSession !== "function") {
           return sendJson(res, 503, { error: "agent-host-disabled" });
         }
         const body = await readJson(req);
         if (!body?.sessionId) return sendJson(res, 400, { error: "sessionId required" });
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          assertHostedSessionProject(
+            runtime,
+            runtime.agentHost?.store,
+            body.sessionId,
+            project,
+            { projectStoreRequired: hostedSessionsRequireProjectStore }
+          );
+        } catch (error) {
+          return sendJson(res, 404, { error: error.message });
+        }
         return sendJson(res, 200, runtime.agentHost.resetSession({
           sessionId: body.sessionId,
           channel: body.channel,
           from: body.from,
-          agentId: body.agentId
+          agentId: body.agentId,
+          projectId: project.id,
+          projectRevision: project.revision,
+          projectHookIds: project.hookIds
         }));
       }
+      if (method === "POST" && /^\/sessions\/[^/]+\/branches$/u.test(pathname)) {
+        if (typeof runtime.agentHost?.branchSession !== "function") {
+          return sendJson(res, 503, { error: "session branching unavailable" });
+        }
+        const sourceSessionId = decodeURIComponent(
+          pathname.slice("/sessions/".length, -"/branches".length)
+        );
+        const body = await readJson(req).catch(() => null);
+        if (
+          !body
+          || typeof body !== "object"
+          || Array.isArray(body)
+          || Object.keys(body).length !== 1
+          || typeof body.messageId !== "string"
+          || !body.messageId.trim()
+        ) {
+          return sendJson(res, 400, { error: "messageId is required" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          assertHostedSessionProject(
+            runtime,
+            runtime.agentHost.store,
+            sourceSessionId,
+            project,
+            { projectStoreRequired: hostedSessionsRequireProjectStore }
+          );
+          const branch = await runtime.agentHost.branchSession({
+            sourceSessionId,
+            messageId: body.messageId,
+            projectId: project.id,
+            agentId: "main"
+          });
+          return sendJson(res, 201, branch);
+        } catch (error) {
+          if (error?.code === "SESSION_BRANCH_TARGET_EXISTS") {
+            return sendJson(res, 409, { error: "session branch conflict" });
+          }
+          if (error?.code === "SESSION_BRANCH_MESSAGE_AMBIGUOUS") {
+            return sendJson(res, 409, { error: "ambiguous branch message" });
+          }
+          if (
+            error?.code === "SESSION_NOT_FOUND"
+            || error?.code === "SESSION_BRANCH_MESSAGE_NOT_FOUND"
+            || error?.code === "PROJECT_BOUNDARY_VIOLATION"
+          ) {
+            return sendJson(res, 404, { error: "unknown session or message" });
+          }
+          if (error instanceof TypeError || error instanceof RangeError) {
+            return sendJson(res, 400, { error: error.message });
+          }
+          throw error;
+        }
+      }
       if (method === "GET" && pathname.startsWith("/sessions/")) {
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.slice("/sessions/".length));
+        try {
+          assertHostedSessionProject(
+            runtime,
+            runtime.agentHost?.store,
+            id,
+            project,
+            { projectStoreRequired: hostedSessionsRequireProjectStore }
+          );
+        } catch {
+          return sendJson(res, 404, { error: "unknown session" });
+        }
         return sendJson(res, 200, runtime.agentHost?.store.getSession(id) ?? { error: "agent-host-disabled" });
       }
-      if (method === "GET" && pathname === "/agent-host") return sendJson(res, 200, runtime.agentHost?.status() ?? { enabled: false });
+      if (method === "GET" && pathname === "/agent-host") {
+        requireDefaultRequestProject(runtime, req, url, null, "Agent host status");
+        return sendJson(res, 200, runtime.agentHost?.status() ?? { enabled: false });
+      }
       if (method === "POST" && pathname === "/nodes/heartbeat") {
         const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Node administration"
+        );
         // Type-checked, not just truthy: a non-string name/nodeId previously
         // persisted and crashed NodeRegistry.list()'s name.localeCompare sort
         // with a TypeError, taking down GET /nodes with a 500 until the
@@ -539,6 +1458,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { ok: true });
       }
       if (method === "GET" && pathname === "/nodes") {
+        requireDefaultRequestProject(runtime, req, url, null, "Node administration");
         const identity = readOrCreateIdentity(dataDir);
         const pairing = readNodeConfig(dataDir);
         if (!pairing?.remote) {
@@ -594,6 +1514,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
       }
       if (method === "GET" && pathname === "/channels") {
+        requireDefaultRequestProject(runtime, req, url, null, "Channel administration");
         const status = channels?.status() ?? { enabled: false };
         const pub = getPublicUrl();
         const base = pub ? pub.replace(/\/$/, "") : null;
@@ -609,6 +1530,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         });
       }
       if (method === "GET" && pathname === "/channels/telegram/pairing-code") {
+        requireDefaultRequestProject(runtime, req, url, null, "Channel administration");
         // Auth-gated like every non-public route (isPublicRoute does not list
         // it, so the global checkAuth gate above already ran). Issues a fresh
         // one-time code and prints it to the daemon log too, so a headless
@@ -618,12 +1540,249 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         console.log(`[openagi] telegram pairing code ${issued.code} (valid 10 min, single use) — send "/pair ${issued.code}" to the bot`);
         return sendJson(res, 200, issued);
       }
-      if (method === "GET" && pathname === "/tools") return sendJson(res, 200, runtime.tools.list());
+      if (method === "GET" && pathname === "/tools") {
+        const project = requireRequestProject(runtime, req, url);
+        const tools = runtime.tools.list().filter((tool) => (
+          projectAllows(project.policy?.allowedTools, tool.name)
+          && (
+            tool.source !== "mcp"
+            || projectAllows(project.mcpGrants, tool.metadata?.server)
+          )
+          && (
+            tool.source !== "skill"
+            || tool.metadata?.skill === undefined
+            || projectAllows(project.activeSkills, tool.metadata.skill)
+          )
+        ));
+        return sendJson(res, 200, tools);
+      }
 
-      if (method === "GET" && pathname === "/events") return handleSse(req, res, sseClients);
+      if (method === "GET" && pathname === "/events") {
+        const project = requireRequestProject(runtime, req, url);
+        return handleSse(req, res, sseClients, project.id);
+      }
+
+      if (method === "POST" && pathname === "/jobs") {
+        if (!runtime.jobs?.start) {
+          return sendJson(res, 503, { error: "durable jobs are unavailable" });
+        }
+        let body;
+        try {
+          body = await readJson(req);
+          assertPlainHttpJobBody(body);
+          if (jsonUtf8Bytes(body) > MAX_JOB_HTTP_BODY_BYTES) {
+            return sendJson(res, 413, {
+              error: `job request exceeds ${MAX_JOB_HTTP_BODY_BYTES} bytes`
+            });
+          }
+        } catch (error) {
+          return sendJson(res, 400, {
+            error: safeJobHttpMessage(error, "invalid job request")
+          });
+        }
+        const project = requireRequestProject(runtime, req, url, body);
+        let sessionId;
+        try {
+          sessionId = normalizeHttpJobSession(body.sessionId);
+          assertHttpJobSessionProject(runtime.projects, project, sessionId);
+        } catch (error) {
+          return sendJson(res, 400, {
+            error: safeJobHttpMessage(error, "invalid job session")
+          });
+        }
+        const input = { ...body };
+        delete input.projectId;
+        delete input.sessionId;
+        try {
+          const job = await runtime.jobs.start(
+            input,
+            jobHttpContext(project, sessionId)
+          );
+          const view = jobHttpStatusView(job, project.id);
+          if (!view) throw new Error("job start returned no status");
+          if (runtime.jobs.emitsEvents !== true) {
+            events.emit("job", {
+              op: "start",
+              projectId: project.id,
+              job: view
+            });
+          }
+          return sendJson(res, 202, view);
+        } catch (error) {
+          return sendJobHttpError(res, error);
+        }
+      }
+
+      if (method === "GET" && pathname === "/jobs") {
+        if (!runtime.jobs?.list) {
+          return sendJson(res, 503, { error: "durable jobs are unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const filters = httpJobListFilters(url.searchParams);
+          const jobs = await runtime.jobs.list(
+            filters,
+            jobHttpContext(project)
+          );
+          const views = (Array.isArray(jobs) ? jobs : [])
+            .map((job) => jobHttpStatusView(job, project.id))
+            .filter(Boolean)
+            .slice(0, filters.limit);
+          return sendJson(res, 200, {
+            count: views.length,
+            jobs: views
+          });
+        } catch (error) {
+          return sendJobHttpError(res, error);
+        }
+      }
+
+      const jobRoute = /^\/jobs\/([^/]+)(?:\/(wait|result|cancel))?$/.exec(pathname);
+      if (jobRoute) {
+        if (!runtime.jobs) {
+          return sendJson(res, 503, { error: "durable jobs are unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        let jobId;
+        try {
+          jobId = normalizeHttpJobId(decodeURIComponent(jobRoute[1]));
+        } catch {
+          return sendJson(res, 400, { error: "invalid job id" });
+        }
+        const action = jobRoute[2] ?? "status";
+        const context = jobHttpContext(project);
+
+        if (method === "GET" && action === "status") {
+          if (!runtime.jobs.status) {
+            return sendJson(res, 503, { error: "job status is unavailable" });
+          }
+          try {
+            const job = await runtime.jobs.status(jobId, context);
+            const view = jobHttpStatusView(job, project.id);
+            return view
+              ? sendJson(res, 200, view)
+              : sendJson(res, 404, { error: "unknown job" });
+          } catch (error) {
+            return sendJobHttpError(res, error);
+          }
+        }
+
+        if (method === "GET" && action === "wait") {
+          if (!runtime.jobs.wait) {
+            return sendJson(res, 503, { error: "job wait is unavailable" });
+          }
+          let timeoutMs;
+          try {
+            timeoutMs = boundedHttpJobInteger(url.searchParams.get("timeoutMs"), {
+              fallback: MAX_JOB_HTTP_WAIT_MS,
+              min: 1,
+              max: MAX_JOB_HTTP_WAIT_MS,
+              field: "timeoutMs"
+            });
+          } catch (error) {
+            return sendJson(res, 400, {
+              error: safeJobHttpMessage(error, "invalid wait timeout")
+            });
+          }
+          try {
+            const job = await runtime.jobs.wait(
+              jobId,
+              { timeoutMs },
+              context
+            );
+            const timedOut = job?.timedOut === true;
+            const view = jobHttpStatusView(job, project.id);
+            return view
+              ? sendJson(res, 200, { timedOut, job: view })
+              : sendJson(res, 404, { error: "unknown job" });
+          } catch (error) {
+            if (error?.code === "JOB_WAIT_TIMEOUT" && runtime.jobs.status) {
+              try {
+                const current = await runtime.jobs.status(jobId, context);
+                const view = jobHttpStatusView(current, project.id);
+                return view
+                  ? sendJson(res, 200, { timedOut: true, job: view })
+                  : sendJson(res, 404, { error: "unknown job" });
+              } catch (statusError) {
+                return sendJobHttpError(res, statusError);
+              }
+            }
+            return sendJobHttpError(res, error);
+          }
+        }
+
+        if (method === "GET" && action === "result") {
+          if (!runtime.jobs.collect) {
+            return sendJson(res, 503, { error: "job collection is unavailable" });
+          }
+          let offset;
+          let maxChars;
+          try {
+            offset = boundedHttpJobInteger(url.searchParams.get("offset"), {
+              fallback: 0,
+              min: 0,
+              max: MAX_JOB_HTTP_RESULT_OFFSET,
+              field: "offset"
+            });
+            maxChars = boundedHttpJobInteger(url.searchParams.get("maxChars"), {
+              fallback: 12_000,
+              min: 1,
+              max: MAX_JOB_HTTP_RESULT_CHARS,
+              field: "maxChars"
+            });
+          } catch (error) {
+            return sendJson(res, 400, {
+              error: safeJobHttpMessage(error, "invalid result range")
+            });
+          }
+          try {
+            const collected = await runtime.jobs.collect(
+              jobId,
+              { offset, maxChars },
+              context
+            );
+            if (!collected) return sendJson(res, 404, { error: "unknown job" });
+            return sendJson(
+              res,
+              200,
+              boundedHttpJobCollection(collected, project.id, maxChars)
+            );
+          } catch (error) {
+            return sendJobHttpError(res, error);
+          }
+        }
+
+        if (method === "POST" && action === "cancel") {
+          if (!runtime.jobs.cancel) {
+            return sendJson(res, 503, { error: "job cancellation is unavailable" });
+          }
+          try {
+            const job = await runtime.jobs.cancel(jobId, context);
+            const view = jobHttpStatusView(job, project.id);
+            if (!view) return sendJson(res, 404, { error: "unknown job" });
+            if (runtime.jobs.emitsEvents !== true) {
+              events.emit("job", {
+                op: "cancel",
+                projectId: project.id,
+                job: view
+              });
+            }
+            return sendJson(res, 200, view);
+          } catch (error) {
+            return sendJobHttpError(res, error);
+          }
+        }
+      }
 
       if (method === "POST" && pathname === "/ingest") {
         const body = await readJson(req);
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Integration event ingestion"
+        );
         const outputs = runtime.processIntegrationEvent(body.source ?? "abi", body.payload ?? body);
         return sendJson(res, 200, { outputs });
       }
@@ -631,10 +1790,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/message") {
         if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
         const body = await readJson(req);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return sendJson(res, 400, { error: "valid JSON object required" });
+        }
         // `ephemeral` (no session/memory/task) is an INTERNAL flag for the
         // setup-test path only — never let a public /message caller set it to
         // evade persistence.
-        if (body && typeof body === "object") delete body.ephemeral;
+        delete body.ephemeral;
+        const project = requireRequestProject(runtime, req, url, body);
+        body.projectId = project.id;
+        body.metadata = {
+          ...(body.metadata ?? {}),
+          projectId: project.id
+        };
         // Chat must return a structured error, not a generic 500: the
         // dashboard needs to distinguish "budget cap hit" / "provider auth
         // failed" / "network blip" to show something actionable.
@@ -690,8 +1858,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 202, { accepted: true });
       }
 
-      if (method === "GET" && pathname === "/budget") return sendJson(res, 200, runtime.budget?.status?.() ?? { error: "no-budget" });
+      if (method === "GET" && pathname === "/budget") {
+        requireDefaultRequestProject(runtime, req, url, null, "Budget administration");
+        return sendJson(res, 200, runtime.budget?.status?.() ?? { error: "no-budget" });
+      }
       if (method === "GET" && pathname === "/budget/ledger") {
+        requireDefaultRequestProject(runtime, req, url, null, "Budget administration");
         const ledger = runtime.budget?.ledger;
         if (!ledger) return sendJson(res, 200, { error: "no-ledger" });
         // Cap at the ledger's retention window so the reported `days` always
@@ -705,6 +1877,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // ─── Ambient capture / observations ─────────────────────────────────
       if (method === "POST" && pathname === "/observations") {
         const body = await readJson(req);
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Ambient observation administration"
+        );
         const observations = Array.isArray(body) ? body : (Array.isArray(body.observations) ? body.observations : [body]);
         const sourceMachineId = (!Array.isArray(body) && typeof body.sourceMachineId === "string" && body.sourceMachineId) ? body.sourceMachineId : null;
         try {
@@ -715,6 +1894,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
       }
       if (method === "GET" && pathname === "/observations/search") {
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          null,
+          "Ambient observation access"
+        );
         const query = url.searchParams.get("q") ?? null;
         const since = url.searchParams.get("since") ?? null;
         const until = url.searchParams.get("until") ?? null;
@@ -725,18 +1911,40 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, results);
       }
       if (method === "GET" && pathname === "/observations/timeline") {
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          null,
+          "Ambient observation access"
+        );
         const since = url.searchParams.get("since") ?? null;
         return sendJson(res, 200, await runtime.observations.timelineByHour({ since }));
       }
       if (method === "GET" && pathname === "/observations/stats") {
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          null,
+          "Ambient observation access"
+        );
         return sendJson(res, 200, await runtime.observations.stats());
       }
       if (method === "POST" && pathname === "/observations/prune") {
         const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Ambient observation administration"
+        );
         return sendJson(res, 200, await runtime.observations.prune(body));
       }
 
       if (method === "GET" && pathname === "/admin/provider") {
+        requireDefaultRequestProject(runtime, req, url, null, "Provider administration");
         const provider = runtime.agentHost?.modelProvider;
         const moaPresets = configuredMoaPresetNames(dataDir);
         return sendJson(res, 200, {
@@ -755,6 +1963,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname === "/admin/provider") {
         const body = await readJson(req);
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Provider administration"
+        );
         const choice = String(body.preference ?? "").toLowerCase();
         if (!isModelProviderId(choice, { includeAuto: true })) {
           return sendJson(res, 400, { error: "preference must be one of: auto, anthropic, openai, moa" });
@@ -810,9 +2025,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             : null
         });
       }
-      if (method === "GET" && pathname === "/audit") return sendJson(res, 200, runtime.introspector?.audit?.() ?? null);
+      if (method === "GET" && pathname === "/audit") {
+        requireDefaultRequestProject(runtime, req, url, null, "Runtime audit access");
+        return sendJson(res, 200, runtime.introspector?.audit?.() ?? null);
+      }
 
       if (method === "GET" && pathname === "/scrutiny/weights") {
+        requireDefaultRequestProject(runtime, req, url, null, "Scrutiny administration");
         const weights = {};
         if (runtime.scrutiny?.judges) {
           for (const [name, judge] of Object.entries(runtime.scrutiny.judges)) {
@@ -824,18 +2043,22 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { weights, fitter: runtime.scrutinyFitter?.status?.() ?? null });
       }
       if (method === "GET" && pathname === "/scrutiny/pending") {
+        requireDefaultRequestProject(runtime, req, url, null, "Scrutiny administration");
         return sendJson(res, 200, runtime.scrutinyFitter?.pending ?? null);
       }
       if (method === "POST" && pathname.match(/^\/scrutiny\/pending\/\d+\/apply$/)) {
+        requireDefaultRequestProject(runtime, req, url, null, "Scrutiny administration");
         const cycle = Number.parseInt(pathname.split("/")[3], 10);
         const result = runtime.scrutinyFitter?.applyPending(cycle);
         if (!result) return sendJson(res, 404, { error: "no pending proposal for cycle" });
         return sendJson(res, 200, result);
       }
       if (method === "POST" && pathname === "/scrutiny/fit") {
+        requireDefaultRequestProject(runtime, req, url, null, "Scrutiny administration");
         return sendJson(res, 200, runtime.scrutinyFitter?.fit() ?? { error: "no fitter" });
       }
       if (method === "GET" && pathname === "/outcomes") {
+        requireDefaultRequestProject(runtime, req, url, null, "Global outcome access");
         const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
         const kind = url.searchParams.get("kind");
         const window = Number.parseInt(url.searchParams.get("windowDays") ?? "7", 10);
@@ -847,65 +2070,213 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "POST" && pathname === "/feedback") {
         const body = await readJson(req);
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Global outcome feedback"
+        );
         const result = runtime.outcomes?.feedback(body.refId, body.qualityScore, body.note);
         if (!result) return sendJson(res, 404, { error: "no outcome found for refId" });
         return sendJson(res, 200, result);
       }
 
-      if (method === "GET" && pathname === "/cron") return sendJson(res, 200, runtime.cron.listJobs());
+      if (method === "GET" && pathname === "/cron") {
+        const project = requireRequestProject(runtime, req, url);
+        return sendJson(
+          res,
+          200,
+          runtime.cron.listJobs().filter(
+            (job) => (
+              (job.input?.projectId ?? "default") === project.id
+              && (
+                project.id === "default"
+                || project.scheduleIds.includes(job.id)
+              )
+            )
+          )
+        );
+      }
       if (method === "POST" && pathname === "/cron") {
         const body = await readJson(req);
-        const job = runtime.cron.addJob({
-          id: body.id,
-          name: body.name ?? "manual-prompt",
-          enabled: body.enabled ?? true,
-          task: body.task ?? "prompt",
-          replace: true,
-          input: body.input ?? {
+        const project = requireRequestProject(runtime, req, url, {
+          projectId: body.projectId ?? body.input?.projectId
+        });
+        const requestedId = body.id === undefined || body.id === null
+          ? null
+          : String(body.id);
+        const existingJob = requestedId === null
+          ? null
+          : runtime.cron.listJobs().find((item) => item.id === requestedId) ?? null;
+        if (
+          existingJob
+          && (
+            (existingJob.input?.projectId ?? "default") !== project.id
+            || (
+              project.id !== "default"
+              && !project.scheduleIds.includes(existingJob.id)
+            )
+          )
+        ) {
+          return sendJson(res, 409, {
+            error: "cron job id is not replaceable in the current project"
+          });
+        }
+        const input = {
+          ...(body.input ?? {
             prompt: body.prompt ?? "(empty)",
             channel: body.channel ?? "local",
             target: body.target ?? null,
             agentId: body.agentId ?? "main",
             sessionId: body.sessionId
-          },
+          }),
+          projectId: project.id,
+          projectRevision: project.revision
+        };
+        let job = runtime.cron.addJob({
+          id: requestedId ?? undefined,
+          name: body.name ?? "manual-prompt",
+          enabled: body.enabled ?? true,
+          task: body.task ?? "prompt",
+          replace: true,
+          input,
           intervalMs: body.intervalSeconds ? body.intervalSeconds * 1000 : body.intervalMs,
           dailyAt: body.dailyAt,
           nextRunAt: body.delaySeconds ? new Date(Date.now() + body.delaySeconds * 1000).toISOString() : body.nextRunAt
         });
+        let attachedByThisCall = !project.scheduleIds.includes(job.id);
+        try {
+          const attachedProject = runtime.projects?.attachResource?.(
+            project.id,
+            "scheduleIds",
+            job.id,
+            { actor: "http:POST:/cron" }
+          );
+          const pinnedRevision = attachedProject?.revision ?? project.revision;
+          if (job.input?.projectRevision !== pinnedRevision) {
+            const patch = {
+              input: {
+                ...job.input,
+                projectRevision: pinnedRevision
+              }
+            };
+            job = typeof runtime.cron.updateJob === "function"
+              ? runtime.cron.updateJob(job.id, patch)
+              : runtime.cron.addJob({ ...job, ...patch, replace: true });
+          }
+        } catch (error) {
+          if (attachedByThisCall) {
+            try {
+              runtime.projects?.detachResource?.(
+                project.id,
+                "scheduleIds",
+                job.id,
+                { actor: "http:POST:/cron:rollback" }
+              );
+            } catch {
+              // Best effort: the orphaned attachment has no runnable job.
+            }
+          }
+          if (existingJob) {
+            const restored = runtime.cron.addJob({
+              ...existingJob,
+              replace: true
+            });
+            if (existingJob.lastRunAt !== null && existingJob.lastRunAt !== undefined) {
+              runtime.cron.updateJob?.(restored.id, {
+                lastRunAt: existingJob.lastRunAt
+              });
+            }
+          } else {
+            runtime.cron.removeJob?.(job.id);
+          }
+          throw error;
+        }
         events.emit("cron", { op: "add", job });
         return sendJson(res, 200, job);
       }
       if (method === "DELETE" && pathname.startsWith("/cron/")) {
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.slice("/cron/".length));
+        const job = runtime.cron.listJobs().find((item) => (
+          item.id === id
+          && (item.input?.projectId ?? "default") === project.id
+          && (
+            project.id === "default"
+            || project.scheduleIds.includes(item.id)
+          )
+        ));
+        if (!job) return sendJson(res, 404, { error: "unknown-job" });
         const removed = runtime.cron.removeJob(id);
-        events.emit("cron", { op: "remove", id });
+        if (removed) {
+          runtime.projects?.detachResource?.(
+            project.id,
+            "scheduleIds",
+            id,
+            { actor: "http:DELETE:/cron" }
+          );
+        }
+        events.emit("cron", { op: "remove", id, projectId: project.id });
         return sendJson(res, 200, { removed });
       }
       if (method === "POST" && pathname.match(/^\/cron\/[^/]+\/run$/)) {
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.split("/")[2]);
-        const job = runtime.cron.listJobs().find((j) => j.id === id);
+        const job = runtime.cron.listJobs().find((item) => (
+          item.id === id
+          && (item.input?.projectId ?? "default") === project.id
+          && (
+            project.id === "default"
+            || project.scheduleIds.includes(item.id)
+          )
+        ));
         if (!job) return sendJson(res, 404, { error: "unknown-job" });
         const result =
           job.task === "autopilot"
             ? await runtime.runAutopilot(job)
             : await runtime.runScheduledPrompt(job);
-        events.emit("cron", { op: "run", id, result });
+        events.emit("cron", { op: "run", id, projectId: project.id, result });
         return sendJson(res, 200, { result });
       }
 
-      if (method === "GET" && pathname === "/skills") return sendJson(res, 200, runtime.skills?.list() ?? []);
-      if (method === "GET" && pathname === "/skills/suggested") return sendJson(res, 200, runtime.patternMiner?.list() ?? []);
+      if (method === "GET" && pathname === "/skills") {
+        const project = requireRequestProject(runtime, req, url);
+        const skills = (runtime.skills?.list() ?? [])
+          .filter((skill) => projectAllows(project.activeSkills, skill.name));
+        return sendJson(res, 200, skills);
+      }
+      if (method === "GET" && pathname === "/skills/suggested") {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Suggested skill administration is default-project only" });
+        }
+        return sendJson(res, 200, runtime.patternMiner?.list() ?? []);
+      }
       // Edit history across all skills (or one, via ?skill=). Feeds the
       // dashboard's "how he improves them" timeline.
       if (method === "GET" && pathname === "/skills/history") {
+        const project = requireRequestProject(runtime, req, url);
         const skill = url.searchParams.get("skill");
-        return sendJson(res, 200, runtime.skills?.history(skill || null, Number(url.searchParams.get("limit") ?? 50)) ?? { edits: [] });
+        if (skill) assertProjectSkill(project, skill);
+        const history = runtime.skills?.history(
+          skill || null,
+          Number(url.searchParams.get("limit") ?? 50)
+        ) ?? { edits: [] };
+        return sendJson(res, 200, {
+          ...history,
+          edits: (history.edits ?? []).filter(
+            (entry) => projectAllows(project.activeSkills, entry.skill)
+          )
+        });
       }
       // Full skill view: body + linked files + stats. ?file= reads one
       // linked file. Marked view=0 to skip usage bump for dashboard reads.
       if (method === "GET" && pathname.match(/^\/skills\/[^/]+\/view$/)) {
+        const project = requireRequestProject(runtime, req, url);
         const name = decodeURIComponent(pathname.split("/")[2]);
         try {
+          assertProjectSkill(project, name);
           const file = url.searchParams.get("file");
           if (!file && url.searchParams.get("count") === "0") {
             // dashboard read — don't inflate usage stats
@@ -926,6 +2297,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/skills/create") {
         const body = await readJson(req).catch(() => ({}));
         try {
+          const project = requireRequestProject(runtime, req, url, body);
+          if (project.id !== "default") {
+            return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
+          }
+          assertProjectSkill(project, body.name);
           const result = runtime.skills.createSkill({ ...body, createdBy: body.createdBy ?? "dashboard" });
           events.emit("skills", { op: "created", skill: result.slug });
           return sendJson(res, 200, result);
@@ -937,6 +2313,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const name = decodeURIComponent(pathname.split("/")[2]);
         const body = await readJson(req).catch(() => ({}));
         try {
+          const project = requireRequestProject(runtime, req, url, body);
+          if (project.id !== "default") {
+            return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
+          }
+          assertProjectSkill(project, name);
           const result = body.old_string !== undefined
             ? runtime.skills.patchSkill(name, body.old_string, body.new_string ?? "", body.by ?? "dashboard")
             : runtime.skills.editSkill(name, body, body.by ?? "dashboard");
@@ -950,6 +2331,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const name = decodeURIComponent(pathname.split("/")[2]);
         const body = await readJson(req).catch(() => ({}));
         try {
+          const project = requireRequestProject(runtime, req, url, body);
+          if (project.id !== "default") {
+            return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
+          }
+          assertProjectSkill(project, name);
           return sendJson(res, 200, runtime.skills.setPinned(name, body.pinned !== false, body.by ?? "dashboard"));
         } catch (error) {
           return sendJson(res, 400, { error: error.message });
@@ -958,6 +2344,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/delete$/)) {
         const name = decodeURIComponent(pathname.split("/")[2]);
         try {
+          const project = requireRequestProject(runtime, req, url);
+          if (project.id !== "default") {
+            return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
+          }
+          assertProjectSkill(project, name);
           const result = runtime.skills.deleteSkill(name, "dashboard");
           events.emit("skills", { op: "deleted", skill: name });
           return sendJson(res, 200, result);
@@ -969,7 +2360,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const skill = decodeURIComponent(pathname.split("/")[3]);
         const body = await readJson(req).catch(() => ({}));
         try {
-          const result = await runtime.skillReplay.run({ skill, dryRun: body.dryRun, confirm: body.confirm ?? "first-run" });
+          const project = requireRequestProject(runtime, req, url, body);
+          assertProjectSkill(project, skill);
+          const result = await runtime.skillReplay.run({
+            skill,
+            dryRun: body.dryRun,
+            confirm: body.confirm ?? "first-run",
+            projectId: project.id
+          });
           return sendJson(res, 200, result);
         } catch (error) {
           return sendJson(res, 400, { error: error.message });
@@ -978,12 +2376,30 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname.match(/^\/skills\/replay-result\/[^/]+$/)) {
         const jobId = decodeURIComponent(pathname.split("/")[3]);
         const body = await readJson(req).catch(() => ({}));
-        const result = runtime.skillReplay.resolveJob(jobId, body);
+        const project = requireRequestProject(runtime, req, url, body);
+        let result;
+        try {
+          result = runtime.skillReplay.resolveJob(jobId, body, {
+            projectId: project.id
+          });
+        } catch (error) {
+          if (error?.code === "INVALID_REPLAY_JOB_ID") {
+            return sendJson(res, 400, {
+              error: "invalid replay job id",
+              code: error.code
+            });
+          }
+          throw error;
+        }
         if (!result) return sendJson(res, 404, { error: "unknown job" });
         return sendJson(res, 200, { ok: true });
       }
       if (method === "GET" && pathname === "/skills/replay-jobs") {
-        return sendJson(res, 200, runtime.skillReplay.list({ status: url.searchParams.get("status") }));
+        const project = requireRequestProject(runtime, req, url);
+        return sendJson(res, 200, runtime.skillReplay.list({
+          status: url.searchParams.get("status"),
+          projectId: project.id
+        }));
       }
       if (method === "POST" && pathname === "/integrations/connect-mcp") {
         // One-click register + connect for catalog entries. Used by the
@@ -996,6 +2412,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // declared apiKeyEnvVar) so it survives restart, then register
         // the MCP with `${VAR}` indirection — never with a literal.
         const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendSecretsJson(
+            res,
+            403,
+            { error: "MCP catalog administration is default-project only" }
+          );
+        }
         const catalogId = body.catalogId;
         if (!catalogId) return sendSecretsJson(res, 400, { error: "catalogId required" });
         const { MCP_CATALOG } = await import("./mcp-catalog.js");
@@ -1045,98 +2469,155 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
       }
       if (method === "GET" && pathname === "/pending-actions") {
+        const project = requireRequestProject(runtime, req, url);
         const status = url.searchParams.get("status") || undefined;
         return sendJson(res, 200, {
-          actions: sanitizeForAudit(runtime.pendingActions?.list({ status }) ?? [])
+          actions: sanitizeForAudit(
+            runtime.pendingActions?.list({
+              status,
+              projectId: project.id
+            }) ?? []
+          )
         });
       }
       if (method === "GET" && pathname === "/outreach/feed") {
+        const project = requireRequestProject(runtime, req, url);
         const since = Number(url.searchParams.get("since") ?? 0);
-        const items = runtime.outreach?.since(since) ?? [];
+        const items = runtime.outreach?.since(since, { projectId: project.id }) ?? [];
         return sendJson(res, 200, { items, cursor: runtime.outreach?.nextSeq ? runtime.outreach.nextSeq - 1 : since });
       }
       if (method === "GET" && pathname === "/outreach/digest") {
-        const digest = runtime.outreach?.list().find((i) => i.type === "digest") ?? null;
+        const project = requireRequestProject(runtime, req, url);
+        const digest = runtime.outreach
+          ?.list({ projectId: project.id })
+          .find((i) => i.type === "digest") ?? null;
         return sendJson(res, 200, { digest });
       }
       if (method === "GET" && pathname === "/outreach/config") {
+        requireDefaultRequestProject(runtime, req, url, null, "Outreach configuration access");
         const c = runtime.outreachConfig;
         return sendJson(res, 200, c
           ? { enabled: c.enabled, destination: c.destination, cadenceHours: c.cadenceHours, quietHours: c.quietHours, stalledDays: c.stalledDays }
           : { enabled: false });
       }
       if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/act")) {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
         const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/act".length));
-        const item = runtime.outreach?.get(id);
+        const item = runtime.outreach?.get(id, { projectId: project.id });
         if (!item) return sendJson(res, 404, { error: "unknown outreach item" });
         if (item.status === "acted" || item.status === "dismissed") {
           return sendJson(res, 200, { item });
         }
-        const body = await readJson(req).catch(() => ({}));
         const action = String(body.action ?? "");
         try {
-          await applyOutreachAction(runtime, item, action, body.note);
+          await applyOutreachAction(runtime, item, action, body.note, project.id);
           const status = action === "dismiss" ? "dismissed" : "acted";
-          const updated = runtime.outreach.resolve(id, { action, by: "user", note: body.note ?? null }, { status });
+          const updated = runtime.outreach.resolve(
+            id,
+            { action, by: "user", note: body.note ?? null },
+            { status, projectId: project.id }
+          );
           return sendJson(res, 200, { item: updated });
         } catch (error) {
-          const updated = runtime.outreach.resolve(id, { action, by: "user" }, { status: "error", error: error.message });
+          const updated = runtime.outreach.resolve(
+            id,
+            { action, by: "user" },
+            {
+              status: "error",
+              error: error.message,
+              projectId: project.id
+            }
+          );
           return sendJson(res, 400, { item: updated, error: error.message });
         }
       }
       if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/feedback")) {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
         const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/feedback".length));
-        const item = runtime.outreach?.get(id);
+        const item = runtime.outreach?.get(id, { projectId: project.id });
         if (!item) return sendJson(res, 404, { error: "unknown outreach item" });
         if (item.status === "acted" || item.status === "dismissed") {
           return sendJson(res, 200, { item });
         }
-        const body = await readJson(req).catch(() => ({}));
         const verdict = String(body.verdict ?? "");
         if (verdict !== "up" && verdict !== "down") {
           return sendJson(res, 400, { error: "verdict must be 'up' or 'down'" });
         }
         try {
           await applyOutreachFeedback(runtime, item, verdict, body.note ?? null);
-          const updated = runtime.outreach.resolve(id, { action: verdict, by: "user", note: body.note ?? null }, { status: "acted" });
+          const updated = runtime.outreach.resolve(
+            id,
+            { action: verdict, by: "user", note: body.note ?? null },
+            { status: "acted", projectId: project.id }
+          );
           return sendJson(res, 200, { item: updated });
         } catch (error) {
-          const updated = runtime.outreach.resolve(id, { action: verdict, by: "user" }, { status: "error", error: error.message });
+          const updated = runtime.outreach.resolve(
+            id,
+            { action: verdict, by: "user" },
+            {
+              status: "error",
+              error: error.message,
+              projectId: project.id
+            }
+          );
           return sendJson(res, 400, { item: updated, error: error.message });
         }
       }
       if (method === "POST" && pathname.startsWith("/outreach/") && pathname.endsWith("/reply")) {
+        const body = await readJson(req);
+        const project = requireRequestProject(runtime, req, url, body);
         const id = decodeURIComponent(pathname.slice("/outreach/".length, -"/reply".length));
-        const item = runtime.outreach?.get(id);
+        const item = runtime.outreach?.get(id, { projectId: project.id });
         if (!item) return sendJson(res, 404, { error: "unknown outreach item" });
         if (!channels) return sendJson(res, 503, { error: "agent-host-disabled" });
-        const body = await readJson(req);
         if (item.outcomeId && runtime.outcomes?.resolve) {
           try {
             runtime.outcomes.resolve(item.outcomeId, inferToneScore(String(body.text ?? "")), "user-followup", "tone of outreach reply");
           } catch { /* best effort */ }
         }
         const forward = `Re: "${item.title}" (${item.type}, actions: ${item.actions.join("/")}).\nUser says: ${body.text ?? ""}\nInterpret intent and take the appropriate action.`;
-        const turn = await channels.handleLocalMessage({ text: forward, from: `outreach:${id}` });
+        const turn = await channels.handleLocalMessage({
+          text: forward,
+          from: `outreach:${id}`,
+          projectId: project.id,
+          metadata: {
+            projectId: project.id,
+            outreachId: id
+          }
+        });
         return sendJson(res, 200, { reply: turn.reply ?? null });
       }
       if (method === "POST" && pathname.startsWith("/pending-actions/") && pathname.endsWith("/approve")) {
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.slice("/pending-actions/".length, -"/approve".length));
-        const action = runtime.pendingActions?.get(id);
-        if (!action) return sendJson(res, 404, { error: "unknown pending action" });
+        const action = runtime.pendingActions?.get(id, {
+          projectId: project.id
+        });
+        if (!action) {
+          return sendJson(res, 404, { error: "unknown pending action" });
+        }
         if (action.status !== "pending") return sendJson(res, 409, { error: `action already ${action.status}` });
         // Resolve a live suspended turn instead of racing it with a second
         // invocation. Restart-era actions without a waiter still execute once.
         const invokeResult = await approvePendingAction(runtime, id, {
           decidedBy: "user",
-          approvedVia: "http"
+          approvedVia: "http",
+          projectId: project.id
         });
         return sendJson(res, invokeResult.ok ? 200 : 400, invokeResult);
       }
       if (method === "POST" && pathname.startsWith("/pending-actions/") && pathname.endsWith("/deny")) {
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.slice("/pending-actions/".length, -"/deny".length));
-        const action = runtime.pendingActions?.get(id);
-        if (!action) return sendJson(res, 404, { error: "unknown pending action" });
+        const action = runtime.pendingActions?.get(id, {
+          projectId: project.id
+        });
+        if (!action) {
+          return sendJson(res, 404, { error: "unknown pending action" });
+        }
         if (action.status !== "pending") return sendJson(res, 409, { error: `action already ${action.status}` });
         const body = await readJson(req).catch(() => ({}));
         runtime.pendingActions.decide(id, {
@@ -1147,6 +2628,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { id, status: "denied" });
       }
       if (method === "GET" && pathname === "/auto-approve") {
+        requireDefaultRequestProject(runtime, req, url, null, "Approval policy administration");
         // Report current auto-approve state (live env, not cached).
         const { autoApproveEnabled } = await import("./tool-registry.js");
         return sendJson(res, 200, { enabled: autoApproveEnabled() });
@@ -1156,6 +2638,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // .openagi/.env (allowlisted in WIZARD_FIELDS) and mutates
         // process.env so autoApproveEnabled() sees it immediately.
         const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Approval policy administration"
+        );
         const enable = Boolean(body.enable);
         const { saveEnv } = await import("./setup-wizard.js");
         try {
@@ -1173,6 +2662,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { enabled: enable });
       }
       if (method === "GET" && pathname === "/computer-use/log") {
+        requireDefaultRequestProject(runtime, req, url, null, "Computer-use administration");
         if (!runtime.computerUseLog) return sendJson(res, 503, { error: "no computer-use log" });
         const limit = Number(url.searchParams.get("limit") ?? 100);
         const sessions = runtime.computerUseLog.listSessions();
@@ -1191,6 +2681,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // Off-flip ends any active session so the agent doesn't reference
         // a tool that no longer exists on its next turn.
         const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Computer-use administration"
+        );
         const enable = Boolean(body.enable);
         const { saveEnv } = await import("./setup-wizard.js");
         const { registerComputerUseTools, unregisterComputerUseTools } = await import("./integrations/computer-use.js");
@@ -1233,12 +2730,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { enabled: enable, tools: enable ? "registered" : "unregistered" });
       }
       if (method === "POST" && pathname.startsWith("/computer-use/sessions/") && pathname.endsWith("/abort")) {
+        requireDefaultRequestProject(runtime, req, url, null, "Computer-use administration");
         const id = decodeURIComponent(pathname.slice("/computer-use/sessions/".length, -"/abort".length));
         const session = runtime.computerUseLog?.endSession(id, { reason: "aborted via dashboard", status: "aborted" });
         if (!session) return sendJson(res, 404, { error: "unknown session" });
         return sendJson(res, 200, { id, status: session.status });
       }
       if (method === "POST" && pathname === "/control/restart") {
+        requireDefaultRequestProject(runtime, req, url, null, "Daemon administration");
         // Bounce the daemon so .env changes pick up. The Mac app's
         // DaemonController has a terminationHandler that respawns after a
         // short backoff; bare-metal `npm run serve` users will need to
@@ -1249,11 +2748,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return;
       }
       if (method === "GET" && pathname === "/control/update") {
+        requireDefaultRequestProject(runtime, req, url, null, "Daemon administration");
         // Dry check — is a newer version available? (no changes applied)
         const { checkForUpdate } = await import("./self-update.js");
         return sendJson(res, 200, await checkForUpdate());
       }
       if (method === "POST" && pathname === "/control/update") {
+        requireDefaultRequestProject(runtime, req, url, null, "Daemon administration");
         // Self-update: fast-forward the checkout, reinstall deps if needed,
         // then exit(0) so the supervisor (systemd Restart=always / launchd
         // KeepAlive / Mac DaemonController) respawns with the new code. No-op
@@ -1268,6 +2769,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return;
       }
       if (method === "GET" && pathname === "/integrations/status") {
+        requireDefaultRequestProject(runtime, req, url, null, "Integration administration");
         // Unified integrations view. Every source/channel/MCP catalog
         // entry shows up here, with whichever paths apply (API key vs.
         // MCP) so the user has ONE place to configure everything.
@@ -1437,32 +2939,49 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "GET" && pathname === "/kanban") {
         if (!runtime.kanban?.boardView) return sendJson(res, 503, { error: "no Kanban store" });
-        const board = url.searchParams.get("board") || undefined;
+        const project = requireRequestProject(runtime, req, url);
+        const requestedBoard = url.searchParams.get("board") || undefined;
+        if (requestedBoard && requestedBoard !== project.kanbanBoardId) {
+          return sendJson(res, 403, { error: "Kanban board is outside the current project" });
+        }
+        const board = project.kanbanBoardId;
         const status = url.searchParams.get("status") || undefined;
         const assignee = url.searchParams.get("assignee") || undefined;
         const limit = url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined;
         try {
           return sendJson(res, 200, await runtime.kanban.boardView({ board, status, assignee, limit }));
         } catch (error) {
-          return sendJson(res, 400, { error: error.message });
+          const statusCode = /^Unknown Kanban task:/.test(error.message) ? 404 : 400;
+          return sendJson(res, statusCode, { error: error.message });
         }
       }
       if (method === "POST" && pathname === "/kanban") {
         if (!runtime.kanban?.createTask) return sendJson(res, 503, { error: "no Kanban store" });
         const body = await readJson(req);
+        const project = requireRequestProject(runtime, req, url, body);
         const action = String(body.action ?? "create").trim().toLowerCase();
-        const context = {
+        const context = projectToolContext(project, {
           agentId: "dashboard",
           sessionId: typeof body.sessionId === "string" ? body.sessionId : null,
           channel: "local",
           from: "http:/kanban"
-        };
+        });
         try {
           let result;
           if (action === "create") {
             const { action: _action, sessionId: _sessionId, ...input } = body;
-            result = await runtime.kanban.createTask(input, context);
+            if (input.board && input.board !== project.kanbanBoardId) {
+              return sendJson(res, 403, { error: "Kanban board is outside the current project" });
+            }
+            for (const blockerId of input.blockedBy ?? []) {
+              await requireProjectKanbanTask(runtime, project, blockerId);
+            }
+            result = await runtime.kanban.createTask({
+              ...input,
+              board: project.kanbanBoardId
+            }, context);
           } else if (action === "assign") {
+            await requireProjectKanbanTask(runtime, project, body.taskId);
             result = await runtime.kanban.assignTask(
               body.taskId,
               body.assignee,
@@ -1470,16 +2989,29 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
               { reason: body.reason }
             );
           } else if (action === "complete") {
+            await requireProjectKanbanTask(runtime, project, body.taskId);
             result = await runtime.kanban.completeTask(body.taskId, body, context);
           } else if (action === "block") {
+            await requireProjectKanbanTask(runtime, project, body.taskId);
+            for (const blockerId of body.blockedBy ?? []) {
+              await requireProjectKanbanTask(runtime, project, blockerId);
+            }
             result = await runtime.kanban.blockTask(body.taskId, body, context);
           } else if (action === "unblock") {
+            await requireProjectKanbanTask(runtime, project, body.taskId);
+            if (body.blockerId) {
+              await requireProjectKanbanTask(runtime, project, body.blockerId);
+            }
             result = await runtime.kanban.unblockTask(body.taskId, body, context);
           } else if (action === "comment") {
+            await requireProjectKanbanTask(runtime, project, body.taskId);
             result = await runtime.kanban.commentTask(body.taskId, body.body, context);
           } else if (action === "heartbeat") {
+            await requireProjectKanbanTask(runtime, project, body.taskId);
             result = await runtime.kanban.heartbeatTask(body.taskId, body, context);
           } else if (action === "link") {
+            await requireProjectKanbanTask(runtime, project, body.parentId);
+            await requireProjectKanbanTask(runtime, project, body.childId);
             result = await runtime.kanban.linkTasks(body.parentId, body.childId, context);
           } else {
             return sendJson(res, 400, { error: `unknown Kanban action: ${action}` });
@@ -1492,17 +3024,20 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "GET" && pathname.match(/^\/kanban\/[^/]+$/)) {
         if (!runtime.kanban?.getTask) return sendJson(res, 503, { error: "no Kanban store" });
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.split("/")[2]);
         try {
-          const task = await runtime.kanban.getTask(id);
+          const task = await requireProjectKanbanTask(runtime, project, id);
           return task
             ? sendJson(res, 200, task)
             : sendJson(res, 404, { error: "unknown Kanban task" });
         } catch (error) {
-          return sendJson(res, 400, { error: error.message });
+          const statusCode = /^Unknown Kanban task:/.test(error.message) ? 404 : 400;
+          return sendJson(res, statusCode, { error: error.message });
         }
       }
       if (method === "GET" && pathname === "/tasks") {
+        requireDefaultRequestProject(runtime, req, url, null, "Legacy task access");
         if (!runtime.tasks?.list) return sendJson(res, 503, { error: "no task store" });
         const queue = url.searchParams.get("queue") || undefined;
         const bucket = url.searchParams.get("bucket") || undefined;
@@ -1514,27 +3049,31 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         });
       }
       if (method === "POST" && pathname === "/tasks") {
-        if (!runtime.tasks?.add) return sendJson(res, 503, { error: "no task store" });
         const body = await readJson(req);
+        requireDefaultRequestProject(runtime, req, url, body, "Legacy task administration");
+        if (!runtime.tasks?.add) return sendJson(res, 503, { error: "no task store" });
         try {
           const task = runtime.tasks.add(body, { source: body.source ?? "manual", queue: body.queue ?? "user" });
           return sendJson(res, 200, task);
         } catch (error) { return sendJson(res, 400, { error: error.message }); }
       }
       if (method === "PATCH" && pathname.match(/^\/tasks\/[^/]+$/)) {
-        if (!runtime.tasks?.update) return sendJson(res, 503, { error: "no task store" });
         const id = decodeURIComponent(pathname.split("/")[2]);
         const body = await readJson(req);
+        requireDefaultRequestProject(runtime, req, url, body, "Legacy task administration");
+        if (!runtime.tasks?.update) return sendJson(res, 503, { error: "no task store" });
         const task = runtime.tasks.update(id, body);
         return task ? sendJson(res, 200, task) : sendJson(res, 404, { error: "unknown task" });
       }
       if (method === "POST" && pathname.match(/^\/tasks\/[^/]+\/complete$/)) {
         const id = decodeURIComponent(pathname.split("/")[2]);
         const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(runtime, req, url, body, "Legacy task administration");
         const task = runtime.tasks.complete(id, body.completedVia ?? "manual");
         return task ? sendJson(res, 200, task) : sendJson(res, 404, { error: "unknown task" });
       }
       if (method === "DELETE" && pathname.match(/^\/tasks\/[^/]+$/)) {
+        requireDefaultRequestProject(runtime, req, url, null, "Legacy task administration");
         const id = decodeURIComponent(pathname.split("/")[2]);
         const ok = runtime.tasks.remove(id);
         return sendJson(res, ok ? 200 : 404, { ok, id });
@@ -1543,6 +3082,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // in-memory Map (never a filesystem path), so the strict-id concern
       // from suggestion routes doesn't apply here.
       if (method === "GET" && pathname === "/tasks/reconciliation/calibration") {
+        requireDefaultRequestProject(runtime, req, url, null, "Task calibration access");
         // Transparency: how the auto-complete threshold has self-tuned from
         // the user's clarification answers, per evidence-source combo.
         const { buildReconciliationCalibration } = await import("./reconciliation-calibration.js");
@@ -1550,14 +3090,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, buildReconciliationCalibration(outcomes).summary);
       }
       if (method === "GET" && pathname === "/tasks/clarifications") {
+        requireDefaultRequestProject(runtime, req, url, null, "Clarification access");
         if (!runtime.clarifications?.list) return sendJson(res, 503, { error: "no clarification store" });
         const status = url.searchParams.get("status");
         return sendJson(res, 200, runtime.clarifications.list({ status: status === "null" ? null : (status ?? "pending") }));
       }
       if (method === "POST" && pathname.match(/^\/tasks\/clarifications\/[^/]+\/answer$/)) {
-        if (!runtime.clarifications?.answer) return sendJson(res, 503, { error: "no clarification store" });
         const id = decodeURIComponent(pathname.split("/")[3]);
         const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(runtime, req, url, body, "Clarification administration");
+        if (!runtime.clarifications?.answer) return sendJson(res, 503, { error: "no clarification store" });
         try {
           const result = runtime.clarifications.answer(id, body.answer);
           return result ? sendJson(res, 200, result) : sendJson(res, 404, { error: "unknown or already-resolved clarification" });
@@ -1565,24 +3107,421 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       // Drafts review queue — agent-produced artifacts awaiting approval.
       // ids are Map keys, never fs paths → no traversal surface.
+      // Versioned Artifact Canvas. All methods are authenticated and project-scoped.
+      if (method === "GET" && pathname === "/artifacts") {
+        if (!runtime.artifacts?.list) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const limitValue = url.searchParams.get("limit");
+          const limit = limitValue == null ? undefined : Number(limitValue);
+          return sendJson(res, 200, runtime.artifacts.list({
+            projectId: project.id,
+            ...(url.searchParams.has("kind")
+              ? { kind: url.searchParams.get("kind") }
+              : {}),
+            ...(limit == null ? {} : { limit })
+          }));
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/artifacts") {
+        if (!runtime.artifacts?.create) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const artifact = runtime.artifacts.create({
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          });
+          return sendJson(res, 201, artifact);
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/artifacts\/[^/]+\/versions$/u.test(pathname)) {
+        if (!runtime.artifacts?.versions) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/artifacts/".length, -"/versions".length)
+        );
+        try {
+          const limitValue = url.searchParams.get("limit");
+          const limit = limitValue == null ? undefined : Number(limitValue);
+          return sendJson(res, 200, runtime.artifacts.versions(id, {
+            projectId: project.id,
+            ...(limit == null ? {} : { limit }),
+            includeContent: url.searchParams.get("includeContent") === "1"
+          }));
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/artifacts\/[^/]+\/restore$/u.test(pathname)) {
+        if (!runtime.artifacts?.restore) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/artifacts/".length, -"/restore".length)
+        );
+        const body = await readJson(req).catch(() => null);
+        try {
+          const artifact = runtime.artifacts.restore(
+            id,
+            body?.revision ?? body?.targetRevision,
+            {
+              projectId: project.id,
+              expectedRevision: body?.expectedRevision,
+              actor: "http"
+            }
+          );
+          return sendJson(res, 200, artifact);
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/artifacts\/[^/]+$/u.test(pathname)) {
+        if (!runtime.artifacts?.get) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/artifacts/".length));
+        try {
+          const revisionValue = url.searchParams.get("revision");
+          const revision = revisionValue == null ? undefined : Number(revisionValue);
+          return sendJson(res, 200, runtime.artifacts.get(id, {
+            projectId: project.id,
+            ...(revision == null ? {} : { revision })
+          }));
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/artifacts\/[^/]+$/u.test(pathname)) {
+        if (!runtime.artifacts?.update) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/artifacts/".length));
+        const body = await readJson(req).catch(() => null);
+        try {
+          const artifact = runtime.artifacts.update(id, {
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          });
+          return sendJson(res, 200, artifact);
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      // Procedural recipe memory. Factual memory remains on the separate
+      // /memory and recall surfaces.
+      if (method === "GET" && pathname === "/recipes/index") {
+        if (!runtime.recipes?.indexStatus) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, runtime.recipes.indexStatus({
+            projectId: project.id
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/recipes/reindex") {
+        if (!runtime.recipes?.reindex) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          return sendJson(res, 200, await runtime.recipes.reindex({
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && pathname === "/recipes/export") {
+        if (!runtime.recipes?.export) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, runtime.recipes.export({
+            projectId: project.id,
+            format: url.searchParams.get("format") ?? "json",
+            statuses: httpRecipeStatuses(url.searchParams.get("status")),
+            includeDeleted: url.searchParams.get("includeDeleted") === "1"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && pathname === "/recipes") {
+        if (!runtime.recipes?.search) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const items = runtime.recipes.search(
+            url.searchParams.get("q") ?? "",
+            {
+              projectId: project.id,
+              statuses: httpRecipeStatuses(url.searchParams.get("status")),
+              includeDeleted: url.searchParams.get("includeDeleted") === "1",
+              limit: url.searchParams.has("limit")
+                ? Number(url.searchParams.get("limit"))
+                : undefined
+            }
+          );
+          return sendJson(res, 200, { count: items.length, items });
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/recipes") {
+        if (!runtime.recipes?.propose) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const recipe = runtime.recipes.propose({
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          });
+          return sendJson(res, 201, recipe);
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/recipes\/[^/]+\/export$/u.test(pathname)) {
+        if (!runtime.recipes?.export) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/export".length)
+        );
+        try {
+          return sendJson(res, 200, runtime.recipes.export({
+            id,
+            projectId: project.id,
+            format: url.searchParams.get("format") ?? "json",
+            includeDeleted: true
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/recipes\/[^/]+\/verify$/u.test(pathname)) {
+        if (!runtime.recipes?.verify) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/verify".length)
+        );
+        try {
+          return sendJson(res, 200, await runtime.recipes.verify(id, {
+            expectedRevision: body?.expectedRevision,
+            method: body?.method,
+            evidence: body?.evidence
+          }, {
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/recipes\/[^/]+\/fail$/u.test(pathname)) {
+        if (!runtime.recipes?.fail) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/fail".length)
+        );
+        try {
+          return sendJson(res, 200, runtime.recipes.fail(id, {
+            expectedRevision: body?.expectedRevision,
+            reason: body?.reason,
+            evidence: body?.evidence
+          }, {
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/recipes\/[^/]+\/supersede$/u.test(pathname)) {
+        if (!runtime.recipes?.supersede) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/supersede".length)
+        );
+        try {
+          return sendJson(res, 200, runtime.recipes.supersede(
+            id,
+            body?.replacementId,
+            {
+              projectId: project.id,
+              expectedRevision: body?.expectedRevision,
+              replacementExpectedRevision: body?.replacementExpectedRevision,
+              actor: "http"
+            }
+          ));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/recipes\/[^/]+\/skill-candidate$/u.test(pathname)
+      ) {
+        if (!runtime.recipes?.withVerifiedRecipe) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/skill-candidate".length)
+        );
+        try {
+          const { createSkillCandidateFromRecipe } = await import(
+            "./skill-materialize.js"
+          );
+          const staged = runtime.recipes.withVerifiedRecipe(
+            id,
+            {
+              projectId: project.id,
+              expectedRevision: body?.expectedRevision
+            },
+            (recipe) => createSkillCandidateFromRecipe({ runtime, recipe })
+          );
+          events.emit("skill-candidate", {
+            source: "recipe-memory",
+            id: staged.candidate.id,
+            recipeId: id,
+            recipeRevision: body?.expectedRevision,
+            projectId: project.id
+          });
+          return sendJson(res, staged.created ? 201 : 200, {
+            id: staged.candidate.id,
+            source: "recipe-memory",
+            recipeId: id,
+            recipeRevision: body?.expectedRevision,
+            projectId: project.id,
+            created: staged.created,
+            status: staged.candidate.status
+          });
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/recipes\/[^/]+$/u.test(pathname)) {
+        if (!runtime.recipes?.get) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/recipes/".length));
+        try {
+          return sendJson(res, 200, runtime.recipes.get(id, {
+            projectId: project.id
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/recipes\/[^/]+$/u.test(pathname)) {
+        if (!runtime.recipes?.edit) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(pathname.slice("/recipes/".length));
+        try {
+          return sendJson(res, 200, runtime.recipes.edit(id, {
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "DELETE" && /^\/recipes\/[^/]+$/u.test(pathname)) {
+        if (!runtime.recipes?.remove) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(pathname.slice("/recipes/".length));
+        try {
+          return sendJson(res, 200, runtime.recipes.remove(id, {
+            projectId: project.id,
+            expectedRevision: body?.expectedRevision,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      // Draft review queue.
       if (method === "GET" && pathname === "/drafts") {
         if (!runtime.drafts?.list) return sendJson(res, 503, { error: "no draft store" });
+        const project = requireRequestProject(runtime, req, url);
         const status = url.searchParams.get("status");
-        return sendJson(res, 200, runtime.drafts.list({ status: status === "null" ? null : (status ?? "pending") }));
+        return sendJson(res, 200, runtime.drafts.list({
+          status: status === "null" ? null : (status ?? "pending"),
+          projectId: project.id
+        }));
       }
       if (method === "PATCH" && pathname.match(/^\/drafts\/[^/]+$/)) {
         if (!runtime.drafts?.edit) return sendJson(res, 503, { error: "no draft store" });
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.split("/")[2]);
         const body = await readJson(req).catch(() => ({}));
-        const draft = runtime.drafts.edit(id, body);
+        const draft = runtime.drafts.edit(id, body, { projectId: project.id });
         return draft ? sendJson(res, 200, draft) : sendJson(res, 404, { error: "unknown or already-resolved draft" });
       }
       if (method === "POST" && pathname.match(/^\/drafts\/[^/]+\/(approve|discard)$/)) {
         if (!runtime.drafts) return sendJson(res, 503, { error: "no draft store" });
+        const project = requireRequestProject(runtime, req, url);
         const parts = pathname.split("/");
         const id = decodeURIComponent(parts[2]);
         const action = parts[3];
-        const draft = action === "approve" ? runtime.drafts.approve(id) : runtime.drafts.discard(id);
+        const draft = action === "approve"
+          ? runtime.drafts.approve(id, { projectId: project.id })
+          : runtime.drafts.discard(id, { projectId: project.id });
         return draft ? sendJson(res, 200, draft) : sendJson(res, 404, { error: "unknown or already-resolved draft" });
       }
       if (method === "POST" && pathname.match(/^\/drafts\/[^/]+\/send$/)) {
@@ -1592,8 +3531,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // agent. We only mark the draft "sent" if delivery actually confirms.
         if (!runtime.drafts?.get) return sendJson(res, 503, { error: "no draft store" });
         if (!runtime.channels?.deliver) return sendJson(res, 503, { error: "no outbound channels" });
+        const project = requireRequestProject(runtime, req, url);
         const id = decodeURIComponent(pathname.split("/")[2]);
-        const draft = runtime.drafts.get(id);
+        const draft = runtime.drafts.get(id, { projectId: project.id });
         if (!draft) return sendJson(res, 404, { error: "unknown draft" });
         if (draft.status === "sent") return sendJson(res, 409, { error: "draft already sent" });
         if (draft.status === "discarded") return sendJson(res, 409, { error: "draft was discarded" });
@@ -1606,21 +3546,34 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         if (!target) return sendJson(res, 400, { error: "no target/recipient for this send" });
         let result;
         try {
-          result = await runtime.channels.deliver({ channel, target, text: draft.body, refId: draft.id });
+          result = await runtime.channels.deliver({
+            channel,
+            target,
+            text: draft.body,
+            projectId: project.id,
+            refId: draft.id
+          });
         } catch (error) { return sendJson(res, 502, { error: error.message }); }
         if (result?.delivered === false) {
           return sendJson(res, 502, { error: result.reason ?? "delivery failed", result });
         }
-        const sent = runtime.drafts.markSent(id, { channel, target, result });
+        const sent = runtime.drafts.markSent(id, {
+          channel,
+          target,
+          result,
+          projectId: project.id
+        });
         return sendJson(res, 200, { sent, result });
       }
       if (method === "POST" && pathname.match(/^\/tasks\/clarifications\/[^/]+\/dismiss$/)) {
+        requireDefaultRequestProject(runtime, req, url, null, "Clarification administration");
         if (!runtime.clarifications?.dismiss) return sendJson(res, 503, { error: "no clarification store" });
         const id = decodeURIComponent(pathname.split("/")[3]);
         const item = runtime.clarifications.dismiss(id);
         return item ? sendJson(res, 200, item) : sendJson(res, 404, { error: "unknown or already-resolved clarification" });
       }
       if (method === "GET" && pathname === "/proactive/suggestions") {
+        requireDefaultRequestProject(runtime, req, url, null, "Proactive suggestion access");
         // Story 4: merge observer suggestions + miner candidates. Both go
         // through the unified envelope so the dashboard renders them with
         // the same card shape; source badge tells them apart.
@@ -1631,6 +3584,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }));
       }
       if (method === "POST" && pathname === "/proactive/observe") {
+        const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(runtime, req, url, body, "Proactive observer control");
         if (!runtime.proactiveObserver?.observe) return sendJson(res, 503, { error: "no observer" });
         try {
           const result = await runtime.proactiveObserver.observe({ force: true });
@@ -1638,6 +3593,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         } catch (error) { return sendJson(res, 500, { error: error.message }); }
       }
       if (method === "POST" && pathname.match(/^\/proactive\/suggestions\/[^/]+\/(accept|reject|dismiss)$/)) {
+        const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Proactive suggestion administration"
+        );
         const parts = pathname.split("/");
         const id = decodeURIComponent(parts[3]);
         const action = parts[4];
@@ -1682,7 +3645,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         if (status === "accepted" && candidate.category === "skill" && runtime.skills?.reload) {
           try {
             const { createSkillFromSuggestion, createSkillFromCandidate } = await import("./skill-materialize.js");
-            const isMined = candidate.source === "pattern-miner" || candidate.source === "session-miner";
+            const isMined = candidate.source === "pattern-miner"
+              || candidate.source === "session-miner"
+              || candidate.source === "recipe-memory";
             const result = isMined
               ? createSkillFromCandidate({ runtime, candidate })
               : createSkillFromSuggestion({ runtime, suggestion: candidate });
@@ -1709,19 +3674,103 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // that fires the new skill at the hinted time.
         const slug = decodeURIComponent(pathname.split("/")[2]);
         const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          assertProjectSkill(project, slug);
+          runtime.skills?.mustGet?.(slug);
+        } catch (error) {
+          return sendJson(res, 403, { error: error.message });
+        }
         if (!body.dailyAt) return sendJson(res, 400, { error: "dailyAt required, e.g. \"09:00\"" });
         if (!runtime.cron?.addJob) return sendJson(res, 503, { error: "no cron scheduler" });
-        const job = runtime.cron.addJob({
-          id: `skill-cron-${slug}`,
-          name: `Auto-fire skill: ${slug}`,
-          enabled: true,
-          task: "prompt",
-          dailyAt: body.dailyAt,
-          input: { prompt: `Run the "${slug}" skill.`, channel: "local", target: null }
-        });
+        const jobId = projectSkillScheduleId(project.id, slug);
+        const existingJob = runtime.cron.listJobs?.()
+          .find((item) => item.id === jobId) ?? null;
+        if (
+          existingJob
+          && (
+            (existingJob.input?.projectId ?? "default") !== project.id
+            || (
+              project.id !== "default"
+              && !project.scheduleIds.includes(existingJob.id)
+            )
+          )
+        ) {
+          return sendJson(res, 409, {
+            error: "skill schedule id belongs to another project"
+          });
+        }
+        const input = {
+          prompt: `Run the "${slug}" skill.`,
+          channel: "local",
+          target: null,
+          projectId: project.id,
+          projectRevision: project.revision
+        };
+        let job = existingJob
+          ? runtime.cron.updateJob(jobId, {
+              name: `Auto-fire skill: ${slug}`,
+              enabled: true,
+              task: "prompt",
+              dailyAt: body.dailyAt,
+              input
+            })
+          : runtime.cron.addJob({
+              id: jobId,
+              name: `Auto-fire skill: ${slug}`,
+              enabled: true,
+              task: "prompt",
+              dailyAt: body.dailyAt,
+              input
+            });
+        let attachedByThisCall = false;
+        try {
+          attachedByThisCall = !project.scheduleIds.includes(job.id);
+          const attachedProject = runtime.projects?.attachResource?.(
+            project.id,
+            "scheduleIds",
+            job.id,
+            { actor: "http:POST:/skills/schedule" }
+          );
+          const pinnedRevision = attachedProject?.revision ?? project.revision;
+          if (job.input?.projectRevision !== pinnedRevision) {
+            job = runtime.cron.updateJob(job.id, {
+              input: {
+                ...job.input,
+                projectRevision: pinnedRevision
+              }
+            });
+          }
+        } catch (error) {
+          if (attachedByThisCall) {
+            try {
+              runtime.projects?.detachResource?.(
+                project.id,
+                "scheduleIds",
+                job.id,
+                { actor: "http:POST:/skills/schedule:rollback" }
+              );
+            } catch { /* best effort */ }
+          }
+          if (existingJob) {
+            const restored = runtime.cron.addJob({
+              ...existingJob,
+              replace: true
+            });
+            if (existingJob.lastRunAt !== null && existingJob.lastRunAt !== undefined) {
+              runtime.cron.updateJob?.(restored.id, {
+                lastRunAt: existingJob.lastRunAt
+              });
+            }
+          } else {
+            runtime.cron.removeJob?.(job.id);
+          }
+          throw error;
+        }
         return sendJson(res, 200, { slug, jobId: job.id, dailyAt: body.dailyAt });
       }
       if (method === "GET" && pathname === "/proactive/preferences") {
+        requireDefaultRequestProject(runtime, req, url, null, "Proactive preference access");
         if (!runtime.suggestionFeedback) return sendJson(res, 503, { error: "no feedback module" });
         return sendJson(res, 200, {
           preferences: runtime.suggestionFeedback.readPreferences(),
@@ -1733,12 +3782,20 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/proactive/preferences/mute") {
         if (!runtime.suggestionFeedback) return sendJson(res, 503, { error: "no feedback module" });
         const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(
+          runtime,
+          req,
+          url,
+          body,
+          "Proactive preference administration"
+        );
         if (!body.category) return sendJson(res, 400, { error: "category required" });
         const muted = body.muted !== false;
         const prefs = runtime.suggestionFeedback.setMuted(body.category, muted);
         return sendJson(res, 200, { preferences: prefs });
       }
       if (method === "GET" && pathname.startsWith("/proactive/suggestions/") && pathname.endsWith("/outcome")) {
+        requireDefaultRequestProject(runtime, req, url, null, "Proactive suggestion access");
         // Story 2: did the thing this suggestion proposed actually pan out?
         // Returns the suggestion record + a summary of every outcome that
         // carried sourceSuggestionId === id (skill runs, task completions).
@@ -1753,6 +3810,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         });
       }
       if (method === "GET" && pathname === "/recap/daily") {
+        requireDefaultRequestProject(runtime, req, url, null, "Legacy daily recap access");
         // Story 7: "what did I get done today" endpoint. Pulls the
         // structured recap; ?date=YYYY-MM-DD for past days.
         const { computeDailyRecap, renderDailyRecapMarkdown } = await import("./daily-recap.js");
@@ -1765,6 +3823,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         });
       }
       if (method === "GET" && pathname === "/plan/daily") {
+        requireDefaultRequestProject(runtime, req, url, null, "Legacy daily plan access");
         // Morning planner: forward-looking "what should I do today."
         // Read-only: never queues actions as a side effect (the cron does
         // that). We attach the REAL status of any actions the cron already
@@ -1777,6 +3836,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { plan, markdown: renderDailyPlanMarkdown(plan) });
       }
       if (method === "GET" && pathname === "/observations/recent-context") {
+        requireDefaultRequestProject(runtime, req, url, null, "Ambient observation access");
         if (!runtime.observations?.getRecentContext) return sendJson(res, 503, { error: "no observation store" });
         const minutes = Math.max(1, Math.min(60, Number(url.searchParams.get("minutes") ?? 10)));
         const ctx = await runtime.observations.getRecentContext({ minutes, maxChars: 1500, maxSnippets: 6 });
@@ -1785,6 +3845,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/skills/mine") {
         // "Mine now" runs both miners so the user gets both activity-pattern
         // and chat-session candidates without having to know which is which.
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Skill mining administration is default-project only" });
+        }
         try {
           const [patternResult, sessionResult] = await Promise.all([
             runtime.patternMiner.mine().catch((err) => ({ error: err.message })),
@@ -1797,25 +3862,53 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       if (method === "POST" && pathname.match(/^\/skills\/suggested\/[^/]+\/accept$/)) {
         const id = decodeURIComponent(pathname.split("/")[3]);
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Suggested skill administration is default-project only" });
+        }
         try { return sendJson(res, 200, runtime.patternMiner.accept(id)); }
         catch (error) { return sendJson(res, 400, { error: error.message }); }
       }
       if (method === "POST" && pathname.match(/^\/skills\/suggested\/[^/]+\/reject$/)) {
         const id = decodeURIComponent(pathname.split("/")[3]);
         const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Suggested skill administration is default-project only" });
+        }
         const r = runtime.patternMiner.reject(id, body.reason);
         if (!r) return sendJson(res, 404, { error: "unknown candidate" });
         return sendJson(res, 200, r);
       }
       if (method === "POST" && pathname === "/skills/reload") {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
+        }
         runtime.skills?.reload();
-        return sendJson(res, 200, runtime.skills?.list() ?? []);
+        return sendJson(
+          res,
+          200,
+          (runtime.skills?.list() ?? [])
+            .filter((skill) => projectAllows(project.activeSkills, skill.name))
+        );
       }
       if (method === "POST" && pathname.match(/^\/skills\/[^/]+\/run$/)) {
         const name = decodeURIComponent(pathname.split("/")[2]);
         const body = await readJson(req);
         try {
-          const result = await runtime.skills.run(name, { input: body.input ?? "", args: body.args ?? {} }, body.context ?? {});
+          const project = requireRequestProject(runtime, req, url, body);
+          assertProjectSkill(project, name);
+          const result = await runtime.skills.run(
+            name,
+            { input: body.input ?? "", args: body.args ?? {} },
+            projectToolContext(project, {
+              ...(body.context ?? {}),
+              channel: "local",
+              from: "http:/skills/run"
+            })
+          );
           return sendJson(res, 200, result);
         } catch (error) {
           return sendJson(res, 400, { error: error.message });
@@ -1823,16 +3916,37 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
 
       if (method === "GET" && pathname === "/mcp") {
-        const servers = runtime.mcp.listServers().map((s) => ({
-          ...s,
-          connecting: runtime.mcp.isConnecting?.(s.name) ?? false,
-          pendingAuthUrl: pendingOauth.get(s.name)?.url ?? null
-        }));
+        const project = requireRequestProject(runtime, req, url);
+        const servers = runtime.mcp.listServers()
+          .filter((server) => projectAllows(project.mcpGrants, server.name))
+          .map((s) => ({
+            ...s,
+            connecting: runtime.mcp.isConnecting?.(s.name) ?? false,
+            pendingAuthUrl: project.id === "default"
+              ? pendingOauth.get(s.name)?.url ?? null
+              : null
+          }));
         return sendJson(res, 200, sanitizeForAudit(servers));
       }
-      if (method === "GET" && pathname === "/mcp/tools") return sendJson(res, 200, runtime.mcp.listTools());
+      if (method === "GET" && pathname === "/mcp/tools") {
+        const project = requireRequestProject(runtime, req, url);
+        return sendJson(
+          res,
+          200,
+          runtime.mcp.listTools()
+            .filter((tool) => (
+              projectAllows(project.mcpGrants, tool.server)
+              && projectRequiredSecretsAllow(project, tool.requiredSecretRefs)
+            ))
+        );
+      }
       if (method === "POST" && pathname.match(/^\/mcp\/connect\/[^/]+$/)) {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "MCP connection administration is default-project only" });
+        }
         const name = decodeURIComponent(pathname.split("/")[3]);
+        assertProjectMcp(project, name);
         // Fire-and-forget so the OAuth dance doesn't block the HTTP response.
         // Dashboard polls /mcp and listens for SSE 'mcp' events to learn when
         // it's done (or if an OAuth URL needs to be opened).
@@ -1845,15 +3959,29 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         runtime.mcp.connect(name)
           .then((status) => {
             pendingOauth.delete(name);
-            events.emit("mcp", { op: "connected", name, tools: status?.tools ?? [] });
+            events.emit("mcp", {
+              op: "connected",
+              name,
+              projectId: project.id,
+              tools: status?.tools ?? []
+            });
           })
           .catch((error) => {
-            events.emit("mcp", { op: "connect-error", name, error: error.message });
+            events.emit("mcp", {
+              op: "connect-error",
+              name,
+              projectId: project.id,
+              error: error.message
+            });
           });
-        events.emit("mcp", { op: "connecting", name });
+        events.emit("mcp", { op: "connecting", name, projectId: project.id });
         return sendJson(res, 202, { name, status: "connecting" });
       }
       if (method === "POST" && pathname.match(/^\/mcp\/clear-auth\/[^/]+$/)) {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "MCP auth administration is default-project only" });
+        }
         const name = parseMcpServerName(pathname.split("/")[3]);
         if (!name) {
           return sendJson(res, 400, { error: "invalid MCP server name" });
@@ -1874,19 +4002,39 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         return sendJson(res, 200, { ok: true });
       }
       if (method === "POST" && pathname.match(/^\/mcp\/disconnect\/[^/]+$/)) {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "MCP disconnection is default-project only" });
+        }
         const name = decodeURIComponent(pathname.split("/")[3]);
         await runtime.mcp.disconnect(name);
         events.emit("mcp", { op: "disconnect", name });
         return sendJson(res, 200, { ok: true });
       }
       if (method === "POST" && pathname === "/mcp/connect-all") {
-        const results = await runtime.mcp.connectAll();
-        events.emit("mcp", { op: "connect-all", results });
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "MCP connection administration is default-project only" });
+        }
+        const names = runtime.mcp.listServers()
+          .map((server) => server.name)
+          .filter((name) => projectAllows(project.mcpGrants, name));
+        const results = await Promise.all(names.map(async (name) => {
+          try {
+            return await runtime.mcp.connect(name);
+          } catch (error) {
+            return { name, status: "error", error: error.message };
+          }
+        }));
+        events.emit("mcp", { op: "connect-all", projectId: project.id, results });
         return sendJson(res, 200, results);
       }
       if (method === "POST" && pathname === "/mcp/call") {
         const body = await readJson(req);
         try {
+          const project = requireRequestProject(runtime, req, url, body);
+          assertProjectMcp(project, body.server);
+          assertProjectMcpSecrets(runtime, project, body.server);
           const result = await runtime.mcp.callTool(body.server, body.tool, body.args ?? {});
           return sendJson(res, 200, result);
         } catch (error) {
@@ -1896,6 +4044,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "POST" && pathname === "/mcp/register") {
         const body = await readJson(req);
         try {
+          const project = requireRequestProject(runtime, req, url, body);
+          if (project.id !== "default") {
+            return sendJson(res, 403, { error: "MCP registration is default-project only" });
+          }
           const server = runtime.mcp.registerServer(body);
           return sendJson(res, 200, {
             name: server.name,
@@ -1910,12 +4062,25 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
 
       if (method === "POST" && pathname === "/tick") {
         const body = await readJson(req);
+        requireDefaultRequestProject(runtime, req, url, body, "Runtime scheduler control");
         const results = await runtime.tick(body.now ? new Date(body.now) : new Date());
         return sendJson(res, 200, { results });
       }
 
       return sendJson(res, 404, { error: "not-found" });
     } catch (error) {
+      if (error?.code === "PROJECT_BOUNDARY_VIOLATION") {
+        return sendJson(res, 403, {
+          error: "project scope rejected",
+          code: error.code
+        });
+      }
+      if (error?.code === "PROJECT_REVISION_CONFLICT") {
+        return sendJson(res, 409, {
+          error: error.message,
+          code: error.code
+        });
+      }
       // Log so we can diagnose 500s instead of swallowing them.
       const logLine = `[${new Date().toISOString()}] 500 ${req.method} ${req.url} — ${error.message}\n${error.stack ?? ""}\n`;
       try { process.stderr.write(logLine); } catch { /* ignore */ }
@@ -1934,7 +4099,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
     // takes effect immediately.
     __setChannels(c) { channels = c; },
     get __heartbeatHandle() { return heartbeatHandle ?? undefined; },
-    listen() {
+    async listen() {
+      await runtime.terminalReconcilePromise;
       return new Promise((resolve) => {
         server.listen(port, host, () => {
           channels?.start();
@@ -2006,6 +4172,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       });
     },
     async close() {
+      for (const { type, listener } of ownedEventListeners.splice(0)) {
+        if (typeof events.off === "function") events.off(type, listener);
+        else events.removeListener?.(type, listener);
+      }
+      if (
+        runtime.projects
+        && hostedProjectChange
+        && runtime.projects.onChange === hostedProjectChange
+      ) {
+        runtime.projects.onChange = previousProjectChange;
+      }
       try { await runtime.agentHost?.endActiveHookSessions?.("gateway-close"); }
       catch (error) { console.warn(`[openagi] session review flush failed open: ${error?.message ?? String(error)}`); }
       try { runtime.hooks?.notify?.("gateway:shutdown", { host, port }); }
@@ -2015,34 +4192,43 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       await new Promise((resolve, reject) => {
         if (tickerHandle) clearInterval(tickerHandle);
         if (heartbeatHandle) clearInterval(heartbeatHandle);
-        for (const client of sseClients) try { client.end(); } catch { /* ignore */ }
+        for (const client of sseClients) {
+          try { client.res.end(); } catch { /* ignore */ }
+        }
         sseClients.clear();
         channels?.stop?.();
         runtime.tunnelWatcher?.stop?.();
         runtime.mcp?.disconnectAll?.().catch(() => {});
         server.close((error) => (error ? reject(error) : resolve()));
       });
-      await runtime.kanban?.close?.();
+      if (typeof runtime.close === "function") {
+        await runtime.close();
+      } else {
+        await runtime.kanban?.close?.();
+        await runtime.observations?.close?.();
+        await runtime.sessionIndex?.close?.();
+      }
     }
   };
 
   return app;
 }
 
-function handleSse(req, res, clients) {
+function handleSse(req, res, clients, projectId = "default") {
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive"
   });
   res.write(`event: hello\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
-  clients.add(res);
+  const client = { res, projectId };
+  clients.add(client);
   const heartbeat = setInterval(() => {
     try { res.write(": ping\n\n"); } catch { /* dropped */ }
   }, 15000);
   req.on("close", () => {
     clearInterval(heartbeat);
-    clients.delete(res);
+    clients.delete(client);
   });
 }
 
@@ -2095,6 +4281,634 @@ function sendJson(res, status, value) {
 function sendSecretsJson(res, status, value) {
   res.setHeader("Cache-Control", "no-store");
   return sendJson(res, status, value);
+}
+
+function assertPlainHttpJobBody(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("job request must be a JSON object");
+  }
+}
+
+function jsonUtf8Bytes(value) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function normalizeHttpJobId(value) {
+  const id = String(value ?? "").trim();
+  if (!HTTP_JOB_ID_RE.test(id)) throw new TypeError("invalid job id");
+  return id;
+}
+
+function normalizeHttpJobSession(value) {
+  const sessionId = String(value ?? "").trim();
+  if (!HTTP_JOB_SESSION_RE.test(sessionId)) {
+    throw new TypeError("sessionId is required and must be printable ASCII");
+  }
+  return sessionId;
+}
+
+function assertHttpJobSessionProject(projects, project, sessionId) {
+  if (typeof projects?.authorize === "function") {
+    const authorized = projects.authorize(project.id, {
+      includeArchived: false,
+      sessionId
+    });
+    if (!authorized) throw new Error("project session is unavailable");
+    return;
+  }
+  if (typeof projects?.assertSession === "function") {
+    projects.assertSession(project.id, sessionId);
+  }
+}
+
+function jobHttpContext(project, sessionId = null) {
+  const allowedTools = Array.isArray(project.policy?.allowedTools)
+    && !project.policy.allowedTools.includes("*")
+    ? [...project.policy.allowedTools]
+    : null;
+  return {
+    channel: "http",
+    from: "http:jobs",
+    agentId: "main",
+    sessionId,
+    __projectId: project.id,
+    __projectRevision: project.revision ?? 1,
+    __projectWorkspaceDir: project.workspaceRoot ?? null,
+    __projectSecretRefs: [...(project.secretRefs ?? [])],
+    __projectActiveSkills: [...(project.activeSkills ?? [])],
+    __projectMcpGrants: [...(project.mcpGrants ?? [])],
+    __projectHookIds: [...(project.hookIds ?? [])],
+    __projectKanbanBoardId: project.kanbanBoardId ?? "default",
+    __projectModelProfile: structuredClone(project.modelProfile ?? {}),
+    __projectRoutingProfile: structuredClone(project.routingProfile ?? {}),
+    __scrutinyPolicy: project.policy?.toolPolicy ?? "full",
+    ...(allowedTools ? { __allowedTools: allowedTools } : {})
+  };
+}
+
+function httpJobListFilters(searchParams) {
+  const status = String(searchParams.get("status") ?? "").trim();
+  if (status && !HTTP_JOB_STATUSES.has(status)) {
+    throw new TypeError("invalid job status filter");
+  }
+  const kind = String(searchParams.get("kind") ?? "").trim();
+  if (kind && !HTTP_JOB_KINDS.has(kind)) {
+    throw new TypeError("invalid job kind filter");
+  }
+  return {
+    limit: boundedHttpJobInteger(searchParams.get("limit"), {
+      fallback: 50,
+      min: 1,
+      max: MAX_JOB_HTTP_LIST_LIMIT,
+      field: "limit"
+    }),
+    ...(status ? { status } : {}),
+    ...(kind ? { kind } : {})
+  };
+}
+
+function boundedHttpJobInteger(value, {
+  fallback,
+  min,
+  max,
+  field
+}) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (!/^\d+$/u.test(String(value))) {
+    throw new TypeError(`${field} must be an integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new TypeError(`${field} must be a safe integer`);
+  }
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function jobHttpStatusView(value, expectedProjectId = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value.job && typeof value.job === "object"
+    ? value.job
+    : value;
+  const id = normalizeHttpJobId(source.id);
+  const projectId = String(source.projectId ?? expectedProjectId ?? "").trim().toLowerCase();
+  if (!projectId || (expectedProjectId && projectId !== expectedProjectId)) {
+    const error = new Error("job is outside the requested project");
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  const error = source.error == null
+    ? null
+    : sanitizeForAudit(source.error);
+  return {
+    id,
+    revision: safeJobInteger(source.revision),
+    kind: safeJobString(source.kind, 32),
+    target: safeJobString(source.target, 256),
+    projectId,
+    sessionId: safeJobString(source.sessionId, 512),
+    status: safeJobString(source.status, 32),
+    attempt: safeJobInteger(source.attempt),
+    maxAttempts: safeJobInteger(source.maxAttempts),
+    createdAt: safeJobTimestamp(source.createdAt),
+    updatedAt: safeJobTimestamp(source.updatedAt),
+    startedAt: safeJobTimestamp(source.startedAt),
+    finishedAt: safeJobTimestamp(source.finishedAt),
+    recoveredAt: safeJobTimestamp(source.recoveredAt),
+    cancel: boundedJobJson(source.cancel, 2_000),
+    toolOutputRef: safeJobString(source.toolOutputRef, 64),
+    error: boundedJobJson(error, 2_000)
+  };
+}
+
+function jobSseStatusView(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const source = value.job && typeof value.job === "object"
+      ? value.job
+      : value;
+    const status = jobHttpStatusView(source, value.projectId ?? source.projectId);
+    if (!status) return null;
+    return {
+      op: safeJobString(value.op, 32) ?? "status",
+      id: status.id,
+      projectId: status.projectId,
+      status: status.status,
+      revision: status.revision,
+      updatedAt: status.updatedAt,
+      finishedAt: status.finishedAt
+    };
+  } catch {
+    return null;
+  }
+}
+
+function boundedHttpJobCollection(value, expectedProjectId, maxChars) {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : { output: value };
+  const job = jobHttpStatusView(source.job ?? source, expectedProjectId);
+  const output = Object.hasOwn(source, "output")
+    ? source.output
+    : Object.hasOwn(source, "result")
+      ? source.result
+      : null;
+  const safeOutput = sanitizeForAudit(output);
+  const encoded = JSON.stringify(safeOutput);
+  if (typeof encoded !== "string" || encoded.length <= maxChars) {
+    return { job, output: safeOutput ?? null };
+  }
+  return {
+    job,
+    output: {
+      truncated: true,
+      originalChars: encoded.length,
+      preview: encoded.slice(0, maxChars)
+    }
+  };
+}
+
+function safeJobInteger(value) {
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function safeJobString(value, maxChars) {
+  if (value === undefined || value === null) return null;
+  return String(value).slice(0, maxChars);
+}
+
+function safeJobTimestamp(value) {
+  const timestamp = safeJobString(value, 64);
+  return timestamp && Number.isFinite(Date.parse(timestamp))
+    ? timestamp
+    : null;
+}
+
+function boundedJobJson(value, maxChars) {
+  if (value === undefined || value === null) return null;
+  const safe = sanitizeForAudit(value);
+  const encoded = JSON.stringify(safe);
+  if (typeof encoded !== "string") return null;
+  if (encoded.length <= maxChars) return safe;
+  return {
+    truncated: true,
+    preview: encoded.slice(0, maxChars)
+  };
+}
+
+function safeJobHttpMessage(error, fallback) {
+  const safe = sanitizeForAudit(error?.message ?? error ?? fallback);
+  return String(safe || fallback).slice(0, 500);
+}
+
+function sendJobHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  if ([
+    "JOB_NOT_FOUND",
+    "JOB_SESSION_BOUNDARY_VIOLATION",
+    "PROJECT_BOUNDARY_VIOLATION"
+  ].includes(code)) {
+    return sendJson(res, 404, { error: "unknown job" });
+  }
+  if (code === "JOB_SECRET_VALUE_REJECTED") {
+    return sendJson(res, 400, {
+      error: "job request contains a credential value that cannot be persisted"
+    });
+  }
+  if ([
+    "JOB_ALREADY_EXISTS",
+    "JOB_IDEMPOTENCY_CONFLICT",
+    "JOB_NOT_READY",
+    "JOB_RESOURCE_CONFLICT",
+    "JOB_REVISION_CONFLICT",
+    "JOB_TRANSITION_INVALID"
+  ].includes(code)) {
+    return sendJson(res, 409, {
+      error: safeJobHttpMessage(error, "job state conflict"),
+      code
+    });
+  }
+  if (error instanceof RangeError) {
+    return sendJson(res, 413, {
+      error: safeJobHttpMessage(error, "job request exceeds a resource bound")
+    });
+  }
+  if (error instanceof TypeError || code.startsWith("JOB_")) {
+    return sendJson(res, 400, {
+      error: safeJobHttpMessage(error, "job request rejected"),
+      ...(code ? { code } : {})
+    });
+  }
+  return sendJson(res, 500, { error: "job operation failed" });
+}
+
+function requireRequestProject(runtime, req, url, body = null) {
+  const candidates = [
+    req.headers["x-openagi-project"],
+    url.searchParams.get("project"),
+    body?.projectId
+  ]
+    .flat()
+    .filter((value) => value !== undefined && value !== null && String(value).trim())
+    .map((value) => String(value).trim().toLowerCase());
+  const unique = [...new Set(candidates)];
+  if (unique.length > 1) {
+    const error = new Error("Conflicting project selections.");
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  const projectId = unique[0] ?? "default";
+  if (
+    typeof runtime.projects?.authorize !== "function"
+    && typeof runtime.projects?.get !== "function"
+  ) {
+    if (projectId !== "default") {
+      const error = new Error(`Unknown project: ${projectId}`);
+      error.code = "PROJECT_BOUNDARY_VIOLATION";
+      throw error;
+    }
+    return {
+      id: "default",
+      name: "Default",
+      status: "active",
+      revision: 1,
+      workspaceRoot: runtime.agentHost?.workspaceDir ?? process.cwd(),
+      memoryScope: "main",
+      instructions: "",
+      secretRefs: ["*"],
+      activeSkills: ["*"],
+      mcpGrants: ["*"],
+      hookIds: ["*"],
+      scheduleIds: [],
+      artifactIds: [],
+      recipeIds: [],
+      kanbanBoardId: "default",
+      policy: { toolPolicy: "full", allowedTools: ["*"] },
+      modelProfile: {},
+      routingProfile: {}
+    };
+  }
+  const project = typeof runtime.projects.authorize === "function"
+    ? runtime.projects.authorize(projectId, { includeArchived: false })
+    : runtime.projects.get(projectId, { includeArchived: false });
+  if (!project) {
+    const error = new Error(`Unknown or archived project: ${projectId}`);
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  return project;
+}
+
+function requireDefaultRequestProject(runtime, req, url, body = null, operation = "This operation") {
+  const project = requireRequestProject(runtime, req, url, body);
+  if (project.id === "default") return project;
+  const error = new Error(
+    `${operation} is restricted to the default project control plane.`
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function sendArtifactHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  if (
+    code.includes("NOT_FOUND")
+    || code.includes("BOUNDARY")
+    || code === "PROJECT_BOUNDARY_VIOLATION"
+  ) {
+    return sendJson(res, 404, { error: "unknown artifact" });
+  }
+  if (
+    code.includes("REVISION")
+    || code.includes("STALE")
+    || code.includes("CONFLICT")
+  ) {
+    return sendJson(res, 409, {
+      error: "artifact revision conflict",
+      code: code || "ARTIFACT_REVISION_CONFLICT"
+    });
+  }
+  if (
+    error instanceof TypeError
+    || error instanceof RangeError
+    || code.startsWith("ARTIFACT_INVALID")
+  ) {
+    return sendJson(res, 400, { error: error.message });
+  }
+  throw error;
+}
+
+function httpRecipeStatuses(value) {
+  if (value == null || !String(value).trim()) return undefined;
+  return String(value)
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function sendRecipeHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  if (
+    code.includes("NOT_FOUND")
+    || code.includes("BOUNDARY")
+    || code === "PROJECT_BOUNDARY_VIOLATION"
+  ) {
+    return sendJson(res, 404, { error: "unknown recipe" });
+  }
+  if (
+    code.includes("REVISION")
+    || code.includes("STALE")
+    || code.includes("CONFLICT")
+  ) {
+    return sendJson(res, 409, {
+      error: "recipe revision conflict",
+      code: code || "RECIPE_REVISION_CONFLICT"
+    });
+  }
+  if (error instanceof RangeError) {
+    return sendJson(res, 413, { error: error.message });
+  }
+  if (
+    error instanceof TypeError
+    || code.startsWith("RECIPE_")
+  ) {
+    return sendJson(res, 400, {
+      error: error.message,
+      ...(code ? { code } : {})
+    });
+  }
+  throw error;
+}
+
+function sendCapabilityHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  const message = String(error?.message ?? "capability administration failed");
+  if (/^Unknown (?:profile|capability bundle|skill import)/u.test(message)) {
+    return sendJson(res, 404, {
+      error: "unknown capability resource",
+      ...(code ? { code } : {})
+    });
+  }
+  if (
+    code.includes("REVISION")
+    || code.includes("STALE")
+    || code.includes("CONFLICT")
+  ) {
+    return sendJson(res, 409, {
+      error: message,
+      code: code || "CAPABILITY_REVISION_CONFLICT"
+    });
+  }
+  if (
+    code.includes("BOUNDARY")
+    || code === "PROJECT_BOUNDARY_VIOLATION"
+  ) {
+    return sendJson(res, 403, {
+      error: message,
+      ...(code ? { code } : {})
+    });
+  }
+  if (error instanceof RangeError) {
+    return sendJson(res, 413, { error: message });
+  }
+  if (
+    error instanceof TypeError
+    || code.startsWith("CAPABILITY_")
+    || code.startsWith("SKILL_IMPORT_")
+  ) {
+    return sendJson(res, 400, {
+      error: message,
+      ...(code ? { code } : {})
+    });
+  }
+  throw error;
+}
+
+function projectSkillScheduleId(projectId, skillSlug) {
+  if (projectId === "default") return `skill-cron-${skillSlug}`;
+  const projectKey = createHash("sha256")
+    .update(`project-skill-schedule\0${projectId}\0${skillSlug}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `skill-cron-${skillSlug}-${projectKey}`;
+}
+
+function assertHostedProjectStoreAvailable(runtime, required) {
+  if (!required || typeof runtime.projects?.projectForSession === "function") {
+    return;
+  }
+  const error = new Error(
+    "Session project bindings are unavailable; session access is disabled."
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function assertHostedSessionProject(
+  runtime,
+  store,
+  sessionId,
+  expectedProject,
+  { projectStoreRequired = false } = {}
+) {
+  assertHostedProjectStoreAvailable(runtime, projectStoreRequired);
+  const sessionExists = typeof store?.hasSession === "function"
+    ? store.hasSession(sessionId)
+    : typeof store?.listSessions === "function"
+      ? store.listSessions().some((session) => session?.id === sessionId)
+      : false;
+  if (!sessionExists) {
+    const error = new Error(`Unknown session '${sessionId}'.`);
+    error.code = "SESSION_NOT_FOUND";
+    throw error;
+  }
+  if (typeof runtime.projects?.projectForSession === "function") {
+    const boundProject = runtime.projects.projectForSession(sessionId);
+    if (!boundProject || boundProject.id !== expectedProject.id) {
+      const error = new Error(`Session '${sessionId}' is outside the current project.`);
+      error.code = "PROJECT_BOUNDARY_VIOLATION";
+      throw error;
+    }
+  }
+  if (typeof runtime.projects?.assertSession === "function") {
+    runtime.projects.assertSession(expectedProject.id, sessionId);
+  } else if (expectedProject.id !== "default") {
+    const error = new Error("Nondefault session scope requires a project store.");
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+
+  const session = store?.getSession?.(sessionId) ?? null;
+  const durableProjectId = durableSessionProjectId(session);
+  if (
+    durableProjectId === null
+    && expectedProject.id !== "default"
+    && Array.isArray(session?.messages)
+    && session.messages.length > 0
+  ) {
+    const error = new Error(
+      `Session '${sessionId}' is missing its durable project binding.`
+    );
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  if (durableProjectId !== null && durableProjectId !== expectedProject.id) {
+    const error = new Error(
+      `Session '${sessionId}' has an inconsistent durable project binding.`
+    );
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  return true;
+}
+
+function durableSessionProjectId(session) {
+  if (!session || typeof session !== "object") return null;
+  const ids = new Set();
+  const candidates = [
+    session.projectId,
+    session.metadata?.projectId,
+    ...(Array.isArray(session.messages)
+      ? session.messages.map((message) => message?.metadata?.projectId)
+      : [])
+  ];
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null || candidate === "") continue;
+    if (typeof candidate !== "string") {
+      const error = new Error("Session contains an invalid durable project binding.");
+      error.code = "PROJECT_BOUNDARY_VIOLATION";
+      throw error;
+    }
+    ids.add(candidate.trim().toLowerCase());
+  }
+  if (ids.size > 1) {
+    const error = new Error("Session contains conflicting durable project bindings.");
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  return ids.values().next().value ?? null;
+}
+
+function eventProject(data) {
+  const value = data?.projectId
+    ?? data?.project?.id
+    ?? data?.draft?.projectId
+    ?? data?.job?.input?.projectId
+    ?? data?.input?.projectId
+    ?? null;
+  return value == null ? null : String(value);
+}
+
+function projectMemorySnapshot(memory, project) {
+  const snapshot = memory?.snapshot?.() ?? { short: [], medium: [], long: [] };
+  const prefix = `project:${project.id}`;
+  const visible = (item) => project.id === "default"
+    ? !String(item?.scope ?? "main").startsWith("project:")
+    : (
+        String(item?.scope ?? "") === prefix
+        || String(item?.scope ?? "").startsWith(`${prefix}:`)
+      );
+  return Object.fromEntries(
+    Object.entries(snapshot).map(([tier, items]) => [
+      tier,
+      Array.isArray(items) ? items.filter(visible) : []
+    ])
+  );
+}
+
+function assertProjectSkill(project, skillName) {
+  if (projectAllows(project.activeSkills, skillName)) return;
+  const error = new Error(`Skill '${skillName}' is not active in project '${project.id}'.`);
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function assertProjectMcp(project, serverName) {
+  if (projectAllows(project.mcpGrants, serverName)) return;
+  const error = new Error(`MCP server '${serverName}' is not granted to project '${project.id}'.`);
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function projectRequiredSecretsAllow(project, requiredSecretRefs) {
+  if (!Array.isArray(requiredSecretRefs) || requiredSecretRefs.length === 0) return true;
+  return requiredSecretRefs.every((name) => projectAllows(project.secretRefs, name));
+}
+
+function assertProjectMcpSecrets(runtime, project, serverName) {
+  const required = runtime.mcp?.requiredSecretRefs?.(serverName) ?? [];
+  if (projectRequiredSecretsAllow(project, required)) return;
+  const denied = required.find((name) => !projectAllows(project.secretRefs, name));
+  const error = new Error(
+    `MCP server '${serverName}' requires secret reference '${denied}' which is not granted to project '${project.id}'.`
+  );
+  error.code = "PROJECT_BOUNDARY_VIOLATION";
+  throw error;
+}
+
+function projectToolContext(project, context = {}) {
+  return {
+    ...context,
+    projectId: project.id,
+    __projectId: project.id,
+    __projectRevision: project.revision,
+    __projectWorkspaceDir: project.workspaceRoot,
+    __projectSecretRefs: [...project.secretRefs],
+    __projectActiveSkills: [...project.activeSkills],
+    __projectMcpGrants: [...project.mcpGrants],
+    __projectHookIds: [...project.hookIds],
+    __projectKanbanBoardId: project.kanbanBoardId,
+    __memoryScope: projectMemoryScope(project)
+  };
+}
+
+async function requireProjectKanbanTask(runtime, project, taskId) {
+  const task = await runtime.kanban?.getTask?.(taskId);
+  if (!task || task.board !== project.kanbanBoardId) {
+    const error = new Error(`Unknown Kanban task: ${taskId}`);
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  return task;
 }
 
 function parseMcpServerName(encoded) {
@@ -2165,16 +4979,22 @@ function isStoredSecretConfigured(store, name, { decidedBy } = {}) {
 
 // Map an outreach action to the real action on the underlying source. Throws
 // on a failed delegation so the route can mark the item status:"error".
-async function applyOutreachAction(runtime, item, action, note) {
+async function applyOutreachAction(runtime, item, action, note, projectId = "default") {
   if (action === "dismiss") return;
   if (action === "up" || action === "down") return applyOutreachFeedback(runtime, item, action, note);
   const ref = item.sourceRef ?? {};
   switch (ref.kind) {
     case "draft":
-      if (action === "approve") { if (!runtime.drafts?.approve(ref.id)) throw new Error("draft not approvable"); return; }
+      if (action === "approve") {
+        if (!runtime.drafts?.approve(ref.id, { projectId })) {
+          throw new Error("draft not approvable");
+        }
+        return;
+      }
       if (action === "edit") return;
       throw new Error(`unsupported draft action: ${action}`);
     case "task":
+      assertDefaultOutreachSource(projectId, "task");
       // TaskStore has no dedicated cancel(); update(id,{status:"cancelled"})
       // is the canonical cancel path (returns the task, or null if unknown).
       if (action === "close") { if (!runtime.tasks?.update(ref.id, { status: "cancelled" })) throw new Error("task not cancellable"); return; }
@@ -2182,12 +5002,15 @@ async function applyOutreachAction(runtime, item, action, note) {
       throw new Error(`unsupported task action: ${action}`);
     case "pending-action":
       if (action === "do") {
-        const a = runtime.pendingActions?.get(ref.id);
-        if (!a) throw new Error("pending action gone");
+        const a = runtime.pendingActions?.get(ref.id, { projectId });
+        if (!a) {
+          throw new Error("pending action gone");
+        }
         if (a.status !== "pending") return; // already decided elsewhere — don't re-run the side-effecting tool
         const r = await approvePendingAction(runtime, ref.id, {
           decidedBy: "user",
-          approvedVia: "outreach"
+          approvedVia: "outreach",
+          projectId
         });
         if (!r.ok) throw new Error(r.error ?? "tool failed");
         return;
@@ -2197,10 +5020,12 @@ async function applyOutreachAction(runtime, item, action, note) {
       if (action === "accept") return;
       throw new Error(`unsupported suggestion action: ${action}`);
     case "clarification":
+      assertDefaultOutreachSource(projectId, "clarification");
       if (!runtime.clarifications?.answer) throw new Error("no clarification store");
       if (!runtime.clarifications.answer(ref.id, action)) throw new Error("clarification not answerable");
       return;
     case "skill-candidate": {
+      assertDefaultOutreachSource(projectId, "skill-candidate");
       if (action !== "accept") throw new Error(`unsupported skill-candidate action: ${action}`);
       const { findSuggestion, resolveSuggestion } = await import("./suggestion-feed.js");
       const candidate = findSuggestion(runtime, ref.id);
@@ -2219,6 +5044,11 @@ async function applyOutreachAction(runtime, item, action, note) {
       // the outreach history (the caller marks the item "acted" either way).
       throw new Error(`no handler for outreach item kind "${ref.kind}" with action "${action}"`);
   }
+}
+
+function assertDefaultOutreachSource(projectId, kind) {
+  if (projectId === "default") return;
+  throw new Error(`${kind} outreach actions are default-project only`);
 }
 
 async function applyOutreachFeedback(runtime, item, verdict, note = null) {
@@ -2334,6 +5164,7 @@ const HUD_ICONS = {
   suggestions: '<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z"/>',
   memory: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   integrations: '<path d="M9 2v6"/><path d="M15 2v6"/><path d="M7 8h10v3a5 5 0 0 1-10 0z"/><path d="M12 16v6"/>',
+  projects: '<path d="M3 7.5 A1.5 1.5 0 0 1 4.5 6h4l2 2.5h9A1.5 1.5 0 0 1 21 10v7.5A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="M3 11h18"/>',
   mcp: '<path d="M12 2l8 4.5v9L12 20l-8-4.5v-9z"/><path d="M12 11l8-4.5M12 11L4 6.5M12 11v9"/>',
   skills: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.7 2.1 2.1.7-2.1.7L19 20.6l-.7-2.1-2.1-.7 2.1-.7z"/>',
   cron: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
@@ -3142,6 +5973,7 @@ function renderApp() {
       <button data-tab="integrations" title="Connect MCPs (Linear, GitHub, Stripe, …), sources (BuildBetter, Rize, inbox folder), and channels (Telegram)."><span class="nav-ico">${hudIcon("integrations")}</span><span>Integrations</span></button>
 
       <div class="nav-group-label">Build</div>
+      <button data-tab="projects" title="Isolated workspaces, policies, skills, MCP grants, sessions, and artifacts."><span class="nav-ico">${hudIcon("projects")}</span><span>Projects</span></button>
       <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones."><span class="nav-ico">${hudIcon("mcp")}</span><span>MCP</span></button>
       <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored."><span class="nav-ico">${hudIcon("skills")}</span><span>Skills</span></button>
       <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs."><span class="nav-ico">${hudIcon("cron")}</span><span>Cron</span></button>
@@ -3187,6 +6019,12 @@ const state = {
   agentId: "main",
   channel: "local",
   from: "browser",
+  projectId: (() => {
+    try { return localStorage.getItem("openagi.projectId") || "default"; }
+    catch { return "default"; }
+  })(),
+  projects: [],
+  projectDetail: null,
   messages: [],
   health: null,
   kanban: null,
@@ -3427,6 +6265,8 @@ newBtn.addEventListener("click", async () => {
     openCronComposer();
   } else if (state.tab === "kanban") {
     openKanbanComposer();
+  } else if (state.tab === "projects") {
+    openProjectComposer();
   } else if (state.tab === "skills") {
     // Triggers both miners (pattern + session) and shows scanned/found
     // counts so the user sees the system working even when nothing landed.
@@ -3482,6 +6322,11 @@ async function switchTab(tab) {
     sidebarTitle.textContent = "Kanban";
     newBtn.textContent = "+ Task";
     await refreshKanban();
+  } else if (tab === "projects") {
+    showSidebar(true);
+    sidebarTitle.textContent = "Projects";
+    newBtn.textContent = "+ Project";
+    await refreshProjects();
   } else if (tab === "skills") {
     showSidebar(true);
     sidebarTitle.textContent = "Skills";
@@ -3572,6 +6417,183 @@ async function refreshSessions() {
     li.innerHTML = \`<div class="title">\${escapeHtml(s.id)}</div><div class="preview">\${escapeHtml(s.lastMessage || "")}</div>\`;
     li.addEventListener("click", () => loadSession(s.id));
     sidebarList.appendChild(li);
+  }
+}
+
+async function refreshProjects() {
+  const response = await fetchJson("/projects?archived=1", { projectScoped: false });
+  state.projects = Array.isArray(response.projects) ? response.projects : [];
+  const active = state.projects.filter((project) => project.status === "active");
+  if (!active.some((project) => project.id === state.projectId)) {
+    state.projectId = "default";
+    try { localStorage.setItem("openagi.projectId", state.projectId); } catch {}
+  }
+  sidebarList.innerHTML = "";
+  if (state.projects.length === 0) {
+    sidebarList.innerHTML = '<li class="empty">No projects yet</li>';
+    main.innerHTML = '<div class="empty">Create a project to begin.</div>';
+    return;
+  }
+  for (const project of state.projects) {
+    const li = document.createElement("li");
+    li.className = state.projectDetail?.id === project.id ? "active" : "";
+    const status = project.status === "archived"
+      ? "archived"
+      : project.id === state.projectId ? "selected" : "active";
+    li.innerHTML = '<div class="title">' + escapeHtml(project.name)
+      + '</div><div class="preview">' + escapeHtml(project.id + " - " + status) + '</div>';
+    li.addEventListener("click", () => showProject(project.id));
+    sidebarList.appendChild(li);
+  }
+  const requested = state.projectDetail?.id;
+  const selected = state.projects.find((project) => project.id === requested)
+    ?? state.projects.find((project) => project.id === state.projectId)
+    ?? state.projects[0];
+  showProject(selected.id, { refreshSidebar: false });
+}
+
+function showProject(projectId, { refreshSidebar = true } = {}) {
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project) return;
+  state.projectDetail = project;
+  if (refreshSidebar) {
+    for (const item of sidebarList.querySelectorAll("li")) item.classList.remove("active");
+    const index = state.projects.findIndex((item) => item.id === projectId);
+    if (index >= 0) sidebarList.children[index]?.classList.add("active");
+  }
+  const selected = project.id === state.projectId;
+  const archived = project.status === "archived";
+  const list = (values) => Array.isArray(values) && values.length
+    ? values.map((value) => escapeHtml(value)).join(", ")
+    : "none";
+  main.innerHTML = [
+    '<div class="card">',
+    '<div class="row between"><div><div class="name">' + escapeHtml(project.name)
+      + '</div><div class="muted">' + escapeHtml(project.id) + ' - revision '
+      + escapeHtml(project.revision) + '</div></div>',
+    '<span class="chip">' + escapeHtml(archived ? "archived" : selected ? "selected" : "active") + '</span></div>',
+    '<p style="white-space:pre-wrap;">' + escapeHtml(project.instructions || "No project instructions.") + '</p>',
+    '<div class="desc"><strong>Workspace</strong>: ' + escapeHtml(project.workspaceRoot) + '</div>',
+    '<div class="desc"><strong>Memory</strong>: ' + escapeHtml(project.memoryScope) + '</div>',
+    '<div class="desc"><strong>Tools</strong>: ' + list(project.policy?.allowedTools) + '</div>',
+    '<div class="desc"><strong>Skills</strong>: ' + list(project.activeSkills) + '</div>',
+    '<div class="desc"><strong>MCP grants</strong>: ' + list(project.mcpGrants) + '</div>',
+    '<div class="desc"><strong>Secret references</strong>: ' + list(project.secretRefs) + '</div>',
+    '<div class="row" style="margin-top:14px;">',
+    archived ? '' : '<button id="projectSelectBtn"' + (selected ? ' disabled' : '') + '>Select</button>',
+    archived ? '' : '<button id="projectEditBtn">Edit</button>',
+    archived || project.id === "default" ? '' : '<button id="projectArchiveBtn" class="danger">Archive</button>',
+    '</div></div>'
+  ].join("");
+  document.getElementById("projectSelectBtn")?.addEventListener("click", () => selectProject(project));
+  document.getElementById("projectEditBtn")?.addEventListener("click", () => openProjectEditor(project));
+  document.getElementById("projectArchiveBtn")?.addEventListener("click", () => archiveProject(project));
+}
+
+function openProjectComposer() {
+  state.projectDetail = null;
+  main.innerHTML = [
+    '<form id="projectCreateForm" class="card">',
+    '<div class="name">Create project</div>',
+    '<label>Name<input id="projectName" required maxlength="200" placeholder="Release workspace"></label>',
+    '<label>Project ID<input id="projectId" maxlength="64" pattern="[a-z0-9][a-z0-9_-]*" placeholder="generated-from-name"></label>',
+    '<label>Instructions<textarea id="projectInstructions" maxlength="32000" rows="7" placeholder="Project-specific goals and constraints"></textarea></label>',
+    '<button type="submit">Create project</button>',
+    '</form>'
+  ].join("");
+  document.getElementById("projectCreateForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = {
+      name: document.getElementById("projectName").value.trim(),
+      instructions: document.getElementById("projectInstructions").value
+    };
+    const id = document.getElementById("projectId").value.trim();
+    if (id) body.id = id;
+    try {
+      const project = await postJson("/projects", body, { projectScoped: false });
+      showToast("Project created.");
+      await refreshProjects();
+      showProject(project.id);
+    } catch (error) {
+      showToast("Project creation failed: " + error.message, false);
+    }
+  });
+}
+
+function openProjectEditor(project) {
+  const value = (items) => Array.isArray(items) ? items.join(", ") : "";
+  main.innerHTML = [
+    '<form id="projectEditForm" class="card">',
+    '<div class="name">Edit ' + escapeHtml(project.name) + '</div>',
+    '<label>Name<input id="projectEditName" required maxlength="200" value="' + escapeHtml(project.name) + '"></label>',
+    '<label>Instructions<textarea id="projectEditInstructions" maxlength="32000" rows="7">' + escapeHtml(project.instructions || "") + '</textarea></label>',
+    '<label>Allowed tools<input id="projectEditTools" value="' + escapeHtml(value(project.policy?.allowedTools)) + '" placeholder="tool_name, prefix_*"></label>',
+    '<label>Active skills<input id="projectEditSkills" value="' + escapeHtml(value(project.activeSkills)) + '" placeholder="skill-name"></label>',
+    '<label>MCP grants<input id="projectEditMcp" value="' + escapeHtml(value(project.mcpGrants)) + '" placeholder="server-name"></label>',
+    '<label>Secret references<input id="projectEditSecrets" value="' + escapeHtml(value(project.secretRefs)) + '" placeholder="SECRET_NAME"></label>',
+    '<div class="row"><button type="submit">Save</button><button id="projectEditCancel" type="button">Cancel</button></div>',
+    '</form>'
+  ].join("");
+  const split = (id) => document.getElementById(id).value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  document.getElementById("projectEditCancel").addEventListener("click", () => showProject(project.id));
+  document.getElementById("projectEditForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const updated = await patchJson("/projects/" + encodeURIComponent(project.id), {
+        expectedRevision: project.revision,
+        patch: {
+          name: document.getElementById("projectEditName").value.trim(),
+          instructions: document.getElementById("projectEditInstructions").value,
+          policy: {
+            ...(project.policy ?? {}),
+            allowedTools: split("projectEditTools")
+          },
+          activeSkills: split("projectEditSkills"),
+          mcpGrants: split("projectEditMcp"),
+          secretRefs: split("projectEditSecrets")
+        }
+      }, { projectScoped: false });
+      showToast("Project updated.");
+      await refreshProjects();
+      showProject(updated.id);
+    } catch (error) {
+      showToast("Project update failed: " + error.message, false);
+    }
+  });
+}
+
+async function selectProject(project) {
+  try {
+    await postJson("/projects/" + encodeURIComponent(project.id) + "/select", {}, {
+      projectScoped: false
+    });
+    state.projectId = project.id;
+    state.sessionId = null;
+    state.messages = [];
+    try { localStorage.setItem("openagi.projectId", state.projectId); } catch {}
+    window.location.href = "/?tab=projects";
+  } catch (error) {
+    showToast("Project selection failed: " + error.message, false);
+  }
+}
+
+async function archiveProject(project) {
+  if (!confirm("Archive project '" + project.name + "'? Existing data is retained.")) return;
+  try {
+    await postJson("/projects/" + encodeURIComponent(project.id) + "/archive", {
+      expectedRevision: project.revision
+    }, { projectScoped: false });
+    showToast("Project archived.");
+    if (state.projectId === project.id) {
+      state.projectId = "default";
+      try { localStorage.setItem("openagi.projectId", state.projectId); } catch {}
+    }
+    await refreshProjects();
+  } catch (error) {
+    showToast("Project archive failed: " + error.message, false);
   }
 }
 
@@ -4101,7 +7123,10 @@ function renderCronDetail(job) {
     $("jobResult").textContent = JSON.stringify(res, null, 2);
   });
   $("deleteJob").addEventListener("click", async () => {
-    await fetch(\`/cron/\${encodeURIComponent(job.id)}\`, { method: "DELETE" });
+    await fetch(\`/cron/\${encodeURIComponent(job.id)}\`, {
+      method: "DELETE",
+      headers: projectHeaders()
+    });
     refreshCron();
   });
 }
@@ -5903,15 +8928,15 @@ async function renderTasks() {
     const id = el.dataset.taskId;
     el.querySelector('[data-action="toggle"]')?.addEventListener("change", async (e) => {
       if (e.target.checked) {
-        await fetch(\`/tasks/\${id}/complete\`, { method: "POST", headers: { "content-type": "application/json" }, credentials: "include", body: "{}" });
+        await fetch(\`/tasks/\${id}/complete\`, { method: "POST", headers: projectHeaders({ "content-type": "application/json" }), credentials: "include", body: "{}" });
       } else {
-        await fetch(\`/tasks/\${id}\`, { method: "PATCH", headers: { "content-type": "application/json" }, credentials: "include", body: JSON.stringify({ status: "pending", bucket: "today" }) });
+        await fetch(\`/tasks/\${id}\`, { method: "PATCH", headers: projectHeaders({ "content-type": "application/json" }), credentials: "include", body: JSON.stringify({ status: "pending", bucket: "today" }) });
       }
       await renderTasks();
     });
     el.querySelector('[data-action="delete"]')?.addEventListener("click", async () => {
       if (!confirm("Delete this task?")) return;
-      await fetch(\`/tasks/\${id}\`, { method: "DELETE", credentials: "include" });
+      await fetch(\`/tasks/\${id}\`, { method: "DELETE", headers: projectHeaders(), credentials: "include" });
       await renderTasks();
     });
   });
@@ -6087,7 +9112,7 @@ async function renderToday() {
       try {
         await fetch("/tasks/clarifications/" + encodeURIComponent(id) + "/answer", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: projectHeaders({ "content-type": "application/json" }),
           credentials: "include",
           body: JSON.stringify({ answer })
         });
@@ -6108,7 +9133,7 @@ async function renderToday() {
         if (action === "save") {
           await fetch("/drafts/" + encodeURIComponent(id), {
             method: "PATCH",
-            headers: { "content-type": "application/json" },
+            headers: projectHeaders({ "content-type": "application/json" }),
             credentials: "include",
             body: JSON.stringify({ body: bodyEl ? bodyEl.value : undefined })
           });
@@ -6118,11 +9143,15 @@ async function renderToday() {
         // Approve persists any in-progress edits first, then resolves.
         if (action === "approve" && bodyEl) {
           await fetch("/drafts/" + encodeURIComponent(id), {
-            method: "PATCH", headers: { "content-type": "application/json" }, credentials: "include",
+            method: "PATCH", headers: projectHeaders({ "content-type": "application/json" }), credentials: "include",
             body: JSON.stringify({ body: bodyEl.value })
           });
         }
-        await fetch("/drafts/" + encodeURIComponent(id) + "/" + action, { method: "POST", credentials: "include" });
+        await fetch("/drafts/" + encodeURIComponent(id) + "/" + action, {
+          method: "POST",
+          headers: projectHeaders(),
+          credentials: "include"
+        });
         showToast(action === "approve" ? "Approved — ready to use." : "Discarded.", true);
       } catch { showToast("Couldn't update the draft.", false); }
       renderToday();
@@ -6143,12 +9172,12 @@ async function renderToday() {
         // Persist any edits to the body first so we send what's on screen.
         if (bodyEl) {
           await fetch("/drafts/" + encodeURIComponent(id), {
-            method: "PATCH", headers: { "content-type": "application/json" }, credentials: "include",
+            method: "PATCH", headers: projectHeaders({ "content-type": "application/json" }), credentials: "include",
             body: JSON.stringify({ body: bodyEl.value })
           });
         }
         const resp = await fetch("/drafts/" + encodeURIComponent(id) + "/send", {
-          method: "POST", headers: { "content-type": "application/json" }, credentials: "include",
+          method: "POST", headers: projectHeaders({ "content-type": "application/json" }), credentials: "include",
           body: JSON.stringify({ channel, target })
         });
         if (resp.ok) showToast("Sent via " + channel + ".", true);
@@ -6395,13 +9424,27 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-async function fetchJson(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(\`\${path} -> \${r.status}\`);
+function projectHeaders(headers = {}, projectScoped = true) {
+  return {
+    ...headers,
+    ...(projectScoped ? { "x-openagi-project": state.projectId || "default" } : {})
+  };
+}
+
+async function fetchJson(path, { projectScoped = true } = {}) {
+  const r = await fetch(path, { headers: projectHeaders({}, projectScoped) });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error ?? \`\${path} -> \${r.status}\`);
+  }
   return r.json();
 }
-async function postJson(path, body) {
-  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+async function postJson(path, body, { projectScoped = true } = {}) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: projectHeaders({ "content-type": "application/json" }, projectScoped),
+    body: JSON.stringify(body ?? {})
+  });
   if (!r.ok) {
     const b = await r.json().catch(() => ({}));
     // Surface the structured error code (e.g. "budget") + status so callers
@@ -6409,6 +9452,18 @@ async function postJson(path, body) {
     const err = new Error(b.code === "budget" ? (b.error ?? "Daily budget exceeded") + " — raise OPENAGI_DAILY_USD_LIMIT in setup." : (b.error ?? \`\${path} -> \${r.status}\`));
     err.code = b.code; err.status = r.status;
     throw err;
+  }
+  return r.json();
+}
+async function patchJson(path, body, { projectScoped = true } = {}) {
+  const r = await fetch(path, {
+    method: "PATCH",
+    headers: projectHeaders({ "content-type": "application/json" }, projectScoped),
+    body: JSON.stringify(body ?? {})
+  });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new Error(b.error ?? \`\${path} -> \${r.status}\`);
   }
   return r.json();
 }
@@ -6508,7 +9563,7 @@ function renderProviderSwitch(p) {
   });
 }
 
-const evt = new EventSource("/events");
+const evt = new EventSource("/events?project=" + encodeURIComponent(state.projectId || "default"));
 evt.addEventListener("message", (e) => {
   try {
     const data = JSON.parse(e.data);
@@ -6520,6 +9575,9 @@ evt.addEventListener("message", (e) => {
   } catch {}
 });
 evt.addEventListener("cron", () => { if (state.tab === "cron") refreshCron(); });
+evt.addEventListener("project", () => {
+  if (state.tab === "projects") refreshProjects().catch(() => {});
+});
 evt.addEventListener("mcp", (e) => {
   if (state.tab === "mcp" && !composerOpen) refreshMcp();
   // Surface OAuth-required as a system notification if the page is unfocused
@@ -6676,7 +9734,7 @@ refreshAmbientBadge();
 
 // Honor ?tab=X in URL on first load — notifications + Mac tray menu deep-link
 // to specific tabs and we need to land on them. Defaults to chat.
-const VALID_TABS = new Set(["chat","tasks","memory","cron","kanban","skills","mcp","integrations","agents","nodes","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
+const VALID_TABS = new Set(["chat","tasks","memory","cron","kanban","projects","skills","mcp","integrations","agents","nodes","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
 const initialTab = (() => {
   try {
     const t = new URLSearchParams(window.location.search).get("tab");

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, writeTextAtomic } from "./file-utils.js";
+import { ensureDir, writeJsonAtomic, writeTextAtomic } from "./file-utils.js";
 import { appendSkillRevision } from "./skill-revisions.js";
+import { nowIso, stableHash } from "./utils.js";
 
 // Turn an accepted "skill" proactive-suggestion into a durable SKILL.md
 // file under the user's skills directory. Pure function from suggestion
@@ -46,13 +47,88 @@ export function createSkillFromCandidate({ runtime, candidate }) {
     body,
     lineage: {
       sourceCandidateId: candidate.id,
-      createdBy: candidate.source === "session-miner" ? "session-miner" : "pattern-miner",
+      ...(candidate.recipe?.id
+        ? {
+            sourceRecipeId: candidate.recipe.id,
+            sourceRecipeRevision: candidate.recipe.revision,
+            sourceRecipeHash: candidate.recipe.hash
+          }
+        : {}),
+      createdBy: candidate.source === "session-miner"
+        ? "session-miner"
+        : candidate.source === "recipe-memory"
+          ? "recipe-memory"
+          : "pattern-miner",
       observedCount: seq.count ?? null,
       observedConfidence: typeof seq.confidence === "number" ? seq.confidence : null,
       sequenceFingerprint: candidate.fingerprint ?? null
     }
   });
   return { ...result, scheduleHint: proposal?.scheduleHint ?? null };
+}
+
+export function createSkillCandidateFromRecipe({ runtime, recipe }) {
+  if (!recipe || recipe.status !== "verified") {
+    throw new Error("Only a verified recipe can become a skill candidate.");
+  }
+  if (recipe.supersededBy || recipe.deletedAt) {
+    throw new Error("Superseded or deleted recipes cannot become skill candidates.");
+  }
+  const dataDir = runtime?.dataDir
+    ?? runtime?.proactiveObserver?.dataDir
+    ?? (runtime?.recipes?.dir
+      ? path.dirname(path.dirname(runtime.recipes.dir))
+      : null);
+  if (!dataDir) throw new Error("Runtime data directory is unavailable.");
+  const recipeHash = stableHash({
+    id: recipe.id,
+    projectId: recipe.projectId,
+    revision: recipe.revision,
+    title: recipe.title,
+    summary: recipe.summary,
+    preconditions: recipe.preconditions,
+    actions: recipe.actions,
+    failureModes: recipe.failureModes,
+    verification: recipe.verification
+  });
+  const id = `rcp_${recipeHash.slice(0, 16)}`;
+  const dir = path.join(dataDir, "skills-suggested");
+  ensureDir(dir);
+  const candidate = {
+    id,
+    proposedAt: nowIso(),
+    status: "pending",
+    source: "recipe-memory",
+    category: "skill",
+    projectId: recipe.projectId,
+    fingerprint: recipeHash,
+    recipe: {
+      id: recipe.id,
+      revision: recipe.revision,
+      hash: recipeHash,
+      verificationRef: recipe.verification.evidence[0]?.ref ?? null
+    },
+    proposal: {
+      name: recipe.title,
+      description: recipe.summary,
+      body: renderRecipeSkillBody(recipe),
+      scheduleHint: null
+    }
+  };
+  const filePath = path.join(dir, `${id}.json`);
+  if (fs.existsSync(filePath)) {
+    const existing = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (
+      existing?.recipe?.id !== recipe.id
+      || existing?.recipe?.revision !== recipe.revision
+      || existing?.recipe?.hash !== recipeHash
+    ) {
+      throw new Error("Recipe skill candidate identity collision.");
+    }
+    return { candidate: existing, path: filePath, created: false };
+  }
+  writeJsonAtomic(filePath, candidate);
+  return { candidate, path: filePath, created: true };
 }
 
 // Compose a description string that includes the observed stats so the
@@ -81,6 +157,28 @@ function buildMinedBody(proposal, seq) {
   // Avoid duplicating if the model already wrote a step list.
   if (/^\d+\.\s/m.test(body)) return body;
   return body + "\n\n**Observed app sequence:**\n" + appLines + "\n";
+}
+
+function renderRecipeSkillBody(recipe) {
+  const lines = [
+    recipe.summary,
+    "",
+    "## Preconditions",
+    ...recipe.preconditions.map((item) => `- ${item}`),
+    "",
+    "## Procedure",
+    ...recipe.actions.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "## Verification",
+    `- ${recipe.verification.method}`,
+    ...recipe.verification.evidence.map((item) => `- Evidence: ${item.ref}`),
+    "",
+    "## Failure modes",
+    ...(recipe.failureModes.length > 0
+      ? recipe.failureModes.map((item) => `- ${item}`)
+      : ["- Stop and report the failed step; do not claim success."])
+  ];
+  return `${lines.join("\n").trim()}\n`;
 }
 
 // Shared writer for both shapes. Keeps slug + frontmatter logic in one

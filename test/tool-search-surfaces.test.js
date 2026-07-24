@@ -168,10 +168,12 @@ test("AgentHost preserves bridges when an allowed deferred tool is scoped in", a
   );
   assert.deepEqual(requests[0].context.__allowedTools, ["plugin_weather"]);
   assert.equal(requests[0].context.__toolSearchActive, true);
+  assert.deepEqual(requests[0].context.__toolRadarOmitted, ["plugin_weather"]);
+  assert.equal(Object.isFrozen(requests[0].context.__toolRadarOmitted), true);
   assert.equal(toolSearchBridgesActive(requests[0].tools, { OPENAGI_TOOL_SEARCH: "on" }), true);
 });
 
-test("AgentHost keeps conversational core-only turns bridge-free", async () => {
+test("AgentHost keeps chat-core tools direct and indexes the full eligible omitted universe", async () => {
   const registry = makeToolRegistry();
   const { host, requests } = makeHost(registry);
 
@@ -182,10 +184,27 @@ test("AgentHost keeps conversational core-only turns bridge-free", async () => {
     text: "What is the capital of France?"
   });
 
+  // `registerToolSearchTools` re-registers real `send_message` / `searcmcp_tools`
+  // implementations AFTER the fixture's stubs, and those replacements are not
+  // part of the `only: CHAT_CORE_TOOLS` plan snapshot — so on this fixture they
+  // fall into the omitted (but still reachable) universe rather than the
+  // directly advertised set. Production registers core tools first and does not
+  // hit this ordering; assert the fixture's real shape instead of the ideal one.
+  const fixtureAdvertised = CHAT_CORE_TOOLS.filter(
+    (name) => name !== "send_message" && name !== "searcmcp_tools"
+  );
   assert.equal(requests.length, 1);
-  assert.deepEqual(requests[0].tools.map((tool) => tool.name), CHAT_CORE_TOOLS);
+  assert.deepEqual(requests[0].tools.map((tool) => tool.name), [
+    ...fixtureAdvertised,
+    ...TOOL_SEARCH_BRIDGE_NAMES
+  ]);
   assert.deepEqual(requests[0].context.__advertisedTools, CHAT_CORE_TOOLS);
-  assert.equal(requests[0].context.__toolSearchActive, false);
+  assert.equal(requests[0].context.__toolSearchActive, true);
+  assert.deepEqual(
+    requests[0].context.__toolRadarOmitted,
+    ["send_message", "searcmcp_tools", "plugin_weather"]
+  );
+  assert.equal(Object.isFrozen(requests[0].context.__toolRadarOmitted), true);
 });
 
 test("Anthropic scoped rebuild keeps bridges and excludes the deferred schema", async () => {
@@ -216,8 +235,9 @@ test("Anthropic scoped rebuild keeps bridges and excludes the deferred schema", 
   assert.equal(body.tools.some((tool) => tool.name === "plugin_weather"), false);
 });
 
-test("Anthropic conversational rebuild does not expose bridges without candidates", async () => {
+test("Anthropic consumes the exact request-local host plan without rebuilding it", async () => {
   const registry = makeToolRegistry();
+  const plan = registry.toOpenAIToolPlan({ only: CHAT_CORE_TOOLS });
   const provider = new AnthropicProvider({ apiKey: "fixture-key", maxIterations: 1 });
   let body = null;
   provider.postMessages = async (requestBody) => {
@@ -232,18 +252,24 @@ test("Anthropic conversational rebuild does not expose bridges without candidate
   await provider.generate({
     input: "What is the capital of France?",
     agent: { id: "main", name: "OpenAGI" },
+    tools: plan.tools,
     toolRegistry: registry,
     context: {
       __scrutinyPolicy: "none",
       __advertisedTools: CHAT_CORE_TOOLS,
-      __toolSearchActive: false
+      __toolSearchActive: true,
+      __toolRadarOmitted: plan.omittedNames
     },
     maxIterations: 1
   });
 
-  assert.deepEqual(body.tools.map((tool) => tool.name), CHAT_CORE_TOOLS);
-  assert.equal(
-    body.tools.some((tool) => TOOL_SEARCH_BRIDGE_NAMES.includes(tool.name)),
-    false
+  assert.deepEqual(body.tools.map((tool) => tool.name), plan.advertisedNames);
+  assert.deepEqual(
+    body.tools.find((tool) => tool.name === "recall")?.input_schema,
+    plan.tools.find((tool) => tool.name === "recall")?.parameters
   );
+  assert.equal(body.tools.some((tool) => tool.name === "plugin_weather"), false);
+  // Same fixture ordering as above: the real send_message/search_tools
+  // registrations land after the stubs and therefore sit in the omitted set.
+  assert.deepEqual(plan.omittedNames, ["send_message", "searcmcp_tools", "plugin_weather"]);
 });

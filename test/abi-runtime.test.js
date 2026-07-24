@@ -949,6 +949,7 @@ test("OpenAI provider tool loop never sends previous_response_id (ZDR-safe)", as
   assert.ok(sentBodies.length >= 2, "expected at least 2 hops");
   for (const body of sentBodies) {
     assert.equal(body.previous_response_id, undefined, "must not use previous_response_id (ZDR breaks it)");
+    assert.equal(body.store, false, "default Responses requests must explicitly disable provider-side storage");
   }
   // Second hop should carry the function_call AND function_call_output items
   const second = sentBodies[1];

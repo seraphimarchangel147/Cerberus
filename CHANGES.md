@@ -677,6 +677,184 @@ API SERVER COMPLETE
 
 PARITY WAVE 3 PHASE 2 COMPLETE
 
+## 2026-07-23 - Agent workspace upgrades: canonical provider requests (Codex)
+
+- Added a clean-room two-phase roadmap for execution-intelligence and workspace-product improvements inspired by the Agent Zero architecture review.
+- Made AgentHost keep the raw current message in durable session history while passing providers only prior messages plus one separately expanded current turn.
+- Preserved repeated identical user turns, context-reference expansion, image forwarding, and ephemeral behavior without content-based deduplication.
+- Added first-turn, multi-turn, repeated-text, ephemeral, context-reference, and image request-boundary regressions in both approval lanes.
+
+## 2026-07-23 - Agent workspace upgrades: safe efficiency telemetry (Codex)
+
+- Added content-free request-shape telemetry for prior-message bytes, one current turn, image count, instruction bytes, and visible/deferred tool-catalog weight.
+- Aggregated provider usage across normal hops, goal judges, and forced answers; exposed it through AgentHost and the API server path without persisting prompts, arguments, results, credentials, or reasoning.
+- Corrected OpenAI cached-token accounting so cached input is not also billed at the full input rate, while preserving Anthropic's additive cache semantics.
+- Added provider, cache, request, schema, compression, latency, stop-reason, and deduplicated tool-outcome analytics; legacy ledger rows remain readable.
+- Explicitly disabled provider-side storage for stateless OpenAI requests and replaced Anthropic thinking-only salvage with a bounded trace-free status.
+- Fixed atomic snapshot flushing on Windows by opening the owned temporary file with a writable handle.
+SAFE EFFICIENCY TELEMETRY COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: typed tool capabilities (Codex)
+
+- Added a normalized capability manifest for every registered tool covering domain, verbs, effect, idempotence, latency, cost, resources, requirements, examples, success criteria, and availability.
+- Derived conservative defaults from the existing source, side-effect, and confirmation policy while keeping `sideEffects` authoritative and provider schemas backward compatible.
+- Rejected malformed, executable, accessor-backed, circular, oversized, and policy-contradicting manifests with field-specific errors.
+- Redacted and deeply froze internal manifests; public registry listings now return detached JSON-safe descriptors without execution callbacks.
+- Added regressions for defaults, explicit normalization, redaction, confirmation, validation, immutability, callback isolation, and unchanged OpenAI/Anthropic schemas.
+TYPED TOOL CAPABILITIES COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: reachability-preserving tool radar (Codex)
+
+- Replaced shared overflow state with immutable request-local provider plans that cap advertised tools while reserving search, describe, and call bridges whenever any eligible tool is omitted.
+- Made every policy-eligible omitted internal, MCP, plugin, and skill tool searchable and invokable without widening specialist, scrutiny, read-only, confirmation, hook, checkpoint, or approval boundaries.
+- Ranked matches across names, descriptions, schema properties, capability metadata, source, and availability; returned bounded, redacted match reasons, required arguments, effects, confirmation requirements, availability, and examples.
+- Kept OpenAI and Anthropic on the exact same host-computed catalog and prevented bridge forwarding from bypassing or duplicating the real target's dispatch pipeline.
+- Reduced the current full-core advertised schema from 31,227 to 7,918 bytes while preserving exact-name reachability for all 42 omitted tools.
+- Added cap, reachability, ranking, scope, policy, immutability, provider-parity, and byte-reduction regressions in both approval lanes.
+REACHABILITY TOOL RADAR COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: semantic tool outcomes and repair (Codex)
+
+- Added one provider-visible outcome contract for success, failure, blocked, and pending calls, including stable codes, mutation state, artifacts, evidence, verification, retryability, and concrete repair steps.
+- Made raw tool failures monotonic, reserved verification for explicit verifiers, kept checkpoint receipts on every post-dispatch failure, and safely isolated domain statuses such as blocked Kanban cards from execution failures.
+- Added descriptor-safe bounded argument fingerprints and result snapshots; accessors, proxies, cycles, BigInt values, malformed side-effect arguments, and unsafe callback results now fail closed without running attacker-controlled properties.
+- Prevented unchanged non-idempotent retries, concurrent duplicate operations across turn cleanup and provider timeouts, duplicate pending calls, and repeated OpenAI or Anthropic call ids while propagating stable idempotency and operation receipts to handlers and hooks.
+- Made oversized model-visible tool output valid bounded JSON with retrievable full-output references and compact semantic receipts instead of slicing JSON into an invalid fragment.
+- Made approvals first-writer-wins across timeout races, terminal and non-replaying after uncertain restart recovery, and bound to the original tool/policy identity; redacted at-rest arguments can only execute through their live suspended owner.
+- Added cross-platform test launchers plus semantic, provider, approval, concurrency, hostile-data, receipt, truncation, Kanban-domain, checkpoint, and policy regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1168/1168 in the canonical WSL clone with no environment pinning.
+SEMANTIC TOOL OUTCOMES COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: activity-aware OpenAI Responses streaming (Codex)
+
+- Added a bounded Responses SSE state machine for fragmented UTF-8, LF/CRLF/bare-CR framing, visible text and refusals, usage snapshots, output items, multiple function calls, and exact argument assembly.
+- Required a terminal protocol event and `output_item.done` before a native call can reach the iteration engine; sequence regressions, identity substitution, sparse indices, lifecycle mutations, malformed calls, and post-terminal data now fail closed.
+- Kept reasoning and tool arguments internal while delivering only visible deltas, and reset the stall watchdog only after a meaningful event passes framing, size, sequence, and lifecycle validation.
+- Added independent hard-request and activity-stall timers plus abort-raced reader settlement, so caller cancellation and non-cooperative transports cannot hang or be misclassified.
+- Bounded wire bytes, events, frames, output items, content parts, visible output, per-call and aggregate arguments, and usage structure; streaming and blocking usage now share a descriptor-safe prototype-resistant accumulator.
+- Added adversarial protocol, cancellation, refusal, encoding, framing, usage, bound, and zero-partial-dispatch regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1203/1203 in the canonical WSL clone with no environment pinning.
+RESPONSES SSE COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: safe provider continuation (Codex)
+
+- Added fixed-size OpenAI prompt cache keys over the exact model, stable instructions, and ordered visible tool catalog without exposing prompt, user, or credential content.
+- Kept Responses requests stateless and `store:false` by default, with an explicit setup-allowlisted continuation mode that remains disabled for ephemeral, ZDR, and data-collection-denied turns.
+- Bound one-shot provider state to the session incarnation, transcript lineage and epoch, provider endpoint, model, process-keyed live credential identity, effective routing, project or memory scope, prompt identity, and tool identity.
+- Delayed continuation commits until the assistant transcript and session-lineage CAS are durable; stale, concurrent, failed-append, synthetic, forced-answer, and compressed-prefix paths abandon or reseed provider state safely.
+- Added narrow 4xx unsupported-state fallback before any tool dispatch, credential-rotation replay only before local effects, bounded descriptor-safe identities, TTL/LRU state, negative-capability isolation, and opaque non-serializing candidates.
+- Added hostile-input, cache, lineage, concurrency, routing, credential, privacy, AgentHost, fallback, setup, and serialization regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1236/1236 in the canonical WSL clone with no environment pinning.
+SAFE PROVIDER CONTINUATION COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: structured asynchronous context ledger (Codex)
+
+- Replaced unstructured live-context summaries with a reversible structured ledger of objective, authorization context, decisions, semantic tool receipts, state changes, evidence, artifacts, durable references, pending work, blockers, failures, and next actions while retaining exact current and recent tool pairs.
+- Added immutable preview, private source-bound single-use install, and restore lifecycle; bounded hostile snapshots and fail-open aggregate fallback; retired the competing compaction path.
+- Prepared candidates asynchronously but installed them only at exact usage-aware 50% and 85% thresholds, with cache bounds, live redaction revalidation, continuation invalidation, and stateless compression replay for OpenAI and Anthropic.
+- Hardened reasoning and credential redaction, durable-reference extraction, legacy failure classification, marker budgeting, optional summarizer isolation, synthetic-turn provenance, credential-pool rotation, and oversized-history behavior.
+- Added provider parity, lifecycle, TOCTOU, hostile-value, secret-rotation, reference, semantic receipt, continuation, threshold, and aggregate-bound regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1314/1314 in the canonical WSL clone with no environment pinning.
+STRUCTURED CONTEXT LEDGER COMPLETE
+
+AGENT WORKSPACE PHASE 1 COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: project composition root (Codex)
+
+- Added a durable ProjectStore composition root with append-only JSONL events, atomic snapshots, revision-safe create/update/archive operations, immutable session bindings, project-owned workspaces, instructions, memory roots, secret references, skills, model and routing profiles, MCP grants, policy, hooks, schedules, Kanban boards, and artifacts.
+- Enforced project identity across AgentHost turns, provider requests, memory, context references, session discovery, code tools, checkpoints and rollback, cron execution, drafts, tool outputs, outreach, background review, skill replay, pending approvals, CLI, authenticated HTTP, SSE, and dashboard surfaces.
+- Added authoritative cross-process authorization reads, canonical project memory scopes, durable transcript-based binding repair, current-revision approval identities, capability and catalog revocation, custom-hook grants, and fail-closed project session validation.
+- Required independent project secret grants for native model credentials, MCP credential placeholders, code-shell exports, and secret administration; added deterministic symlink-swap revalidation and project-contained schedule identifiers.
+- Preserved legacy default-project behavior while restricting global administration to the default control plane and keeping nondefault storage roots, tools, skills, hooks, schedules, sessions, drafts, outputs, and credentials disjoint.
+- Added bounded persistence, append-uncertainty reconciliation, restart/corruption recovery, hostile-input validation, Windows-safe resource teardown, and per-process test data isolation that never touches the operator's live runtime tree.
+- Added project store, memory, session, code, cron, checkpoint, draft, output, outreach, replay, approval, capability, CLI, HTTP, SSE, dashboard, restart, concurrency, credential, and red-team boundary regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1441/1441 with zero failures and one intentional Windows permission-mode skip.
+PROJECT COMPOSITION ROOT COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: durable policy-aware jobs (Codex)
+
+- Added project-scoped durable direct-tool and subagent jobs with start, status, bounded wait, collect, cancel, authenticated HTTP, and status-only SSE surfaces.
+- Added JSONL event persistence plus atomic snapshots, cross-process CAS, tuple idempotency, restart reconciliation without dispatched-work replay, explicit cancellation settlement, and a default concurrency limit of three.
+- Added an exclusive live-scheduler witness so passive readers cannot reconcile work owned by another process, bounded restart-batch hydration, session-isolated controls, durable cancel-before-abort ordering, and project-revision cancellation.
+- Bound canonical hierarchical locks to trusted live tool resources at submission and dispatch, coordinated foreground mutations with background leases, rejected tool-identity and operand TOCTOU, and quarantined non-cooperative handlers without releasing conflicting locks.
+- Inherited allowed-tool and scrutiny ceilings, abort signals, shared atomic provider spend, aggregate iteration limits, wall-clock deadlines, and remaining iterations while stripping parent approval and operation authority from children.
+- Kept credential-bearing payloads live-only, blocked restart-era job approvals from escaping the scheduler, and stored oversized redacted results behind project-owned tool-output references.
+- Added durable-store, concurrency, lock, cancellation, restart, subagent, budget, approval, project, output-reference, HTTP, SSE, prompt, and hostile-input regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1477/1477 with zero failures and one intentional Windows permission-mode skip.
+DURABLE JOBS COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: semantic browser (Codex)
+
+- Added an opt-in project/session-scoped semantic browser with a lazy optional Playwright/CDP adapter, compact accessibility/DOM snapshots, opaque generation-bound references, typed navigation/input/selection/scroll/transfer actions, and on-demand screenshots.
+- Labeled every page-derived result as untrusted, invalidated references on live DOM changes and mutations, stripped fragment credentials, redacted entered-secret representations from later semantic output, and withheld untrusted adapter diagnostics.
+- Routed navigation, activation, form input, selection, secret input, uploads, downloads, and screenshots through the existing approval rail; rejected embedded credentials before approval persistence and resolved credential values only from project-granted SecretsStore references.
+- Added HTTP(S), DNS, private-network, redirect-origin, service-worker, and WebSocket guards; isolated every local or CDP browser context and prevented directly injected adapters from crossing project/session boundaries.
+- Confined downloads to project-owned paths and converted uploads to bounded opened byte payloads with file-identity checks, closing symlink and validate-then-use path races.
+- Added native screenshot attachment parity for OpenAI and Anthropic without retaining base64 in textual tool output, plus setup allowlisting and runtime lifecycle/public API wiring.
+- Added lifecycle, stale-reference, scope, approval, secret, SSRF, redirect, CDP, path-race, provider-image, prompt, optional-dependency, and hostile-adapter regressions. The compact semantic benchmark is below 20 percent of the equivalent three-screenshot-loop context.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1507/1507 with zero failures and one intentional Windows permission-mode skip.
+SEMANTIC BROWSER COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: Artifact Canvas and session branching (Codex)
+
+- Added a project-scoped Artifact Canvas for versioned Markdown and JSON-compatible data, with append-only JSONL revision events, atomic snapshots, cross-process mutation locking, strict size and structure bounds, stale-write rejection, recoverable restores, and pinned revision references.
+- Reserved artifact identities through ProjectStore before persistence, rolled reservations back on failed appends, refreshed authorization at storage boundaries, and emitted content-free lifecycle notifications only after durable mutations.
+- Added create, list, show, update, version-history, and restore agent tools; documented every tool in the system prompt; and exposed authenticated project-contained HTTP plus metadata-only SSE updates.
+- Extended Deliverable Mode to attach exact pinned artifact revisions with deterministic Markdown or JSON serialization while retaining invalid, unpinned, fenced, and foreign references as text and confining nondefault filesystem attachments to the active project workspace.
+- Added exact inclusive branch-from-message semantics without source mutation, fresh branch metadata, server-generated target sessions, durable project binding before transcript creation, metadata-only hooks and SSE, and composite session/message indexing.
+- Replaced lossy transcript filenames with hash-addressed paths, exact-id legacy migration, corrupt-record fail-closed checks, and deduplicated session listing while preserving backward compatibility.
+- Added persistence, stale-write, restore, project-boundary, HTTP, SSE, deliverable, transcript-collision, source-immutability, branch-indexing, prompt-visibility, hostile-data, and both-policy regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1537/1538 tests with zero failures and one intentional Windows permission-mode skip.
+ARTIFACT CANVAS COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: solution-recipe memory (Codex)
+
+- Added a project-scoped procedural-memory domain, independent from factual recall, with preconditions, ordered actions, evidence, failure modes, verification, soft deletion, and atomic supersession.
+- Persisted authoritative recipe state through append-only JSONL events and atomic snapshots with cross-process locking, global sequencing, revision CAS, append-uncertainty reconciliation, corruption fail-closed behavior, and project resource reservations.
+- Required explicit durable evidence and human approval before verification, destructive lifecycle changes, reindexing, or skill-candidate staging; semantic edits reset trust and failed or unverified attempts remain excluded from procedural recall.
+- Added embedding identities bound to provider, model, endpoint hash, dimension, algorithm, and text schema; identity drift marks indexes stale, verified recall falls back to lexical search, and bounded revision-checked reindexing atomically replaces only the active project namespace.
+- Hardened the shared vector store against stale-writer namespace loss and mismatched dimensions, and rejected secret-shaped or configured credential material before persistence, export, or embedding.
+- Added searchable agent tools, prompt guidance, authenticated CRUD, verification, supersession, deletion, export, reindex, metadata-only SSE, and review-only skill candidates with exact recipe lineage.
+- Added persistence, concurrency, corruption, evidence, trust-reset, fact separation, stale-index, vector-isolation, secret-redaction, project-boundary, HTTP, SSE, prompt, and review-path regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1551/1552 tests with zero failures and one intentional Windows permission-mode skip.
+SOLUTION RECIPES COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: profiles and capability grants (Codex)
+
+- Added durable project- and session-scoped profiles for persona instructions, model and routing choices, progressively disclosed active skills, exact tool grants, and disabled-by-default capability bundles.
+- Bound every sensitive tool invocation to one enabled bundle that grants both the exact tool and its complete filesystem, network, secret, subprocess, API, UI, or hook access; unrelated grants cannot be combined to manufacture authority.
+- Enforced fresh profile resolution in provider catalogs, direct and radar-dispatched calls, asynchronous hook and checkpoint boundaries, approval identities, project application, and session branches, with revoked or corrupt authority failing closed.
+- Added revision-safe profile, bundle, and binding administration through deferred agent tools plus authenticated HTTP, metadata-only events, audit history, explicit-human escalation gates, and deny-all preservation for empty grants.
+- Added inert ZIP and local-checkout skill quarantine with bounded static parsing, traversal, link, device, archive, credential, CRC, collision, Unicode, and decompression defenses; imported code cannot load before exact human-approved atomic materialization.
+- Pinned import approvals to candidate and project revisions, stamped durable import lineage and finite tool allowlists, kept arbitrary function patching unsupported, and made both authority journals append-only with atomic snapshots and corruption-safe writes.
+- Added profile, bundle, race, CAS, branch, catalog, prompt, HTTP auth, import, project-boundary, persistence, corruption, and hostile-package regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1573/1574 tests with zero failures and one intentional Windows permission-mode skip.
+PROFILES AND GRANTS COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: workspace timeline (Codex)
+
+- Added a debounced project-scoped post-mutation workspace timeline with content-addressed manifests and blobs, append-only JSONL authority, atomic cache snapshots, cross-process locking, list, diff, preview, travel, and revert tools, and runtime lifecycle wiring.
+- Kept CheckpointStore as the fast pre-mutation rail while capturing successful and partial-failure filesystem dispatches after debounce; recovery snapshots current state first, uses expected-head CAS and human confirmation, and records only verified observed results.
+- Added deterministic opaque-path handling for sensitive files, symlinks, repositories, hardlinks, special files, ignored trees, oversized files, and large binaries without persisting excluded contents; case-folded and NFKC path identities prevent exclusion-to-absence deletion.
+- Hardened project and revision authorization, descriptor-based reads, root, ancestor, and path identity checks, per-path restore verification, exact post-apply scans, conflict-safe inverse revert, file and directory transitions, strict journal topology, and corrupt-cache recovery.
+- Added project-scoped quota and garbage collection with recovery-before retention and explicit bounded safety debt, plus hostile persistence, cross-project, integrity, TOCTOU, opaque-transition, Windows case-fold, runtime, prompt, and both-policy regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1593/1594 tests with zero failures and one intentional Windows permission-mode skip.
+WORKSPACE TIMELINE COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: sandboxed persistent terminals (Codex)
+
+- Added opt-in project- and chat-scoped persistent terminal sessions for interactive shells, REPLs, debuggers, and bounded long-running work, with start, list, status, send, read, signal, and close agent tools documented in the system prompt.
+- Required explicit human approval for every session start and exact one-shot human approval for every catastrophic command; public confirmation fields, inherited approvals, session allowances, nested skill calls, and both auto-approval modes cannot forge or reuse authority.
+- Isolated sessions in digest-pinned local Docker containers with no image pulls, host networking, host fallback, added capabilities, writable root, or remote daemon; mounted only the authorized project workspace and enforced nonroot identity, process, CPU, memory, swap, file-descriptor, and temporary-storage limits.
+- Bounded global and per-project sessions, queued input, command count, lifetime input and output, live output rings, callback floods, idle time, and total lifetime; sanitized terminal control sequences and labeled every output slice as untrusted.
+- Kept raw commands off JSONL, snapshots, hooks, lifecycle events, transcripts, and pending-action persistence while rechecking managed and pattern-shaped secrets immediately before each serialized write and across fragmented output.
+- Added durable metadata through JSONL events and verified atomic snapshots, bounded journal compaction, cross-process locks, manager ownership leases, exact container labels, restart cursor continuity, orphan cleanup, and fail-closed startup reconciliation before any mutating tool or hosted listener becomes available.
+- Coordinated foreground, background-job, terminal, and workspace-timeline ownership; retained project quarantine until failed container removal is verified, rechecked live project and profile authority, and closed terminals before broader runtime teardown.
+- Added adapter, store, manager, policy, approval, privacy, resource-bound, revocation, restart, corruption, shutdown, prompt, setup, and both-policy regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1611/1612 tests with zero failures and one intentional Windows permission-mode skip.
+PERSISTENT TERMINALS COMPLETE
+
+AGENT WORKSPACE PHASE 2 COMPLETE
 ## 2026-07-23 — Legion sibling roster + bot-to-bot mention discipline (Seraphim)
 Root cause of Ziz↔Azazel plain-text "@Azazel" not pinging: Azazel's sibling
 table only had seraphim/azazel/home (no `ziz` target), and the Legion context

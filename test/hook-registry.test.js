@@ -227,7 +227,7 @@ test("plugin verdicts cannot spoof catastrophic provenance or bypass confirmatio
 
   const verdict = await registry.beforeToolCall({
     toolName: "code_shell",
-    args: { command: "rm -rf /" },
+    args: { command: "printf safe" },
     confirmed: true,
     sessionAllowed: true
   });
@@ -338,4 +338,125 @@ test("a malformed reload preserves the last valid shell configuration", (t) => {
   assert.equal(reloaded.length, 1);
   assert.equal(registry.list({ tier: "shell" })[0].name, "valid-shell");
   assert.match(warnings.at(-1), /could not load/);
+});
+
+test("project hook grants scope vetoes and observers by hook name", async () => {
+  const calls = [];
+  const registry = new HookRegistry({ loadConfig: false, log: () => {} });
+  registry.register({
+    name: "alpha-hook",
+    event: "pre_tool_call",
+    handler: async () => {
+      calls.push("alpha-veto");
+      return { action: "allow" };
+    }
+  });
+  registry.register({
+    name: "beta-hook",
+    event: "pre_tool_call",
+    handler: async () => {
+      calls.push("beta-veto");
+      return { action: "allow" };
+    }
+  });
+  registry.register({
+    name: "alpha-observer",
+    event: "agent:end",
+    handler: async () => {
+      calls.push("alpha-observer");
+    }
+  });
+  registry.register({
+    name: "beta-observer",
+    event: "agent:end",
+    handler: async () => {
+      calls.push("beta-observer");
+    }
+  });
+
+  await registry.beforeToolCall({
+    toolName: "read_status",
+    projectHookIds: ["alpha-hook"]
+  });
+  registry.notify("agent:end", {
+    projectHookIds: ["alpha-observer"]
+  });
+  await registry.flush();
+
+  assert.deepEqual(calls, ["alpha-veto", "alpha-observer"]);
+});
+
+test("project-tagged hook payloads require explicit custom hook grants", async () => {
+  const calls = [];
+  const registry = new HookRegistry({ loadConfig: false, log: () => {} });
+  registry.register({
+    name: "project-veto",
+    event: "pre_tool_call",
+    handler: () => {
+      calls.push("veto");
+      return { action: "block", message: "custom veto" };
+    }
+  });
+  registry.register({
+    name: "project-observer",
+    event: "agent:end",
+    handler: () => {
+      calls.push("observer");
+    }
+  });
+
+  for (const projectHookIds of [undefined, []]) {
+    const payload = {
+      projectId: "alpha",
+      projectRevision: 3,
+      toolName: "read_status",
+      args: {}
+    };
+    if (projectHookIds !== undefined) payload.projectHookIds = projectHookIds;
+    assert.deepEqual(await registry.beforeToolCall(payload), { action: "allow" });
+    registry.notify("agent:end", payload);
+  }
+  await registry.flush();
+  assert.deepEqual(calls, []);
+
+  const catastrophic = await registry.beforeToolCall({
+    projectId: "alpha",
+    projectRevision: 3,
+    toolName: "code_shell",
+    args: { command: "rm -rf /" },
+    confirmed: false,
+    sessionAllowed: false
+  });
+  assert.equal(catastrophic.action, "block");
+  assert.equal(catastrophic.blockedBy, "catastrophic-policy");
+  assert.equal(catastrophic.builtin, true);
+  assert.deepEqual(calls, [], "builtins stay universal without enabling custom hooks");
+});
+
+test("unscoped legacy hook payloads retain custom hook compatibility", async () => {
+  const calls = [];
+  const registry = new HookRegistry({ loadConfig: false, log: () => {} });
+  registry.register({
+    name: "legacy-veto",
+    event: "pre_tool_call",
+    handler: () => {
+      calls.push("veto");
+      return { action: "allow" };
+    }
+  });
+  registry.register({
+    name: "legacy-observer",
+    event: "agent:end",
+    handler: () => {
+      calls.push("observer");
+    }
+  });
+
+  assert.deepEqual(
+    await registry.beforeToolCall({ toolName: "read_status", args: {} }),
+    { action: "allow" }
+  );
+  registry.notify("agent:end", { sessionId: "legacy-session" });
+  await registry.flush();
+  assert.deepEqual(calls, ["veto", "observer"]);
 });

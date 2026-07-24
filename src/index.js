@@ -33,15 +33,121 @@ export { createAbiIntegration, IntegrationRegistry, normalizeSignal } from "./in
 export { McpRegistry } from "./mcp-registry.js";
 export { createSecretsStore, SecretsStore } from "./secrets-store.js";
 export { PendingActionStore } from "./pending-actions.js";
+export {
+  JOB_KINDS,
+  JOB_STATUSES,
+  JobResourceConflictError,
+  JobRevisionError,
+  JobStore,
+  JobStoreError,
+  TERMINAL_JOB_STATUSES
+} from "./job-store.js";
+export {
+  JOB_DEFAULTS,
+  JobManager,
+  registerJobTools
+} from "./job-manager.js";
 export { GoalStore } from "./goal-store.js";
 export { KanbanStore, KANBAN_COLUMNS } from "./kanban-store.js";
+export {
+  CAPABILITY_ACCESS_FIELDS,
+  CAPABILITY_BUNDLE_STATUSES,
+  FILESYSTEM_ACCESS,
+  PROFILE_STATUSES,
+  CapabilityProfileBoundaryError,
+  CapabilityProfileRevisionError,
+  CapabilityProfileStore,
+  emptyCapabilityAccess,
+  profileCapabilityBoundaryError,
+  requiredToolAccess
+} from "./capability-profile-store.js";
+export {
+  SKILL_IMPORT_KINDS,
+  SKILL_IMPORT_STATUSES,
+  SkillImportBoundaryError,
+  SkillImportRevisionError,
+  SkillImportStore
+} from "./skill-import-store.js";
+export {
+  DEFAULT_PROJECT_ID,
+  PROJECT_STATUSES,
+  ProjectBoundaryError,
+  ProjectRevisionError,
+  ProjectStore,
+  projectAllows,
+  projectMemoryScope
+} from "./project-store.js";
 export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
+export {
+  DEFAULT_TIMELINE_DEBOUNCE_MS,
+  DEFAULT_TIMELINE_MAX_BINARY_BYTES,
+  DEFAULT_TIMELINE_MAX_BLOB_BYTES,
+  DEFAULT_TIMELINE_MAX_FILE_BYTES,
+  DEFAULT_TIMELINE_MAX_FILES,
+  DEFAULT_TIMELINE_MAX_SNAPSHOT_BYTES,
+  DEFAULT_TIMELINE_MAX_SNAPSHOTS,
+  WORKSPACE_TIMELINE_POLICY_VERSION,
+  WorkspaceTimelineConflictError,
+  WorkspaceTimelineError,
+  WorkspaceTimelineHeadError,
+  WorkspaceTimelineStore,
+  registerWorkspaceTimelineTools
+} from "./workspace-timeline-store.js";
+export {
+  TERMINAL_SESSION_STATUSES,
+  TerminalSessionConflictError,
+  TerminalSessionLeaseError,
+  TerminalSessionStore,
+  TerminalSessionStoreError,
+  isPinnedTerminalImage,
+  isTerminalSessionActive
+} from "./terminal-session-store.js";
+export {
+  DockerTerminalAdapter,
+  TerminalContainerError,
+  buildDockerTerminalRunArgs
+} from "./terminal-container-adapter.js";
+export {
+  DEFAULT_TERMINAL_LIMITS,
+  TerminalSessionManager,
+  TerminalSessionManagerError,
+  registerTerminalSessionTools
+} from "./terminal-session-manager.js";
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";
+export {
+  ARTIFACT_KINDS,
+  ArtifactCanvasError,
+  ArtifactCanvasStore,
+  ArtifactRevisionError,
+  artifactPinnedRef,
+  parseArtifactPinnedRef
+} from "./artifact-canvas.js";
+export {
+  RECIPE_STATUSES,
+  RecipeRevisionError,
+  SolutionRecipeError,
+  SolutionRecipeStore,
+  currentEmbeddingIdentity,
+  recipeIndexText,
+  recipeTextHash,
+  renderRecipeMarkdown
+} from "./solution-recipe-store.js";
 export { McpStdioClient } from "./mcp-client.js";
 export { McpHttpClient } from "./mcp-http-client.js";
 export { McpOAuthClient } from "./mcp-oauth.js";
-export { MemoryCondenser } from "./memory-condenser.js";
+export {
+  MemoryCondenser,
+  compressLiveContext,
+  cooperativeContextLedgerSummarizer,
+  contextCompressionTrigger,
+  contextInputTokens,
+  createContextLedgerCandidate,
+  estimateContextTokens,
+  installContextLedgerCandidate,
+  previewContextLedger,
+  restoreContextLedger
+} from "./memory-condenser.js";
 export { OutcomeStore, scoreFromToolCalls } from "./outcome-store.js";
 export { ObservationStore } from "./observation-store.js";
 export { SessionIndex } from "./session-index.js";
@@ -93,8 +199,23 @@ export {
   CredentialPoolRequest,
   classifyCredentialFailure,
   createCredentialPoolRegistry,
+  credentialLeaseIdentity,
   loadCredentialPoolConfig
 } from "./credential-pool.js";
+export {
+  RESPONSES_CONTINUATION_ENV,
+  ResponsesContinuationStore,
+  continuationUnsupported,
+  createConversationContentIdentity,
+  createConversationLineageIdentity,
+  createCredentialLeaseIdentity,
+  createOpenAIPromptCacheKey,
+  createRoutingIdentity,
+  createVisibleToolCatalogIdentity,
+  extendConversationLineageIdentity,
+  parseResponsesContinuationMode,
+  resolveResponsesContinuationMode
+} from "./responses-continuation.js";
 export {
   DEFAULT_TOOL_SEARCH_THRESHOLD_BYTES,
   TOOL_SEARCH_BRIDGE_NAMES,
@@ -136,7 +257,25 @@ export {
 } from "./model-router.js";
 export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";
-export { registerCoreTools, ToolRegistry } from "./tool-registry.js";
+export {
+  registerCoreTools,
+  registerCapabilityProfileTools,
+  registerSemanticBrowserTools,
+  registerSolutionRecipeTools,
+  SEMANTIC_BROWSER_TOOL_NAMES,
+  ToolRegistry
+} from "./tool-registry.js";
+export {
+  SemanticBrowserError,
+  SemanticBrowserService,
+  createOptionalSemanticBrowserService,
+  createPlaywrightAdapterFactory,
+  createSemanticBrowserService,
+  isPrivateAddress,
+  semanticBrowserEnabled,
+  validateCdpUrl,
+  validateNavigationUrl
+} from "./semantic-browser.js";
 export { createHostedInterface } from "./hosted-interface.js";
 export {
   DEFAULT_API_SERVER_PORT,

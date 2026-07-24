@@ -1,5 +1,6 @@
 import path from "node:path";
 import util from "node:util";
+import { createHmac, randomBytes } from "node:crypto";
 import {
   appendJsonLine,
   readJsonFile,
@@ -35,6 +36,9 @@ const DEFAULT_PROVIDER_ENV_KEYS = Object.freeze({
 });
 const LEASE_VALUES = new WeakMap();
 const LEASE_REFRESH_VALUES = new WeakMap();
+const POOL_REDACTION_VALUES = new WeakMap();
+const LEASE_IDENTITY_KEY = randomBytes(32);
+const MAX_POOL_REDACTION_SNAPSHOT = 512;
 
 export class CredentialPoolExhaustedError extends Error {
   constructor(provider, { failures = [] } = {}) {
@@ -82,6 +86,48 @@ export class CredentialLease {
   [util.inspect.custom]() {
     return `CredentialLease <${this.provider}/${this.id} [REDACTED]>`;
   }
+}
+
+export function credentialLeaseIdentity(lease) {
+  if (!(lease instanceof CredentialLease)) {
+    throw new TypeError("Credential identity requires a CredentialLease");
+  }
+  const value = LEASE_VALUES.get(lease);
+  if (!nonBlankSecret(value)) {
+    throw new TypeError("Credential lease has no usable credential");
+  }
+  return createHmac("sha256", LEASE_IDENTITY_KEY)
+    .update("openagi-credential-lease-identity-v1\0", "utf8")
+    .update(lease.provider, "utf8")
+    .update("\0", "utf8")
+    .update(String(value), "utf8")
+    .digest("hex");
+}
+
+// Return an ephemeral snapshot of credentials already resolved by the normal
+// acquisition path. Values stay out of public pool state, snapshots, events,
+// and persistence while allowing provider context compression to redact every
+// credential it may rotate to without calling the secrets store itself.
+export function credentialPoolRedactionSnapshot(pool) {
+  const cached = POOL_REDACTION_VALUES.get(pool);
+  if (!cached) return null;
+  const records = [];
+  let overflow = false;
+  for (const [id, values] of cached) {
+    if (records.length >= MAX_POOL_REDACTION_SNAPSHOT) {
+      overflow = true;
+      break;
+    }
+    records.push(Object.freeze({
+      id,
+      value: values.value,
+      refreshToken: values.refreshToken
+    }));
+  }
+  return Object.freeze({
+    records: Object.freeze(records),
+    overflow
+  });
 }
 
 export function classifyCredentialFailure(error) {
@@ -132,6 +178,13 @@ export class CredentialPool {
       refreshedValue: null,
       liveValue: null
     }]));
+    POOL_REDACTION_VALUES.set(
+      this,
+      new Map(this.entries.map((entry) => [
+        entry.id,
+        { value: null, refreshToken: null }
+      ]))
+    );
     this.roundRobinCursor = 0;
     this.rotationCount = 0;
     this.#restoreState();
@@ -152,6 +205,8 @@ export class CredentialPool {
     const state = this.states.get(String(id));
     if (!state) return false;
     state.liveValue = nonBlankSecret(value) ? String(value) : null;
+    const redaction = POOL_REDACTION_VALUES.get(this)?.get(String(id));
+    if (redaction) redaction.value = state.liveValue;
     if (["missing", "auth"].includes(state.blockedReason) && state.liveValue) {
       state.blockedReason = null;
     }
@@ -174,6 +229,13 @@ export class CredentialPool {
       return this.acquire({ excludeIds: [...excluded, entry.id] });
     }
     const refreshToken = this.#resolveRefreshToken(entry);
+    const redaction = POOL_REDACTION_VALUES.get(this)?.get(entry.id);
+    if (redaction) {
+      redaction.value = String(value);
+      redaction.refreshToken = nonBlankSecret(refreshToken)
+        ? String(refreshToken)
+        : null;
+    }
     state.uses += 1;
     const lease = new CredentialLease({
       provider: this.provider,
@@ -208,6 +270,11 @@ export class CredentialPool {
     state.blockedReason = null;
     state.refreshedValue = null;
     state.liveValue = null;
+    const redaction = POOL_REDACTION_VALUES.get(this)?.get(String(id));
+    if (redaction) {
+      redaction.value = null;
+      redaction.refreshToken = null;
+    }
     this.#persistState("reset", { id: String(id) });
     return true;
   }
@@ -277,6 +344,8 @@ export class CredentialPool {
       if (!nonBlankSecret(value)) return false;
       const state = this.#stateForLease(lease);
       state.refreshedValue = String(value);
+      const redaction = POOL_REDACTION_VALUES.get(this)?.get(lease.id);
+      if (redaction) redaction.value = String(value);
       state.blockedReason = null;
       LEASE_VALUES.set(lease, String(value));
       if (lease.secretName && typeof this.secretsStore?.setSecret === "function") {

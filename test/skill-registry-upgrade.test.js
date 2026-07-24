@@ -197,9 +197,24 @@ test("run_skill enforces declared tool allowlists and exposes legacy full-regist
   assert.deepEqual(schemaCalls[0], { only: ["read_data", "summarize"] });
   assert.equal(warnings.length, 0);
 
+  await reg.run("legacy-run", { input: "go" }, {
+    __projectId: "alpha",
+    __projectActiveSkills: ["legacy-run"],
+    __allowedTools: ["read_data"]
+  });
+  assert.deepEqual(
+    requests[1].tools.map((tool) => tool.name),
+    ["read_data"],
+    "a skill without a declaration still inherits its project tool boundary"
+  );
+  assert.deepEqual(requests[1].context.__advertisedTools, ["read_data"]);
+  assert.deepEqual(requests[1].context.__allowedTools, ["read_data"]);
+  assert.deepEqual(schemaCalls[1], { only: ["read_data"] });
+  assert.equal(warnings.length, 0, "a bounded inherited scope is not a full-registry warning");
+
   await reg.run("legacy-run", { input: "go" });
-  assert.deepEqual(requests[1].tools, definitions, "absent allowlist preserves the legacy schema surface");
-  assert.equal(schemaCalls[1], undefined);
+  assert.deepEqual(requests[2].tools, definitions, "absent allowlist preserves the legacy schema surface");
+  assert.equal(schemaCalls[2], undefined);
   assert.match(warnings[0], /full tool registry.*no allowed_tools.*prefer use_skill/iu);
 });
 

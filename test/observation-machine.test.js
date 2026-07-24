@@ -12,9 +12,13 @@ import { createDurableRuntime, createHostedInterface } from "../src/index.js";
 let hasSqlite = true;
 try { await import("node:sqlite"); } catch { hasSqlite = false; }
 
-test("record() stores a batch sourceMachineId and search({machine}) filters recent activity", { skip: !hasSqlite }, async () => {
+test("record() stores a batch sourceMachineId and search({machine}) filters recent activity", { skip: !hasSqlite }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "obs-mach-"));
   const store = new ObservationStore({ dir });
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   await store.record([
     { kind: "activity", at: "2026-07-01T10:00:00.000Z", app: "Safari", window: "Docs", event: "focus" }
   ], { sourceMachineId: "mac-A" });
@@ -32,12 +36,15 @@ test("record() stores a batch sourceMachineId and search({machine}) filters rece
 
   const all = await store.search({ limit: 10 });
   assert.equal(all.length, 2);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("search({query, machine}) filters FTS hits (frames and activity) by machine", { skip: !hasSqlite }, async () => {
+test("search({query, machine}) filters FTS hits (frames and activity) by machine", { skip: !hasSqlite }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "obs-fts-"));
   const store = new ObservationStore({ dir });
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   await store.record([
     { kind: "frame", at: "2026-07-01T10:00:00.000Z", app: "Safari", window: "Roadmap", frameId: "f-A", ocrText: "quarterly roadmap review" },
     { kind: "activity", at: "2026-07-01T10:00:01.000Z", app: "Safari", window: "quarterly roadmap tab", event: "focus" }
@@ -52,10 +59,9 @@ test("search({query, machine}) filters FTS hits (frames and activity) by machine
 
   const unfiltered = await store.search({ query: "roadmap", limit: 10 });
   assert.equal(unfiltered.length, 3);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("opening a pre-migration DB adds source_machine_id columns without losing rows", { skip: !hasSqlite }, async () => {
+test("opening a pre-migration DB adds source_machine_id columns without losing rows", { skip: !hasSqlite }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "obs-mig-"));
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(path.join(dir, "index.db"));
@@ -68,6 +74,10 @@ test("opening a pre-migration DB adds source_machine_id columns without losing r
   db.close();
 
   const store = new ObservationStore({ dir });
+  t.after(async () => {
+    await store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   await store.record(
     { kind: "activity", at: "2026-07-01T09:00:00.000Z", app: "Safari", window: "new row", event: "focus" },
     { sourceMachineId: "mac-A" }
@@ -77,7 +87,6 @@ test("opening a pre-migration DB adds source_machine_id columns without losing r
   assert.equal(filtered[0].window, "new row");
   const all = await store.search({ limit: 10 });
   assert.equal(all.length, 2, "legacy row must survive the migration");
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("POST /observations passes the envelope sourceMachineId through to the store", { skip: !hasSqlite }, async () => {

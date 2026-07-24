@@ -1603,7 +1603,7 @@ test("iMessage node responses cannot reflect the managed bearer token", async (t
 
   for (const query of ["success", "remote-error", "transport-error"]) {
     const output = await registry.invoke("search_imessages", { query });
-    assert.equal(output.ok, true);
+    assert.equal(output.ok, query === "success");
     assert.equal(JSON.stringify(output).includes(token), false);
     assert.match(JSON.stringify(output), /\[(?:REDACTED|HIDDEN)\]/);
   }

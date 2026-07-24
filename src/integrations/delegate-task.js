@@ -10,7 +10,12 @@ const MAX_SUMMARY_CHARS = 16_000;
 // Every nested spawn uses this module's audited depth and scrutiny ceilings.
 export const SUBAGENT_INTERACTIVE_TOOLS = Object.freeze([
   "send_message",
-  "schedule_message"
+  "schedule_message",
+  "job_start",
+  "job_status",
+  "job_wait",
+  "job_collect",
+  "job_cancel"
 ]);
 
 function positiveInteger(value, fallback) {
@@ -138,6 +143,24 @@ export function registerDelegateTaskTool(runtime) {
       const host = runtime.agentHost;
       if (!host?.handleMessage) return { error: "Agent host unavailable for delegation." };
       if (context.__abortSignal?.aborted) return { error: "delegation cancelled" };
+      const inheritedIterations = Number(context.__remainingIterations);
+      const maxIterations = Number.isSafeInteger(inheritedIterations)
+        ? Math.min(config.maxIterations, Math.max(0, inheritedIterations))
+        : config.maxIterations;
+      if (maxIterations < 1) {
+        return { error: "parent iteration budget is exhausted" };
+      }
+      const inheritedDeadline = Number(context.__turnDeadline);
+      const remainingTurnSeconds = Number.isFinite(inheritedDeadline)
+        ? Math.floor((inheritedDeadline - Date.now()) / 1000)
+        : config.maxTurnSeconds;
+      const maxTurnSeconds = Math.min(
+        config.maxTurnSeconds,
+        remainingTurnSeconds
+      );
+      if (maxTurnSeconds < 1) {
+        return { error: "parent turn deadline is exhausted" };
+      }
 
       const childDepth = parentDepth + 1;
       const parentSessionId = String(context.sessionId ?? "unknown");
@@ -168,16 +191,27 @@ export function registerDelegateTaskTool(runtime) {
             from: context.from ?? "delegator",
             agentId: "main",
             sessionId,
+            projectId: context.__projectId ?? "default",
             text: childPrompt(task),
-            origin: "subagent",
+            origin: context.__jobId ? "job" : "subagent",
+            jobId: context.__jobId ?? null,
             routeTo: false,
-            metadata: { delegatedBy: parentSessionId, role: effectiveRole, spawnDepth: childDepth },
+            metadata: {
+              delegatedBy: parentSessionId,
+              projectId: context.__projectId ?? "default",
+              role: effectiveRole,
+              spawnDepth: childDepth
+            },
             memoryScope: `subagent:${childId}`,
             allowedTools,
             scrutinyPolicyCeiling: context.__scrutinyPolicy ?? "full",
             spawnDepth: childDepth,
-            maxIterations: config.maxIterations,
-            maxTurnSeconds: config.maxTurnSeconds,
+            maxIterations,
+            maxTurnSeconds,
+            budgetEnvelope: context.__budgetEnvelope ?? null,
+            turnDeadline: Number.isFinite(inheritedDeadline)
+              ? inheritedDeadline
+              : null,
             abortSignal: controllers[index].signal,
             onToolEvent: childEvent
           });

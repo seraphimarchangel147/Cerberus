@@ -99,7 +99,8 @@ export function createEmbedder(options = {}) {
 
 export function cosine(a, b) {
   if (!a || !b) return 0;
-  const len = Math.min(a.length, b.length);
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
+  const len = a.length;
   let dot = 0;
   let na = 0;
   let nb = 0;

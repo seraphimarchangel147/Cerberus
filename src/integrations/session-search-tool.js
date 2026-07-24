@@ -4,6 +4,15 @@ function clampLimit(value) {
   return Math.max(1, Math.min(20, Math.trunc(parsed)));
 }
 
+function sessionProjectId(projects, sessionId) {
+  if (typeof projects?.projectForSession !== "function") return null;
+  try {
+    return projects.projectForSession(sessionId, { includeArchived: false })?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function registerSessionSearchTool(runtime) {
   runtime.tools.register({
     name: "searcmcp_sessions",
@@ -24,16 +33,36 @@ export function registerSessionSearchTool(runtime) {
     },
     handler: async (args, context) => {
       const query = String(args?.query ?? "").trim();
-      const index = context?.runtime?.sessionIndex ?? runtime.sessionIndex;
+      const invocationRuntime = context?.runtime ?? runtime;
+      const index = invocationRuntime?.sessionIndex ?? runtime.sessionIndex;
       if (!index?.search) return { query, count: 0, hits: [] };
+      const projects = invocationRuntime?.projects ?? runtime.projects ?? null;
+      const projectScoped = typeof projects?.projectForSession === "function";
+      const projectId = String(context?.__projectId ?? "default").trim() || "default";
+      if (
+        projectScoped
+        && args?.sessionId
+        && sessionProjectId(projects, args.sessionId) !== projectId
+      ) {
+        throw new Error("Session is outside the current project.");
+      }
+      const limit = clampLimit(args?.limit ?? 8);
       const hits = await index.search(query, {
-        limit: clampLimit(args?.limit ?? 8),
+        // The legacy index has no project column. Fetch a bounded surplus
+        // before filtering so foreign hits cannot usually crowd the current
+        // project's requested page. Unscoped runtimes keep the old limit.
+        limit: projectScoped ? Math.min(100, limit * 8) : limit,
         role: args?.role ?? null,
         sessionId: args?.sessionId ?? null,
         since: args?.since ?? null,
         until: args?.until ?? null
       });
-      return { query, count: hits.length, hits };
+      const visible = projectScoped
+        ? hits
+            .filter((hit) => sessionProjectId(projects, hit.sessionId) === projectId)
+            .slice(0, limit)
+        : hits;
+      return { query, count: visible.length, hits: visible };
     }
   });
 }

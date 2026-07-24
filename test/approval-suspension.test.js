@@ -77,6 +77,175 @@ test("waitForDecision reports deny and supports a deterministic timeout", async 
   });
   fire();
   assert.deepEqual(await timeout, { decision: "timeout" });
+  assert.equal(store.get(timed.id).status, "denied");
+  assert.equal(store.get(timed.id).decidedBy, "timeout");
+
+  const lateApproval = store.decide(timed.id, {
+    decision: "approve",
+    decidedBy: "too-late"
+  });
+  assert.equal(lateApproval.status, "denied");
+  assert.equal(lateApproval.decidedBy, "timeout");
+});
+
+test("an approval that wins before the timeout remains approved", async (t) => {
+  const store = makeStore(t);
+  const action = store.enqueue({ toolName: "send_thing" });
+  let fire;
+  const waiting = store.waitForDecision(action.id, {
+    timeoutMs: 123,
+    setTimeoutFn(callback) {
+      fire = callback;
+      return { unref() {} };
+    },
+    clearTimeoutFn() {}
+  });
+
+  store.decide(action.id, { decision: "approve", decidedBy: "creator" });
+  fire();
+
+  assert.equal((await waiting).decision, "approve");
+  assert.equal(store.get(action.id).status, "approved");
+  assert.equal(store.get(action.id).decidedBy, "creator");
+});
+
+test("a live approval fails semantically when project authorization changes", async (t) => {
+  const store = makeStore(t);
+  let project = {
+    id: "alpha",
+    status: "active",
+    revision: 1,
+    workspaceRoot: "/workspace/alpha",
+    policy: { toolPolicy: "full", allowedTools: ["send_thing"] },
+    mcpGrants: [],
+    activeSkills: [],
+    secretRefs: [],
+    hookIds: [],
+    kanbanBoardId: "project-alpha"
+  };
+  const tools = new ToolRegistry({
+    projects: {
+      authorize(id) {
+        return id === project.id ? structuredClone(project) : null;
+      }
+    }
+  });
+  tools.bindPendingActions(store);
+  let calls = 0;
+  tools.register({
+    name: "send_thing",
+    needsConfirmation: true,
+    handler: async () => {
+      calls += 1;
+      return "sent";
+    }
+  });
+  const context = {
+    __projectId: "alpha",
+    __projectRevision: 1
+  };
+  const action = store.enqueue({
+    toolName: "send_thing",
+    args: { value: 1 },
+    context,
+    approvalIdentity: tools.approvalIdentity("send_thing", context)
+  });
+  const waiting = tools._suspendForApproval(
+    action,
+    "send_thing",
+    { value: 1 },
+    context
+  );
+  project = {
+    ...project,
+    revision: 2,
+    policy: { toolPolicy: "none", allowedTools: [] }
+  };
+  store.decide(action.id, {
+    decision: "approve",
+    decidedBy: "creator"
+  });
+
+  const result = await waiting;
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome.code, "approval_identity_changed");
+  assert.equal(calls, 0);
+  assert.equal(store.get(action.id).status, "approved");
+  assert.ok(store.get(action.id).completedAt);
+  assert.equal(store.get(action.id).outcome.code, "approval_identity_changed");
+});
+
+test("recovery fails closed for approved actions with no completion receipt", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-approval-recovery-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const original = new PendingActionStore({ dir });
+  const action = original.enqueue({
+    toolName: "send_thing",
+    args: { value: 11 },
+    context: { sessionId: "session-recovery" }
+  });
+  original.decide(action.id, { decision: "approve", decidedBy: "creator" });
+  assert.equal(original.get(action.id).completedAt, null);
+
+  const recovered = new PendingActionStore({ dir });
+  const terminal = recovered.get(action.id);
+  assert.equal(terminal.status, "approved");
+  assert.ok(terminal.completedAt);
+  assert.match(terminal.error, /recovered without a completion record/i);
+  assert.equal(terminal.outcome.status, "blocked");
+  assert.equal(terminal.outcome.code, "approval_completion_interrupted");
+
+  const completion = await recovered.waitForCompletion(action.id);
+  assert.equal(completion.ok, false);
+  assert.match(completion.error, /execution was not replayed/i);
+
+  let calls = 0;
+  const approval = await approvePendingAction({
+    pendingActions: recovered,
+    tools: {
+      async invoke() {
+        calls += 1;
+        return { ok: true, result: { sent: true } };
+      }
+    }
+  }, action.id, { decidedBy: "second-approver" });
+  assert.equal(approval.ok, false);
+  assert.equal(approval.status, 409);
+  assert.equal(calls, 0);
+
+  const replayed = new PendingActionStore({ dir }).get(action.id);
+  assert.equal(replayed.completedAt, terminal.completedAt);
+  assert.equal(replayed.outcome.code, "approval_completion_interrupted");
+});
+
+test("a restart-era durable-job approval never executes outside its scheduler", async (t) => {
+  const store = makeStore(t);
+  const action = store.enqueue({
+    toolName: "send_thing",
+    args: { value: 12 },
+    context: {
+      sessionId: "session-job-approval",
+      __jobId: "job_0123456789abcdef"
+    }
+  });
+  let calls = 0;
+
+  const result = await approvePendingAction({
+    pendingActions: store,
+    tools: {
+      async invoke() {
+        calls += 1;
+        return { ok: true, result: { sent: true } };
+      }
+    }
+  }, action.id, { decidedBy: "creator" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.outcome.code, "job_approval_owner_unavailable");
+  assert.equal(calls, 0);
+  assert.equal(store.get(action.id).status, "denied");
 });
 
 test("a gated invoke stays pending, then approval resumes with the real result", async (t) => {
@@ -171,14 +340,16 @@ test("double approval is a no-op and cannot execute twice", async (t) => {
   assert.equal(store.get(action.id).decidedBy, "first");
 });
 
-test("auto-approve remains immediate and byte-compatible", async (t) => {
+test("auto-approve remains immediate and carries the semantic result", async (t) => {
   setAutoApprove(t, "1");
   const store = makeStore(t);
   let calls = 0;
   const tools = registerGatedTool(store, async () => { calls += 1; return { sent: true }; });
 
   const result = await tools.invoke("send_thing", {}, {});
-  assert.deepEqual(result, { ok: true, result: { sent: true } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.result, { sent: true });
+  assert.equal(result.outcome.status, "succeeded");
   assert.equal(calls, 1);
   assert.equal(store.list()[0].decidedBy, "auto-approve");
 });

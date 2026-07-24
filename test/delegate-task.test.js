@@ -375,6 +375,34 @@ test("children share the runtime budget and receive subagent-specific turn limit
   ]);
 });
 
+test("delegated children inherit the live parent budget, deadline, and remaining iterations", async () => {
+  const captured = [];
+  const provider = {
+    async generate(request) {
+      captured.push(request);
+      return modelResult("bounded child", { iterations: 1 });
+    }
+  };
+  const { tools } = makeHarness(provider);
+  const budgetEnvelope = { limitUsd: 0.25, spentUsd: 0.05 };
+  const turnDeadline = Date.now() + 10_000;
+
+  const result = await delegateHandler(tools)({ goal: "bounded work" }, {
+    sessionId: "bounded-parent",
+    __budgetEnvelope: budgetEnvelope,
+    __turnDeadline: turnDeadline,
+    __remainingIterations: 4
+  });
+
+  assert.equal(result.results[0].ok, true);
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].context.__budgetEnvelope, budgetEnvelope);
+  assert.equal(captured[0].context.__turnDeadline, turnDeadline);
+  assert.equal(captured[0].maxIterations, 4);
+  assert.ok(captured[0].maxTurnSeconds >= 1);
+  assert.ok(captured[0].maxTurnSeconds <= 10);
+});
+
 test("parent cancellation aborts outstanding child provider calls", async () => {
   let childStarted;
   const started = new Promise((resolve) => { childStarted = resolve; });

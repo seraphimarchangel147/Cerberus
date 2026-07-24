@@ -22,8 +22,8 @@
     "build-mac-app": "./scripts/build-mac-app.sh",
     "docker:build": "docker build -t openagi:local .",
     "docker:run": "docker run --rm -p 43210:43210 -v openagi-data:/data openagi:local",
-    "test": "OPENAGI_AUTO_APPROVE=0 node --test",
-    "test:prod-policy": "OPENAGI_AUTO_APPROVE=1 node --test",
+    "test": "node scripts/run-tests.mjs 0",
+    "test:prod-policy": "node scripts/run-tests.mjs 1",
     "test:all": "npm test && npm run test:prod-policy",
     "cli": "node bin/openagi.js"
   },

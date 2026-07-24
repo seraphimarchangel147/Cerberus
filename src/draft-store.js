@@ -35,21 +35,47 @@ export class DraftStore {
     this.runtime = runtime;
   }
 
-  list({ status = "pending" } = {}) {
+  list({ status = "pending", projectId = null } = {}) {
     const all = [...this.items.values()];
-    const filtered = status ? all.filter((d) => d.status === status) : all;
+    const scoped = projectId == null
+      ? all
+      : all.filter((draft) => (draft.projectId ?? "default") === projectId);
+    const filtered = status ? scoped.filter((d) => d.status === status) : scoped;
     return filtered.sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
   }
 
-  get(id) {
-    return this.items.get(id) ?? null;
+  get(id, { projectId = null } = {}) {
+    const draft = this.items.get(id) ?? null;
+    if (
+      draft
+      && projectId != null
+      && (draft.projectId ?? "default") !== projectId
+    ) {
+      return null;
+    }
+    return draft;
   }
 
   /// Save a draft for review. `kind` is normalized to a known type so the
   /// UI can pick an icon; unknown kinds collapse to "other".
-  add({ taskId, kind, title, body, recipient, sourceMeta } = {}) {
+  add({
+    id = null,
+    taskId,
+    kind,
+    title,
+    body,
+    recipient,
+    sourceMeta,
+    projectId = "default"
+  } = {}) {
+    const draftId = id === null ? createId("draft") : String(id);
+    if (!/^draft_[a-f0-9]{16}$/u.test(draftId)) {
+      throw new TypeError("draft id is invalid");
+    }
+    if (this.items.has(draftId)) throw new Error(`draft already exists: ${draftId}`);
     const draft = {
-      id: createId("draft"),
+      id: draftId,
+      projectId: String(projectId || "default"),
       taskId: taskId ?? null,
       kind: DRAFT_KINDS.includes(kind) ? kind : "other",
       title: String(title ?? "").trim() || "(untitled draft)",
@@ -63,15 +89,24 @@ export class DraftStore {
     };
     if (!draft.body.trim()) throw new Error("draft requires a body");
     this.items.set(draft.id, draft);
-    this.snapshot();
-    this.runtime?.events?.emit?.("draft-created", draft);
+    try {
+      this.snapshot();
+    } catch (error) {
+      this.items.delete(draft.id);
+      throw error;
+    }
+    try {
+      this.runtime?.events?.emit?.("draft-created", draft);
+    } catch {
+      // Persistence is authoritative; observers cannot roll back a saved draft.
+    }
     return draft;
   }
 
   /// Edit a pending draft's body/title/recipient in place (user tweaks
   /// before approving). No-op fields are left unchanged.
-  edit(id, patch = {}) {
-    const d = this.items.get(id);
+  edit(id, patch = {}, { projectId = null } = {}) {
+    const d = this.get(id, { projectId });
     if (!d || d.status !== "pending") return null;
     if (patch.title !== undefined) d.title = String(patch.title).trim() || d.title;
     if (patch.body !== undefined) d.body = String(patch.body);
@@ -82,19 +117,19 @@ export class DraftStore {
     return d;
   }
 
-  approve(id) {
-    return this._resolve(id, "approved");
+  approve(id, options = {}) {
+    return this._resolve(id, "approved", options);
   }
 
-  discard(id) {
-    return this._resolve(id, "discarded");
+  discard(id, options = {}) {
+    return this._resolve(id, "discarded", options);
   }
 
   /// Mark a draft as actually sent, recording how. Only the send endpoint
   /// calls this, AFTER a real transport confirmed delivery. Accepts a
   /// pending OR approved draft (you can send straight from review).
-  markSent(id, { channel, target, result } = {}) {
-    const d = this.items.get(id);
+  markSent(id, { channel, target, result, projectId = null } = {}) {
+    const d = this.get(id, { projectId });
     if (!d || (d.status !== "pending" && d.status !== "approved")) return null;
     d.status = "sent";
     d.reviewedAt = d.reviewedAt ?? nowIso();
@@ -106,8 +141,8 @@ export class DraftStore {
     return d;
   }
 
-  _resolve(id, status) {
-    const d = this.items.get(id);
+  _resolve(id, status, { projectId = null } = {}) {
+    const d = this.get(id, { projectId });
     if (!d || d.status !== "pending") return null;
     d.status = status;
     d.reviewedAt = nowIso();

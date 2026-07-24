@@ -377,6 +377,19 @@ export class McpRegistry {
     });
   }
 
+  requiredSecretRefs(name) {
+    const server = this.servers.get(name);
+    if (!server) return [];
+    return [...collectPlaceholderNames([
+      ...(server.args ?? []),
+      ...Object.values(server.env ?? {}),
+      ...Object.values(server.headers ?? {}),
+      server.apiKey,
+      server.clientId,
+      server.clientSecret
+    ])].sort();
+  }
+
   listTools() {
     const out = [];
     for (const [name, server] of this.servers) {
@@ -393,6 +406,7 @@ export class McpRegistry {
           registeredName: mcpToolName(name, rawName),
           description: tool.description ?? "",
           inputSchema: tool.inputSchema ?? null,
+          requiredSecretRefs: this.requiredSecretRefs(name),
           connected: Boolean(client?.connected)
         });
       }
@@ -628,6 +642,7 @@ export class McpRegistry {
     }
     for (const tool of client.tools ?? []) {
       const safeName = mcpToolName(serverName, tool.name);
+      const requiredSecretRefs = this.requiredSecretRefs(serverName);
       this.toolRegistry.register({
         name: safeName,
         description: `[MCP:${serverName}] ${tool.description ?? tool.name}`,
@@ -638,7 +653,11 @@ export class McpRegistry {
           additionalProperties: true
         },
         handler: (args) => client.callTool(tool.name, args ?? {}),
-        metadata: { server: serverName, originalName: tool.name }
+        metadata: {
+          server: serverName,
+          originalName: tool.name,
+          requiredSecretRefs
+        }
       });
     }
   }

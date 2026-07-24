@@ -15,17 +15,26 @@ test("mustResolve throws for paths outside allowed roots", () => {
   assert.throws(() => mustResolve(path.join(os.homedir(), ".ssh", "id_rsa")), /outside allowed roots/);
 });
 
-test("mustResolve allows paths inside /tmp", () => {
-  const p = mustResolve("/tmp/openagi-hardening-test.txt");
-  assert.ok(p.startsWith("/tmp/"));
+test("mustResolve allows paths inside the operating system temp directory", () => {
+  const tempRoot = fs.realpathSync(os.tmpdir());
+  const p = mustResolve(path.join(tempRoot, "openagi-hardening-test.txt"));
+  assert.equal(path.dirname(p), tempRoot);
 });
 
 test("resolveSafe rejects a symlink inside an allowed root pointing outside", () => {
-  const dir = fs.mkdtempSync(path.join("/tmp", "oa-symlink-"));
-  const link = path.join(dir, "escape");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oa-symlink-"));
+  const allowed = path.join(dir, "allowed");
+  const outside = path.join(dir, "outside");
+  const link = path.join(allowed, "escape");
   try {
-    fs.symlinkSync("/etc", link);
-    const viaLink = resolveSafe(path.join(link, "passwd"));
+    fs.mkdirSync(allowed);
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "canary.txt"), "outside", "utf8");
+    fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+    const viaLink = resolveSafe(
+      path.join(link, "canary.txt"),
+      { roots: [allowed] }
+    );
     assert.equal(viaLink.ok, false, "symlink escape must be rejected");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -33,7 +42,12 @@ test("resolveSafe rejects a symlink inside an allowed root pointing outside", ()
 });
 
 test("resolveSafe still allows creating new files under an allowed root", () => {
-  const target = resolveSafe("/tmp/oa-new-dir-not-yet-existing/sub/file.txt");
+  const target = resolveSafe(path.join(
+    os.tmpdir(),
+    "oa-new-dir-not-yet-existing",
+    "sub",
+    "file.txt"
+  ));
   assert.equal(target.ok, true);
 });
 

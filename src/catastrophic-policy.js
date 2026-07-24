@@ -11,6 +11,12 @@ export function classifyCommand(command) {
   if (containsCatastrophicRm(normalized)) {
     return catastrophic("recursive forced delete targets a protected or dangerously short path");
   }
+  if (segments(normalized).some(isDestructiveGitCleanSegment)) {
+    return catastrophic("git clean can erase untracked project workspace content");
+  }
+  if (segments(normalized).some(isDynamicShellExecutionSegment)) {
+    return catastrophic("dynamic shell evaluation can bypass command policy inspection");
+  }
   if (segments(normalized).some(isShutdownSegment)) {
     return catastrophic("command shuts down or reboots the host/WSL environment");
   }
@@ -37,7 +43,10 @@ export function classifyCommand(command) {
 
 /** @returns {{catastrophic: boolean, reason: string|null}} */
 export function isCatastrophicToolCall({ toolName, args } = {}) {
-  if (toolName === "code_shell" && args?.command != null) {
+  if (
+    (toolName === "code_shell" || toolName === "terminal_send")
+    && args?.command != null
+  ) {
     return classifyCommand(String(args.command));
   }
   return safe();
@@ -50,11 +59,12 @@ export function createCatastrophicPreToolHook() {
     tier: "gateway",
     immutable: true,
     handler(payload = {}) {
-      if (payload.confirmed === true || payload.sessionAllowed === true) {
-        return { action: "allow" };
-      }
       const classified = isCatastrophicToolCall(payload);
       if (!classified.catastrophic) return { action: "allow" };
+      // Classify first. Caller context and session-wide grants are insufficient
+      // for a catastrophic command. Only the registry's private exact-action
+      // resume proof may continue.
+      if (payload.catastrophicApproved === true) return { action: "allow" };
       return {
         action: "block",
         code: "catastrophic",
@@ -68,10 +78,14 @@ export function createCatastrophicPreToolHook() {
 
 function normalizeCommand(command) {
   let value = typeof command === "string" ? command.trim() : "";
-  // Models commonly send the literal bash wrapper even though code_shell adds
-  // one itself. Peel it before matching so quoting cannot hide the payload.
-  for (let i = 0; i < 2; i += 1) {
-    const match = /^(?:\/[^\s]+\/)?bash\s+-lc\s+(?:'([\s\S]*)'|"([\s\S]*)"|([\s\S]+))$/i.exec(value);
+  // Peel common shell wrappers before matching so quoting cannot hide the
+  // payload. The bounded loop supports combinations such as env sh -c.
+  for (let i = 0; i < 4; i += 1) {
+    value = value.replace(
+      /^(?:(?:\/usr\/bin\/)?env(?:\s+(?:-[^\s]+|[A-Za-z_][A-Za-z0-9_]*=[^\s]+))*|command)\s+/i,
+      ""
+    );
+    const match = /^(?:\/(?:usr\/)?bin\/)?(?:ba|z|k)?sh\s+-(?:l?c|cl)\s+(?:'([\s\S]*)'|"([\s\S]*)"|([\s\S]+))$/i.exec(value);
     if (!match) break;
     value = (match[1] ?? match[2] ?? match[3] ?? "").trim();
   }
@@ -97,8 +111,9 @@ function shellWords(value) {
 
 function containsCatastrophicRm(command) {
   return segments(command).some((segment) => {
-    if (!/^rm\s+/i.test(segment)) return false;
-    const words = shellWords(segment).slice(1);
+    const executable = stripCommandPrefixes(segment);
+    if (!/^(?:\/(?:usr\/)?bin\/)?rm\s+/i.test(executable)) return false;
+    const words = shellWords(executable).slice(1);
     const flags = words.filter((word) => /^-/.test(word) && word !== "--");
     const recursive = flags.some((flag) => flag === "--recursive" || /^-[^-]*r/i.test(flag));
     const forced = flags.some((flag) => flag === "--force" || /^-[^-]*f/i.test(flag));
@@ -118,11 +133,43 @@ function containsCatastrophicRm(command) {
 
 function isProtectedDeleteTarget(target) {
   const clean = String(target).replace(/["']/g, "").replace(/\/$/, "") || "/";
+  if (/^(?:\.|\.\.|\.\/\*|\*|\$PWD|\$\{PWD\}|\$\(pwd\))$/i.test(clean)) return true;
+  if (/^\/workspace(?:\/|$)/i.test(clean)) return true;
   if (/^(?:~|\$HOME|\$\{HOME\})(?:\/|$)/i.test(clean)) return true;
   if (/^\/home(?:\/|$)/i.test(clean)) return true;
   if (/^\/mnt\/c(?:\/|$)/i.test(clean)) return true;
   if (!clean.startsWith("/")) return false;
   return path.posix.resolve(clean).length < 6;
+}
+
+function isDestructiveGitCleanSegment(segment) {
+  const words = shellWords(stripCommandPrefixes(segment));
+  if (words[0]?.toLowerCase() !== "git") return false;
+  const cleanIndex = words.findIndex((word, index) => (
+    index > 0 && word.toLowerCase() === "clean"
+  ));
+  if (cleanIndex < 0) return false;
+  return words.slice(cleanIndex + 1).some((word) => (
+    word === "--force" || /^-[^-]*f/i.test(word)
+  ));
+}
+
+function isDynamicShellExecutionSegment(segment) {
+  const command = stripCommandPrefixes(segment);
+  return /^eval(?:\s|$)/i.test(command);
+}
+
+function stripCommandPrefixes(value) {
+  let command = String(value ?? "").trim();
+  for (let i = 0; i < 3; i += 1) {
+    const next = command.replace(
+      /^(?:(?:\/usr\/bin\/)?env(?:\s+(?:-[^\s]+|[A-Za-z_][A-Za-z0-9_]*=[^\s]+))*|command)\s+/i,
+      ""
+    );
+    if (next === command) break;
+    command = next;
+  }
+  return command;
 }
 
 function isShutdownSegment(segment) {

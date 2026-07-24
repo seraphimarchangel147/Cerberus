@@ -95,10 +95,14 @@ export class HookRegistry {
    */
   async runVeto(event, payload = {}, options = {}) {
     assertEventName(event, { wildcard: false });
-    const hooks = this._matching(event);
+    const hooks = this._matching(event)
+      .filter((hook) => projectHookEnabled(hook, payload));
     if (!hooks.length) return allowVerdict();
 
     const immutablePayload = freezeHookPayload(payload);
+    const observerPayload = payload?.privateInput === true
+      ? freezeHookPayload(redactPrivateHookInput(payload))
+      : immutablePayload;
     const totalMs = boundedInteger(options.timeoutMs, this.timeoutMs, 1, 5_000);
     const deadline = Date.now() + totalMs;
 
@@ -116,7 +120,12 @@ export class HookRegistry {
 
       let raw;
       try {
-        raw = await invokeWithTimeout(hook, immutablePayload, event, hookTimeoutMs);
+        raw = await invokeWithTimeout(
+          hook,
+          hook.builtin ? immutablePayload : observerPayload,
+          event,
+          hookTimeoutMs
+        );
       } catch (error) {
         this._warn(
           `${hookLabel(hook)} failed open for ${event}: ${safeErrorMessage(error)}`
@@ -260,10 +269,15 @@ export class HookRegistry {
   }
 
   async _dispatchObservers(event, payload) {
-    for (const hook of this._matching(event)) {
+    for (const hook of this._matching(event).filter(
+      (candidate) => projectHookEnabled(candidate, payload)
+    )) {
       const timeoutMs = Math.min(hook.timeoutMs ?? this.perHookTimeoutMs, this.timeoutMs);
       try {
-        await invokeWithTimeout(hook, payload, event, timeoutMs);
+        const delivered = payload?.privateInput === true && !hook.builtin
+          ? freezeHookPayload(redactPrivateHookInput(payload))
+          : payload;
+        await invokeWithTimeout(hook, delivered, event, timeoutMs);
       } catch (error) {
         this._warn(`${hookLabel(hook)} failed open for ${event}: ${safeErrorMessage(error)}`);
       }
@@ -536,6 +550,36 @@ function assertEventName(event, { wildcard }) {
   if (!pattern.test(event)) {
     throw new Error(`Hook event '${event}' contains unsupported characters.`);
   }
+}
+
+function redactPrivateHookInput(value) {
+  const clone = cloneHookValue(value, new WeakSet(), 0);
+  if (
+    clone?.args
+    && typeof clone.args === "object"
+    && !Array.isArray(clone.args)
+    && Object.hasOwn(clone.args, "command")
+  ) {
+    clone.args.command = "[TERMINAL INPUT OMITTED]";
+  }
+  return clone;
+}
+
+function projectHookEnabled(hook, payload) {
+  if (hook?.builtin) return true;
+  const grants = payload?.projectHookIds;
+  if (!Array.isArray(grants)) return !isProjectTaggedPayload(payload);
+  return grants.includes("*") || grants.includes(hook.name);
+}
+
+function isProjectTaggedPayload(payload) {
+  const projectId = String(
+    payload?.projectId ?? payload?.__projectId ?? ""
+  ).trim().toLowerCase();
+  if (!projectId) return false;
+  return projectId !== "default"
+    || (Number.isSafeInteger(payload?.projectRevision) && payload.projectRevision > 0)
+    || (Number.isSafeInteger(payload?.__projectRevision) && payload.__projectRevision > 0);
 }
 
 function boundedInteger(value, fallback, minimum, maximum) {

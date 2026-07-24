@@ -162,8 +162,7 @@ export class MemorySystem {
       if (!tiers.has(item.tier)) continue;
       if (
         scope
-        && (item.scope ?? "main") !== scope
-        && (exactScope || (item.scope ?? "main") !== "main")
+        && !canReadMemoryScope(scope, item.scope, { exactScope })
       ) continue;
       // Superseded items were corrected by the user — never recall the stale
       // version (the correction itself carries the fact forward).
@@ -360,11 +359,9 @@ export class MemorySystem {
     return [...this.items.values()]
       .filter((item) => item?.metadata?.capacityManaged === true)
       // Specialist retrieval already inherits main-scope memory. Freeze the
-      // same effective view so global facts do not become volatile mid-session.
-      .filter((item) => (
-        (item.scope ?? "main") === scope
-        || (scope !== "main" && (item.scope ?? "main") === "main")
-      ))
+      // same effective view so inherited facts do not become volatile
+      // mid-session. Project children inherit their project root, never main.
+      .filter((item) => canReadMemoryScope(scope, item.scope))
       .filter((item) => !item.metadata?.supersededBy && !item.metadata?.condensedInto)
       .sort(compareCuratedItems);
   }
@@ -517,12 +514,15 @@ export class MemorySystem {
   assertCuratedCapacity(candidate, creditIds = new Set()) {
     const credited = new Set(creditIds);
     const candidateScope = candidate.scope ?? "main";
-    // A main-scope write changes every specialist's inherited projection.
-    // Validate each affected view before mutating any item; local writes only
-    // affect their own specialist view.
-    const affectedScopes = candidateScope === "main"
-      ? this.curatedCapacityScopes()
-      : [candidateScope];
+    // Validate every effective projection that inherits this scope before
+    // mutating. Main affects legacy specialist scopes but not projects;
+    // project roots affect only children of that same project.
+    const affectedScopes = [...new Set([
+      candidateScope,
+      ...this.curatedCapacityScopes().filter(
+        (scope) => canReadMemoryScope(scope, candidateScope)
+      )
+    ])].sort();
     for (const scope of affectedScopes) {
       const usage = this.curatedUsage({ scope });
       const retained = usage.items.filter((item) => !credited.has(item.id));
@@ -557,6 +557,25 @@ export class MemorySystem {
 function positiveMemoryInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function canReadMemoryScope(requestedScope, itemScope, { exactScope = false } = {}) {
+  const requested = String(requestedScope ?? "main");
+  const candidate = String(itemScope ?? "main");
+  if (candidate === requested) return true;
+  if (exactScope) return false;
+
+  const projectRoot = projectMemoryRoot(requested);
+  if (projectRoot) {
+    return requested !== projectRoot && candidate === projectRoot;
+  }
+  return requested !== "main" && candidate === "main";
+}
+
+function projectMemoryRoot(scope) {
+  if (!scope.startsWith("project:")) return null;
+  const nestedAt = scope.indexOf(":", "project:".length);
+  return nestedAt === -1 ? scope : scope.slice(0, nestedAt);
 }
 
 function normalizedMemoryIds(ids) {

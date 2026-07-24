@@ -7,10 +7,14 @@ import path from "node:path";
 import { BudgetGuard } from "../src/budget-guard.js";
 import { CreditLedger } from "../src/credit-ledger.js";
 
-function tmp() {
+function tmp(options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bg-"));
   const ledger = new CreditLedger({ storePath: path.join(dir, "ledger.jsonl") });
-  const guard = new BudgetGuard({ storePath: path.join(dir, "usage.json"), ledger });
+  const guard = new BudgetGuard({
+    storePath: path.join(dir, "usage.json"),
+    ledger,
+    ...options
+  });
   return { guard, ledger };
 }
 
@@ -35,6 +39,108 @@ test("record without meta still aggregates and does not throw (back-compat)", ()
   const rows = ledger.query({ days: 1 });
   assert.equal(rows.length, 1);
   assert.equal(rows[0].channel, null);
+});
+
+test("OpenAI cached input is split from the total instead of double-charged", () => {
+  const { guard, ledger } = tmp({
+    prices: {
+      "test-openai": { in: 5, out: 0, cacheRead: 0.5, cacheWrite: 0 }
+    }
+  });
+  const result = guard.record({
+    input_tokens: 1000,
+    output_tokens: 0,
+    input_tokens_details: { cached_tokens: 400 }
+  }, "test-openai");
+
+  const [row] = ledger.query({ days: 1 });
+  assert.deepEqual(row.tokens, {
+    input: 600,
+    output: 0,
+    cacheRead: 400,
+    cacheWrite: 0
+  });
+  assert.ok(Math.abs(result.added - 0.0032) < 1e-12);
+  assert.deepEqual(guard.status().tokens, {
+    input: 600,
+    output: 0,
+    cacheRead: 400,
+    cacheWrite: 0
+  });
+});
+
+test("OpenAI Chat cached input uses the same mutually-exclusive buckets", () => {
+  const { guard, ledger } = tmp();
+  guard.record({
+    prompt_tokens: 300,
+    completion_tokens: 20,
+    prompt_tokens_details: { cached_tokens: 125 }
+  }, "gpt-5");
+
+  assert.deepEqual(ledger.query({ days: 1 })[0].tokens, {
+    input: 175,
+    output: 20,
+    cacheRead: 125,
+    cacheWrite: 0
+  });
+});
+
+test("Anthropic cache read/write fields remain additive to input_tokens", () => {
+  const { guard, ledger } = tmp();
+  guard.record({
+    input_tokens: 100,
+    output_tokens: 25,
+    cache_read_input_tokens: 40,
+    cache_creation_input_tokens: 30
+  }, "claude-sonnet-4-6");
+
+  assert.deepEqual(ledger.query({ days: 1 })[0].tokens, {
+    input: 100,
+    output: 25,
+    cacheRead: 40,
+    cacheWrite: 30
+  });
+});
+
+test("record forwards only normalized content-free efficiency metadata", () => {
+  const { guard, ledger } = tmp();
+  guard.record({ input_tokens: 10, output_tokens: 2 }, "gpt-5", {
+    provider: "openai",
+    tools: ["read_file", "write_file"],
+    efficiency: {
+      requestBytes: 4096,
+      toolCount: 2,
+      toolSuccessCount: 1,
+      toolFailureCount: 1,
+      toolSchemaBytes: 1024,
+      visibleSchemaBytes: 384,
+      deferredSchemaBytes: 640,
+      visibleToolCount: 8,
+      deferredToolCount: 12,
+      compression: true,
+      stopReason: "completed",
+      latencyMs: 250,
+      prompt: "this content must not be persisted"
+    }
+  });
+
+  const [row] = ledger.query({ days: 1 });
+  assert.equal(row.provider, "openai");
+  assert.deepEqual(row.efficiency, {
+    requestBytes: 4096,
+    toolCount: 2,
+    toolSuccessCount: 1,
+    toolFailureCount: 1,
+    toolSchemaBytes: 1024,
+    visibleSchemaBytes: 384,
+    deferredSchemaBytes: 640,
+    visibleToolCount: 8,
+    deferredToolCount: 12,
+    compression: true,
+    stopReason: "completed",
+    latencyMs: 250
+  });
+  assert.doesNotMatch(JSON.stringify(row.efficiency), /this content/);
 });
 
 test("priceFor bills nano/mini variants at their own rate, not flagship (longest-prefix)", () => {
