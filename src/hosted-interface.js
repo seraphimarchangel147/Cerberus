@@ -2063,14 +2063,14 @@ function renderLoginPage(reason, next = "/") {
   const safeNext = typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : "/";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Cerberus · auth</title>
-<style>body{font:14px/1.5 ui-sans-serif,system-ui;background:#0e1411;color:#e8efea;display:grid;place-items:center;min-height:100vh;margin:0}
-form{background:#161d19;border:1px solid #2a352f;border-radius:10px;padding:24px;width:min(420px,90vw)}
-h1{margin:0 0 4px;font-size:18px}p{color:#8da59a;margin:6px 0 16px;font-size:13px}
-input{width:100%;padding:9px 12px;background:#0e1411;color:#e8efea;border:1px solid #2a352f;border-radius:6px;font:inherit;margin-bottom:10px}
-button{background:#6fe1b1;color:#002219;border:0;padding:9px 14px;border-radius:6px;font-weight:700;cursor:pointer;width:100%}
+<style>body{font:14px/1.5 ui-sans-serif,system-ui;background:#030304;color:#ece9e7;display:grid;place-items:center;min-height:100vh;margin:0}
+form{background:#0a0a0c;border:1px solid #2b1d1d;border-radius:10px;padding:24px;width:min(420px,90vw)}
+h1{margin:0 0 4px;font-size:18px}p{color:#8f7d78;margin:6px 0 16px;font-size:13px}
+input{width:100%;padding:9px 12px;background:#030304;color:#ece9e7;border:1px solid #2b1d1d;border-radius:6px;font:inherit;margin-bottom:10px}
+button{background:#ff2b2b;color:#0a0203;border:0;padding:9px 14px;border-radius:6px;font-weight:700;cursor:pointer;width:100%}
 .err{color:#f08080;margin-bottom:10px;font-size:12px}
-.hint{color:#8da59a;font-size:12px;margin-top:14px}
-.hint code{background:#0e1411;padding:2px 5px;border-radius:3px;border:1px solid #2a352f}</style></head>
+.hint{color:#8f7d78;font-size:12px;margin-top:14px}
+.hint code{background:#030304;padding:2px 5px;border-radius:3px;border:1px solid #2b1d1d}</style></head>
 <body><form method="POST" action="/sign-in" id="loginForm" enctype="application/x-www-form-urlencoded">
 <h1>Cerberus</h1><p>This daemon requires authentication.</p>
 ${reason ? `<div class="err">${escapeHtmlForLogin(reason)}</div>` : ""}
@@ -2357,7 +2357,7 @@ function hudIcon(name) {
 
 /* Inline SVG favicon from the mark (avoids a favicon.ico 404 + brands the tab). */
 function cerbFavicon() {
-  const svg = cerbMarkSVG(64, { stroke: "#ff2b2b", bg: "#050506" });
+  const svg = cerbMarkSVG(64, { stroke: "#ff2b2b", bg: "#030304" });
   return "data:image/svg+xml," + encodeURIComponent(svg);
 }
 
@@ -2374,16 +2374,16 @@ function renderApp() {
       color-scheme: light dark;
       /* Legacy tokens — kept so existing inline-styled components don't
          drift visually while we migrate them to the shadcn-vocab layer. */
-      --bg: #050506;
-      --panel: #0c0d10;
-      --panel-2: #12141a;
-      --text: #e6e8ea;
-      --muted: #6e7681;
-      --line: #23262c;
+      --bg: #030304;
+      --panel: #0a0a0c;
+      --panel-2: #161010;
+      --text: #ece9e7;
+      --muted: #8f7d78;
+      --line: #2b1d1d;
       --accent: #ff2b2b;
       --accent-soft: rgba(255, 43, 43, 0.10);
       --user: #1a0d0e;
-      --assistant: #12141a;
+      --assistant: #161010;
       --warn: #f0b454;
       --err: #ff5a4a;
 
@@ -2411,7 +2411,7 @@ function renderApp() {
       --foreground: var(--text);
       --card: var(--panel);
       --card-foreground: var(--text);
-      --popover: #12141a;
+      --popover: #161010;
       --popover-foreground: var(--text);
       --primary: var(--accent);
       --primary-foreground: #0a0203;
@@ -2621,18 +2621,18 @@ function renderApp() {
     .tier-pills { display: flex; gap: 4px; }
     .tier-pills button { background: var(--panel); color: var(--muted); border: 1px solid var(--line); padding: 6px 14px; border-radius: 18px; font: inherit; font-size: 12px; cursor: pointer; }
     .tier-pills button .count { color: var(--muted); margin-left: 6px; font-size: 11px; }
-    .tier-pills button:hover { color: var(--text); border-color: #3a4a42; }
+    .tier-pills button:hover { color: var(--text); border-color: #4a2a24; }
     .tier-pills button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
     .tier-pills button.active .count { color: var(--accent); }
     .mem-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; max-width: 1180px; margin: 0 auto; }
     .mem-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 140px; }
     .mem-card.tier-short { border-left: 3px solid #ff2b2b; }
     .mem-card.tier-medium { border-left: 3px solid #f0b454; }
-    .mem-card.tier-long { border-left: 3px solid #a98ef5; }
+    .mem-card.tier-long { border-left: 3px solid #ff7a45; }
     .mem-head { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
     .mem-head .badge.tier-short { background: rgba(255,43,43,0.12); color: #ff5a4a; border-color: rgba(255,43,43,0.3); }
     .mem-head .badge.tier-medium { background: rgba(240,180,84,0.12); color: #f0b454; border-color: rgba(240,180,84,0.3); }
-    .mem-head .badge.tier-long { background: rgba(169,142,245,0.12); color: #a98ef5; border-color: rgba(169,142,245,0.3); }
+    .mem-head .badge.tier-long { background: rgba(255,122,69,0.12); color: #ff7a45; border-color: rgba(255,122,69,0.3); }
     .mem-age { color: var(--muted); font-size: 11px; margin-left: auto; }
     .mem-content { font-size: 13px; line-height: 1.5; max-height: 8.4em; overflow: hidden; position: relative; word-break: break-word; }
     .mem-content::after { content: ""; position: absolute; bottom: 0; left: 0; right: 0; height: 1.6em; background: linear-gradient(transparent, var(--panel)); pointer-events: none; }
@@ -2650,7 +2650,7 @@ function renderApp() {
     .badge.ok { color: var(--accent); }
     .badge.warn { color: var(--warn); }
     .badge.err { color: var(--err); }
-    .badge.mcp { background: rgba(96,165,250,.16); color: #7fb3ff; border-color: rgba(96,165,250,.35); }
+    .badge.mcp { background: rgba(255,90,74,.14); color: #ff8a7a; border-color: rgba(255,90,74,.35); }
     .badge.muted { opacity: .65; }
     pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
     input, select, textarea {
@@ -2765,7 +2765,7 @@ function renderApp() {
       line-height: 1.4; box-shadow: var(--shadow); pointer-events: auto;
       transition: opacity .35s ease, transform .35s ease;
     }
-    .ui-toast-ok { background: #1a3a2a; color: #7be59c; border: 1px solid #2d5b40; }
+    .ui-toast-ok { background: #2a1610; color: #ff9a7a; border: 1px solid #4a2a1e; }
     .ui-toast-err { background: #3a1a1a; color: #f08a8a; border: 1px solid #5b2d2d; }
     .ui-toast-leaving { opacity: 0; transform: translateX(8px); }
 
@@ -3938,7 +3938,7 @@ function cerbHoloStart() {
   gl.enableVertexAttribArray(locP);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive — emissive hologram
-  gl.clearColor(0.012, 0.013, 0.018, 1.0);
+  gl.clearColor(0.012, 0.012, 0.014, 1.0);
 
   const makeBuf = (data) => {
     const b = gl.createBuffer();
@@ -4472,7 +4472,7 @@ async function renderSkillDetail(skill) {
   const spark = recent.length
     ? \`<div class="row" style="gap:2px;align-items:flex-end;height:34px;margin:4px 0 2px;">\${recent.map((r) => {
         const h = Math.max(4, Math.round(r.score * 32));
-        const c = r.score >= 0.6 ? "var(--ok, #4caf82)" : r.score >= 0.4 ? "var(--warn, #d9a441)" : "var(--err, #d96b6b)";
+        const c = r.score >= 0.6 ? "var(--ok, #ff7a45)" : r.score >= 0.4 ? "var(--warn, #d9a441)" : "var(--err, #d96b6b)";
         return \`<div title="\${(r.score * 100).toFixed(0)}% · \${escapeHtml(r.at ?? "")}" style="width:10px;height:\${h}px;background:\${c};border-radius:2px 2px 0 0;"></div>\`;
       }).join("")}</div><div class="ui-muted" style="font-size:10px;">last \${recent.length} graded runs →</div>\`
     : '<p class="ui-muted" style="font-size:12px;">No graded runs yet — run it once to start the quality track record.</p>';
@@ -6366,7 +6366,7 @@ function renderTimeline(rows) {
   }
   const sortedHours = [...byHour.keys()].sort();
   const max = Math.max(...rows.map((r) => r.n));
-  const palette = ["#6fe1b1", "#f0b454", "#a98ef5", "#7ab8ff", "#f08080", "#94a9b1"];
+  const palette = ["#ff2b2b", "#ff5a4a", "#ff7a45", "#f0b454", "#ff9a7a", "#c9a09a"];
   const appColor = {};
   [...apps].forEach((a, i) => appColor[a] = palette[i % palette.length]);
   host.innerHTML = \`
