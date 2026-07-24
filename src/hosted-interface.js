@@ -2456,7 +2456,16 @@ function renderApp() {
     }
     /* ─── Hermes-style shell: fixed left nav rail + content column ─────── */
     :root { --rail-w: 232px; }
-    .app { display: grid; grid-template-columns: var(--rail-w) 1fr; height: 100vh; }
+    /* Ambient phase-transition background — fixed full-viewport canvas behind
+       the app shell. pointer-events:none so it never intercepts interaction;
+       z-index 0 with .app raised above it. */
+    #cerbBg {
+      position: fixed; inset: 0; z-index: 0;
+      width: 100vw; height: 100vh;
+      pointer-events: none;
+      background: var(--bg);
+    }
+    .app { position: relative; z-index: 1; display: grid; grid-template-columns: var(--rail-w) 1fr; height: 100vh; }
 
     /* Left navigation rail — brand at top, grouped vertical nav, setup pinned
        to the bottom. Mirrors the Hermes dashboard's persistent left sidebar. */
@@ -3127,6 +3136,7 @@ function renderApp() {
   </style>
 </head>
 <body>
+<canvas id="cerbBg" aria-hidden="true"></canvas>
 <div class="app">
   <aside class="railnav">
     <div class="brand">
@@ -6890,6 +6900,432 @@ const initialTab = (() => {
   } catch { return "chat"; }
 })();
 switchTab(initialTab);
+
+/* ─────────────────────────────────────────────────────────────
+   CERBERUS ambient background — "phase transition" particle lattice
+   Adapted from pbakaus/radiant "Phase Transition" (MIT), recolored to
+   the crimson/black palette and tuned as a low-presence ambient layer.
+   A grid of embers sweeps between ORDER (calm crimson lattice) and
+   CHAOS (incandescent turbulence) behind a travelling wavefront.
+   Canvas 2D, self-contained, honours prefers-reduced-motion and pauses
+   when the tab is hidden. The wavefront gently follows the cursor.
+   ───────────────────────────────────────────────────────────── */
+(function cerbBackground() {
+  var canvas = document.getElementById("cerbBg");
+  if (!canvas) return;
+  var ctx = canvas.getContext("2d");
+  var prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* Ambient tuning — keep it subtle behind the working UI. */
+  var WAVE_SPEED = 0.35;
+  var PARTICLE_DENSITY = 0.45;
+  var AMBIENT = 0.55; /* global presence multiplier */
+
+  var width, height, dpr, cx, cy;
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = width / 2;
+    cy = height / 2;
+  }
+  var needsResize = false;
+  window.addEventListener("resize", function() { needsResize = true; });
+  resize();
+
+  /* ── value noise + fbm ── */
+  var perm = new Uint8Array(512);
+  var grad2 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
+  (function initNoise() {
+    var p = new Uint8Array(256);
+    for (var i = 0; i < 256; i++) p[i] = i;
+    for (var i = 255; i > 0; i--) {
+      var j = (Math.random() * (i + 1)) | 0;
+      var t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+    for (var i = 0; i < 512; i++) perm[i] = p[i & 255];
+  })();
+  function noise2d(x, y) {
+    var ix = Math.floor(x) & 255, iy = Math.floor(y) & 255;
+    var fx = x - Math.floor(x), fy = y - Math.floor(y);
+    var ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+    var g00 = grad2[perm[ix + perm[iy]] & 7];
+    var g10 = grad2[perm[ix + 1 + perm[iy]] & 7];
+    var g01 = grad2[perm[ix + perm[iy + 1]] & 7];
+    var g11 = grad2[perm[ix + 1 + perm[iy + 1]] & 7];
+    var d00 = g00[0] * fx + g00[1] * fy;
+    var d10 = g10[0] * (fx - 1) + g10[1] * fy;
+    var d01 = g01[0] * fx + g01[1] * (fy - 1);
+    var d11 = g11[0] * (fx - 1) + g11[1] * (fy - 1);
+    var nx0 = d00 + ux * (d10 - d00);
+    var nx1 = d01 + ux * (d11 - d01);
+    return nx0 + uy * (nx1 - nx0);
+  }
+  function fbm(x, y, oct) {
+    var v = 0, a = 0.5, f = 1;
+    for (var i = 0; i < oct; i++) { v += a * noise2d(x * f, y * f); a *= 0.5; f *= 2; }
+    return v;
+  }
+  function smoothstep(e0, e1, x) {
+    var t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  /* ── particle lattice ── */
+  var COUNT = 0, posX, posY, velX, velY, homeX, homeY, latticeCol, latticeRow;
+  var cols, rows, spacingX, spacingY;
+  function initParticles() {
+    var area = width * height;
+    var base = 2500 * PARTICLE_DENSITY;
+    COUNT = Math.round(base * Math.sqrt(area / (1920 * 1080)));
+    COUNT = Math.max(400, Math.min(COUNT, 5000));
+    var aspect = width / height;
+    rows = Math.round(Math.sqrt(COUNT / aspect));
+    cols = Math.round(rows * aspect);
+    COUNT = rows * cols;
+    spacingX = width / (cols + 1);
+    spacingY = height / (rows + 1);
+    posX = new Float32Array(COUNT); posY = new Float32Array(COUNT);
+    velX = new Float32Array(COUNT); velY = new Float32Array(COUNT);
+    homeX = new Float32Array(COUNT); homeY = new Float32Array(COUNT);
+    latticeCol = new Int32Array(COUNT); latticeRow = new Int32Array(COUNT);
+    var idx = 0;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var hx = (c + 1) * spacingX, hy = (r + 1) * spacingY;
+        homeX[idx] = hx; homeY[idx] = hy;
+        posX[idx] = hx + (Math.random() - 0.5) * spacingX * 0.3;
+        posY[idx] = hy + (Math.random() - 0.5) * spacingY * 0.3;
+        velX[idx] = 0; velY[idx] = 0;
+        latticeCol[idx] = c; latticeRow[idx] = r;
+        idx++;
+      }
+    }
+  }
+  initParticles();
+
+  /* ── wavefront state ── */
+  var wavePos = 0, waveDir = 1, wavePhase = 0, waveCycleTime = 0;
+
+  /* ── trail buffer ── */
+  var trailCanvas = document.createElement("canvas");
+  var trailCtx = trailCanvas.getContext("2d");
+  function resizeTrail() {
+    trailCanvas.width = canvas.width;
+    trailCanvas.height = canvas.height;
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    trailCtx.fillStyle = "#080404";
+    trailCtx.fillRect(0, 0, width, height);
+  }
+  resizeTrail();
+
+  /* ── glow sprites (crimson family) ── */
+  var GLOW_RES = 64;
+  function makeGlowSprite(r, g, b) {
+    var c = document.createElement("canvas");
+    c.width = GLOW_RES * 2; c.height = GLOW_RES * 2;
+    var gc = c.getContext("2d");
+    var grad = gc.createRadialGradient(GLOW_RES, GLOW_RES, 0, GLOW_RES, GLOW_RES, GLOW_RES);
+    grad.addColorStop(0, "rgba(" + r + "," + g + "," + b + ", 0.6)");
+    grad.addColorStop(0.3, "rgba(" + r + "," + g + "," + b + ", 0.2)");
+    grad.addColorStop(0.7, "rgba(" + r + "," + g + "," + b + ", 0.04)");
+    grad.addColorStop(1, "rgba(" + r + "," + g + "," + b + ", 0)");
+    gc.fillStyle = grad;
+    gc.beginPath();
+    gc.arc(GLOW_RES, GLOW_RES, GLOW_RES, 0, Math.PI * 2);
+    gc.fill();
+    return c;
+  }
+  var glowOrdered = makeGlowSprite(0x8b, 0x1a, 0x16);
+  var glowChaotic = makeGlowSprite(0xff, 0x3a, 0x26);
+  var glowWave = makeGlowSprite(0xff, 0x5a, 0x42);
+
+  /* ── crimson palette ──
+     ORDER  : deep crimson  -> ember
+     CHAOS  : hot signal red -> incandescent
+     WAVE   : bright signal red                              */
+  var ORD_R = 0x7a, ORD_G = 0x16, ORD_B = 0x16;
+  var ORD_HI_R = 0xc2, ORD_HI_G = 0x3a, ORD_HI_B = 0x30;
+  var CHA_R = 0xff, CHA_G = 0x2f, CHA_B = 0x1f;
+  var CHA_HI_R = 0xff, CHA_HI_G = 0x9a, CHA_HI_B = 0x70;
+  var WAVE_R = 0xff, WAVE_G = 0x4a, WAVE_B = 0x38;
+
+  /* ── physics ── */
+  var SPRING_K = 4.0, DAMPING = 3.5;
+  var TURBULENCE_SCALE = 0.003, TURBULENCE_STRENGTH = 120;
+
+  var paused = false, lastTime = 0;
+
+  /* cursor nudges the wavefront; decays back to autonomous sweep */
+  var mouseActive = false, mouseWavePos = 0.5, mouseIdleAt = 0;
+  window.addEventListener("mousemove", function(e) {
+    mouseActive = true;
+    mouseWavePos = e.clientX / width;
+    mouseIdleAt = performance.now();
+  });
+
+  function update(dt, time) {
+    var cycleDuration = (width * 1.4) / (WAVE_SPEED * 180);
+    waveCycleTime += dt;
+    var raw = waveCycleTime / cycleDuration;
+    var ci = Math.floor(raw);
+    var wc = raw - ci;
+    var eased = wc * wc * (3 - 2 * wc);
+    if (ci % 2 === 0) { wavePos = eased; waveDir = 1; }
+    else { wavePos = 1 - eased; waveDir = -1; }
+    wavePhase = ci % 4 < 2 ? 0 : 1;
+
+    if (mouseActive) {
+      if (performance.now() - mouseIdleAt > 3000) mouseActive = false;
+      else wavePos = mouseWavePos;
+    }
+
+    var wavePx = wavePos * width;
+    var transWidth = width * 0.12;
+    var noiseT = time * 0.4;
+
+    for (var i = 0; i < COUNT; i++) {
+      var px = posX[i], py = posY[i];
+      var distToWave = (px - wavePx) * waveDir;
+      var phase = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, distToWave)
+        : smoothstep(-transWidth, transWidth, distToWave);
+      var transEnergy = 1 - Math.abs(distToWave) / transWidth;
+      transEnergy = Math.max(0, transEnergy);
+      transEnergy = transEnergy * transEnergy;
+
+      var dx = homeX[i] - px, dy = homeY[i] - py;
+      var orderedFx = dx * SPRING_K - velX[i] * DAMPING;
+      var orderedFy = dy * SPRING_K - velY[i] * DAMPING;
+
+      var nx = px * TURBULENCE_SCALE, ny = py * TURBULENCE_SCALE;
+      var angle = fbm(nx + noiseT, ny + noiseT * 0.7, 3) * Math.PI * 4;
+      var turbFx = Math.cos(angle) * TURBULENCE_STRENGTH;
+      var turbFy = Math.sin(angle) * TURBULENCE_STRENGTH;
+      var sa = Math.atan2(py - cy, px - cx);
+      var sd = Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+      var ss = 30 * Math.min(1, sd / (width * 0.3));
+      turbFx += Math.cos(sa + Math.PI * 0.5) * ss;
+      turbFy += Math.sin(sa + Math.PI * 0.5) * ss;
+      var chaoticFx = turbFx - velX[i] * 1.2;
+      var chaoticFy = turbFy - velY[i] * 1.2;
+
+      var kickFx = 0, kickFy = 0;
+      if (transEnergy > 0.01) {
+        var ka = fbm(nx * 2 + noiseT * 1.5, ny * 2 + 100, 2) * Math.PI * 2;
+        var ks = transEnergy * 200;
+        kickFx = Math.cos(ka) * ks; kickFy = Math.sin(ka) * ks;
+      }
+
+      var fx = orderedFx * (1 - phase) + chaoticFx * phase + kickFx;
+      var fy = orderedFy * (1 - phase) + chaoticFy * phase + kickFy;
+      velX[i] += fx * dt; velY[i] += fy * dt;
+      var speed = Math.sqrt(velX[i] * velX[i] + velY[i] * velY[i]);
+      if (speed > 300) { velX[i] = velX[i] / speed * 300; velY[i] = velY[i] / speed * 300; }
+      posX[i] += velX[i] * dt; posY[i] += velY[i] * dt;
+
+      var m = 20;
+      if (posX[i] < -m) { posX[i] = -m; velX[i] = Math.abs(velX[i]) * 0.5; }
+      if (posX[i] > width + m) { posX[i] = width + m; velX[i] = -Math.abs(velX[i]) * 0.5; }
+      if (posY[i] < -m) { posY[i] = -m; velY[i] = Math.abs(velY[i]) * 0.5; }
+      if (posY[i] > height + m) { posY[i] = height + m; velY[i] = -Math.abs(velY[i]) * 0.5; }
+    }
+  }
+
+  function render(timestamp) {
+    if (paused) { requestAnimationFrame(render); return; }
+    if (needsResize) { needsResize = false; resize(); initParticles(); resizeTrail(); }
+    if (!lastTime) lastTime = timestamp;
+    var dt = Math.min((timestamp - lastTime) / 1000, 0.033);
+    lastTime = timestamp;
+    if (prefersReduced) dt *= 0.15;
+    var time = timestamp / 1000;
+    update(dt, time);
+
+    /* fade previous frame into the trail buffer */
+    trailCtx.fillStyle = "rgba(8, 4, 4, 0.15)";
+    trailCtx.fillRect(0, 0, width, height);
+
+    var wavePx = wavePos * width;
+    var transWidth = width * 0.12;
+    var noiseT = time * 0.4;
+
+    /* Layer 1: chaotic-zone haze */
+    if (!prefersReduced) {
+      var bgStep = 40;
+      for (var bx = 0; bx < width; bx += bgStep) {
+        for (var by = 0; by < height; by += bgStep) {
+          var dw = (bx - wavePx) * waveDir;
+          var bp = wavePhase === 0
+            ? 1 - smoothstep(-transWidth, transWidth, dw)
+            : smoothstep(-transWidth, transWidth, dw);
+          var nv = fbm(bx * 0.005 + noiseT * 0.3, by * 0.005 + noiseT * 0.2, 2);
+          var ba = (0.01 + Math.abs(nv) * 0.04) * bp * AMBIENT;
+          if (ba < 0.003) continue;
+          trailCtx.fillStyle = "rgba(" + CHA_R + "," + CHA_G + "," + CHA_B + "," + ba.toFixed(3) + ")";
+          trailCtx.fillRect(bx, by, bgStep, bgStep);
+        }
+      }
+    }
+
+    /* Layer 2: crimson lattice connections in ordered regions */
+    trailCtx.lineWidth = 0.5;
+    for (var i = 0; i < COUNT; i++) {
+      var c = latticeCol[i], r = latticeRow[i];
+      var dw2 = (posX[i] - wavePx) * waveDir;
+      var ph = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, dw2)
+        : smoothstep(-transWidth, transWidth, dw2);
+      if (ph > 0.5) continue;
+      var orderedAmount = 1 - ph * 2;
+      var lineAlpha = orderedAmount * 0.08 * AMBIENT;
+      if (lineAlpha < 0.005) continue;
+      if (c < cols - 1) {
+        var j = i + 1;
+        var ddx = posX[j] - posX[i], ddy = posY[j] - posY[i];
+        var dist = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (dist < spacingX * 2) {
+          var a = lineAlpha * (1 - dist / (spacingX * 2));
+          trailCtx.strokeStyle = "rgba(140, 30, 26, " + a.toFixed(3) + ")";
+          trailCtx.beginPath();
+          trailCtx.moveTo(posX[i], posY[i]);
+          trailCtx.lineTo(posX[j], posY[j]);
+          trailCtx.stroke();
+        }
+      }
+      if (r < rows - 1) {
+        var j2 = i + cols;
+        var ddx2 = posX[j2] - posX[i], ddy2 = posY[j2] - posY[i];
+        var dist2 = Math.sqrt(ddx2 * ddx2 + ddy2 * ddy2);
+        if (dist2 < spacingY * 2) {
+          var a2 = lineAlpha * (1 - dist2 / (spacingY * 2));
+          trailCtx.strokeStyle = "rgba(140, 30, 26, " + a2.toFixed(3) + ")";
+          trailCtx.beginPath();
+          trailCtx.moveTo(posX[i], posY[i]);
+          trailCtx.lineTo(posX[j2], posY[j2]);
+          trailCtx.stroke();
+        }
+      }
+    }
+
+    /* Layer 3: wavefront band */
+    if (!prefersReduced) {
+      var wg = transWidth * 2.5;
+      var grad = trailCtx.createLinearGradient(wavePx - wg, 0, wavePx + wg, 0);
+      grad.addColorStop(0, "rgba(255, 74, 56, 0)");
+      grad.addColorStop(0.3, "rgba(255, 74, 56, " + (0.02 * AMBIENT).toFixed(3) + ")");
+      grad.addColorStop(0.5, "rgba(255, 110, 90, " + (0.06 * AMBIENT).toFixed(3) + ")");
+      grad.addColorStop(0.7, "rgba(255, 74, 56, " + (0.02 * AMBIENT).toFixed(3) + ")");
+      grad.addColorStop(1, "rgba(255, 74, 56, 0)");
+      trailCtx.fillStyle = grad;
+      trailCtx.fillRect(wavePx - wg, 0, wg * 2, height);
+      trailCtx.strokeStyle = "rgba(255, 120, 96, " + (0.12 * AMBIENT).toFixed(3) + ")";
+      trailCtx.lineWidth = 2;
+      trailCtx.beginPath();
+      for (var y = 0; y < height; y += 8) {
+        var wob = fbm(y * 0.01 + time * 0.5, time * 0.3, 2) * 15;
+        if (y === 0) trailCtx.moveTo(wavePx + wob, y);
+        else trailCtx.lineTo(wavePx + wob, y);
+      }
+      trailCtx.stroke();
+    }
+
+    /* Layer 4: chaotic trails */
+    for (var i2 = 0; i2 < COUNT; i2++) {
+      var dw3 = (posX[i2] - wavePx) * waveDir;
+      var ph3 = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, dw3)
+        : smoothstep(-transWidth, transWidth, dw3);
+      if (ph3 > 0.3) {
+        var spd = Math.sqrt(velX[i2] * velX[i2] + velY[i2] * velY[i2]);
+        var ta = ph3 * Math.min(1, spd / 100) * 0.15 * AMBIENT;
+        if (ta > 0.005) {
+          trailCtx.fillStyle = "rgba(" + CHA_R + "," + CHA_G + "," + CHA_B + "," + ta.toFixed(3) + ")";
+          trailCtx.beginPath();
+          trailCtx.arc(posX[i2], posY[i2], 1.5, 0, Math.PI * 2);
+          trailCtx.fill();
+        }
+      }
+    }
+
+    /* composite trail onto main canvas */
+    ctx.drawImage(trailCanvas, 0, 0, trailCanvas.width, trailCanvas.height, 0, 0, width, height);
+
+    /* Layer 5: particle cores */
+    for (var i3 = 0; i3 < COUNT; i3++) {
+      var ppx = posX[i3], ppy = posY[i3];
+      var dw4 = (ppx - wavePx) * waveDir;
+      var ph4 = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, dw4)
+        : smoothstep(-transWidth, transWidth, dw4);
+      var te = 1 - Math.abs(dw4) / transWidth;
+      te = Math.max(0, te); te = te * te;
+      var baseSize = 1.2 + ph4 * 0.8;
+      var size = baseSize + te * 2.5;
+      var spd2 = Math.sqrt(velX[i3] * velX[i3] + velY[i3] * velY[i3]);
+      var eb = Math.min(1, spd2 / 150);
+      var rr, gg, bb;
+      if (te > 0.1) {
+        var tt = te;
+        rr = WAVE_R + (255 - WAVE_R) * tt * 0.5;
+        gg = WAVE_G + (255 - WAVE_G) * tt * 0.5;
+        bb = WAVE_B + (255 - WAVE_B) * tt * 0.3;
+      } else if (ph4 < 0.5) {
+        var ddx3 = ppx - homeX[i3], ddy3 = ppy - homeY[i3];
+        var dfh = Math.sqrt(ddx3 * ddx3 + ddy3 * ddy3);
+        var settled = 1 - Math.min(1, dfh / spacingX);
+        rr = ORD_R + (ORD_HI_R - ORD_R) * settled;
+        gg = ORD_G + (ORD_HI_G - ORD_G) * settled;
+        bb = ORD_B + (ORD_HI_B - ORD_B) * settled;
+      } else {
+        rr = CHA_R + (CHA_HI_R - CHA_R) * eb;
+        gg = CHA_G + (CHA_HI_G - CHA_G) * eb;
+        bb = CHA_B + (CHA_HI_B - CHA_B) * eb;
+      }
+      var alpha = (0.6 + te * 0.4 + eb * 0.15) * AMBIENT;
+      alpha = Math.min(1, alpha);
+      if (te > 0.05 || (ph4 > 0.5 && spd2 > 50)) {
+        var gs = size * 3;
+        var ga = (te * 0.3 + eb * 0.08) * alpha;
+        if (ga > 0.005) {
+          var sprite = te > 0.1 ? glowWave : (ph4 < 0.5 ? glowOrdered : glowChaotic);
+          ctx.globalAlpha = Math.min(ga, 0.8);
+          ctx.drawImage(sprite, ppx - gs, ppy - gs, gs * 2, gs * 2);
+          ctx.globalAlpha = 1;
+        }
+      }
+      ctx.fillStyle = "rgba(" + Math.round(rr) + "," + Math.round(gg) + "," + Math.round(bb) + "," + alpha.toFixed(3) + ")";
+      ctx.beginPath();
+      ctx.arc(ppx, ppy, size, 0, Math.PI * 2);
+      ctx.fill();
+      if (te > 0.3) {
+        ctx.fillStyle = "rgba(255, 235, 225, " + (te * 0.5 * AMBIENT).toFixed(3) + ")";
+        ctx.beginPath();
+        ctx.arc(ppx, ppy, size * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    /* vignette */
+    var maxDim = Math.max(width, height);
+    var vig = ctx.createRadialGradient(cx, cy, maxDim * 0.3, cx, cy, maxDim * 0.85);
+    vig.addColorStop(0, "rgba(5, 2, 2, 0)");
+    vig.addColorStop(1, "rgba(5, 2, 2, 0.4)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, width, height);
+
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+
+  document.addEventListener("visibilitychange", function() {
+    paused = document.hidden;
+    if (!paused) lastTime = 0;
+  });
+})();
 </script>
 </body>
 </html>`;
