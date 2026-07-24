@@ -591,7 +591,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // Public liveness only — {ok, firstRun}. The full runtime status
         // (cron records + inputs, channel state, etc.) used to be public
         // here; it now requires auth (Tier-1 hardening, 2026-07).
-        const authed = checkAuth(req, url, getAuthToken()).ok;
+        // /health is a PUBLIC route, so it never passes through the
+        // loopback-trust branch above and no auth cookie is minted for a local
+        // operator. Without honouring loopbackTrusted here the local dashboard's
+        // refreshHealth() reads an undefined `status`, throws, and pins the
+        // header pill to OFFLINE while the daemon is plainly up. This payload is
+        // read-only status (no credentials, no project data), so extending
+        // loopback trust to it grants nothing the local operator lacks.
+        const authed = loopbackTrusted || checkAuth(req, url, getAuthToken()).ok;
         if (!authed) {
           return sendJson(res, 200, { ok: true, firstRun: isFirstRun() });
         }
@@ -4249,14 +4256,14 @@ function renderLoginPage(reason, next = "/") {
   const safeNext = typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : "/";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Cerberus · auth</title>
-<style>body{font:14px/1.5 ui-sans-serif,system-ui;background:#0e1411;color:#e8efea;display:grid;place-items:center;min-height:100vh;margin:0}
-form{background:#161d19;border:1px solid #2a352f;border-radius:10px;padding:24px;width:min(420px,90vw)}
-h1{margin:0 0 4px;font-size:18px}p{color:#8da59a;margin:6px 0 16px;font-size:13px}
-input{width:100%;padding:9px 12px;background:#0e1411;color:#e8efea;border:1px solid #2a352f;border-radius:6px;font:inherit;margin-bottom:10px}
-button{background:#6fe1b1;color:#002219;border:0;padding:9px 14px;border-radius:6px;font-weight:700;cursor:pointer;width:100%}
+<style>body{font:14px/1.5 ui-sans-serif,system-ui;background:#030304;color:#ece9e7;display:grid;place-items:center;min-height:100vh;margin:0}
+form{background:#0a0a0c;border:1px solid #2b1d1d;border-radius:10px;padding:24px;width:min(420px,90vw)}
+h1{margin:0 0 4px;font-size:18px}p{color:#8f7d78;margin:6px 0 16px;font-size:13px}
+input{width:100%;padding:9px 12px;background:#030304;color:#ece9e7;border:1px solid #2b1d1d;border-radius:6px;font:inherit;margin-bottom:10px}
+button{background:#ff2b2b;color:#0a0203;border:0;padding:9px 14px;border-radius:6px;font-weight:700;cursor:pointer;width:100%}
 .err{color:#f08080;margin-bottom:10px;font-size:12px}
-.hint{color:#8da59a;font-size:12px;margin-top:14px}
-.hint code{background:#0e1411;padding:2px 5px;border-radius:3px;border:1px solid #2a352f}</style></head>
+.hint{color:#8f7d78;font-size:12px;margin-top:14px}
+.hint code{background:#030304;padding:2px 5px;border-radius:3px;border:1px solid #2b1d1d}</style></head>
 <body><form method="POST" action="/sign-in" id="loginForm" enctype="application/x-www-form-urlencoded">
 <h1>Cerberus</h1><p>This daemon requires authentication.</p>
 ${reason ? `<div class="err">${escapeHtmlForLogin(reason)}</div>` : ""}
@@ -5188,7 +5195,7 @@ function hudIcon(name) {
 
 /* Inline SVG favicon from the mark (avoids a favicon.ico 404 + brands the tab). */
 function cerbFavicon() {
-  const svg = cerbMarkSVG(64, { stroke: "#ff2b2b", bg: "#050506" });
+  const svg = cerbMarkSVG(64, { stroke: "#ff2b2b", bg: "#030304" });
   return "data:image/svg+xml," + encodeURIComponent(svg);
 }
 
@@ -5205,16 +5212,16 @@ function renderApp() {
       color-scheme: light dark;
       /* Legacy tokens — kept so existing inline-styled components don't
          drift visually while we migrate them to the shadcn-vocab layer. */
-      --bg: #050506;
-      --panel: #0c0d10;
-      --panel-2: #12141a;
-      --text: #e6e8ea;
-      --muted: #6e7681;
-      --line: #23262c;
+      --bg: #030304;
+      --panel: #0a0a0c;
+      --panel-2: #161010;
+      --text: #ece9e7;
+      --muted: #8f7d78;
+      --line: #2b1d1d;
       --accent: #ff2b2b;
       --accent-soft: rgba(255, 43, 43, 0.10);
       --user: #1a0d0e;
-      --assistant: #12141a;
+      --assistant: #161010;
       --warn: #f0b454;
       --err: #ff5a4a;
 
@@ -5242,7 +5249,7 @@ function renderApp() {
       --foreground: var(--text);
       --card: var(--panel);
       --card-foreground: var(--text);
-      --popover: #12141a;
+      --popover: #161010;
       --popover-foreground: var(--text);
       --primary: var(--accent);
       --primary-foreground: #0a0203;
@@ -5287,7 +5294,16 @@ function renderApp() {
     }
     /* ─── Hermes-style shell: fixed left nav rail + content column ─────── */
     :root { --rail-w: 232px; }
-    .app { display: grid; grid-template-columns: var(--rail-w) 1fr; height: 100vh; }
+    /* Ambient phase-transition background — fixed full-viewport canvas behind
+       the app shell. pointer-events:none so it never intercepts interaction;
+       z-index 0 with .app raised above it. */
+    #cerbBg {
+      position: fixed; inset: 0; z-index: 0;
+      width: 100vw; height: 100vh;
+      pointer-events: none;
+      background: var(--bg);
+    }
+    .app { position: relative; z-index: 1; display: grid; grid-template-columns: var(--rail-w) 1fr; height: 100vh; }
 
     /* Left navigation rail — brand at top, grouped vertical nav, setup pinned
        to the bottom. Mirrors the Hermes dashboard's persistent left sidebar. */
@@ -5452,18 +5468,18 @@ function renderApp() {
     .tier-pills { display: flex; gap: 4px; }
     .tier-pills button { background: var(--panel); color: var(--muted); border: 1px solid var(--line); padding: 6px 14px; border-radius: 18px; font: inherit; font-size: 12px; cursor: pointer; }
     .tier-pills button .count { color: var(--muted); margin-left: 6px; font-size: 11px; }
-    .tier-pills button:hover { color: var(--text); border-color: #3a4a42; }
+    .tier-pills button:hover { color: var(--text); border-color: #4a2a24; }
     .tier-pills button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
     .tier-pills button.active .count { color: var(--accent); }
     .mem-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; max-width: 1180px; margin: 0 auto; }
     .mem-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 140px; }
     .mem-card.tier-short { border-left: 3px solid #ff2b2b; }
     .mem-card.tier-medium { border-left: 3px solid #f0b454; }
-    .mem-card.tier-long { border-left: 3px solid #a98ef5; }
+    .mem-card.tier-long { border-left: 3px solid #ff7a45; }
     .mem-head { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
     .mem-head .badge.tier-short { background: rgba(255,43,43,0.12); color: #ff5a4a; border-color: rgba(255,43,43,0.3); }
     .mem-head .badge.tier-medium { background: rgba(240,180,84,0.12); color: #f0b454; border-color: rgba(240,180,84,0.3); }
-    .mem-head .badge.tier-long { background: rgba(169,142,245,0.12); color: #a98ef5; border-color: rgba(169,142,245,0.3); }
+    .mem-head .badge.tier-long { background: rgba(255,122,69,0.12); color: #ff7a45; border-color: rgba(255,122,69,0.3); }
     .mem-age { color: var(--muted); font-size: 11px; margin-left: auto; }
     .mem-content { font-size: 13px; line-height: 1.5; max-height: 8.4em; overflow: hidden; position: relative; word-break: break-word; }
     .mem-content::after { content: ""; position: absolute; bottom: 0; left: 0; right: 0; height: 1.6em; background: linear-gradient(transparent, var(--panel)); pointer-events: none; }
@@ -5481,7 +5497,7 @@ function renderApp() {
     .badge.ok { color: var(--accent); }
     .badge.warn { color: var(--warn); }
     .badge.err { color: var(--err); }
-    .badge.mcp { background: rgba(96,165,250,.16); color: #7fb3ff; border-color: rgba(96,165,250,.35); }
+    .badge.mcp { background: rgba(255,90,74,.14); color: #ff8a7a; border-color: rgba(255,90,74,.35); }
     .badge.muted { opacity: .65; }
     pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
     input, select, textarea {
@@ -5596,7 +5612,7 @@ function renderApp() {
       line-height: 1.4; box-shadow: var(--shadow); pointer-events: auto;
       transition: opacity .35s ease, transform .35s ease;
     }
-    .ui-toast-ok { background: #1a3a2a; color: #7be59c; border: 1px solid #2d5b40; }
+    .ui-toast-ok { background: #2a1610; color: #ff9a7a; border: 1px solid #4a2a1e; }
     .ui-toast-err { background: #3a1a1a; color: #f08a8a; border: 1px solid #5b2d2d; }
     .ui-toast-leaving { opacity: 0; transform: translateX(8px); }
 
@@ -5958,6 +5974,7 @@ function renderApp() {
   </style>
 </head>
 <body>
+<canvas id="cerbBg" aria-hidden="true"></canvas>
 <div class="app">
   <aside class="railnav">
     <div class="brand">
@@ -6707,6 +6724,8 @@ function renderChat() {
     appendMessage({ role: "user", content: text, from: state.from, channel: state.channel, createdAt: new Date().toISOString() });
     const sendBtn = $("send");
     sendBtn.disabled = true;
+    // The avatar reacts to the harness working — spin it up while we wait.
+    if (window.cerbHoloReact) window.cerbHoloReact("thinking");
     try {
       const result = await postJson("/message", {
         text,
@@ -6869,14 +6888,24 @@ function cerbHoloStop() {
   if (cerbHoloRaf) { cancelAnimationFrame(cerbHoloRaf); cerbHoloRaf = 0; }
 }
 
-/* Extrude the 2D mark polylines (same geometry as cerbMarkSVG) into a
-   shallow 3D wireframe: a front ring, a back ring, and connecting struts
-   for every polyline. Returns a flat Float32Array of segment endpoints. */
-function cerbHoloGeometry() {
-  const W = 64, D = 3;
+/* ─── Holo avatar — geometry ────────────────────────────────────────────
+   The avatar is built from layered primitives that share ONE source of
+   truth (the Cerberus mark polylines — the same geometry as cerbMarkSVG,
+   so the brand mark and the projection are literally the same shape):
+     1. an extruded wireframe "skeleton" (front ring, back ring, struts),
+     2. a volumetric particle field sampled from the mark's strokes — the
+        img2threejs technique: rasterise the glyph, then turn every lit
+        pixel into a particle whose depth comes from its brightness, so
+        the strokes read as a shallow relief instead of a flat outline,
+     3. two counter-rotating orbital rings for the "projection" feel.
+   All of it is raw WebGL line/point primitives — zero dependencies. */
+
+/* Single source of truth for the mark's polylines (64x64 mark space). */
+function cerbMarkPolys() {
+  const W = 64;
   const mir = (pts) => pts.map((p) => [W - p[0], p[1]]);
   const sideHead = [[0,20],[10,15],[11,14],[13,6],[16,12],[20,14],[19,20],[18,25],[11,27],[5,25],[0,23]];
-  const polys = [
+  return [
     { pts: sideHead, closed: true },
     { pts: [[10,19],[13,18]], closed: false },
     { pts: [[9,16],[13,15]], closed: false },
@@ -6891,11 +6920,14 @@ function cerbHoloGeometry() {
     { pts: [[38,22],[35,24]], closed: false },
     { pts: [[30,30],[34,30],[32,33]], closed: true },
   ];
-  // Normalise 64x64 mark space into ~[-1,1], flip y so up is positive.
+}
+
+function cerbHoloGeometry() {
+  const D = 3;
   const v = (x, y, z) => [(x - 32) / 32, (32 - y) / 32, z / 32];
   const segs = [];
   const push = (a, b) => { segs.push(a[0], a[1], a[2], b[0], b[1], b[2]); };
-  for (const poly of polys) {
+  for (const poly of cerbMarkPolys()) {
     const n = poly.pts.length;
     const front = poly.pts.map((p) => v(p[0], p[1], D));
     const back = poly.pts.map((p) => v(p[0], p[1], -D));
@@ -6910,6 +6942,88 @@ function cerbHoloGeometry() {
   return new Float32Array(segs);
 }
 
+/* Volumetric particle field — the img2threejs technique applied to our own
+   mark: rasterise the glyph to an offscreen canvas, then turn every lit
+   pixel into a particle. Brightness drives depth, so the strokes read as
+   a shallow relief; three depth layers + deterministic jitter give volume. */
+function cerbHoloPointCloud() {
+  const S = 128;
+  const c = document.createElement("canvas");
+  c.width = c.height = S;
+  const ctx = c.getContext("2d");
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 3.0;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const scale = S / 64;
+  for (const poly of cerbMarkPolys()) {
+    ctx.beginPath();
+    poly.pts.forEach((p, i) => {
+      const x = p[0] * scale, y = p[1] * scale;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    if (poly.closed) ctx.closePath();
+    ctx.stroke();
+  }
+  const img = ctx.getImageData(0, 0, S, S).data;
+  const rand = mulberry32(1337);
+  const pts = [];
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const a = img[(y * S + x) * 4 + 3];
+      if (a < 30) continue;
+      const bright = a / 255;
+      const px = (x - S / 2) / (S / 2);
+      const py = (S / 2 - y) / (S / 2);
+      for (let layer = 0; layer < 5; layer++) {
+        const z = ((layer / 4) - 0.5) * 0.26 + (bright - 0.5) * 0.12;
+        pts.push(
+          px + (rand() - 0.5) * 0.010,
+          py + (rand() - 0.5) * 0.010,
+          z + (rand() - 0.5) * 0.02
+        );
+      }
+    }
+  }
+  return new Float32Array(pts);
+}
+
+/* Tiny deterministic PRNG so particle jitter is stable frame-to-frame. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* Orbital ring — a circle of line segments in the XZ plane. */
+function cerbRingGeometry(radius, segments = 64) {
+  const segs = [];
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i + 1) / segments) * Math.PI * 2;
+    segs.push(Math.cos(a0) * radius, 0, Math.sin(a0) * radius);
+    segs.push(Math.cos(a1) * radius, 0, Math.sin(a1) * radius);
+  }
+  return new Float32Array(segs);
+}
+
+/* Projector light cone — fans up from the emitter point on the grid
+   to the top of the projection volume, selling the "emitted" fiction. */
+function cerbConeGeometry(segments = 24) {
+  const segs = [];
+  const apexY = -0.95, topY = 0.7, topR = 1.1;
+  for (let i = 0; i < segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    segs.push(0, apexY, 0);
+    segs.push(Math.cos(a) * topR, topY, Math.sin(a) * topR);
+  }
+  return new Float32Array(segs);
+}
+
 /* Perspective grid floor beneath the projection. */
 function cerbGridGeometry() {
   const segs = [];
@@ -6919,6 +7033,39 @@ function cerbGridGeometry() {
   for (let z = -S; z <= S + 1e-9; z += step) push([-S, y, z], [S, y, z]);
   return new Float32Array(segs);
 }
+
+/* ─── Holo avatar — reactive state ──────────────────────────────────────
+   The avatar mirrors whatever the harness is doing. cerbHoloReact(mode) is
+   the single entry point; the render loop smooths "energy" toward the
+   mode's target so transitions feel analog, not snapped. Energy drives
+   rotation speed, pulse rate, particle twinkle, ring brightness, jitter. */
+const cerbHoloState = {
+  mode: "idle",       // idle | thinking | offline
+  energy: 0.3,        // smoothed 0..1
+  target: 0.3,
+  online: true,
+};
+window.cerbHoloReact = function (mode) {
+  cerbHoloState.mode = mode;
+  cerbHoloState.target = mode === "thinking" ? 1.0 : mode === "offline" ? 0.08 : 0.3;
+  cerbHoloState.online = mode !== "offline";
+  // Keep the emitter readout honest — don't claim "Projecting" while offline.
+  const status = document.getElementById("holoStatus");
+  if (status) status.textContent = mode === "offline" ? "Standby" : mode === "thinking" ? "Processing" : "Projecting";
+};
+
+/* Poll the daemon's public /health so the avatar tracks agent liveness. */
+(function cerbHoloHealthWatch() {
+  const check = () => {
+    fetch("/health").then((r) => r.json()).then((h) => {
+      const up = Boolean(h && h.ok);
+      if (up && cerbHoloState.mode === "offline") window.cerbHoloReact("idle");
+      else if (!up && cerbHoloState.mode !== "offline") window.cerbHoloReact("offline");
+    }).catch(() => { if (cerbHoloState.mode !== "offline") window.cerbHoloReact("offline"); });
+  };
+  check();
+  setInterval(check, 5000);
+})();
 
 /* Minimal column-major mat4 helpers (no library). */
 function mPersp(fov, aspect, near, far) {
@@ -6937,6 +7084,7 @@ function mRotY(a) { const c = Math.cos(a), s = Math.sin(a); return [c,0,-s,0, 0,
 function mRotX(a) { const c = Math.cos(a), s = Math.sin(a); return [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]; }
 function mTrans(x, y, z) { return [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]; }
 function mScale(s) { return [s,0,0,0, 0,s,0,0, 0,0,s,0, 0,0,0,1]; }
+function mScaleY(s) { return [1,0,0,0, 0,s,0,0, 0,0,1,0, 0,0,0,1]; }
 
 function cerbHoloStart() {
   const canvas = document.getElementById("holoCanvas");
@@ -6945,39 +7093,83 @@ function cerbHoloStart() {
   const status = document.getElementById("holoStatus");
   if (!gl) { if (status) status.textContent = "No signal"; return; }
 
-  const vsSrc = "attribute vec3 p;uniform mat4 mvp;void main(){gl_Position=mvp*vec4(p,1.0);}";
-  const fsSrc = "precision mediump float;uniform vec3 col;uniform float alpha;void main(){gl_FragColor=vec4(col,alpha);}";
-  const compile = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
-  const prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
-  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
-  gl.linkProgram(prog);
-  gl.useProgram(prog);
-  const locP = gl.getAttribLocation(prog, "p");
-  const locMvp = gl.getUniformLocation(prog, "mvp");
-  const locCol = gl.getUniformLocation(prog, "col");
-  const locAlpha = gl.getUniformLocation(prog, "alpha");
-  gl.enableVertexAttribArray(locP);
+  // Line program (wireframe skeleton, rings, grid).
+  const lineVs = "attribute vec3 p;uniform mat4 mvp;void main(){gl_Position=mvp*vec4(p,1.0);}";
+  const lineFs = "precision mediump float;uniform vec3 col;uniform float alpha;void main(){gl_FragColor=vec4(col,alpha);}";
+  // Point program (volumetric particle field) — per-particle phase twinkle.
+  const pointVs = "attribute vec3 p;attribute float ph;uniform mat4 mvp;uniform float time;uniform float energy;uniform float size;varying float vTw;varying float vDepth;void main(){vec4 clip=mvp*vec4(p,1.0);gl_Position=clip;float depth=clip.w;vDepth=clamp(1.0-(depth-3.1)/0.6,0.15,1.0);vTw=0.55+0.45*sin(time*(1.2+energy*3.5)+ph);gl_PointSize=size*(0.6+0.4*vTw)*(1.0+energy*0.6)*(0.6+0.5*vDepth);}";
+  const pointFs = "precision highp float;uniform vec3 col;uniform float alpha;uniform float time;varying float vTw;varying float vDepth;void main(){vec2 uv=gl_PointCoord-0.5;float d=length(uv);float fall=smoothstep(0.5,0.05,d);float flick=0.92+0.08*sin(time*23.0+gl_FragCoord.x*0.7);gl_FragColor=vec4(col,alpha*fall*vTw*(0.5+0.5*vDepth)*flick);}";
+
+  const compile = (type, s) => { const sh = gl.createShader(type); gl.shaderSource(sh, s); gl.compileShader(sh); if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.warn("[holo] shader:", gl.getShaderInfoLog(sh)); return sh; };
+  const link = (vs, fs) => { const p = gl.createProgram(); gl.attachShader(p, compile(gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.warn("[holo] link:", gl.getProgramInfoLog(p)); return p; };
+
+  const lineProg = link(lineVs, lineFs);
+  const pointProg = link(pointVs, pointFs);
+
+  const lP = gl.getAttribLocation(lineProg, "p");
+  const lMvp = gl.getUniformLocation(lineProg, "mvp");
+  const lCol = gl.getUniformLocation(lineProg, "col");
+  const lAlpha = gl.getUniformLocation(lineProg, "alpha");
+  const pP = gl.getAttribLocation(pointProg, "p");
+  const pPh = gl.getAttribLocation(pointProg, "ph");
+  const pMvp = gl.getUniformLocation(pointProg, "mvp");
+  const pCol = gl.getUniformLocation(pointProg, "col");
+  const pAlpha = gl.getUniformLocation(pointProg, "alpha");
+  const pTime = gl.getUniformLocation(pointProg, "time");
+  const pEnergy = gl.getUniformLocation(pointProg, "energy");
+  const pSize = gl.getUniformLocation(pointProg, "size");
+
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive — emissive hologram
-  gl.clearColor(0.012, 0.013, 0.018, 1.0);
+  gl.clearColor(0.012, 0.012, 0.014, 1.0);
 
-  const makeBuf = (data) => {
-    const b = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, b);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    return { buf: b, count: data.length / 3 };
-  };
+  const makeBuf = (data) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); return { buf: b, count: data.length / 3 }; };
+
   const markBuf = makeBuf(cerbHoloGeometry());
   const gridBuf = makeBuf(cerbGridGeometry());
+  const ring1 = makeBuf(cerbRingGeometry(1.35));
+  const ring2 = makeBuf(cerbRingGeometry(1.6));
+  const coneBuf = makeBuf(cerbConeGeometry());
 
-  const drawBuf = (b, mvp, col, alpha) => {
+  // Point cloud + a per-particle phase attribute for twinkle.
+  const pcData = cerbHoloPointCloud();
+  const pcCount = pcData.length / 3;
+  const phases = new Float32Array(pcCount);
+  const prand = mulberry32(42);
+  for (let i = 0; i < pcCount; i++) phases[i] = prand() * Math.PI * 2;
+  const pcBuf = makeBuf(pcData);
+  const phBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, phBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, phases, gl.STATIC_DRAW);
+
+  const drawLines = (b, mvp, col, alpha) => {
+    gl.useProgram(lineProg);
     gl.bindBuffer(gl.ARRAY_BUFFER, b.buf);
-    gl.vertexAttribPointer(locP, 3, gl.FLOAT, false, 0, 0);
-    gl.uniformMatrix4fv(locMvp, false, new Float32Array(mvp));
-    gl.uniform3fv(locCol, col);
-    gl.uniform1f(locAlpha, alpha);
+    gl.enableVertexAttribArray(lP);
+    gl.vertexAttribPointer(lP, 3, gl.FLOAT, false, 0, 0);
+    gl.uniformMatrix4fv(lMvp, false, new Float32Array(mvp));
+    gl.uniform3fv(lCol, col);
+    gl.uniform1f(lAlpha, alpha);
     gl.drawArrays(gl.LINES, 0, b.count);
+  };
+
+  const drawPoints = (mvp, col, alpha, time, energy, size) => {
+    gl.useProgram(pointProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pcBuf.buf);
+    gl.enableVertexAttribArray(pP);
+    gl.vertexAttribPointer(pP, 3, gl.FLOAT, false, 0, 0);
+    if (pPh >= 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, phBuf);
+      gl.enableVertexAttribArray(pPh);
+      gl.vertexAttribPointer(pPh, 1, gl.FLOAT, false, 0, 0);
+    }
+    gl.uniformMatrix4fv(pMvp, false, new Float32Array(mvp));
+    gl.uniform3fv(pCol, col);
+    gl.uniform1f(pAlpha, alpha);
+    gl.uniform1f(pTime, time);
+    gl.uniform1f(pEnergy, energy);
+    gl.uniform1f(pSize, size);
+    gl.drawArrays(gl.POINTS, 0, pcCount);
   };
 
   const resize = () => {
@@ -6991,20 +7183,52 @@ function cerbHoloStart() {
 
   const draw = (t) => {
     const aspect = resize();
+    // Smooth energy toward its target — analog transitions, no snapping.
+    cerbHoloState.energy += (cerbHoloState.target - cerbHoloState.energy) * 0.06;
+    const e = cerbHoloState.energy;
     gl.clear(gl.COLOR_BUFFER_BIT);
     const proj = mPersp(0.9, aspect, 0.1, 20);
     const view = mTrans(0, -0.05, -3.4);
-    drawBuf(gridBuf, mMul(proj, view), [1.0, 0.16, 0.16], 0.16);
-    const yaw = Math.sin(t * 0.55) * 0.42;
-    const bob = Math.sin(t * 0.9) * 0.045;
-    const model = mMul(mTrans(0, 0.10 + bob, 0), mMul(mRotX(-0.10), mMul(mRotY(yaw), mScale(1.25))));
+
+    drawLines(gridBuf, mMul(proj, view), [1.0, 0.16, 0.16], 0.14);
+
+    // Projector light cone — the "emitted" fiction, brighter with energy.
+    const cone = mMul(mMul(proj, view), mTrans(0, 0, 0));
+    drawLines(coneBuf, cone, [1.0, 0.2, 0.18], 0.05 + e * 0.07);
+
+    // Orbital rings — counter-rotate; speed + brightness scale with energy.
+    const r1 = mMul(mMul(proj, view), mMul(mTrans(0, 0.1, 0), mMul(mRotX(1.2), mRotY(t * (0.3 + e * 0.9)))));
+    drawLines(ring1, r1, [1.0, 0.2, 0.18], 0.16 + e * 0.16);
+    const r2 = mMul(mMul(proj, view), mMul(mTrans(0, 0.1, 0), mMul(mRotX(-0.9), mRotY(-t * (0.22 + e * 0.7)))));
+    drawLines(ring2, r2, [1.0, 0.2, 0.18], 0.12 + e * 0.14);
+
+    // The avatar — yaw speed, bob, and high-energy jitter all track energy.
+    const yaw = Math.sin(t * (0.55 + e * 1.6)) * (0.42 + e * 0.25);
+    const bob = Math.sin(t * (0.9 + e * 1.2)) * 0.045;
+    const jitter = e > 0.7 ? Math.sin(t * 40) * 0.004 * e : 0;
+    const model = mMul(mTrans(jitter, 0.10 + bob, 0), mMul(mRotX(-0.10), mMul(mRotY(yaw), mScale(1.25))));
     const mvp = mMul(mMul(proj, view), model);
-    const pulse = 0.72 + 0.28 * Math.sin(t * 2.1);
-    drawBuf(markBuf, mvp, [1.0, 0.24, 0.20], pulse);
+
+    // Soft halo pass — the skeleton drawn slightly larger and dim, giving
+    // the emissive glow a bloom-like fringe (cheap, one extra draw call).
+    const halo = mMul(mMul(proj, view), mMul(model, mScale(1.06)));
+    drawLines(markBuf, halo, [1.0, 0.18, 0.16], 0.10 + e * 0.10);
+
+    // Wireframe skeleton — emissive pulse, rate scales with energy.
+    const pulse = (0.55 + 0.25 * Math.sin(t * (2.1 + e * 3.0))) * (0.5 + e * 0.7);
+    drawLines(markBuf, mvp, [1.0, 0.24, 0.20], Math.min(0.9, pulse));
+
+    // Floor reflection — the skeleton mirrored below the grid plane, dim.
+    const refl = mMul(mMul(proj, view), mMul(mTrans(jitter, -1.92 - bob, 0), mMul(mScaleY(-1.0), mMul(mRotX(-0.10), mMul(mRotY(yaw), mScale(1.25))))));
+    drawLines(markBuf, refl, [1.0, 0.2, 0.18], 0.06);
+
+    // Volumetric particle field over the skeleton.
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    drawPoints(mvp, [1.0, 0.30, 0.24], 0.75 + e * 0.3, t, e, 3.0 * dpr);
   };
 
-  // Reduced motion: one static frame (deferred to the next frame so the
-  // canvas has its laid-out size), then no loop.
+  // Reduced motion: one static frame (deferred so the canvas is laid out),
+  // then no loop.
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     requestAnimationFrame(() => draw(1.2));
     if (status) status.textContent = "Static";
@@ -7016,7 +7240,6 @@ function cerbHoloStart() {
   let last = performance.now();
   let t = 0;
   const frame = (now) => {
-    // Self-terminate the instant we're off-tab, hidden, or unmounted.
     if (!cerbHoloLive || document.hidden || state.tab !== "chat" || !canvas.isConnected) {
       cerbHoloStop();
       return;
@@ -7497,7 +7720,7 @@ async function renderSkillDetail(skill) {
   const spark = recent.length
     ? \`<div class="row" style="gap:2px;align-items:flex-end;height:34px;margin:4px 0 2px;">\${recent.map((r) => {
         const h = Math.max(4, Math.round(r.score * 32));
-        const c = r.score >= 0.6 ? "var(--ok, #4caf82)" : r.score >= 0.4 ? "var(--warn, #d9a441)" : "var(--err, #d96b6b)";
+        const c = r.score >= 0.6 ? "var(--ok, #ff7a45)" : r.score >= 0.4 ? "var(--warn, #d9a441)" : "var(--err, #d96b6b)";
         return \`<div title="\${(r.score * 100).toFixed(0)}% · \${escapeHtml(r.at ?? "")}" style="width:10px;height:\${h}px;background:\${c};border-radius:2px 2px 0 0;"></div>\`;
       }).join("")}</div><div class="ui-muted" style="font-size:10px;">last \${recent.length} graded runs →</div>\`
     : '<p class="ui-muted" style="font-size:12px;">No graded runs yet — run it once to start the quality track record.</p>';
@@ -9395,7 +9618,7 @@ function renderTimeline(rows) {
   }
   const sortedHours = [...byHour.keys()].sort();
   const max = Math.max(...rows.map((r) => r.n));
-  const palette = ["#6fe1b1", "#f0b454", "#a98ef5", "#7ab8ff", "#f08080", "#94a9b1"];
+  const palette = ["#ff2b2b", "#ff5a4a", "#ff7a45", "#f0b454", "#ff9a7a", "#c9a09a"];
   const appColor = {};
   [...apps].forEach((a, i) => appColor[a] = palette[i % palette.length]);
   host.innerHTML = \`
@@ -9501,7 +9724,9 @@ async function refreshHealth() {
       budgetLabel ? \`<span class="status-pill">\${escapeHtml(budgetLabel)}</span>\` : ""
     ].filter(Boolean);
     $("status").innerHTML = pills.join("");
-    if (p) renderProviderSwitch(p);
+    // Isolated: a throw inside the provider switch must not fall through to
+    // the catch below and repaint a healthy daemon as "offline".
+    if (p) { try { renderProviderSwitch(p); } catch (e) { console.error("providerSwitch:", e); } }
   } catch {
     $("status").innerHTML = '<span class="status-pill">offline</span>';
   }
@@ -9515,7 +9740,8 @@ async function refreshAmbientBadge() {
     host.style.cssText = "margin-left:12px;font-size:12px;padding:3px 9px;border-radius:10px;border:1px solid var(--line);color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap;";
     host.title = "Ambient context — what the agent sees from your screen. Click to view Activity tab.";
     host.addEventListener("click", () => switchTab("activity"));
-    const slot = document.querySelector("header .status")?.parentElement;
+    const slot = document.getElementById("status")?.parentElement
+      || document.querySelector(".topbar");
     if (slot) slot.appendChild(host);
   }
   try {
@@ -9546,7 +9772,14 @@ function renderProviderSwitch(p) {
     host.id = "providerSwitch";
     host.style.marginLeft = "12px";
     host.style.fontSize = "12px";
-    document.querySelector("header .status")?.parentElement?.appendChild(host);
+    // Mount into .topbar — #status lives there, NOT inside any <header>.
+    // The old "header .status" selector matched nothing (the only <header>
+    // is header.sub in the sidebar), so this span was never attached and the
+    // getElementById below threw, which refreshHealth()'s catch swallowed as
+    // "offline" — pinning the pill to OFFLINE on a healthy daemon.
+    const slot = document.getElementById("status")?.parentElement
+      || document.querySelector(".topbar");
+    if (slot) slot.appendChild(host);
   }
   const opts = [
     \`<option value="auto" \${p.preference === "auto" ? "selected" : ""}>auto</option>\`,
@@ -9555,7 +9788,7 @@ function renderProviderSwitch(p) {
     \`<option value="moa" \${p.preference === "moa" ? "selected" : ""} \${!p.available?.moa ? "disabled" : ""}>MoA\${p.moaPreset ? " / " + escapeHtml(p.moaPreset) : ""}\${p.available?.moa ? "" : " (no presets)"}</option>\`
   ].join("");
   host.innerHTML = \`<label style="color:var(--muted);">model: <select id="providerSelect" style="background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:12px;">\${opts}</select></label>\`;
-  document.getElementById("providerSelect").addEventListener("change", async (e) => {
+  document.getElementById("providerSelect")?.addEventListener("change", async (e) => {
     try {
       await postJson("/admin/provider", { preference: e.target.value });
       refreshHealth();
@@ -9742,6 +9975,432 @@ const initialTab = (() => {
   } catch { return "chat"; }
 })();
 switchTab(initialTab);
+
+/* ─────────────────────────────────────────────────────────────
+   CERBERUS ambient background — "phase transition" particle lattice
+   Adapted from pbakaus/radiant "Phase Transition" (MIT), recolored to
+   the crimson/black palette and tuned as a low-presence ambient layer.
+   A grid of embers sweeps between ORDER (calm crimson lattice) and
+   CHAOS (incandescent turbulence) behind a travelling wavefront.
+   Canvas 2D, self-contained, honours prefers-reduced-motion and pauses
+   when the tab is hidden. The wavefront gently follows the cursor.
+   ───────────────────────────────────────────────────────────── */
+(function cerbBackground() {
+  var canvas = document.getElementById("cerbBg");
+  if (!canvas) return;
+  var ctx = canvas.getContext("2d");
+  var prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* Ambient tuning — keep it subtle behind the working UI. */
+  var WAVE_SPEED = 0.35;
+  var PARTICLE_DENSITY = 0.45;
+  var AMBIENT = 0.55; /* global presence multiplier */
+
+  var width, height, dpr, cx, cy;
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = width / 2;
+    cy = height / 2;
+  }
+  var needsResize = false;
+  window.addEventListener("resize", function() { needsResize = true; });
+  resize();
+
+  /* ── value noise + fbm ── */
+  var perm = new Uint8Array(512);
+  var grad2 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
+  (function initNoise() {
+    var p = new Uint8Array(256);
+    for (var i = 0; i < 256; i++) p[i] = i;
+    for (var i = 255; i > 0; i--) {
+      var j = (Math.random() * (i + 1)) | 0;
+      var t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+    for (var i = 0; i < 512; i++) perm[i] = p[i & 255];
+  })();
+  function noise2d(x, y) {
+    var ix = Math.floor(x) & 255, iy = Math.floor(y) & 255;
+    var fx = x - Math.floor(x), fy = y - Math.floor(y);
+    var ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+    var g00 = grad2[perm[ix + perm[iy]] & 7];
+    var g10 = grad2[perm[ix + 1 + perm[iy]] & 7];
+    var g01 = grad2[perm[ix + perm[iy + 1]] & 7];
+    var g11 = grad2[perm[ix + 1 + perm[iy + 1]] & 7];
+    var d00 = g00[0] * fx + g00[1] * fy;
+    var d10 = g10[0] * (fx - 1) + g10[1] * fy;
+    var d01 = g01[0] * fx + g01[1] * (fy - 1);
+    var d11 = g11[0] * (fx - 1) + g11[1] * (fy - 1);
+    var nx0 = d00 + ux * (d10 - d00);
+    var nx1 = d01 + ux * (d11 - d01);
+    return nx0 + uy * (nx1 - nx0);
+  }
+  function fbm(x, y, oct) {
+    var v = 0, a = 0.5, f = 1;
+    for (var i = 0; i < oct; i++) { v += a * noise2d(x * f, y * f); a *= 0.5; f *= 2; }
+    return v;
+  }
+  function smoothstep(e0, e1, x) {
+    var t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  /* ── particle lattice ── */
+  var COUNT = 0, posX, posY, velX, velY, homeX, homeY, latticeCol, latticeRow;
+  var cols, rows, spacingX, spacingY;
+  function initParticles() {
+    var area = width * height;
+    var base = 2500 * PARTICLE_DENSITY;
+    COUNT = Math.round(base * Math.sqrt(area / (1920 * 1080)));
+    COUNT = Math.max(400, Math.min(COUNT, 5000));
+    var aspect = width / height;
+    rows = Math.round(Math.sqrt(COUNT / aspect));
+    cols = Math.round(rows * aspect);
+    COUNT = rows * cols;
+    spacingX = width / (cols + 1);
+    spacingY = height / (rows + 1);
+    posX = new Float32Array(COUNT); posY = new Float32Array(COUNT);
+    velX = new Float32Array(COUNT); velY = new Float32Array(COUNT);
+    homeX = new Float32Array(COUNT); homeY = new Float32Array(COUNT);
+    latticeCol = new Int32Array(COUNT); latticeRow = new Int32Array(COUNT);
+    var idx = 0;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var hx = (c + 1) * spacingX, hy = (r + 1) * spacingY;
+        homeX[idx] = hx; homeY[idx] = hy;
+        posX[idx] = hx + (Math.random() - 0.5) * spacingX * 0.3;
+        posY[idx] = hy + (Math.random() - 0.5) * spacingY * 0.3;
+        velX[idx] = 0; velY[idx] = 0;
+        latticeCol[idx] = c; latticeRow[idx] = r;
+        idx++;
+      }
+    }
+  }
+  initParticles();
+
+  /* ── wavefront state ── */
+  var wavePos = 0, waveDir = 1, wavePhase = 0, waveCycleTime = 0;
+
+  /* ── trail buffer ── */
+  var trailCanvas = document.createElement("canvas");
+  var trailCtx = trailCanvas.getContext("2d");
+  function resizeTrail() {
+    trailCanvas.width = canvas.width;
+    trailCanvas.height = canvas.height;
+    trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    trailCtx.fillStyle = "#080404";
+    trailCtx.fillRect(0, 0, width, height);
+  }
+  resizeTrail();
+
+  /* ── glow sprites (crimson family) ── */
+  var GLOW_RES = 64;
+  function makeGlowSprite(r, g, b) {
+    var c = document.createElement("canvas");
+    c.width = GLOW_RES * 2; c.height = GLOW_RES * 2;
+    var gc = c.getContext("2d");
+    var grad = gc.createRadialGradient(GLOW_RES, GLOW_RES, 0, GLOW_RES, GLOW_RES, GLOW_RES);
+    grad.addColorStop(0, "rgba(" + r + "," + g + "," + b + ", 0.6)");
+    grad.addColorStop(0.3, "rgba(" + r + "," + g + "," + b + ", 0.2)");
+    grad.addColorStop(0.7, "rgba(" + r + "," + g + "," + b + ", 0.04)");
+    grad.addColorStop(1, "rgba(" + r + "," + g + "," + b + ", 0)");
+    gc.fillStyle = grad;
+    gc.beginPath();
+    gc.arc(GLOW_RES, GLOW_RES, GLOW_RES, 0, Math.PI * 2);
+    gc.fill();
+    return c;
+  }
+  var glowOrdered = makeGlowSprite(0x8b, 0x1a, 0x16);
+  var glowChaotic = makeGlowSprite(0xff, 0x3a, 0x26);
+  var glowWave = makeGlowSprite(0xff, 0x5a, 0x42);
+
+  /* ── crimson palette ──
+     ORDER  : deep crimson  -> ember
+     CHAOS  : hot signal red -> incandescent
+     WAVE   : bright signal red                              */
+  var ORD_R = 0x7a, ORD_G = 0x16, ORD_B = 0x16;
+  var ORD_HI_R = 0xc2, ORD_HI_G = 0x3a, ORD_HI_B = 0x30;
+  var CHA_R = 0xff, CHA_G = 0x2f, CHA_B = 0x1f;
+  var CHA_HI_R = 0xff, CHA_HI_G = 0x9a, CHA_HI_B = 0x70;
+  var WAVE_R = 0xff, WAVE_G = 0x4a, WAVE_B = 0x38;
+
+  /* ── physics ── */
+  var SPRING_K = 4.0, DAMPING = 3.5;
+  var TURBULENCE_SCALE = 0.003, TURBULENCE_STRENGTH = 120;
+
+  var paused = false, lastTime = 0;
+
+  /* cursor nudges the wavefront; decays back to autonomous sweep */
+  var mouseActive = false, mouseWavePos = 0.5, mouseIdleAt = 0;
+  window.addEventListener("mousemove", function(e) {
+    mouseActive = true;
+    mouseWavePos = e.clientX / width;
+    mouseIdleAt = performance.now();
+  });
+
+  function update(dt, time) {
+    var cycleDuration = (width * 1.4) / (WAVE_SPEED * 180);
+    waveCycleTime += dt;
+    var raw = waveCycleTime / cycleDuration;
+    var ci = Math.floor(raw);
+    var wc = raw - ci;
+    var eased = wc * wc * (3 - 2 * wc);
+    if (ci % 2 === 0) { wavePos = eased; waveDir = 1; }
+    else { wavePos = 1 - eased; waveDir = -1; }
+    wavePhase = ci % 4 < 2 ? 0 : 1;
+
+    if (mouseActive) {
+      if (performance.now() - mouseIdleAt > 3000) mouseActive = false;
+      else wavePos = mouseWavePos;
+    }
+
+    var wavePx = wavePos * width;
+    var transWidth = width * 0.12;
+    var noiseT = time * 0.4;
+
+    for (var i = 0; i < COUNT; i++) {
+      var px = posX[i], py = posY[i];
+      var distToWave = (px - wavePx) * waveDir;
+      var phase = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, distToWave)
+        : smoothstep(-transWidth, transWidth, distToWave);
+      var transEnergy = 1 - Math.abs(distToWave) / transWidth;
+      transEnergy = Math.max(0, transEnergy);
+      transEnergy = transEnergy * transEnergy;
+
+      var dx = homeX[i] - px, dy = homeY[i] - py;
+      var orderedFx = dx * SPRING_K - velX[i] * DAMPING;
+      var orderedFy = dy * SPRING_K - velY[i] * DAMPING;
+
+      var nx = px * TURBULENCE_SCALE, ny = py * TURBULENCE_SCALE;
+      var angle = fbm(nx + noiseT, ny + noiseT * 0.7, 3) * Math.PI * 4;
+      var turbFx = Math.cos(angle) * TURBULENCE_STRENGTH;
+      var turbFy = Math.sin(angle) * TURBULENCE_STRENGTH;
+      var sa = Math.atan2(py - cy, px - cx);
+      var sd = Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+      var ss = 30 * Math.min(1, sd / (width * 0.3));
+      turbFx += Math.cos(sa + Math.PI * 0.5) * ss;
+      turbFy += Math.sin(sa + Math.PI * 0.5) * ss;
+      var chaoticFx = turbFx - velX[i] * 1.2;
+      var chaoticFy = turbFy - velY[i] * 1.2;
+
+      var kickFx = 0, kickFy = 0;
+      if (transEnergy > 0.01) {
+        var ka = fbm(nx * 2 + noiseT * 1.5, ny * 2 + 100, 2) * Math.PI * 2;
+        var ks = transEnergy * 200;
+        kickFx = Math.cos(ka) * ks; kickFy = Math.sin(ka) * ks;
+      }
+
+      var fx = orderedFx * (1 - phase) + chaoticFx * phase + kickFx;
+      var fy = orderedFy * (1 - phase) + chaoticFy * phase + kickFy;
+      velX[i] += fx * dt; velY[i] += fy * dt;
+      var speed = Math.sqrt(velX[i] * velX[i] + velY[i] * velY[i]);
+      if (speed > 300) { velX[i] = velX[i] / speed * 300; velY[i] = velY[i] / speed * 300; }
+      posX[i] += velX[i] * dt; posY[i] += velY[i] * dt;
+
+      var m = 20;
+      if (posX[i] < -m) { posX[i] = -m; velX[i] = Math.abs(velX[i]) * 0.5; }
+      if (posX[i] > width + m) { posX[i] = width + m; velX[i] = -Math.abs(velX[i]) * 0.5; }
+      if (posY[i] < -m) { posY[i] = -m; velY[i] = Math.abs(velY[i]) * 0.5; }
+      if (posY[i] > height + m) { posY[i] = height + m; velY[i] = -Math.abs(velY[i]) * 0.5; }
+    }
+  }
+
+  function render(timestamp) {
+    if (paused) { requestAnimationFrame(render); return; }
+    if (needsResize) { needsResize = false; resize(); initParticles(); resizeTrail(); }
+    if (!lastTime) lastTime = timestamp;
+    var dt = Math.min((timestamp - lastTime) / 1000, 0.033);
+    lastTime = timestamp;
+    if (prefersReduced) dt *= 0.15;
+    var time = timestamp / 1000;
+    update(dt, time);
+
+    /* fade previous frame into the trail buffer */
+    trailCtx.fillStyle = "rgba(8, 4, 4, 0.15)";
+    trailCtx.fillRect(0, 0, width, height);
+
+    var wavePx = wavePos * width;
+    var transWidth = width * 0.12;
+    var noiseT = time * 0.4;
+
+    /* Layer 1: chaotic-zone haze */
+    if (!prefersReduced) {
+      var bgStep = 40;
+      for (var bx = 0; bx < width; bx += bgStep) {
+        for (var by = 0; by < height; by += bgStep) {
+          var dw = (bx - wavePx) * waveDir;
+          var bp = wavePhase === 0
+            ? 1 - smoothstep(-transWidth, transWidth, dw)
+            : smoothstep(-transWidth, transWidth, dw);
+          var nv = fbm(bx * 0.005 + noiseT * 0.3, by * 0.005 + noiseT * 0.2, 2);
+          var ba = (0.01 + Math.abs(nv) * 0.04) * bp * AMBIENT;
+          if (ba < 0.003) continue;
+          trailCtx.fillStyle = "rgba(" + CHA_R + "," + CHA_G + "," + CHA_B + "," + ba.toFixed(3) + ")";
+          trailCtx.fillRect(bx, by, bgStep, bgStep);
+        }
+      }
+    }
+
+    /* Layer 2: crimson lattice connections in ordered regions */
+    trailCtx.lineWidth = 0.5;
+    for (var i = 0; i < COUNT; i++) {
+      var c = latticeCol[i], r = latticeRow[i];
+      var dw2 = (posX[i] - wavePx) * waveDir;
+      var ph = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, dw2)
+        : smoothstep(-transWidth, transWidth, dw2);
+      if (ph > 0.5) continue;
+      var orderedAmount = 1 - ph * 2;
+      var lineAlpha = orderedAmount * 0.08 * AMBIENT;
+      if (lineAlpha < 0.005) continue;
+      if (c < cols - 1) {
+        var j = i + 1;
+        var ddx = posX[j] - posX[i], ddy = posY[j] - posY[i];
+        var dist = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (dist < spacingX * 2) {
+          var a = lineAlpha * (1 - dist / (spacingX * 2));
+          trailCtx.strokeStyle = "rgba(140, 30, 26, " + a.toFixed(3) + ")";
+          trailCtx.beginPath();
+          trailCtx.moveTo(posX[i], posY[i]);
+          trailCtx.lineTo(posX[j], posY[j]);
+          trailCtx.stroke();
+        }
+      }
+      if (r < rows - 1) {
+        var j2 = i + cols;
+        var ddx2 = posX[j2] - posX[i], ddy2 = posY[j2] - posY[i];
+        var dist2 = Math.sqrt(ddx2 * ddx2 + ddy2 * ddy2);
+        if (dist2 < spacingY * 2) {
+          var a2 = lineAlpha * (1 - dist2 / (spacingY * 2));
+          trailCtx.strokeStyle = "rgba(140, 30, 26, " + a2.toFixed(3) + ")";
+          trailCtx.beginPath();
+          trailCtx.moveTo(posX[i], posY[i]);
+          trailCtx.lineTo(posX[j2], posY[j2]);
+          trailCtx.stroke();
+        }
+      }
+    }
+
+    /* Layer 3: wavefront band */
+    if (!prefersReduced) {
+      var wg = transWidth * 2.5;
+      var grad = trailCtx.createLinearGradient(wavePx - wg, 0, wavePx + wg, 0);
+      grad.addColorStop(0, "rgba(255, 74, 56, 0)");
+      grad.addColorStop(0.3, "rgba(255, 74, 56, " + (0.02 * AMBIENT).toFixed(3) + ")");
+      grad.addColorStop(0.5, "rgba(255, 110, 90, " + (0.06 * AMBIENT).toFixed(3) + ")");
+      grad.addColorStop(0.7, "rgba(255, 74, 56, " + (0.02 * AMBIENT).toFixed(3) + ")");
+      grad.addColorStop(1, "rgba(255, 74, 56, 0)");
+      trailCtx.fillStyle = grad;
+      trailCtx.fillRect(wavePx - wg, 0, wg * 2, height);
+      trailCtx.strokeStyle = "rgba(255, 120, 96, " + (0.12 * AMBIENT).toFixed(3) + ")";
+      trailCtx.lineWidth = 2;
+      trailCtx.beginPath();
+      for (var y = 0; y < height; y += 8) {
+        var wob = fbm(y * 0.01 + time * 0.5, time * 0.3, 2) * 15;
+        if (y === 0) trailCtx.moveTo(wavePx + wob, y);
+        else trailCtx.lineTo(wavePx + wob, y);
+      }
+      trailCtx.stroke();
+    }
+
+    /* Layer 4: chaotic trails */
+    for (var i2 = 0; i2 < COUNT; i2++) {
+      var dw3 = (posX[i2] - wavePx) * waveDir;
+      var ph3 = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, dw3)
+        : smoothstep(-transWidth, transWidth, dw3);
+      if (ph3 > 0.3) {
+        var spd = Math.sqrt(velX[i2] * velX[i2] + velY[i2] * velY[i2]);
+        var ta = ph3 * Math.min(1, spd / 100) * 0.15 * AMBIENT;
+        if (ta > 0.005) {
+          trailCtx.fillStyle = "rgba(" + CHA_R + "," + CHA_G + "," + CHA_B + "," + ta.toFixed(3) + ")";
+          trailCtx.beginPath();
+          trailCtx.arc(posX[i2], posY[i2], 1.5, 0, Math.PI * 2);
+          trailCtx.fill();
+        }
+      }
+    }
+
+    /* composite trail onto main canvas */
+    ctx.drawImage(trailCanvas, 0, 0, trailCanvas.width, trailCanvas.height, 0, 0, width, height);
+
+    /* Layer 5: particle cores */
+    for (var i3 = 0; i3 < COUNT; i3++) {
+      var ppx = posX[i3], ppy = posY[i3];
+      var dw4 = (ppx - wavePx) * waveDir;
+      var ph4 = wavePhase === 0
+        ? 1 - smoothstep(-transWidth, transWidth, dw4)
+        : smoothstep(-transWidth, transWidth, dw4);
+      var te = 1 - Math.abs(dw4) / transWidth;
+      te = Math.max(0, te); te = te * te;
+      var baseSize = 1.2 + ph4 * 0.8;
+      var size = baseSize + te * 2.5;
+      var spd2 = Math.sqrt(velX[i3] * velX[i3] + velY[i3] * velY[i3]);
+      var eb = Math.min(1, spd2 / 150);
+      var rr, gg, bb;
+      if (te > 0.1) {
+        var tt = te;
+        rr = WAVE_R + (255 - WAVE_R) * tt * 0.5;
+        gg = WAVE_G + (255 - WAVE_G) * tt * 0.5;
+        bb = WAVE_B + (255 - WAVE_B) * tt * 0.3;
+      } else if (ph4 < 0.5) {
+        var ddx3 = ppx - homeX[i3], ddy3 = ppy - homeY[i3];
+        var dfh = Math.sqrt(ddx3 * ddx3 + ddy3 * ddy3);
+        var settled = 1 - Math.min(1, dfh / spacingX);
+        rr = ORD_R + (ORD_HI_R - ORD_R) * settled;
+        gg = ORD_G + (ORD_HI_G - ORD_G) * settled;
+        bb = ORD_B + (ORD_HI_B - ORD_B) * settled;
+      } else {
+        rr = CHA_R + (CHA_HI_R - CHA_R) * eb;
+        gg = CHA_G + (CHA_HI_G - CHA_G) * eb;
+        bb = CHA_B + (CHA_HI_B - CHA_B) * eb;
+      }
+      var alpha = (0.6 + te * 0.4 + eb * 0.15) * AMBIENT;
+      alpha = Math.min(1, alpha);
+      if (te > 0.05 || (ph4 > 0.5 && spd2 > 50)) {
+        var gs = size * 3;
+        var ga = (te * 0.3 + eb * 0.08) * alpha;
+        if (ga > 0.005) {
+          var sprite = te > 0.1 ? glowWave : (ph4 < 0.5 ? glowOrdered : glowChaotic);
+          ctx.globalAlpha = Math.min(ga, 0.8);
+          ctx.drawImage(sprite, ppx - gs, ppy - gs, gs * 2, gs * 2);
+          ctx.globalAlpha = 1;
+        }
+      }
+      ctx.fillStyle = "rgba(" + Math.round(rr) + "," + Math.round(gg) + "," + Math.round(bb) + "," + alpha.toFixed(3) + ")";
+      ctx.beginPath();
+      ctx.arc(ppx, ppy, size, 0, Math.PI * 2);
+      ctx.fill();
+      if (te > 0.3) {
+        ctx.fillStyle = "rgba(255, 235, 225, " + (te * 0.5 * AMBIENT).toFixed(3) + ")";
+        ctx.beginPath();
+        ctx.arc(ppx, ppy, size * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    /* vignette */
+    var maxDim = Math.max(width, height);
+    var vig = ctx.createRadialGradient(cx, cy, maxDim * 0.3, cx, cy, maxDim * 0.85);
+    vig.addColorStop(0, "rgba(5, 2, 2, 0)");
+    vig.addColorStop(1, "rgba(5, 2, 2, 0.4)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, width, height);
+
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+
+  document.addEventListener("visibilitychange", function() {
+    paused = document.hidden;
+    if (!paused) lastTime = 0;
+  });
+})();
 </script>
 </body>
 </html>`;
