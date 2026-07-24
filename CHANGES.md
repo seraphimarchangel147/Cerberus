@@ -709,3 +709,15 @@ AGENT WORKSPACE PHASE 1 COMPLETE
 - Added project store, memory, session, code, cron, checkpoint, draft, output, outreach, replay, approval, capability, CLI, HTTP, SSE, dashboard, restart, concurrency, credential, and red-team boundary regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1441/1441 with zero failures and one intentional Windows permission-mode skip.
 PROJECT COMPOSITION ROOT COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: durable policy-aware jobs (Codex)
+
+- Added project-scoped durable direct-tool and subagent jobs with start, status, bounded wait, collect, cancel, authenticated HTTP, and status-only SSE surfaces.
+- Added JSONL event persistence plus atomic snapshots, cross-process CAS, tuple idempotency, restart reconciliation without dispatched-work replay, explicit cancellation settlement, and a default concurrency limit of three.
+- Added an exclusive live-scheduler witness so passive readers cannot reconcile work owned by another process, bounded restart-batch hydration, session-isolated controls, durable cancel-before-abort ordering, and project-revision cancellation.
+- Bound canonical hierarchical locks to trusted live tool resources at submission and dispatch, coordinated foreground mutations with background leases, rejected tool-identity and operand TOCTOU, and quarantined non-cooperative handlers without releasing conflicting locks.
+- Inherited allowed-tool and scrutiny ceilings, abort signals, shared atomic provider spend, aggregate iteration limits, wall-clock deadlines, and remaining iterations while stripping parent approval and operation authority from children.
+- Kept credential-bearing payloads live-only, blocked restart-era job approvals from escaping the scheduler, and stored oversized redacted results behind project-owned tool-output references.
+- Added durable-store, concurrency, lock, cancellation, restart, subagent, budget, approval, project, output-reference, HTTP, SSE, prompt, and hostile-input regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1477/1477 with zero failures and one intentional Windows permission-mode skip.
+DURABLE JOBS COMPLETE

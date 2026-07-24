@@ -33,6 +33,20 @@ export { createAbiIntegration, IntegrationRegistry, normalizeSignal } from "./in
 export { McpRegistry } from "./mcp-registry.js";
 export { createSecretsStore, SecretsStore } from "./secrets-store.js";
 export { PendingActionStore } from "./pending-actions.js";
+export {
+  JOB_KINDS,
+  JOB_STATUSES,
+  JobResourceConflictError,
+  JobRevisionError,
+  JobStore,
+  JobStoreError,
+  TERMINAL_JOB_STATUSES
+} from "./job-store.js";
+export {
+  JOB_DEFAULTS,
+  JobManager,
+  registerJobTools
+} from "./job-manager.js";
 export { GoalStore } from "./goal-store.js";
 export { KanbanStore, KANBAN_COLUMNS } from "./kanban-store.js";
 export {

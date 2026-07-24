@@ -81,6 +81,9 @@ const MAX_CONTEXT_LEDGER_REDACT_INSPECTIONS = 1_024;
 const MAX_CONTEXT_LEDGER_ENV_KEYS = 2_048;
 const MAX_CONTEXT_LEDGER_POOL_STATES = 512;
 const CONTEXT_LEDGER_REDACTION_OVERFLOW = new WeakSet();
+const TRUSTED_TURN_BUDGETS = new WeakSet();
+const TRUSTED_TURN_BUDGET_STATE = new WeakMap();
+const TURN_BUDGET_REQUEST_LEASE = Symbol("turn-budget-request-lease");
 const UNKNOWN_CONTEXT_WINDOW_WARNINGS = new Set();
 const MIN_CONTEXT_DIGEST_CHARS = 40;
 const SYNTHETIC_CONTINUE = [
@@ -606,6 +609,134 @@ function checkRequestBudget(provider, turnBudget) {
 function recordTurnSpend(turnBudget, record) {
   const added = Number(record?.added);
   if (Number.isFinite(added) && added > 0) turnBudget.spentUsd += added;
+}
+
+function inheritedIterationLimit(context, maxIterations) {
+  const inherited = Number(context?.__remainingIterations);
+  return Number.isSafeInteger(inherited) && inherited >= 0
+    ? Math.min(maxIterations, inherited)
+    : maxIterations;
+}
+
+function resolveTurnBudget(context, configuredLimit, maxIterations) {
+  const inherited = context?.__budgetEnvelope;
+  if (
+    inherited
+    && typeof inherited === "object"
+    && TRUSTED_TURN_BUDGETS.has(inherited)
+    && Number.isFinite(inherited.spentUsd)
+    && inherited.spentUsd >= 0
+  ) {
+    inherited.limitUsd = tighterBudgetLimit(
+      inherited.limitUsd,
+      configuredLimit
+    );
+    const state = TRUSTED_TURN_BUDGET_STATE.get(inherited);
+    if (state) {
+      state.remainingIterations = Math.min(
+        state.remainingIterations,
+        inheritedIterationLimit(context, maxIterations)
+      );
+    }
+    return inherited;
+  }
+  const budget = {
+    limitUsd: normalizedBudgetLimit(configuredLimit),
+    spentUsd: 0
+  };
+  TRUSTED_TURN_BUDGETS.add(budget);
+  TRUSTED_TURN_BUDGET_STATE.set(budget, {
+    remainingIterations: inheritedIterationLimit(context, maxIterations),
+    forcedAnswerClaimed: false,
+    requestTail: Promise.resolve()
+  });
+  try { context.__budgetEnvelope = budget; } catch { /* optional inheritance */ }
+  return budget;
+}
+
+function resolveTurnDeadline(provider, context, maxTurnSeconds) {
+  const ownDeadline = provider.now() + (maxTurnSeconds * 1000);
+  const inherited = Number(context?.__turnDeadline);
+  const deadline = Number.isFinite(inherited) && inherited > 0
+    ? Math.min(ownDeadline, inherited)
+    : ownDeadline;
+  try { context.__turnDeadline = deadline; } catch { /* optional inheritance */ }
+  return deadline;
+}
+
+function claimTurnIteration(turnBudget) {
+  const state = TRUSTED_TURN_BUDGET_STATE.get(turnBudget);
+  if (!state) return true;
+  if (state.remainingIterations < 1) return false;
+  state.remainingIterations -= 1;
+  return true;
+}
+
+function claimTurnForcedAnswer(turnBudget) {
+  const state = TRUSTED_TURN_BUDGET_STATE.get(turnBudget);
+  if (!state) return true;
+  if (state.forcedAnswerClaimed) return false;
+  state.forcedAnswerClaimed = true;
+  return true;
+}
+
+function publishRemainingIterations(context, turnBudget, maxIterations, usedIterations) {
+  const shared = TRUSTED_TURN_BUDGET_STATE.get(turnBudget)?.remainingIterations;
+  try {
+    context.__remainingIterations = Number.isSafeInteger(shared)
+      ? Math.max(0, shared)
+      : Math.max(0, maxIterations - usedIterations);
+  } catch {
+    // A frozen embedding context simply cannot delegate the live remainder.
+  }
+}
+
+async function withTurnBudgetRequest(
+  provider,
+  turnBudget,
+  context,
+  timeoutMs,
+  request
+) {
+  const state = TRUSTED_TURN_BUDGET_STATE.get(turnBudget);
+  if (!state) {
+    checkRequestBudget(provider, turnBudget);
+    return request(positiveNumber(timeoutMs, provider.timeoutMs));
+  }
+
+  const predecessor = state.requestTail;
+  let release;
+  state.requestTail = new Promise((resolve) => {
+    release = resolve;
+  });
+  const requestDeadline = provider.now()
+    + positiveNumber(timeoutMs, provider.timeoutMs);
+
+  await predecessor;
+  try {
+    if (context?.__abortSignal?.aborted) {
+      throw abortReason(context.__abortSignal);
+    }
+    const remainingMs = requestDeadline - provider.now();
+    if (remainingMs <= 0) throw new TurnDeadlineError();
+    checkRequestBudget(provider, turnBudget);
+    return await request(remainingMs);
+  } finally {
+    release();
+  }
+}
+
+function tighterBudgetLimit(left, right) {
+  const a = normalizedBudgetLimit(left);
+  const b = normalizedBudgetLimit(right);
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+function normalizedBudgetLimit(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 const PROVIDER_USAGE_MAX_DEPTH = 6;
@@ -3534,8 +3665,8 @@ export class OpenAIResponsesProvider {
       }
     }
 
-    const deadline = this.now() + (maxTurnSeconds * 1000);
-    const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
+    const deadline = resolveTurnDeadline(this, context, maxTurnSeconds);
+    const turnBudget = resolveTurnBudget(context, this.maxTurnUsd, maxIterations);
     let response;
     let iterations = 0;
     let stopReason = "completed";
@@ -3562,7 +3693,12 @@ export class OpenAIResponsesProvider {
         stopReason = "budget-cap";
         break;
       }
+      if (!claimTurnIteration(turnBudget)) {
+        stopReason = "iteration-cap";
+        break;
+      }
       iterations += 1;
+      publishRemainingIterations(context, turnBudget, maxIterations, iterations);
       emitIteration(context, iterations, maxIterations);
       const preparation = await prepareProviderConversation(this, conversationInput, {
         format: "openai",
@@ -3684,6 +3820,9 @@ export class OpenAIResponsesProvider {
         }
         if (!requestError) {
           // The one allowed local replay completed before any tool dispatch.
+        } else if (budgetExceeded(requestError)) {
+          stopReason = "budget-cap";
+          break;
         } else if (isCredentialPoolExhausted(requestError) && successfulModelHops === 0 && toolCalls.length === 0) {
           const fallback = await tryFallbackProvider(this, generationRequest, requestError);
           if (fallback.used) {
@@ -3914,7 +4053,11 @@ export class OpenAIResponsesProvider {
     // path for the rationale). No tools, fresh short budget, so the model
     // always gets a chance to reply instead of returning only a canned string.
     const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout", "provider-error"]);
-    if (FORCE_ANSWER_REASONS.has(stopReason) && !continuationMustStop) {
+    if (
+      FORCE_ANSWER_REASONS.has(stopReason)
+      && !continuationMustStop
+      && claimTurnForcedAnswer(turnBudget)
+    ) {
       continuationUsedForcedAnswer = true;
       reconcileOrphanedToolCalls(conversationInput, "openai");
       appendOpenAIContinue(conversationInput);
@@ -4093,6 +4236,23 @@ export class OpenAIResponsesProvider {
   }
 
   async postResponses(body, context = {}, options = {}) {
+    if (
+      options.turnBudget
+      && normalizedBudgetLimit(options.turnBudget.limitUsd) !== null
+      && options[TURN_BUDGET_REQUEST_LEASE] !== options.turnBudget
+    ) {
+      return withTurnBudgetRequest(
+        this,
+        options.turnBudget,
+        context,
+        options.timeoutMs,
+        (remainingMs) => this.postResponses(body, context, {
+          ...options,
+          timeoutMs: remainingMs,
+          [TURN_BUDGET_REQUEST_LEASE]: options.turnBudget
+        })
+      );
+    }
     const controller = new AbortController();
     const externalSignal = context?.__abortSignal;
     const onExternalAbort = () => controller.abort(externalSignal.reason);
@@ -4366,8 +4526,8 @@ export class AnthropicProvider {
 
     const toolCalls = [];
     const completedToolCallIds = new Map();
-    const deadline = this.now() + (maxTurnSeconds * 1000);
-    const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
+    const deadline = resolveTurnDeadline(this, context, maxTurnSeconds);
+    const turnBudget = resolveTurnBudget(context, this.maxTurnUsd, maxIterations);
     let response;
     let iterations = 0;
     let stopReason = "completed";
@@ -4392,7 +4552,12 @@ export class AnthropicProvider {
         stopReason = "budget-cap";
         break;
       }
+      if (!claimTurnIteration(turnBudget)) {
+        stopReason = "iteration-cap";
+        break;
+      }
       iterations += 1;
+      publishRemainingIterations(context, turnBudget, maxIterations, iterations);
       emitIteration(context, iterations, maxIterations);
       const preparation = await prepareProviderConversation(this, convo, {
         format: "anthropic",
@@ -4436,6 +4601,10 @@ export class AnthropicProvider {
           compression: preparation
         }), context);
       } catch (error) {
+        if (budgetExceeded(error)) {
+          stopReason = "budget-cap";
+          break;
+        }
         if (isCredentialPoolExhausted(error) && successfulModelHops === 0 && toolCalls.length === 0) {
           const fallback = await tryFallbackProvider(this, generationRequest, error);
           if (fallback.used) return fallback.result;
@@ -4606,7 +4775,10 @@ export class AnthropicProvider {
     // The final call carries NO tools (so it can't loop again), a fresh short
     // budget (forceAnswerMs), and is non-streaming (a clean blocking ask).
     const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout", "provider-error"]);
-    if (FORCE_ANSWER_REASONS.has(stopReason)) {
+    if (
+      FORCE_ANSWER_REASONS.has(stopReason)
+      && claimTurnForcedAnswer(turnBudget)
+    ) {
       reconcileOrphanedToolCalls(convo, "anthropic");
       appendAnthropicUserText(convo, forceAnswerPrompt(stopReason, iterations, maxIterations));
       try {
@@ -4681,6 +4853,23 @@ export class AnthropicProvider {
   }
 
   async postMessages(body, context = {}, options = {}) {
+    if (
+      options.turnBudget
+      && normalizedBudgetLimit(options.turnBudget.limitUsd) !== null
+      && options[TURN_BUDGET_REQUEST_LEASE] !== options.turnBudget
+    ) {
+      return withTurnBudgetRequest(
+        this,
+        options.turnBudget,
+        context,
+        options.timeoutMs,
+        (remainingMs) => this.postMessages(body, context, {
+          ...options,
+          timeoutMs: remainingMs,
+          [TURN_BUDGET_REQUEST_LEASE]: options.turnBudget
+        })
+      );
+    }
     const controller = new AbortController();
     const externalSignal = context?.__abortSignal;
     const onExternalAbort = () => controller.abort(externalSignal.reason);
@@ -4971,6 +5160,10 @@ Tools available to you (call them when useful):
 - kanban_comment(taskId, body) - add an identity-attributed task comment
 - kanban_heartbeat(taskId, runId?, state?, assignee?, detail?) - claim work and update or append run attempts
 - kanban_link(parentId, childId) - make a child depend on a parent task
+- job_start(kind, tool?/arguments? | goal?/context?/role?, resourceLocks?) - start one bounded durable direct-tool or subagent job; mutating work must declare disjoint locks
+- job_status(jobId) / job_wait(jobId, timeoutMs?) - inspect or briefly wait for durable background work
+- job_collect(jobId, offset?, maxChars?) - collect an inline result or a bounded chunk from a large durable result
+- job_cancel(jobId) - request cancellation of queued or running background work
 - list_skills / use_skill / run_skill / restore_skill - discover, load, run, or restore named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
 - tool_search(query, limit?) - search every eligible tool omitted from this request without loading its full schema

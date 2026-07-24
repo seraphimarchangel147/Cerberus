@@ -475,6 +475,12 @@ export class AgentHost {
           routingProfile: {}
         };
     assertProjectProviderSecrets(project, turnProvider);
+    const durableJobId = verifyAgentHostJobContext(
+      this.runtime,
+      input,
+      project,
+      channel
+    );
     const requestedMemoryScope = String(input.memoryScope ?? "").trim();
     const baseMemoryScope = projectMemoryScope(
       project,
@@ -1007,6 +1013,11 @@ export class AgentHost {
       __continuationSessionIncarnation: continuationSessionMetadata?.incarnation ?? null,
       __continuationHeadMessageId: continuationSessionMetadata?.headMessageId ?? null,
       __turnId: turnId,
+      __jobId: durableJobId,
+      __budgetEnvelope: input.budgetEnvelope ?? null,
+      __turnDeadline: Number.isFinite(input.turnDeadline)
+        ? input.turnDeadline
+        : null,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,
       __abortSignal: turnAbortController.signal,
       __turnAbortController: turnAbortController,
@@ -1882,6 +1893,33 @@ function assertProjectProviderSecrets(project, provider) {
 }
 
 const AGENT_HOST_PROJECT_ID_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
+
+function verifyAgentHostJobContext(runtime, input, project, channel) {
+  if (input?.jobId == null || input.jobId === "") return null;
+  if (channel !== "subagent" || input.origin !== "job") {
+    throw new ProjectBoundaryError("Durable job identity is invalid for this turn.");
+  }
+  const id = String(input.jobId);
+  if (!/^job_[a-f0-9]{16}$/.test(id)) {
+    throw new ProjectBoundaryError("Durable job identity is malformed.");
+  }
+  let record;
+  try {
+    record = runtime.jobStore?.get?.(id, {
+      projectId: project.id
+    });
+  } catch {
+    throw new ProjectBoundaryError("Durable job identity is outside this project.");
+  }
+  if (
+    !record
+    || record.kind !== "subagent"
+    || !["running", "cancel_requested"].includes(record.status)
+  ) {
+    throw new ProjectBoundaryError("Durable job identity is not an active subagent job.");
+  }
+  return id;
+}
 
 function normalizeAgentHostProjectId(value, field = "project id") {
   if (typeof value !== "string") {

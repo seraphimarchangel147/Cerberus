@@ -50,6 +50,8 @@ import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
+import { JobStore } from "./job-store.js";
+import { JobManager, registerJobTools } from "./job-manager.js";
 import { ComputerUseLog } from "./computer-use-log.js";
 import { ClarificationStore } from "./clarification-store.js";
 import { DraftStore } from "./draft-store.js";
@@ -358,6 +360,15 @@ export class AbiRuntime {
     this.tools.bindPendingActions(this.pendingActions);
     this.toolOutputs = options.toolOutputs ?? new ToolOutputStore({
       dir: options.dataDir ? path.join(options.dataDir, "tool-outputs") : undefined
+    });
+    this.jobStore = options.jobStore ?? new JobStore({
+      dataDir: options.dataDir,
+      ...(options.jobStoreOptions ?? {})
+    });
+    this.jobs = options.jobs ?? new JobManager({
+      runtime: this,
+      store: this.jobStore,
+      ...(options.jobOptions ?? {})
     });
     // Computer-use log is always allocated so the dashboard can render the
     // log surface even when the feature is off (showing zero sessions).
@@ -685,6 +696,7 @@ export class AbiRuntime {
       // A VM script can compact multi-step tool work, but every nested call
       // re-enters this same registry so scrutiny and catastrophic gates hold.
       registerExecuteCodeTool(this);
+      registerJobTools(this.tools, this);
       registerDelegateTaskTool(this);
       registerSessionSearchTool(this);
       registerTtsTool(this, { dataDir: options.dataDir });
@@ -1513,6 +1525,7 @@ export class AbiRuntime {
         this.sessionIndex?.rebuildPromise
       ]);
       settled.push(...await Promise.allSettled([
+        this.jobs?.close?.(),
         this.kanban?.close?.(),
         this.observations?.close?.(),
         this.sessionIndex?.close?.()
@@ -1542,6 +1555,7 @@ export function createDefaultRuntime(options = {}) {
       { backfill: true }
     );
   }
+  runtime.jobs?.resume?.();
   // First boot / backfill: when the session index is empty (missing DB, or a
   // DB file created empty), seed it from the transcripts already on disk.
   // Non-blocking and best-effort so a large history can't hold up startup;

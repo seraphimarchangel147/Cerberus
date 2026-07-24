@@ -111,6 +111,20 @@ export class ToolRegistry {
       : typeof metadata.forwardInvocation === "function"
         ? metadata.forwardInvocation
         : null;
+    const jobResources = typeof tool.jobResources === "function"
+      ? tool.jobResources
+      : null;
+    const jobResourceRevision = jobResources
+      ? String(tool.jobResourceRevision ?? "").trim()
+      : null;
+    if (
+      jobResources
+      && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(jobResourceRevision)
+    ) {
+      throw new TypeError(
+        `Tool ${tool.name} with jobResources requires a stable jobResourceRevision.`
+      );
+    }
     delete metadata.forwardInvocation;
     const normalized = {
       name: tool.name,
@@ -125,6 +139,12 @@ export class ToolRegistry {
       // Synchronous input validation that runs before observers, hooks,
       // summaries, or durable approval records can see the arguments.
       preflight: typeof tool.preflight === "function" ? tool.preflight : null,
+      // Optional trusted resolver for the concrete resources a durable
+      // mutating job can touch. This callback is internal-only and lets the
+      // scheduler bind locks to actual operands instead of trusting
+      // model-supplied lock labels.
+      jobResources,
+      jobResourceRevision,
       // When true, invoke() queues a pending action and suspends until the
       // user approves, denies, or the bounded approval window expires.
       needsConfirmation,
@@ -182,6 +202,10 @@ export class ToolRegistry {
 
   bindProjects(projects) {
     this.projects = projects ?? null;
+  }
+
+  bindJobCoordinator(coordinator) {
+    this.jobCoordinator = coordinator ?? null;
   }
 
   approvalIdentity(name, context = {}) {
@@ -1137,6 +1161,7 @@ export class ToolRegistry {
     const startedAt = Date.now();
     let dispatched = false;
     let checkpointCapture = null;
+    let releaseJobLease = null;
     try {
       if (context?.__abortSignal?.aborted) {
         return semanticToolError(tool, "Turn ended before tool dispatch.", {
@@ -1163,6 +1188,13 @@ export class ToolRegistry {
           durationMs: Date.now() - startedAt
         });
         return semantic;
+      }
+      if (tool.sideEffects && this.jobCoordinator?.acquireToolInvocation) {
+        releaseJobLease = this.jobCoordinator.acquireToolInvocation(
+          tool,
+          args ?? {},
+          context
+        );
       }
       dispatched = true;
       const result = await tool.handler(args ?? {}, context);
@@ -1200,6 +1232,8 @@ export class ToolRegistry {
         durationMs: Date.now() - startedAt
       });
       return semantic;
+    } finally {
+      try { releaseJobLease?.(); } catch { /* fail closed until invocation end */ }
     }
   }
 
@@ -1948,6 +1982,8 @@ function publicToolDescriptor(tool) {
   const {
     handler: _handler,
     preflight: _preflight,
+    jobResources: _jobResources,
+    jobResourceRevision: _jobResourceRevision,
     forwardInvocation: _forwardInvocation,
     summarize: _summarize,
     normalizeOutcome: _normalizeOutcome,

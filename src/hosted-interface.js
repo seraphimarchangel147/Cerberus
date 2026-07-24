@@ -27,6 +27,24 @@ import { approvePendingAction } from "./pending-actions.js";
 import { isModelProviderId } from "./model-router.js";
 import { projectAllows, projectMemoryScope } from "./project-store.js";
 
+const MAX_JOB_HTTP_BODY_BYTES = 256 * 1024;
+const MAX_JOB_HTTP_LIST_LIMIT = 100;
+const MAX_JOB_HTTP_WAIT_MS = 30_000;
+const MAX_JOB_HTTP_RESULT_CHARS = 50_000;
+const MAX_JOB_HTTP_RESULT_OFFSET = 64 * 1024 * 1024;
+const HTTP_JOB_ID_RE = /^job_[a-f0-9]{16}$/;
+const HTTP_JOB_SESSION_RE = /^[\x21-\x7E]{1,512}$/;
+const HTTP_JOB_STATUSES = new Set([
+  "queued",
+  "running",
+  "cancel_requested",
+  "cancelled",
+  "succeeded",
+  "failed",
+  "interrupted"
+]);
+const HTTP_JOB_KINDS = new Set(["tool", "direct-tool", "subagent"]);
+
 function isHostedMoaProvider(provider) {
   const id = String(provider?.provider ?? provider?.name ?? "").trim().toLowerCase();
   return id === "moa" || provider?.constructor?.name === "MoaProvider";
@@ -149,9 +167,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   events.on("daily-recap", (data) => broadcast("daily-recap", data));
   events.on("daily-plan", (data) => broadcast("daily-plan", data));
   events.on("task-unblocked", (data) => broadcast("task-unblocked", data));
+  events.on("job", (data) => {
+    const status = jobSseStatusView(data);
+    if (status) broadcast("job", status);
+  });
   if (runtime.skillReplay) runtime.skillReplay.bindEvents(events);
   if (runtime.pendingActions?.bindEvents) runtime.pendingActions.bindEvents(events);
   if (runtime.computerUseLog?.bindEvents) runtime.computerUseLog.bindEvents(events);
+  if (runtime.jobs?.bindEvents) runtime.jobs.bindEvents(events);
   events.on("computer-use", (data) => broadcast("computer-use", data));
   events.on("outreach", (data) => broadcast("outreach", data));
   events.on("outreach-resolved", (data) => broadcast("outreach-resolved", data));
@@ -922,6 +945,218 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/events") {
         const project = requireRequestProject(runtime, req, url);
         return handleSse(req, res, sseClients, project.id);
+      }
+
+      if (method === "POST" && pathname === "/jobs") {
+        if (!runtime.jobs?.start) {
+          return sendJson(res, 503, { error: "durable jobs are unavailable" });
+        }
+        let body;
+        try {
+          body = await readJson(req);
+          assertPlainHttpJobBody(body);
+          if (jsonUtf8Bytes(body) > MAX_JOB_HTTP_BODY_BYTES) {
+            return sendJson(res, 413, {
+              error: `job request exceeds ${MAX_JOB_HTTP_BODY_BYTES} bytes`
+            });
+          }
+        } catch (error) {
+          return sendJson(res, 400, {
+            error: safeJobHttpMessage(error, "invalid job request")
+          });
+        }
+        const project = requireRequestProject(runtime, req, url, body);
+        let sessionId;
+        try {
+          sessionId = normalizeHttpJobSession(body.sessionId);
+          assertHttpJobSessionProject(runtime.projects, project, sessionId);
+        } catch (error) {
+          return sendJson(res, 400, {
+            error: safeJobHttpMessage(error, "invalid job session")
+          });
+        }
+        const input = { ...body };
+        delete input.projectId;
+        delete input.sessionId;
+        try {
+          const job = await runtime.jobs.start(
+            input,
+            jobHttpContext(project, sessionId)
+          );
+          const view = jobHttpStatusView(job, project.id);
+          if (!view) throw new Error("job start returned no status");
+          if (runtime.jobs.emitsEvents !== true) {
+            events.emit("job", {
+              op: "start",
+              projectId: project.id,
+              job: view
+            });
+          }
+          return sendJson(res, 202, view);
+        } catch (error) {
+          return sendJobHttpError(res, error);
+        }
+      }
+
+      if (method === "GET" && pathname === "/jobs") {
+        if (!runtime.jobs?.list) {
+          return sendJson(res, 503, { error: "durable jobs are unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const filters = httpJobListFilters(url.searchParams);
+          const jobs = await runtime.jobs.list(
+            filters,
+            jobHttpContext(project)
+          );
+          const views = (Array.isArray(jobs) ? jobs : [])
+            .map((job) => jobHttpStatusView(job, project.id))
+            .filter(Boolean)
+            .slice(0, filters.limit);
+          return sendJson(res, 200, {
+            count: views.length,
+            jobs: views
+          });
+        } catch (error) {
+          return sendJobHttpError(res, error);
+        }
+      }
+
+      const jobRoute = /^\/jobs\/([^/]+)(?:\/(wait|result|cancel))?$/.exec(pathname);
+      if (jobRoute) {
+        if (!runtime.jobs) {
+          return sendJson(res, 503, { error: "durable jobs are unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        let jobId;
+        try {
+          jobId = normalizeHttpJobId(decodeURIComponent(jobRoute[1]));
+        } catch {
+          return sendJson(res, 400, { error: "invalid job id" });
+        }
+        const action = jobRoute[2] ?? "status";
+        const context = jobHttpContext(project);
+
+        if (method === "GET" && action === "status") {
+          if (!runtime.jobs.status) {
+            return sendJson(res, 503, { error: "job status is unavailable" });
+          }
+          try {
+            const job = await runtime.jobs.status(jobId, context);
+            const view = jobHttpStatusView(job, project.id);
+            return view
+              ? sendJson(res, 200, view)
+              : sendJson(res, 404, { error: "unknown job" });
+          } catch (error) {
+            return sendJobHttpError(res, error);
+          }
+        }
+
+        if (method === "GET" && action === "wait") {
+          if (!runtime.jobs.wait) {
+            return sendJson(res, 503, { error: "job wait is unavailable" });
+          }
+          let timeoutMs;
+          try {
+            timeoutMs = boundedHttpJobInteger(url.searchParams.get("timeoutMs"), {
+              fallback: MAX_JOB_HTTP_WAIT_MS,
+              min: 1,
+              max: MAX_JOB_HTTP_WAIT_MS,
+              field: "timeoutMs"
+            });
+          } catch (error) {
+            return sendJson(res, 400, {
+              error: safeJobHttpMessage(error, "invalid wait timeout")
+            });
+          }
+          try {
+            const job = await runtime.jobs.wait(
+              jobId,
+              { timeoutMs },
+              context
+            );
+            const timedOut = job?.timedOut === true;
+            const view = jobHttpStatusView(job, project.id);
+            return view
+              ? sendJson(res, 200, { timedOut, job: view })
+              : sendJson(res, 404, { error: "unknown job" });
+          } catch (error) {
+            if (error?.code === "JOB_WAIT_TIMEOUT" && runtime.jobs.status) {
+              try {
+                const current = await runtime.jobs.status(jobId, context);
+                const view = jobHttpStatusView(current, project.id);
+                return view
+                  ? sendJson(res, 200, { timedOut: true, job: view })
+                  : sendJson(res, 404, { error: "unknown job" });
+              } catch (statusError) {
+                return sendJobHttpError(res, statusError);
+              }
+            }
+            return sendJobHttpError(res, error);
+          }
+        }
+
+        if (method === "GET" && action === "result") {
+          if (!runtime.jobs.collect) {
+            return sendJson(res, 503, { error: "job collection is unavailable" });
+          }
+          let offset;
+          let maxChars;
+          try {
+            offset = boundedHttpJobInteger(url.searchParams.get("offset"), {
+              fallback: 0,
+              min: 0,
+              max: MAX_JOB_HTTP_RESULT_OFFSET,
+              field: "offset"
+            });
+            maxChars = boundedHttpJobInteger(url.searchParams.get("maxChars"), {
+              fallback: 12_000,
+              min: 1,
+              max: MAX_JOB_HTTP_RESULT_CHARS,
+              field: "maxChars"
+            });
+          } catch (error) {
+            return sendJson(res, 400, {
+              error: safeJobHttpMessage(error, "invalid result range")
+            });
+          }
+          try {
+            const collected = await runtime.jobs.collect(
+              jobId,
+              { offset, maxChars },
+              context
+            );
+            if (!collected) return sendJson(res, 404, { error: "unknown job" });
+            return sendJson(
+              res,
+              200,
+              boundedHttpJobCollection(collected, project.id, maxChars)
+            );
+          } catch (error) {
+            return sendJobHttpError(res, error);
+          }
+        }
+
+        if (method === "POST" && action === "cancel") {
+          if (!runtime.jobs.cancel) {
+            return sendJson(res, 503, { error: "job cancellation is unavailable" });
+          }
+          try {
+            const job = await runtime.jobs.cancel(jobId, context);
+            const view = jobHttpStatusView(job, project.id);
+            if (!view) return sendJson(res, 404, { error: "unknown job" });
+            if (runtime.jobs.emitsEvents !== true) {
+              events.emit("job", {
+                op: "cancel",
+                projectId: project.id,
+                job: view
+              });
+            }
+            return sendJson(res, 200, view);
+          } catch (error) {
+            return sendJobHttpError(res, error);
+          }
+        }
       }
 
       if (method === "POST" && pathname === "/ingest") {
@@ -3018,6 +3253,264 @@ function sendJson(res, status, value) {
 function sendSecretsJson(res, status, value) {
   res.setHeader("Cache-Control", "no-store");
   return sendJson(res, status, value);
+}
+
+function assertPlainHttpJobBody(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("job request must be a JSON object");
+  }
+}
+
+function jsonUtf8Bytes(value) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function normalizeHttpJobId(value) {
+  const id = String(value ?? "").trim();
+  if (!HTTP_JOB_ID_RE.test(id)) throw new TypeError("invalid job id");
+  return id;
+}
+
+function normalizeHttpJobSession(value) {
+  const sessionId = String(value ?? "").trim();
+  if (!HTTP_JOB_SESSION_RE.test(sessionId)) {
+    throw new TypeError("sessionId is required and must be printable ASCII");
+  }
+  return sessionId;
+}
+
+function assertHttpJobSessionProject(projects, project, sessionId) {
+  if (typeof projects?.authorize === "function") {
+    const authorized = projects.authorize(project.id, {
+      includeArchived: false,
+      sessionId
+    });
+    if (!authorized) throw new Error("project session is unavailable");
+    return;
+  }
+  if (typeof projects?.assertSession === "function") {
+    projects.assertSession(project.id, sessionId);
+  }
+}
+
+function jobHttpContext(project, sessionId = null) {
+  const allowedTools = Array.isArray(project.policy?.allowedTools)
+    && !project.policy.allowedTools.includes("*")
+    ? [...project.policy.allowedTools]
+    : null;
+  return {
+    channel: "http",
+    from: "http:jobs",
+    agentId: "main",
+    sessionId,
+    __projectId: project.id,
+    __projectRevision: project.revision ?? 1,
+    __projectWorkspaceDir: project.workspaceRoot ?? null,
+    __projectSecretRefs: [...(project.secretRefs ?? [])],
+    __projectActiveSkills: [...(project.activeSkills ?? [])],
+    __projectMcpGrants: [...(project.mcpGrants ?? [])],
+    __projectHookIds: [...(project.hookIds ?? [])],
+    __projectKanbanBoardId: project.kanbanBoardId ?? "default",
+    __projectModelProfile: structuredClone(project.modelProfile ?? {}),
+    __projectRoutingProfile: structuredClone(project.routingProfile ?? {}),
+    __scrutinyPolicy: project.policy?.toolPolicy ?? "full",
+    ...(allowedTools ? { __allowedTools: allowedTools } : {})
+  };
+}
+
+function httpJobListFilters(searchParams) {
+  const status = String(searchParams.get("status") ?? "").trim();
+  if (status && !HTTP_JOB_STATUSES.has(status)) {
+    throw new TypeError("invalid job status filter");
+  }
+  const kind = String(searchParams.get("kind") ?? "").trim();
+  if (kind && !HTTP_JOB_KINDS.has(kind)) {
+    throw new TypeError("invalid job kind filter");
+  }
+  return {
+    limit: boundedHttpJobInteger(searchParams.get("limit"), {
+      fallback: 50,
+      min: 1,
+      max: MAX_JOB_HTTP_LIST_LIMIT,
+      field: "limit"
+    }),
+    ...(status ? { status } : {}),
+    ...(kind ? { kind } : {})
+  };
+}
+
+function boundedHttpJobInteger(value, {
+  fallback,
+  min,
+  max,
+  field
+}) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (!/^\d+$/u.test(String(value))) {
+    throw new TypeError(`${field} must be an integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new TypeError(`${field} must be a safe integer`);
+  }
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function jobHttpStatusView(value, expectedProjectId = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value.job && typeof value.job === "object"
+    ? value.job
+    : value;
+  const id = normalizeHttpJobId(source.id);
+  const projectId = String(source.projectId ?? expectedProjectId ?? "").trim().toLowerCase();
+  if (!projectId || (expectedProjectId && projectId !== expectedProjectId)) {
+    const error = new Error("job is outside the requested project");
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+  const error = source.error == null
+    ? null
+    : sanitizeForAudit(source.error);
+  return {
+    id,
+    revision: safeJobInteger(source.revision),
+    kind: safeJobString(source.kind, 32),
+    target: safeJobString(source.target, 256),
+    projectId,
+    sessionId: safeJobString(source.sessionId, 512),
+    status: safeJobString(source.status, 32),
+    attempt: safeJobInteger(source.attempt),
+    maxAttempts: safeJobInteger(source.maxAttempts),
+    createdAt: safeJobTimestamp(source.createdAt),
+    updatedAt: safeJobTimestamp(source.updatedAt),
+    startedAt: safeJobTimestamp(source.startedAt),
+    finishedAt: safeJobTimestamp(source.finishedAt),
+    recoveredAt: safeJobTimestamp(source.recoveredAt),
+    cancel: boundedJobJson(source.cancel, 2_000),
+    toolOutputRef: safeJobString(source.toolOutputRef, 64),
+    error: boundedJobJson(error, 2_000)
+  };
+}
+
+function jobSseStatusView(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const source = value.job && typeof value.job === "object"
+      ? value.job
+      : value;
+    const status = jobHttpStatusView(source, value.projectId ?? source.projectId);
+    if (!status) return null;
+    return {
+      op: safeJobString(value.op, 32) ?? "status",
+      id: status.id,
+      projectId: status.projectId,
+      status: status.status,
+      revision: status.revision,
+      updatedAt: status.updatedAt,
+      finishedAt: status.finishedAt
+    };
+  } catch {
+    return null;
+  }
+}
+
+function boundedHttpJobCollection(value, expectedProjectId, maxChars) {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : { output: value };
+  const job = jobHttpStatusView(source.job ?? source, expectedProjectId);
+  const output = Object.hasOwn(source, "output")
+    ? source.output
+    : Object.hasOwn(source, "result")
+      ? source.result
+      : null;
+  const safeOutput = sanitizeForAudit(output);
+  const encoded = JSON.stringify(safeOutput);
+  if (typeof encoded !== "string" || encoded.length <= maxChars) {
+    return { job, output: safeOutput ?? null };
+  }
+  return {
+    job,
+    output: {
+      truncated: true,
+      originalChars: encoded.length,
+      preview: encoded.slice(0, maxChars)
+    }
+  };
+}
+
+function safeJobInteger(value) {
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function safeJobString(value, maxChars) {
+  if (value === undefined || value === null) return null;
+  return String(value).slice(0, maxChars);
+}
+
+function safeJobTimestamp(value) {
+  const timestamp = safeJobString(value, 64);
+  return timestamp && Number.isFinite(Date.parse(timestamp))
+    ? timestamp
+    : null;
+}
+
+function boundedJobJson(value, maxChars) {
+  if (value === undefined || value === null) return null;
+  const safe = sanitizeForAudit(value);
+  const encoded = JSON.stringify(safe);
+  if (typeof encoded !== "string") return null;
+  if (encoded.length <= maxChars) return safe;
+  return {
+    truncated: true,
+    preview: encoded.slice(0, maxChars)
+  };
+}
+
+function safeJobHttpMessage(error, fallback) {
+  const safe = sanitizeForAudit(error?.message ?? error ?? fallback);
+  return String(safe || fallback).slice(0, 500);
+}
+
+function sendJobHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  if ([
+    "JOB_NOT_FOUND",
+    "JOB_SESSION_BOUNDARY_VIOLATION",
+    "PROJECT_BOUNDARY_VIOLATION"
+  ].includes(code)) {
+    return sendJson(res, 404, { error: "unknown job" });
+  }
+  if (code === "JOB_SECRET_VALUE_REJECTED") {
+    return sendJson(res, 400, {
+      error: "job request contains a credential value that cannot be persisted"
+    });
+  }
+  if ([
+    "JOB_ALREADY_EXISTS",
+    "JOB_IDEMPOTENCY_CONFLICT",
+    "JOB_NOT_READY",
+    "JOB_RESOURCE_CONFLICT",
+    "JOB_REVISION_CONFLICT",
+    "JOB_TRANSITION_INVALID"
+  ].includes(code)) {
+    return sendJson(res, 409, {
+      error: safeJobHttpMessage(error, "job state conflict"),
+      code
+    });
+  }
+  if (error instanceof RangeError) {
+    return sendJson(res, 413, {
+      error: safeJobHttpMessage(error, "job request exceeds a resource bound")
+    });
+  }
+  if (error instanceof TypeError || code.startsWith("JOB_")) {
+    return sendJson(res, 400, {
+      error: safeJobHttpMessage(error, "job request rejected"),
+      ...(code ? { code } : {})
+    });
+  }
+  return sendJson(res, 500, { error: "job operation failed" });
 }
 
 function requireRequestProject(runtime, req, url, body = null) {

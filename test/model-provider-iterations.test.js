@@ -597,6 +597,343 @@ for (const spec of [
 for (const spec of [
   {
     name: "OpenAI",
+    make: () => new OpenAIResponsesProvider({
+      apiKey: "test-key",
+      maxIterations: 4
+    }),
+    stub(provider, state) {
+      provider.postResponses = async (body) => {
+        if (state.seeding) {
+          return { id: "iteration_seed_openai", output_text: "seed", output: [] };
+        }
+        if (!body.tools) {
+          state.forcedRequests += 1;
+          return { id: "iteration_summary_openai", output_text: "bounded", output: [] };
+        }
+        state.iterationRequests += 1;
+        const n = state.iterationRequests;
+        await Promise.resolve();
+        return {
+          id: `iteration_openai_${n}`,
+          output: [{
+            type: "function_call",
+            call_id: `iteration_call_${n}`,
+            name: "step",
+            arguments: "{}"
+          }]
+        };
+      };
+    },
+    registry: openAIToolRegistry
+  },
+  {
+    name: "Anthropic",
+    make: () => new AnthropicProvider({
+      apiKey: "test-key",
+      maxIterations: 4
+    }),
+    stub(provider, state) {
+      provider.postMessages = async (body) => {
+        if (state.seeding) {
+          return {
+            id: "iteration_seed_anthropic",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "seed" }]
+          };
+        }
+        if (!body.tools) {
+          state.forcedRequests += 1;
+          return {
+            id: "iteration_summary_anthropic",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "bounded" }]
+          };
+        }
+        state.iterationRequests += 1;
+        const n = state.iterationRequests;
+        await Promise.resolve();
+        return {
+          id: `iteration_anthropic_${n}`,
+          stop_reason: "tool_use",
+          content: [{
+            type: "tool_use",
+            id: `iteration_tool_${n}`,
+            name: "step",
+            input: {}
+          }]
+        };
+      };
+    },
+    registry: anthropicToolRegistry
+  }
+]) {
+  test(`${spec.name} shares one aggregate iteration allowance across concurrent children`, async () => {
+    const provider = spec.make();
+    const state = {
+      seeding: true,
+      iterationRequests: 0,
+      forcedRequests: 0
+    };
+    spec.stub(provider, state);
+    const parentContext = {};
+
+    await provider.generate({
+      input: "establish the trusted parent turn",
+      agent,
+      toolRegistry: spec.registry(),
+      context: parentContext
+    });
+    assert.equal(parentContext.__remainingIterations, 3);
+    state.seeding = false;
+
+    const childContexts = Array.from({ length: 3 }, () => ({
+      __budgetEnvelope: parentContext.__budgetEnvelope,
+      __remainingIterations: parentContext.__remainingIterations
+    }));
+    const results = await Promise.all(childContexts.map((context, index) => (
+      provider.generate({
+        input: `parallel child ${index + 1}`,
+        agent,
+        toolRegistry: spec.registry(),
+        context,
+        maxIterations: 3
+      })
+    )));
+
+    assert.equal(
+      results.reduce((sum, result) => sum + result.iterations, 0),
+      3,
+      "three children may consume only the parent's three remaining iterations"
+    );
+    assert.equal(state.iterationRequests, 3);
+    assert.equal(state.forcedRequests, 1, "the shared turn permits one final-answer request");
+    assert.deepEqual(
+      childContexts
+        .map((context) => context.__remainingIterations)
+        .sort((left, right) => left - right),
+      [0, 1, 2],
+      "each child publishes the shared remainder observed at its atomic claim"
+    );
+  });
+}
+
+for (const spec of [
+  {
+    name: "OpenAI",
+    make: (budgetGuard) => new OpenAIResponsesProvider({
+      apiKey: "test-key",
+      maxIterations: 4,
+      maxTurnUsd: 0.5,
+      budgetGuard
+    }),
+    seed: {
+      id: "budget_seed_openai",
+      usage: { input_tokens: 1, output_tokens: 1 },
+      output_text: "seed",
+      output: []
+    },
+    child: {
+      id: "budget_child_openai",
+      usage: { input_tokens: 1, output_tokens: 1 },
+      output: [{
+        type: "function_call",
+        call_id: "budget_child_call",
+        name: "step",
+        arguments: "{}"
+      }]
+    },
+    registry: openAIToolRegistry
+  },
+  {
+    name: "Anthropic",
+    make: (budgetGuard) => new AnthropicProvider({
+      apiKey: "test-key",
+      maxIterations: 4,
+      maxTurnUsd: 0.5,
+      stallTimeoutMs: 0,
+      budgetGuard
+    }),
+    seed: {
+      id: "budget_seed_anthropic",
+      usage: { input_tokens: 1, output_tokens: 1 },
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "seed" }]
+    },
+    child: {
+      id: "budget_child_anthropic",
+      usage: { input_tokens: 1, output_tokens: 1 },
+      stop_reason: "tool_use",
+      content: [{
+        type: "tool_use",
+        id: "budget_child_tool",
+        name: "step",
+        input: {}
+      }]
+    },
+    registry: anthropicToolRegistry
+  }
+]) {
+  test(`${spec.name} serializes concurrent charges against one trusted turn budget`, async (t) => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    let releaseFirstChild;
+    const firstChildBlocked = new Promise((resolve) => {
+      releaseFirstChild = resolve;
+    });
+    t.after(() => {
+      releaseFirstChild();
+      globalThis.fetch = originalFetch;
+    });
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 2) await firstChildBlocked;
+      const response = fetchCalls === 1 ? spec.seed : spec.child;
+      return {
+        ok: true,
+        headers: { get: () => "application/json" },
+        json: async () => structuredClone(response)
+      };
+    };
+    let records = 0;
+    const budgetGuard = {
+      check() {},
+      record() {
+        records += 1;
+        return { added: records === 1 ? 0 : 0.6 };
+      }
+    };
+    const provider = spec.make(budgetGuard);
+    const parentContext = {};
+
+    await provider.generate({
+      input: "establish the trusted parent budget",
+      agent,
+      toolRegistry: spec.registry(),
+      context: parentContext
+    });
+    const childContexts = Array.from({ length: 3 }, () => ({
+      __budgetEnvelope: parentContext.__budgetEnvelope,
+      __remainingIterations: parentContext.__remainingIterations
+    }));
+    const running = childContexts.map((context, index) => provider.generate({
+      input: `budget child ${index + 1}`,
+      agent,
+      toolRegistry: spec.registry(),
+      context,
+      maxIterations: 3
+    }));
+
+    await waitFor(() => fetchCalls >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      fetchCalls,
+      2,
+      "only the first child reaches HTTP while its charge is unresolved"
+    );
+    releaseFirstChild();
+    const results = await Promise.all(running);
+
+    assert.equal(fetchCalls, 2, "the recorded first-child spend blocks both queued requests");
+    assert.equal(records, 2);
+    assert.deepEqual(results.map((result) => result.stopReason), [
+      "budget-cap",
+      "budget-cap",
+      "budget-cap"
+    ]);
+  });
+}
+
+for (const spec of [
+  {
+    name: "OpenAI",
+    make: (budgetGuard) => new OpenAIResponsesProvider({
+      apiKey: "test-key",
+      maxIterations: 3,
+      maxTurnUsd: 0.5,
+      budgetGuard
+    }),
+    stub(provider, onRequest) {
+      provider.postResponses = async (_body, _context, options) => {
+        const n = onRequest();
+        options.turnBudget.spentUsd += 0.6;
+        return {
+          id: `shared_openai_${n}`,
+          usage: { input_tokens: 1, output_tokens: 1 },
+          output: [{
+            type: "function_call",
+            call_id: `shared_call_${n}`,
+            name: "step",
+            arguments: "{}"
+          }]
+        };
+      };
+    },
+    registry: openAIToolRegistry
+  },
+  {
+    name: "Anthropic",
+    make: (budgetGuard) => new AnthropicProvider({
+      apiKey: "test-key",
+      maxIterations: 3,
+      maxTurnUsd: 0.5,
+      budgetGuard
+    }),
+    stub(provider, onRequest) {
+      provider.postMessages = async (_body, _context, options) => {
+        const n = onRequest();
+        options.turnBudget.spentUsd += 0.6;
+        return {
+          id: `shared_anthropic_${n}`,
+          usage: { input_tokens: 1, output_tokens: 1 },
+          stop_reason: "tool_use",
+          content: [{
+            type: "tool_use",
+            id: `shared_tool_${n}`,
+            name: "step",
+            input: {}
+          }]
+        };
+      };
+    },
+    registry: anthropicToolRegistry
+  }
+]) {
+  test(`${spec.name} carries one trusted spend envelope into child provider turns`, async () => {
+    let requests = 0;
+    const budgetGuard = {
+      check() {},
+      record() {
+        return { added: 0.6 };
+      }
+    };
+    const provider = spec.make(budgetGuard);
+    spec.stub(provider, () => ++requests);
+    const context = {};
+
+    const parent = await provider.generate({
+      input: "parent work",
+      agent,
+      toolRegistry: spec.registry(),
+      context
+    });
+    assert.equal(parent.stopReason, "budget-cap");
+    assert.equal(requests, 1);
+    assert.ok(context.__budgetEnvelope);
+
+    const child = await provider.generate({
+      input: "child work",
+      agent,
+      toolRegistry: spec.registry(),
+      context
+    });
+    assert.equal(child.stopReason, "budget-cap");
+    assert.equal(requests, 1, "the inherited spend blocks a child request");
+  });
+}
+
+for (const spec of [
+  {
+    name: "OpenAI",
     make: (budgetGuard) => new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 4, budgetGuard }),
     response: {
       id: "openai_spend",
@@ -910,6 +1247,15 @@ test("the deterministic provider remains compatible with iteration-aware callers
   assert.equal(result.toolCalls.length, 0);
   assert.match(result.text, /Hey/);
 });
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail("condition was not reached before timeout");
+}
 
 // ── Vision plumbing: inbound images attach to the current user turn ──────
 const PX = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";

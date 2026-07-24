@@ -472,6 +472,24 @@ function resolveWorkspaceOperand(operand, workspaceDir, safetyOptions) {
   return mustResolve(candidate, safetyOptions);
 }
 
+function codePathJobResources(args, context, safetyOptions) {
+  const scope = codeExecutionScope(context, safetyOptions);
+  const abs = resolveWorkspaceOperand(
+    args?.path,
+    scope.workspaceDir,
+    scope.safetyOptions
+  );
+  const resolved = resolveSafe(abs, scope.safetyOptions);
+  if (!resolved.ok || resolved.sensitive) {
+    throw new Error(`Unsafe durable job path: ${abs}`);
+  }
+  const identity = process.platform === "win32"
+    ? String(resolved.realAbs ?? abs).toLowerCase()
+    : String(resolved.realAbs ?? abs);
+  const digest = createHash("sha256").update(identity).digest("hex");
+  return [`workspace/file/${digest}`];
+}
+
 function revalidateBeforeFsOperation(abs, safetyOptions, callback, operation) {
   if (typeof callback === "function") {
     const result = callback({ path: abs, operation });
@@ -633,6 +651,12 @@ export function registerCodeTools(registry, runtime, options = {}) {
       additionalProperties: false
     },
     summarize: (args) => `Edit ${args.path} (${args.edits?.length ?? 0} hunk${(args.edits?.length ?? 0) === 1 ? "" : "s"})`,
+    jobResources: (args, context) => codePathJobResources(
+      args,
+      context,
+      safetyOptions
+    ),
+    jobResourceRevision: "code-path-v1",
     handler: async (args, context) => {
       const scope = codeExecutionScope(context, safetyOptions);
       const abs = resolveWorkspaceOperand(
@@ -714,6 +738,12 @@ export function registerCodeTools(registry, runtime, options = {}) {
       additionalProperties: false
     },
     summarize: (args) => `Write ${args.path} (${String(args.content ?? "").length} chars)`,
+    jobResources: (args, context) => codePathJobResources(
+      args,
+      context,
+      safetyOptions
+    ),
+    jobResourceRevision: "code-path-v1",
     handler: async (args, context) => {
       const scope = codeExecutionScope(context, safetyOptions);
       const abs = resolveWorkspaceOperand(

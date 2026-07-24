@@ -219,6 +219,35 @@ test("recovery fails closed for approved actions with no completion receipt", as
   assert.equal(replayed.outcome.code, "approval_completion_interrupted");
 });
 
+test("a restart-era durable-job approval never executes outside its scheduler", async (t) => {
+  const store = makeStore(t);
+  const action = store.enqueue({
+    toolName: "send_thing",
+    args: { value: 12 },
+    context: {
+      sessionId: "session-job-approval",
+      __jobId: "job_0123456789abcdef"
+    }
+  });
+  let calls = 0;
+
+  const result = await approvePendingAction({
+    pendingActions: store,
+    tools: {
+      async invoke() {
+        calls += 1;
+        return { ok: true, result: { sent: true } };
+      }
+    }
+  }, action.id, { decidedBy: "creator" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.outcome.code, "job_approval_owner_unavailable");
+  assert.equal(calls, 0);
+  assert.equal(store.get(action.id).status, "denied");
+});
+
 test("a gated invoke stays pending, then approval resumes with the real result", async (t) => {
   setAutoApprove(t, "0");
   const store = makeStore(t);

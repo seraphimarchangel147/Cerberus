@@ -1220,6 +1220,12 @@ function persistedArgumentsRemainExecutable(args) {
 }
 
 function approvalReplayBlock(runtime, action) {
+  if (action.context?.__jobId) {
+    return replayBlockedOutcome(
+      "The durable job approval owner is no longer live; the target was not replayed outside its scheduler.",
+      "job_approval_owner_unavailable"
+    );
+  }
   if (action.argsReplayable === false) {
     return replayBlockedOutcome(
       "Pending action arguments were redacted at rest and cannot be replayed safely.",
