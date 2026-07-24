@@ -641,3 +641,13 @@ SAFE EFFICIENCY TELEMETRY COMPLETE
 - Redacted and deeply froze internal manifests; public registry listings now return detached JSON-safe descriptors without execution callbacks.
 - Added regressions for defaults, explicit normalization, redaction, confirmation, validation, immutability, callback isolation, and unchanged OpenAI/Anthropic schemas.
 TYPED TOOL CAPABILITIES COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: reachability-preserving tool radar (Codex)
+
+- Replaced shared overflow state with immutable request-local provider plans that cap advertised tools while reserving search, describe, and call bridges whenever any eligible tool is omitted.
+- Made every policy-eligible omitted internal, MCP, plugin, and skill tool searchable and invokable without widening specialist, scrutiny, read-only, confirmation, hook, checkpoint, or approval boundaries.
+- Ranked matches across names, descriptions, schema properties, capability metadata, source, and availability; returned bounded, redacted match reasons, required arguments, effects, confirmation requirements, availability, and examples.
+- Kept OpenAI and Anthropic on the exact same host-computed catalog and prevented bridge forwarding from bypassing or duplicating the real target's dispatch pipeline.
+- Reduced the current full-core advertised schema from 31,227 to 7,918 bytes while preserving exact-name reachability for all 42 omitted tools.
+- Added cap, reachability, ranking, scope, policy, immutability, provider-parity, and byte-reduction regressions in both approval lanes.
+REACHABILITY TOOL RADAR COMPLETE

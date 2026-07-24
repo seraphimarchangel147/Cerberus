@@ -4,15 +4,18 @@ import { sanitizeForAudit } from "./redact.js";
 import { validateMcpServerSpec } from "./mcp-registry.js";
 import { MODEL_PROVIDER_IDS, isModelProviderId } from "./model-router.js";
 import {
+  TOOL_SEARCH_BRIDGE_NAMES,
   ToolSearchController,
   isToolSearchDeferrable,
-  registerToolSearchTools
+  registerToolSearchTools,
+  toolSchemaBytes
 } from "./tool-search.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 const TOOL_SEARCH_DISCOVERY_BRIDGES = new Set(["tool_search", "tool_describe"]);
+const TOOL_SEARCH_BRIDGE_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
 const CAPABILITY_FIELDS = new Set([
   "domain",
   "verbs",
@@ -145,93 +148,136 @@ export class ToolRegistry {
     // across servers so one giant integration cannot crowd out every peer. Anything not
   // advertised is STILL invokable via run_mcp_tool + discoverable via
   // list_mcp_tools — no capability is lost, just the direct function affordance.
-  _modelToolList(options = {}) {
-    const listed = this.list(options);
-    // `only` narrows what the model sees; it never removes tools from the
-    // registry or changes invoke-time policy. Leaving it unset preserves the
-    // existing hot path byte-for-byte at the API boundary.
-    const narrowed = Array.isArray(options.only)
-      ? listed.filter((tool) => options.only.includes(tool.name))
+  modelToolPlan(options = {}) {
+    const listed = this.list({ readOnly: options.readOnly === true });
+    const only = Array.isArray(options.only) ? new Set(options.only.map(String)) : null;
+    const narrowed = only
+      ? listed.filter((tool) => only.has(tool.name))
       : listed;
-    const all = this.toolSearchController?.shapeModelTools
-      ? this.toolSearchController.shapeModelTools(narrowed, {
+    const searchPlan = this.toolSearchController?.planModelTools
+      ? this.toolSearchController.planModelTools(listed, {
           ...options,
           context: options.context ?? {}
         })
-      : narrowed;
-    const max = Number(process.env.OPENAGI_MAX_MODEL_TOOLS) || 128;
-    if (all.length <= max) {
-      this._lastToolOverflow = null;
-      return all;
-    }
-    const core = all.filter((t) => t.source !== "mcp");
-    const mcp = all.filter((t) => t.source === "mcp");
-    const selectedCore = core.slice(0, max);
-    const budget = Math.max(0, max - selectedCore.length);
-    const byServer = new Map();
-    for (const t of mcp) {
-      const s = t.metadata?.server ?? "?";
-      if (!byServer.has(s)) byServer.set(s, []);
-      byServer.get(s).push(t);
-    }
-    const servers = [...byServer.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-    const picked = [];
-    let cursor = 0;
-    while (picked.length < budget && servers.some(([, tools]) => cursor < tools.length)) {
-      for (const [, tools] of servers) {
-        if (picked.length >= budget) break;
-        if (cursor < tools.length) picked.push(tools[cursor]);
+      : {
+          active: false,
+          mode: "off",
+          schemaBytes: 0,
+          eligibleSchemaBytes: toolSchemaBytes(narrowed),
+          deferredNames: [],
+          eligibleNames: narrowed.map((tool) => tool.name),
+          tools: narrowed
+        };
+    const max = modelToolCap();
+    const bridgeTools = TOOL_SEARCH_BRIDGE_NAMES
+      .map((name) => listed.find((tool) => tool.name === name))
+      .filter(Boolean);
+    const plannedDirect = searchPlan.tools.filter((tool) => (
+      !TOOL_SEARCH_BRIDGE_SET.has(tool.name)
+    ));
+    const omittedNames = new Set(searchPlan.deferredNames ?? []);
+    let selectedDirect = plannedDirect;
+    let capOmitted = [];
+    let radarActive = Boolean(searchPlan.active);
+    const wouldOverflow = plannedDirect.length
+      + (radarActive ? TOOL_SEARCH_BRIDGE_NAMES.length : 0) > max;
+
+    if (wouldOverflow) {
+      if (this.toolSearchController && bridgeTools.length === TOOL_SEARCH_BRIDGE_NAMES.length) {
+        radarActive = true;
+        if (max < TOOL_SEARCH_BRIDGE_NAMES.length) {
+          throw new Error(
+            `OPENAGI_MAX_MODEL_TOOLS must be at least ${TOOL_SEARCH_BRIDGE_NAMES.length} when tool radar is required.`
+          );
+        }
+        selectedDirect = selectCappedModelTools(
+          plannedDirect,
+          max - TOOL_SEARCH_BRIDGE_NAMES.length
+        );
+      } else {
+        selectedDirect = selectCappedModelTools(plannedDirect, max);
       }
-      cursor += 1;
+      const selectedNames = new Set(selectedDirect.map((tool) => tool.name));
+      capOmitted = plannedDirect.filter((tool) => !selectedNames.has(tool.name));
+      for (const tool of capOmitted) omittedNames.add(tool.name);
     }
-    const pickedNames = new Set(picked.map((tool) => tool.name));
-    const overflow = servers
-      .map(([name, tools]) => ({ name, count: tools.filter((tool) => !pickedNames.has(tool.name)).length }))
-      .filter((entry) => entry.count > 0);
-    const omittedCore = Math.max(0, core.length - selectedCore.length);
-    this._lastToolOverflow = {
-      total: all.length,
+
+    if (radarActive && bridgeTools.length !== TOOL_SEARCH_BRIDGE_NAMES.length) {
+      throw new Error("Tool radar cannot omit tools unless all three discovery bridges are registered.");
+    }
+    const tools = radarActive
+      ? [...selectedDirect, ...bridgeTools]
+      : selectedDirect;
+    if (tools.length > max) {
+      throw new Error(`Model tool plan exceeds configured cap ${max}.`);
+    }
+
+    const capOmittedNames = new Set(capOmitted.map((tool) => tool.name));
+    const deferredCount = [...omittedNames]
+      .filter((name) => !capOmittedNames.has(name))
+      .length;
+    const omitted = [...omittedNames];
+    const notice = omitted.length > 0
+      ? radarActive
+        ? `Tool radar: ${omitted.length} eligible tools are omitted from direct schemas (${deferredCount} deferred, ${capOmitted.length} capped). Use tool_search, then tool_describe and tool_call.`
+        : legacyToolCapNotice(plannedDirect, selectedDirect)
+      : null;
+
+    return Object.freeze({
+      active: radarActive,
+      mode: searchPlan.mode,
       max,
-      omitted: overflow.reduce((sum, entry) => sum + entry.count, omittedCore),
-      omittedCore,
-      servers: overflow
-    };
-    this._logToolCap(all.length, max, servers.map(([name]) => name), overflow.map((entry) => `${entry.name}(${entry.count})`));
-    return [...selectedCore, ...picked];
+      tools: Object.freeze(tools),
+      advertisedNames: Object.freeze(tools.map((tool) => tool.name)),
+      omittedNames: Object.freeze(omitted),
+      deferredNames: Object.freeze([...(searchPlan.deferredNames ?? [])]),
+      capOmittedNames: Object.freeze(capOmitted.map((tool) => tool.name)),
+      schemaBytes: toolSchemaBytes(tools),
+      eligibleSchemaBytes: searchPlan.eligibleSchemaBytes ?? toolSchemaBytes(narrowed),
+      omittedSchemaBytes: toolSchemaBytes(
+        listed.filter((tool) => omittedNames.has(tool.name))
+      ),
+      notice
+    });
   }
 
-  modelToolOverflowNotice() {
-    const overflow = this._lastToolOverflow;
-    if (!overflow?.omitted) return null;
-    const servers = overflow.servers.slice(0, 6).map((entry) => `${entry.name}:${entry.count}`).join(", ");
-    const core = overflow.omittedCore ? `; ${overflow.omittedCore} core tools also omitted` : "";
-    return `Tool catalog cap: ${overflow.omitted} tools are not advertised directly (${servers || "MCP overflow"}${core}). Use searcmcp_tools to find them, then run_mcp_tool to invoke them.`;
+  modelToolOverflowNotice(options = {}) {
+    return this.modelToolPlan(options).notice;
   }
 
   // Surface what got capped (once per distinct overflow set) — never silently
   // drop tools, per the "no silent caps" rule.
-  _logToolCap(total, max, advertised, overflow) {
-    const key = overflow.join(",");
-    if (key === this._lastToolCapKey || !overflow.length) { this._lastToolCapKey = key; return; }
-    this._lastToolCapKey = key;
-    console.warn(`[tools] ${total} tools exceed model cap ${max}; advertising core + [${advertised.join(", ")}] directly. Reachable only via run_mcp_tool: [${overflow.join(", ")}]. Raise OPENAGI_MAX_MODEL_TOOLS to advertise more.`);
+  toOpenAIToolPlan(options = {}) {
+    const plan = this.modelToolPlan(options);
+    return Object.freeze({
+      ...plan,
+      tools: Object.freeze(plan.tools.map((tool) => ({
+        type: "function",
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters
+      })))
+    });
+  }
+
+  toAnthropicToolPlan(options = {}) {
+    const plan = this.modelToolPlan(options);
+    return Object.freeze({
+      ...plan,
+      tools: Object.freeze(plan.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.parameters
+      })))
+    });
   }
 
   toOpenAITools(options = {}) {
-    return this._modelToolList(options).map((tool) => ({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters
-    }));
+    return this.toOpenAIToolPlan(options).tools;
   }
 
   toAnthropicTools(options = {}) {
-    return this._modelToolList(options).map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.parameters
-    }));
+    return this.toAnthropicToolPlan(options).tools;
   }
 
   // Public entry: wraps the gated invocation with per-tool lifecycle
@@ -257,12 +303,15 @@ export class ToolRegistry {
       const targetName = String(forwarded?.name ?? "").trim();
       const targetArgs = forwarded?.args;
       const target = this.tools.get(targetName);
+      const reachableThroughRadar = this.toolSearchController?.isReachableTarget
+        ? this.toolSearchController.isReachableTarget(targetName, { context })
+        : isToolSearchDeferrable(target);
       if (
         !targetName
         || targetName === name
         || !target
         || typeof target.forwardInvocation === "function"
-        || !isToolSearchDeferrable(target)
+        || !reachableThroughRadar
       ) {
         return { ok: false, error: `Tool ${targetName || "(missing)"} is not available through tool_call.` };
       }
@@ -569,6 +618,66 @@ export class ToolRegistry {
 function normalizedToolSource(value) {
   const source = String(value ?? "internal").trim();
   return source || "internal";
+}
+
+function modelToolCap(env = process.env) {
+  const parsed = Number(env.OPENAGI_MAX_MODEL_TOOLS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 128;
+}
+
+function selectCappedModelTools(tools, max) {
+  if (tools.length <= max) return tools;
+  if (max <= 0) return [];
+
+  const core = tools.filter((tool) => tool.source !== "mcp");
+  const mcp = tools.filter((tool) => tool.source === "mcp");
+  const selectedCore = core.slice(0, max);
+  const budget = Math.max(0, max - selectedCore.length);
+  if (budget === 0) return selectedCore;
+
+  const byServer = new Map();
+  for (const tool of mcp) {
+    const server = String(tool.metadata?.server ?? "?");
+    if (!byServer.has(server)) byServer.set(server, []);
+    byServer.get(server).push(tool);
+  }
+  const servers = [...byServer.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]));
+  const picked = [];
+  let cursor = 0;
+  while (
+    picked.length < budget
+    && servers.some(([, serverTools]) => cursor < serverTools.length)
+  ) {
+    for (const [, serverTools] of servers) {
+      if (picked.length >= budget) break;
+      if (cursor < serverTools.length) picked.push(serverTools[cursor]);
+    }
+    cursor += 1;
+  }
+  return [...selectedCore, ...picked];
+}
+
+function legacyToolCapNotice(all, selected) {
+  const selectedNames = new Set(selected.map((tool) => tool.name));
+  const omitted = all.filter((tool) => !selectedNames.has(tool.name));
+  if (omitted.length === 0) return null;
+  const byServer = new Map();
+  let omittedCore = 0;
+  for (const tool of omitted) {
+    if (tool.source !== "mcp") {
+      omittedCore += 1;
+      continue;
+    }
+    const server = String(tool.metadata?.server ?? "?");
+    byServer.set(server, (byServer.get(server) ?? 0) + 1);
+  }
+  const servers = [...byServer.entries()]
+    .slice(0, 6)
+    .map(([server, count]) => `${server}:${count}`)
+    .join(", ");
+  const core = omittedCore ? `; ${omittedCore} core tools also omitted` : "";
+  return `Tool catalog cap: ${omitted.length} tools are not advertised directly (${servers || "MCP overflow"}${core}). Use searcmcp_tools to find them, then run_mcp_tool to invoke them.`;
 }
 
 function normalizeToolCapability(input, {

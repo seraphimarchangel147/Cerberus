@@ -7,7 +7,7 @@ import { deriveSpecialistScope, measureAxes, REMEMBER_RE, SCHEDULE_RE, SPECIALIZ
 import { autoApproveEnabled } from "./tool-registry.js";
 import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
-import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
+import { TOOL_SEARCH_BRIDGE_NAMES } from "./tool-search.js";
 import { expandContextReferences } from "./context-references.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
@@ -55,14 +55,26 @@ export const CONSENT_PHRASE_PATTERNS = Object.freeze([
 const STOP_OR_DELAY_RE = /\b(?:stop|wait|hold on|pause|cancel|not yet|do not|don't|never mind)\b/iu;
 const CHAT_AUTHOR_PREFIX_RE = /^\[[^\]\r\n]{1,100}\]\s*/u;
 
-export function toolSearchBridgesActive(tools, env = process.env) {
-  if (resolveToolSearchMode(env) === "off") return false;
+export function toolSearchBridgesActive(tools, _env = process.env) {
   const names = new Set(
     (Array.isArray(tools) ? tools : [])
       .map((tool) => String(tool?.name ?? ""))
       .filter((name) => TOOL_SEARCH_BRIDGE_NAME_SET.has(name))
   );
   return TOOL_SEARCH_BRIDGE_NAMES.every((name) => names.has(name));
+}
+
+function openAIToolPlan(toolRegistry, options = {}) {
+  if (typeof toolRegistry?.toOpenAIToolPlan === "function") {
+    return toolRegistry.toOpenAIToolPlan(options);
+  }
+  const tools = toolRegistry?.toOpenAITools?.(options) ?? [];
+  return {
+    active: toolSearchBridgesActive(tools),
+    tools,
+    omittedNames: Object.freeze([]),
+    notice: toolRegistry?.modelToolOverflowNotice?.(options) ?? null
+  };
 }
 
 function normalizedDirectReply(value) {
@@ -504,34 +516,46 @@ export class AgentHost {
     // The fast lane trims schemas only. Side-effect and scope enforcement
     // below remains authoritative even for core tools advertised on a watch
     // or ignore turn.
-    let tools = toolPolicy === "none" && !conversational
-      ? []
-      : (toolRegistry?.toOpenAITools?.(
-          conversational ? { only: CHAT_CORE_TOOLS } : { readOnly: toolPolicy === "read-only" }
-        ) ?? []);
+    let toolPlan = toolPolicy === "none" && !conversational
+      ? { active: false, tools: [], omittedNames: Object.freeze([]), notice: null }
+      : openAIToolPlan(
+          toolRegistry,
+          conversational
+            ? { only: CHAT_CORE_TOOLS, readOnly: toolPolicy === "read-only" }
+            : { readOnly: toolPolicy === "read-only" }
+        );
+    let tools = toolPlan.tools;
     // Embedders may supply a custom registry with none of OpenAGI's named
     // chat-core tools. Preserve their historical watch behavior rather than
     // silently advertising nothing; the production registry never needs this
     // fallback because it owns every name in CHAT_CORE_TOOLS.
     const chatCoreUnavailable = conversational && tools.length === 0 && toolPolicy === "read-only";
     if (chatCoreUnavailable) {
-      tools = toolRegistry?.toOpenAITools?.({ readOnly: true }) ?? [];
+      toolPlan = openAIToolPlan(toolRegistry, { readOnly: true });
+      tools = toolPlan.tools;
     }
-    const toolOverflowNotice = toolPolicy === "none" && !conversational
-      ? null
-      : toolRegistry?.modelToolOverflowNotice?.() ?? null;
 
     if (allowedToolNames) {
       const scopedNames = conversational && !chatCoreUnavailable
         ? CHAT_CORE_TOOLS.filter((name) => allowedToolNames.includes(name))
         : allowedToolNames;
-      tools = toolPolicy === "none" && !conversational
-        ? []
-        : (toolRegistry?.toOpenAITools?.({
+      toolPlan = toolPolicy === "none" && !conversational
+        ? { active: false, tools: [], omittedNames: Object.freeze([]), notice: null }
+        : openAIToolPlan(toolRegistry, {
             only: scopedNames,
-            readOnly: toolPolicy === "read-only"
-          }) ?? []);
+            readOnly: toolPolicy === "read-only",
+            context: {
+              __allowedTools: allowedToolNames,
+              __scrutinyPolicy: toolPolicy === "read-only"
+                ? "read-only"
+                : toolPolicy === "none"
+                  ? "none"
+                  : null
+            }
+          });
+      tools = toolPlan.tools;
     }
+    const toolOverflowNotice = toolPlan.notice ?? null;
     const toolSearchActive = toolSearchBridgesActive(
       tools,
       toolRegistry?.toolSearchController?.env ?? process.env
@@ -609,6 +633,9 @@ export class AgentHost {
       // does not read this field.
       __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
       __toolSearchActive: toolSearchActive,
+      // Exact request-local radar universe used to build `tools` above.
+      // Discovery and forwarding intersect it with enforced policy/scope.
+      __toolRadarOmitted: toolPlan.omittedNames,
       __memoryScope: memoryScope,
       __turnId: turnId,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,

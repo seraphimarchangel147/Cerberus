@@ -2113,7 +2113,7 @@ export class AnthropicProvider {
     return verdict;
   }
 
-  async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
+  async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools: requestTools, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     const generationRequest = arguments[0] ?? {};
     if (!this.isConfigured()) throw new Error("ANTHROPIC_API_KEY is not configured.");
     const model = this.resolveModel({ model: modelOverride, tier, task });
@@ -2151,15 +2151,30 @@ export class AnthropicProvider {
       ? advertisedTools.filter((name) => allowedTools.includes(name))
       : advertisedTools ?? allowedTools;
     const suppressTools = context.__scrutinyPolicy === "none" && advertisedTools === null;
-    let tools = suppressTools
-      ? []
-      : scopedTools
-      ? (toolRegistry?.toAnthropicTools?.({
-          only: scopedTools,
-          readOnly: context.__scrutinyPolicy === "read-only"
-        }) ?? [])
-      : (toolRegistry?.toAnthropicTools?.({ readOnly: context.__scrutinyPolicy === "read-only" }) ?? []);
-    if (resolveToolSearchMode(toolRegistry?.toolSearchController?.env ?? process.env) === "off") {
+    const hostPlannedTools = Array.isArray(requestTools)
+      ? requestTools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          input_schema: tool.input_schema ?? tool.parameters ?? tool.function?.parameters ?? {
+            type: "object",
+            properties: {}
+          }
+        }))
+      : null;
+    let tools = hostPlannedTools ?? (
+      suppressTools
+        ? []
+        : scopedTools
+        ? (toolRegistry?.toAnthropicTools?.({
+            only: scopedTools,
+            readOnly: context.__scrutinyPolicy === "read-only"
+          }) ?? [])
+        : (toolRegistry?.toAnthropicTools?.({ readOnly: context.__scrutinyPolicy === "read-only" }) ?? [])
+    );
+    if (
+      hostPlannedTools === null
+      && resolveToolSearchMode(toolRegistry?.toolSearchController?.env ?? process.env) === "off"
+    ) {
       const bridgeNames = new Set(TOOL_SEARCH_BRIDGE_NAMES);
       tools = tools.filter((tool) => !bridgeNames.has(tool.name));
     }
@@ -2726,9 +2741,9 @@ Tools available to you (call them when useful):
 - kanban_link(parentId, childId) - make a child depend on a parent task
 - list_skills / use_skill / run_skill / restore_skill - discover, load, run, or restore named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
-- tool_search(query, limit?) - search deferred MCP and non-core plugin tools without loading their full schemas
-- tool_describe(name) - inspect the full schema for one deferred tool before calling it
-- tool_call(name, arguments) - invoke a deferred tool by its real name through the normal policy and approval gates
+- tool_search(query, limit?) - search every eligible tool omitted from this request without loading its full schema
+- tool_describe(name) - inspect one eligible omitted tool's schema, requirements, effect, and availability
+- tool_call(name, arguments) - invoke an eligible omitted tool by its real name through the normal policy and approval gates
 - list_sessions — see recent conversations
 
 Guidelines:

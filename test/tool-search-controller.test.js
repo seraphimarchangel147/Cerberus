@@ -27,6 +27,8 @@ class FakeRegistry {
       },
       source: tool.source ?? "internal",
       sideEffects: tool.sideEffects !== false,
+      needsConfirmation: Boolean(tool.needsConfirmation),
+      capability: tool.capability,
       metadata: tool.metadata ?? {},
       handler: tool.handler,
       forwardInvocation: tool.forwardInvocation ?? tool.metadata?.forwardInvocation ?? null
@@ -49,6 +51,8 @@ function add(registry, name, {
   description = name,
   sideEffects = false,
   metadata = {},
+  capability,
+  needsConfirmation = false,
   parameters
 } = {}) {
   return registry.register({
@@ -56,6 +60,8 @@ function add(registry, name, {
     source,
     description,
     sideEffects,
+    capability,
+    needsConfirmation,
     metadata,
     parameters,
     handler: async () => ({ name })
@@ -100,6 +106,10 @@ test("deferrable classification preserves core tools and honors metadata overrid
     name: "forced_deferred",
     source: "internal",
     metadata: { toolSearch: "deferred" }
+  }), true);
+  assert.equal(isToolSearchDeferrable({
+    name: "kanban_create",
+    source: "internal"
   }), true);
   assert.equal(isToolSearchDeferrable({
     name: "tool_call",
@@ -248,6 +258,12 @@ test("search ranking and describe expose only context-eligible deferred tools", 
   assert.equal(found.count, 1);
   assert.equal(found.items[0].name, "mcp_invoice_list");
   assert.equal(found.items[0].server, "stripe");
+  assert.ok(found.items[0].whyMatched.includes("name"));
+  assert.deepEqual(found.items[0].requiredArguments, []);
+  assert.equal(found.items[0].effect, "read");
+  assert.equal(found.items[0].needsConfirmation, false);
+  assert.equal(found.items[0].availability, "unknown");
+  assert.equal(found.items[0].example, null);
 
   const allowed = controller.search("weather", {
     context: { __allowedTools: ["plugin_weather"] }
@@ -264,27 +280,92 @@ test("search ranking and describe expose only context-eligible deferred tools", 
     context: { __scrutinyPolicy: "none" }
   }).count, 0);
 
-  assert.deepEqual(controller.describe("mcp_invoice_list"), {
-    name: "mcp_invoice_list",
-    description: "List customer invoices and payment status.",
-    parameters: {
-      type: "object",
-      properties: { customer: { type: "string" } },
-      additionalProperties: false
-    },
-    source: "mcp",
-    server: "stripe",
-    originalName: "list_invoices"
+  const described = controller.describe("mcp_invoice_list");
+  assert.equal(described.name, "mcp_invoice_list");
+  assert.equal(described.description, "List customer invoices and payment status.");
+  assert.deepEqual(described.parameters, {
+    type: "object",
+    properties: { customer: { type: "string" } },
+    additionalProperties: false
   });
+  assert.deepEqual(described.requiredArguments, []);
+  assert.equal(described.source, "mcp");
+  assert.equal(described.server, "stripe");
+  assert.equal(described.originalName, "list_invoices");
+  assert.equal(described.capability.effect, "read");
+  assert.equal(described.needsConfirmation, false);
+  assert.equal(described.example, null);
   assert.throws(
     () => controller.describe("remember"),
-    /Unknown or unavailable deferred tool/
+    /Unknown or unavailable omitted tool/
   );
   assert.throws(
     () => controller.describe("mcp_invoice_list", {
       context: { __allowedTools: ["plugin_weather"] }
     }),
-    /Unknown or unavailable deferred tool/
+    /Unknown or unavailable omitted tool/
+  );
+});
+
+test("ranking includes schema properties, capability metadata, availability, and bounded metadata", () => {
+  const registry = new FakeRegistry();
+  add(registry, "internal_diagnostics", {
+    description: `Inspect editor state ${"x".repeat(400)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        workspaceRoot: { type: "string" },
+        options: {
+          type: "object",
+          properties: {
+            severityFilter: { type: "string" }
+          }
+        }
+      },
+      required: ["workspaceRoot"]
+    },
+    capability: {
+      domain: "language-server",
+      verbs: ["inspect"],
+      effect: "read",
+      availability: "available",
+      examples: [{ workspaceRoot: "C:\\fixture", note: "\u{1f9ea}".repeat(500) }]
+    },
+    needsConfirmation: true
+  });
+  add(registry, "internal_unavailable", {
+    capability: {
+      domain: "language-server",
+      effect: "read",
+      availability: "unavailable"
+    }
+  });
+  const controller = registerToolSearchTools(registry);
+  const context = {
+    __toolRadarOmitted: ["internal_diagnostics", "internal_unavailable"]
+  };
+
+  const schemaMatch = controller.search("severityFilter", { context });
+  assert.equal(schemaMatch.items[0].name, "internal_diagnostics");
+  assert.ok(schemaMatch.items[0].whyMatched.includes("input-schema"));
+  assert.deepEqual(schemaMatch.items[0].requiredArguments, ["workspaceRoot"]);
+  assert.equal(schemaMatch.items[0].needsConfirmation, true);
+  assert.ok(schemaMatch.items[0].description.length <= 280);
+
+  const capabilityMatch = controller.search("language server", { context });
+  assert.equal(capabilityMatch.items[0].name, "internal_diagnostics");
+  assert.ok(capabilityMatch.items[0].whyMatched.includes("capability"));
+  assert.equal(capabilityMatch.items[0].availability, "available");
+  assert.equal(typeof capabilityMatch.items[0].example, "string");
+  assert.ok(Buffer.byteLength(capabilityMatch.items[0].example, "utf8") <= 600);
+
+  assert.throws(
+    () => controller.search("x".repeat(501), { context }),
+    /at most 500 characters/
+  );
+  assert.match(
+    controller.resolveCall("internal_unavailable", {}, { context }).error,
+    /currently unavailable/
   );
 });
 
@@ -309,9 +390,9 @@ test("tool_call forwarding metadata resolves only real deferred targets", () => 
     name: "mcp_invoice_list",
     args: {}
   });
-  assert.match(controller.resolveCall("remember", {}).error, /registered deferred tool/);
-  assert.match(controller.resolveCall("tool_call", {}).error, /registered deferred tool/);
-  assert.match(controller.resolveCall("missing", {}).error, /registered deferred tool/);
+  assert.match(controller.resolveCall("remember", {}).error, /eligible omitted tool/);
+  assert.match(controller.resolveCall("tool_call", {}).error, /eligible omitted tool/);
+  assert.match(controller.resolveCall("missing", {}).error, /eligible omitted tool/);
   assert.match(controller.resolveCall("mcp_invoice_list", []).error, /must be an object/);
   assert.equal(bridge.metadata.toolSearch, "core");
   assert.equal(bridge.metadata.scopeBridge, true);

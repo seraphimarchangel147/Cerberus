@@ -279,7 +279,7 @@ test("discovery and forwarded calls stay inside specialist and read-only scopes"
     arguments: {}
   }, context);
   assert.equal(forbiddenCall.ok, false);
-  assert.match(forbiddenCall.error, /outside this specialist's bounded scope/i);
+  assert.match(forbiddenCall.error, /eligible omitted tool/i);
 
   const readOnlyCall = await registry.invoke("tool_call", {
     name: "plugin_allowed_write",
@@ -289,7 +289,7 @@ test("discovery and forwarded calls stay inside specialist and read-only scopes"
     __scrutinyPolicy: "read-only"
   });
   assert.equal(readOnlyCall.ok, false);
-  assert.match(readOnlyCall.error, /read-only tools only/i);
+  assert.match(readOnlyCall.error, /eligible omitted tool/i);
 });
 
 test("off mode preserves direct schemas and hides inactive bridges", () => {
