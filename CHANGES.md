@@ -663,3 +663,14 @@ REACHABILITY TOOL RADAR COMPLETE
 - Added cross-platform test launchers plus semantic, provider, approval, concurrency, hostile-data, receipt, truncation, Kanban-domain, checkpoint, and policy regressions in both approval lanes.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1168/1168 in the canonical WSL clone with no environment pinning.
 SEMANTIC TOOL OUTCOMES COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: activity-aware OpenAI Responses streaming (Codex)
+
+- Added a bounded Responses SSE state machine for fragmented UTF-8, LF/CRLF/bare-CR framing, visible text and refusals, usage snapshots, output items, multiple function calls, and exact argument assembly.
+- Required a terminal protocol event and `output_item.done` before a native call can reach the iteration engine; sequence regressions, identity substitution, sparse indices, lifecycle mutations, malformed calls, and post-terminal data now fail closed.
+- Kept reasoning and tool arguments internal while delivering only visible deltas, and reset the stall watchdog only after a meaningful event passes framing, size, sequence, and lifecycle validation.
+- Added independent hard-request and activity-stall timers plus abort-raced reader settlement, so caller cancellation and non-cooperative transports cannot hang or be misclassified.
+- Bounded wire bytes, events, frames, output items, content parts, visible output, per-call and aggregate arguments, and usage structure; streaming and blocking usage now share a descriptor-safe prototype-resistant accumulator.
+- Added adversarial protocol, cancellation, refusal, encoding, framing, usage, bound, and zero-partial-dispatch regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1203/1203 in the canonical WSL clone with no environment pinning.
+RESPONSES SSE COMPLETE

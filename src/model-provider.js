@@ -572,34 +572,127 @@ function recordTurnSpend(turnBudget, record) {
   if (Number.isFinite(added) && added > 0) turnBudget.spentUsd += added;
 }
 
+const PROVIDER_USAGE_MAX_DEPTH = 6;
+const PROVIDER_USAGE_MAX_KEYS = 128;
+const FORBIDDEN_USAGE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+function usageLimitError(message) {
+  return new ProviderError(message, { providerCode: "invalid_usage_payload" });
+}
+
+function safeUsageDescriptors(source, strict) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+  try {
+    const prototype = Object.getPrototypeOf(source);
+    if (prototype !== Object.prototype && prototype !== null) {
+      if (strict) throw usageLimitError("Provider usage must be a plain object.");
+      return null;
+    }
+    return Object.getOwnPropertyDescriptors(source);
+  } catch (error) {
+    if (strict && error instanceof ProviderError) throw error;
+    if (strict) throw usageLimitError("Provider usage could not be inspected safely.");
+    return null;
+  }
+}
+
+function mergeSafeProviderUsage(target, source, {
+  mode = "replace",
+  strict = false,
+  maxDepth = PROVIDER_USAGE_MAX_DEPTH,
+  maxKeys = PROVIDER_USAGE_MAX_KEYS,
+  state = { paths: new Set() },
+  depth = 0,
+  path = "usage"
+} = {}) {
+  const descriptors = safeUsageDescriptors(source, strict);
+  if (!descriptors) return target;
+  if (depth >= maxDepth) {
+    if (strict && Object.keys(descriptors).length > 0) {
+      throw usageLimitError("Provider usage exceeded the nesting limit.");
+    }
+    return target;
+  }
+
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (FORBIDDEN_USAGE_KEYS.has(key)) continue;
+    if (!Object.hasOwn(descriptor, "value")) {
+      if (strict) throw usageLimitError("Provider usage contained an accessor.");
+      continue;
+    }
+    const nextPath = `${path}.${key}`;
+    if (!state.paths.has(nextPath)) {
+      if (state.paths.size >= maxKeys) {
+        if (strict) throw usageLimitError("Provider usage exceeded the key limit.");
+        continue;
+      }
+      state.paths.add(nextPath);
+    }
+    const value = descriptor.value;
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      if (mode === "sum") {
+        const previous = Object.hasOwn(target, key) && Number.isFinite(target[key])
+          ? target[key]
+          : 0;
+        target[key] = previous + value;
+      } else {
+        target[key] = value;
+      }
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const nested = Object.hasOwn(target, key)
+      && target[key]
+      && typeof target[key] === "object"
+      && !Array.isArray(target[key])
+      ? target[key]
+      : Object.create(null);
+    target[key] = nested;
+    mergeSafeProviderUsage(nested, value, {
+      mode,
+      strict,
+      maxDepth,
+      maxKeys,
+      state,
+      depth: depth + 1,
+      path: nextPath
+    });
+    if (Object.keys(nested).length === 0) delete target[key];
+  }
+  return target;
+}
+
+function plainProviderUsage(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const output = {};
+  for (const key of Object.keys(value)) {
+    const item = value[key];
+    output[key] = item && typeof item === "object" && !Array.isArray(item)
+      ? plainProviderUsage(item)
+      : item;
+  }
+  return output;
+}
+
 function createProviderUsageAccumulator() {
-  return { calls: 0, usage: {} };
+  return {
+    calls: 0,
+    usage: Object.create(null),
+    usageState: { paths: new Set() }
+  };
 }
 
 function addProviderUsage(accumulator, usage) {
   if (!accumulator || !usage || typeof usage !== "object" || Array.isArray(usage)) return;
   accumulator.calls += 1;
-  mergeProviderUsage(accumulator.usage, usage);
-}
-
-function mergeProviderUsage(target, source) {
-  for (const [key, value] of Object.entries(source)) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      const previous = Number(target[key]);
-      target[key] = (Number.isFinite(previous) ? previous : 0) + value;
-      continue;
-    }
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const nested = target[key] && typeof target[key] === "object" && !Array.isArray(target[key])
-      ? target[key]
-      : {};
-    target[key] = nested;
-    mergeProviderUsage(nested, value);
-  }
+  mergeSafeProviderUsage(accumulator.usage, usage, {
+    mode: "sum",
+    state: accumulator.usageState
+  });
 }
 
 function finalizedProviderUsage(accumulator) {
-  return accumulator?.calls > 0 ? accumulator.usage : null;
+  return accumulator?.calls > 0 ? plainProviderUsage(accumulator.usage) : null;
 }
 
 function serializedByteLength(value) {
@@ -852,6 +945,755 @@ export async function readAnthropicEventStream(response, { onDelta, onActivity }
   }
   message.content = message.content.filter(Boolean);
   return message;
+}
+
+const OPENAI_SSE_DEFAULT_LIMITS = Object.freeze({
+  maxWireBytes: 16 * 1024 * 1024,
+  maxEventChars: 1024 * 1024,
+  maxEvents: 20_000,
+  maxItems: 4096,
+  maxContentParts: 1024,
+  maxVisibleChars: 8 * 1024 * 1024,
+  maxArgumentChars: 4 * 1024 * 1024,
+  maxTotalArgumentChars: 8 * 1024 * 1024,
+  maxUsageDepth: PROVIDER_USAGE_MAX_DEPTH,
+  maxUsageKeys: PROVIDER_USAGE_MAX_KEYS
+});
+
+function openAIStreamProtocolError(message, providerCode = "invalid_stream_protocol", cause = null) {
+  return new ProviderError(message, { providerCode, cause });
+}
+
+function openAIStreamError(event, fallback = "OpenAI stream returned an error event.") {
+  // Top-level `error` SSE events carry code/message directly, while terminal
+  // response failures nest them under response.error.
+  const detail = event?.error ?? event?.response?.error ?? event ?? {};
+  const message = typeof detail?.message === "string" && detail.message
+    ? detail.message.slice(0, 2000)
+    : fallback;
+  return new ProviderError(message, {
+    providerCode: typeof detail?.code === "string" ? detail.code : null,
+    providerType: typeof detail?.type === "string" ? detail.type : null
+  });
+}
+
+function normalizeOpenAIStreamLimits(overrides) {
+  const source = overrides && typeof overrides === "object" && !Array.isArray(overrides)
+    ? overrides
+    : {};
+  const limits = {};
+  for (const [key, fallback] of Object.entries(OPENAI_SSE_DEFAULT_LIMITS)) {
+    const candidate = Number(source[key]);
+    limits[key] = Number.isInteger(candidate) && candidate > 0
+      ? Math.min(candidate, fallback)
+      : fallback;
+  }
+  return limits;
+}
+
+function openAIOutputKey(event, limits) {
+  if (Object.hasOwn(event, "output_index")) {
+    const index = event.output_index;
+    if (!Number.isInteger(index) || index < 0 || index >= limits.maxItems) {
+      throw openAIStreamProtocolError("OpenAI stream contained an invalid output index.");
+    }
+    return `index:${index}`;
+  }
+  const itemId = typeof event.item_id === "string"
+    ? event.item_id
+    : (typeof event.item?.id === "string" ? event.item.id : "");
+  if (!itemId || itemId.length > 512 || /[\u0000-\u001f\u007f]/u.test(itemId)) {
+    throw openAIStreamProtocolError("OpenAI stream event was missing a bounded output identity.");
+  }
+  return `item:${itemId}`;
+}
+
+function safeOpenAIItem(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw openAIStreamProtocolError("OpenAI stream output item must be an object.");
+  }
+  try {
+    return structuredClone(value);
+  } catch (error) {
+    throw openAIStreamProtocolError("OpenAI stream output item could not be copied safely.", "invalid_stream_item", error);
+  }
+}
+
+function terminalFunctionMatches(doneItem, terminalItem) {
+  for (const key of ["id", "call_id", "name", "arguments"]) {
+    if (
+      terminalItem[key] !== undefined
+      && doneItem[key] !== undefined
+      && terminalItem[key] !== doneItem[key]
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Responses SSE is reconstructed into the same complete response object used
+// by the blocking path. Only visible output text and refusals leave this
+// parser. Function calls are returned only after output_item.done, even when a
+// terminal response snapshot claims that an unfinished item is complete.
+export async function readOpenAIEventStream(response, {
+  onDelta,
+  onActivity,
+  signal,
+  limits: limitOverrides
+} = {}) {
+  if (!response?.body?.getReader) {
+    throw openAIStreamProtocolError("OpenAI streaming response has no readable body.");
+  }
+
+  const limits = normalizeOpenAIStreamLimits(limitOverrides);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const responseState = {
+    object: "response",
+    status: "in_progress",
+    output: []
+  };
+  const itemStates = new Map();
+  const outputOrder = [];
+  const functionArgs = new Map();
+  const usage = Object.create(null);
+  const usageState = { paths: new Set() };
+  let totalArgumentChars = 0;
+  let visibleChars = 0;
+  let totalWireBytes = 0;
+  let eventCount = 0;
+  let lastSequence = null;
+  let terminalResponse = null;
+  let terminalType = null;
+  let sawEvent = false;
+  let sawDoneSentinel = false;
+  let pending = "";
+  let dataLines = [];
+  let dataChars = 0;
+  let cancelRequested = false;
+
+  const failLimit = (label) => {
+    throw openAIStreamProtocolError(
+      `OpenAI stream exceeded the ${label} limit.`,
+      "stream_limit_exceeded"
+    );
+  };
+
+  const bestEffortCancel = (reason) => {
+    if (cancelRequested) return;
+    cancelRequested = true;
+    try {
+      const cancellation = reader.cancel?.(reason);
+      if (cancellation && typeof cancellation.catch === "function") {
+        cancellation.catch(() => {});
+      }
+    } catch {
+      // Cancellation is advisory; the read race below guarantees settlement.
+    }
+  };
+
+  const onAbort = () => bestEffortCancel(signal?.reason);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener?.("abort", onAbort, { once: true });
+
+  const readWithAbort = () => {
+    if (!signal) return reader.read();
+    if (signal.aborted) return Promise.reject(abortReason(signal));
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener?.("abort", aborted);
+        callback(value);
+      };
+      const aborted = () => finish(reject, abortReason(signal));
+      signal.addEventListener?.("abort", aborted, { once: true });
+      Promise.resolve()
+        .then(() => reader.read())
+        .then(
+          (value) => finish(resolve, value),
+          (error) => finish(reject, error)
+        );
+    });
+  };
+
+  const rememberItem = (key, item, { done = false, added = false } = {}) => {
+    const previous = itemStates.get(key);
+    if (previous?.done) {
+      throw openAIStreamProtocolError("OpenAI stream mutated an output item after completion.");
+    }
+    if (added && previous) {
+      throw openAIStreamProtocolError("OpenAI stream added the same output item more than once.");
+    }
+    if (!previous) {
+      if (itemStates.size >= limits.maxItems) failLimit("output item count");
+      outputOrder.push(key);
+    }
+    itemStates.set(key, {
+      item: safeOpenAIItem(item),
+      done,
+      argsDone: previous?.argsDone ?? false,
+      completedParts: previous?.completedParts ?? new Set()
+    });
+    return itemStates.get(key);
+  };
+
+  const assertEventItemIdentity = (key, event) => {
+    const existingId = itemStates.get(key)?.item?.id;
+    const eventId = typeof event.item_id === "string"
+      ? event.item_id
+      : (typeof event.item?.id === "string" ? event.item.id : null);
+    if (
+      typeof existingId === "string"
+      && eventId
+      && existingId !== eventId
+    ) {
+      throw openAIStreamProtocolError("OpenAI stream reused an output index for a different item.");
+    }
+  };
+
+  const ensureMessagePart = (event, expectedType) => {
+    const key = openAIOutputKey(event, limits);
+    let state = itemStates.get(key);
+    if (state) assertEventItemIdentity(key, event);
+    if (!state) {
+      state = rememberItem(key, {
+        id: typeof event.item_id === "string" ? event.item_id : undefined,
+        type: "message",
+        role: "assistant",
+        status: "in_progress",
+        content: []
+      });
+    }
+    if (state.done) {
+      throw openAIStreamProtocolError("OpenAI stream mutated message content after item completion.");
+    }
+    const item = state.item;
+    if (item.type !== "message" && item.role !== "assistant") {
+      throw openAIStreamProtocolError("OpenAI stream attached visible content to a non-message item.");
+    }
+    if (!Array.isArray(item.content)) item.content = [];
+    const index = Object.hasOwn(event, "content_index") ? event.content_index : 0;
+    if (
+      !Number.isInteger(index)
+      || index < 0
+      || index >= limits.maxContentParts
+      || index > item.content.length
+    ) {
+      throw openAIStreamProtocolError("OpenAI stream contained an invalid or sparse content index.");
+    }
+    if (index === item.content.length) {
+      item.content.push(expectedType === "refusal"
+        ? { type: "refusal", refusal: "", text: "" }
+        : { type: "output_text", text: "", annotations: [] });
+    }
+    const part = item.content[index];
+    if (!part || part.type !== expectedType) {
+      throw openAIStreamProtocolError("OpenAI stream changed a content part type.");
+    }
+    return { key, state, part, index };
+  };
+
+  const replaceVisibleText = (part, field, nextValue) => {
+    const next = typeof nextValue === "string" ? nextValue : "";
+    const previous = typeof part[field] === "string" ? part[field] : "";
+    if (previous && next && previous !== next) {
+      throw openAIStreamProtocolError("OpenAI stream final visible content did not match its deltas.");
+    }
+    const resolved = next || previous;
+    const projected = visibleChars - previous.length + resolved.length;
+    if (projected > limits.maxVisibleChars) failLimit("visible output");
+    visibleChars = projected;
+    part[field] = resolved;
+    if (part.type === "refusal") {
+      part.refusal = resolved;
+      part.text = resolved;
+    }
+  };
+
+  const appendVisibleText = (part, field, delta) => {
+    if (typeof delta !== "string") {
+      throw openAIStreamProtocolError("OpenAI stream visible delta must be a string.");
+    }
+    const previous = typeof part[field] === "string" ? part[field] : "";
+    const next = `${previous}${delta}`;
+    if (visibleChars + delta.length > limits.maxVisibleChars) failLimit("visible output");
+    visibleChars += delta.length;
+    part[field] = next;
+    if (part.type === "refusal") {
+      part.refusal = next;
+      part.text = next;
+    }
+    if (delta && typeof onDelta === "function") {
+      try { onDelta(delta); } catch { /* presentation callbacks are advisory */ }
+    }
+  };
+
+  const visiblePartValue = (part) => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) return "";
+    if (part.type === "output_text") {
+      if (part.text !== undefined && typeof part.text !== "string") {
+        throw openAIStreamProtocolError("OpenAI stream output text must be a string.");
+      }
+      return part.text ?? "";
+    }
+    if (part.type === "refusal") {
+      const value = part.refusal ?? part.text ?? "";
+      if (typeof value !== "string") {
+        throw openAIStreamProtocolError("OpenAI stream refusal must be a string.");
+      }
+      return value;
+    }
+    return "";
+  };
+
+  const accountMessageItem = (nextItem, previousItem = null) => {
+    if (nextItem?.type !== "message" && nextItem?.role !== "assistant") return;
+    const nextContent = Array.isArray(nextItem.content) ? nextItem.content : [];
+    const previousContent = Array.isArray(previousItem?.content) ? previousItem.content : [];
+    if (nextContent.length > limits.maxContentParts) failLimit("content part count");
+    let previousChars = 0;
+    let nextChars = 0;
+    for (let index = 0; index < nextContent.length; index += 1) {
+      if (!Object.hasOwn(nextContent, index)) {
+        throw openAIStreamProtocolError("OpenAI stream message content must not be sparse.");
+      }
+      const nextPart = nextContent[index];
+      const previousPart = previousContent[index];
+      if (nextPart?.type === "refusal") {
+        const refusal = nextPart.refusal ?? nextPart.text ?? "";
+        if (typeof refusal === "string") {
+          nextPart.refusal = refusal;
+          nextPart.text = refusal;
+        }
+      }
+      const nextValue = visiblePartValue(nextPart);
+      const previousValue = visiblePartValue(previousPart);
+      if (
+        previousValue
+        && nextValue
+        && (
+          previousPart?.type !== nextPart?.type
+          || previousValue !== nextValue
+        )
+      ) {
+        throw openAIStreamProtocolError("OpenAI stream final message content did not match its deltas.");
+      }
+      previousChars += previousValue.length;
+      nextChars += (nextValue || previousValue).length;
+    }
+    for (let index = nextContent.length; index < previousContent.length; index += 1) {
+      previousChars += visiblePartValue(previousContent[index]).length;
+    }
+    const projected = visibleChars - previousChars + nextChars;
+    if (projected > limits.maxVisibleChars) failLimit("visible output");
+    visibleChars = projected;
+  };
+
+  const setFunctionArguments = (key, nextValue) => {
+    if (typeof nextValue !== "string") {
+      throw openAIStreamProtocolError("OpenAI stream function arguments must be a string.");
+    }
+    if (nextValue.length > limits.maxArgumentChars) failLimit("function argument");
+    const previous = functionArgs.get(key) ?? "";
+    const projected = totalArgumentChars - previous.length + nextValue.length;
+    if (projected > limits.maxTotalArgumentChars) failLimit("total function arguments");
+    totalArgumentChars = projected;
+    functionArgs.set(key, nextValue);
+  };
+
+  const requireActiveFunction = (event) => {
+    const key = openAIOutputKey(event, limits);
+    const state = itemStates.get(key);
+    if (state) assertEventItemIdentity(key, event);
+    if (!state || state.item?.type !== "function_call") {
+      throw openAIStreamProtocolError("OpenAI stream arguments referenced an unknown function call.");
+    }
+    if (state.done) {
+      throw openAIStreamProtocolError("OpenAI stream mutated function arguments after item completion.");
+    }
+    if (state.argsDone) {
+      throw openAIStreamProtocolError("OpenAI stream mutated function arguments after arguments completion.");
+    }
+    return { key, state };
+  };
+
+  const mergeUsage = (source) => {
+    mergeSafeProviderUsage(usage, source, {
+      mode: "replace",
+      strict: true,
+      maxDepth: limits.maxUsageDepth,
+      maxKeys: limits.maxUsageKeys,
+      state: usageState
+    });
+  };
+
+  const validateSequence = (event) => {
+    if (!Object.hasOwn(event, "sequence_number")) return;
+    const sequence = event.sequence_number;
+    if (!Number.isInteger(sequence) || sequence < 0) {
+      throw openAIStreamProtocolError("OpenAI stream contained an invalid sequence number.");
+    }
+    if (lastSequence !== null && sequence <= lastSequence) {
+      throw openAIStreamProtocolError("OpenAI stream sequence numbers were not strictly increasing.");
+    }
+    lastSequence = sequence;
+  };
+
+  const updateResponseSnapshot = (event) => {
+    const snapshot = event.response;
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return;
+    for (const key of ["id", "object", "created_at", "model", "status", "error", "incomplete_details"]) {
+      if (Object.hasOwn(snapshot, key)) responseState[key] = structuredClone(snapshot[key]);
+    }
+    if (snapshot.usage) mergeUsage(snapshot.usage);
+  };
+
+  const handleEvent = (event) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      throw openAIStreamProtocolError("OpenAI stream event must be an object.");
+    }
+    validateSequence(event);
+    if (terminalType) {
+      throw openAIStreamProtocolError("OpenAI stream emitted an event after its terminal response.");
+    }
+    sawEvent = true;
+    updateResponseSnapshot(event);
+    if (event.usage) mergeUsage(event.usage);
+
+    if (event.type === "error") throw openAIStreamError(event);
+    if (event.type === "response.failed") {
+      throw openAIStreamError(event, "OpenAI failed while streaming a response.");
+    }
+    if (event.type === "response.cancelled") {
+      throw openAIStreamError(event, "OpenAI cancelled the streaming response.");
+    }
+
+    if (event.type === "response.completed" || event.type === "response.incomplete") {
+      terminalType = event.type;
+      terminalResponse = event.response && typeof event.response === "object" && !Array.isArray(event.response)
+        ? structuredClone(event.response)
+        : null;
+      return true;
+    }
+
+    if (event.type === "response.created" || event.type === "response.in_progress") return true;
+
+    if (event.type === "response.output_item.added") {
+      const key = openAIOutputKey(event, limits);
+      const state = rememberItem(key, event.item ?? {}, { added: true });
+      accountMessageItem(state.item);
+      if (state.item.type === "function_call") {
+        const initial = typeof state.item.arguments === "string" ? state.item.arguments : "";
+        setFunctionArguments(key, initial);
+      }
+      return true;
+    }
+
+    if (event.type === "response.content_part.added" || event.type === "response.content_part.done") {
+      const type = event.part?.type;
+      if (type !== "output_text" && type !== "refusal") {
+        return true;
+      }
+      const { part, state, index } = ensureMessagePart(event, type);
+      if (state.completedParts.has(index)) {
+        throw openAIStreamProtocolError("OpenAI stream mutated a content part after completion.");
+      }
+      const value = type === "refusal" ? event.part?.refusal : event.part?.text;
+      if (typeof value === "string") {
+        replaceVisibleText(part, type === "refusal" ? "refusal" : "text", value);
+      }
+      if (type === "output_text" && Array.isArray(event.part?.annotations)) {
+        part.annotations = structuredClone(event.part.annotations);
+      }
+      if (event.type === "response.content_part.done") state.completedParts.add(index);
+      return true;
+    }
+
+    if (event.type === "response.output_text.delta") {
+      const { part, state, index } = ensureMessagePart(event, "output_text");
+      if (state.completedParts.has(index)) {
+        throw openAIStreamProtocolError("OpenAI stream mutated output text after completion.");
+      }
+      appendVisibleText(part, "text", event.delta);
+      return true;
+    }
+    if (event.type === "response.output_text.done") {
+      const { part, state, index } = ensureMessagePart(event, "output_text");
+      if (state.completedParts.has(index)) {
+        throw openAIStreamProtocolError("OpenAI stream completed output text more than once.");
+      }
+      replaceVisibleText(part, "text", event.text);
+      state.completedParts.add(index);
+      return true;
+    }
+    if (event.type === "response.refusal.delta") {
+      const { part, state, index } = ensureMessagePart(event, "refusal");
+      if (state.completedParts.has(index)) {
+        throw openAIStreamProtocolError("OpenAI stream mutated a refusal after completion.");
+      }
+      appendVisibleText(part, "refusal", event.delta);
+      return true;
+    }
+    if (event.type === "response.refusal.done") {
+      const { part, state, index } = ensureMessagePart(event, "refusal");
+      if (state.completedParts.has(index)) {
+        throw openAIStreamProtocolError("OpenAI stream completed a refusal more than once.");
+      }
+      replaceVisibleText(part, "refusal", event.refusal);
+      state.completedParts.add(index);
+      return true;
+    }
+
+    if (event.type === "response.function_call_arguments.delta") {
+      const { key } = requireActiveFunction(event);
+      if (typeof event.delta !== "string") {
+        throw openAIStreamProtocolError("OpenAI stream function argument delta must be a string.");
+      }
+      setFunctionArguments(key, `${functionArgs.get(key) ?? ""}${event.delta}`);
+      return true;
+    }
+    if (event.type === "response.function_call_arguments.done") {
+      const { key, state } = requireActiveFunction(event);
+      const finalArguments = Object.hasOwn(event, "arguments")
+        ? event.arguments
+        : (functionArgs.get(key) ?? "");
+      setFunctionArguments(key, finalArguments);
+      if (typeof event.name === "string") state.item.name = event.name;
+      if (typeof event.call_id === "string") state.item.call_id = event.call_id;
+      state.item.arguments = functionArgs.get(key);
+      state.argsDone = true;
+      return true;
+    }
+
+    if (event.type === "response.output_item.done") {
+      const key = openAIOutputKey(event, limits);
+      const previous = itemStates.get(key);
+      if (previous) assertEventItemIdentity(key, event);
+      if (previous?.done) {
+        throw openAIStreamProtocolError("OpenAI stream completed an output item more than once.");
+      }
+      const completed = safeOpenAIItem(event.item ?? {});
+      if (completed.status !== undefined && completed.status !== "completed") {
+        throw openAIStreamProtocolError("OpenAI stream completed an output item with a non-completed status.");
+      }
+      const item = { ...(previous?.item ?? {}), ...completed, status: "completed" };
+      if (!Array.isArray(completed.content) && Array.isArray(previous?.item?.content)) {
+        item.content = previous.item.content;
+      }
+      accountMessageItem(item, previous?.item);
+      if (item.type === "function_call") {
+        const assembled = functionArgs.get(key) ?? previous?.item?.arguments ?? "";
+        if (
+          typeof completed.arguments === "string"
+          && assembled
+          && completed.arguments !== assembled
+        ) {
+          throw openAIStreamProtocolError("OpenAI stream final function arguments did not match their deltas.");
+        }
+        setFunctionArguments(key, typeof completed.arguments === "string" ? completed.arguments : assembled);
+        item.arguments = functionArgs.get(key);
+      }
+      rememberItem(key, item, { done: true });
+      return true;
+    }
+
+    if (
+      typeof event.type === "string"
+      && (
+        event.type.startsWith("response.reasoning")
+        || event.type.startsWith("response.output_text.annotation")
+      )
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const dispatchData = (data) => {
+    if (!data) return;
+    if (data === "[DONE]") {
+      sawDoneSentinel = true;
+      return;
+    }
+    if (sawDoneSentinel) {
+      throw openAIStreamProtocolError("OpenAI stream emitted data after the done sentinel.");
+    }
+    if (data.length > limits.maxEventChars) failLimit("event size");
+    eventCount += 1;
+    if (eventCount > limits.maxEvents) failLimit("event count");
+    let event;
+    try {
+      event = JSON.parse(data);
+    } catch (error) {
+      throw openAIStreamProtocolError(
+        "OpenAI stream returned malformed event JSON.",
+        "invalid_stream_json",
+        error
+      );
+    }
+    const meaningful = handleEvent(event);
+    if (meaningful && typeof onActivity === "function") {
+      try { onActivity(); } catch { /* watchdog callback is advisory */ }
+    }
+  };
+
+  const consumeLine = (line) => {
+    if (line === "") {
+      if (dataLines.length > 0) dispatchData(dataLines.join("\n"));
+      dataLines = [];
+      dataChars = 0;
+      return;
+    }
+    if (line.startsWith(":")) return;
+    if (!line.startsWith("data:")) return;
+    const value = line.slice(5).replace(/^ /u, "");
+    dataChars += value.length + (dataLines.length > 0 ? 1 : 0);
+    if (dataChars > limits.maxEventChars) failLimit("event size");
+    dataLines.push(value);
+  };
+
+  const drainLines = (final = false) => {
+    let offset = 0;
+    for (let index = 0; index < pending.length; index += 1) {
+      const character = pending[index];
+      if (character !== "\n" && character !== "\r") continue;
+      if (character === "\r" && index + 1 === pending.length && !final) break;
+      consumeLine(pending.slice(offset, index));
+      if (character === "\r" && pending[index + 1] === "\n") index += 1;
+      offset = index + 1;
+    }
+    pending = pending.slice(offset);
+    if (final && pending) {
+      consumeLine(pending);
+      pending = "";
+    }
+    if (pending.length > limits.maxEventChars + 16) failLimit("pending frame");
+  };
+
+  try {
+    if (signal?.aborted) throw abortReason(signal);
+    while (true) {
+      const { done, value } = await readWithAbort();
+      if (done) break;
+      const byteLength = Number(value?.byteLength);
+      if (!Number.isInteger(byteLength) || byteLength < 0) {
+        throw openAIStreamProtocolError("OpenAI stream reader returned an invalid chunk.");
+      }
+      totalWireBytes += byteLength;
+      if (totalWireBytes > limits.maxWireBytes) failLimit("wire byte");
+      try {
+        pending += decoder.decode(value, { stream: true });
+      } catch (error) {
+        throw openAIStreamProtocolError(
+          "OpenAI stream contained invalid UTF-8.",
+          "invalid_stream_encoding",
+          error
+        );
+      }
+      drainLines(false);
+    }
+    try {
+      pending += decoder.decode();
+    } catch (error) {
+      throw openAIStreamProtocolError(
+        "OpenAI stream contained incomplete UTF-8.",
+        "invalid_stream_encoding",
+        error
+      );
+    }
+    drainLines(true);
+    if (dataLines.length > 0) dispatchData(dataLines.join("\n"));
+    if (signal?.aborted) throw abortReason(signal);
+  } catch (error) {
+    bestEffortCancel(error);
+    throw error;
+  } finally {
+    signal?.removeEventListener?.("abort", onAbort);
+    try { reader.releaseLock?.(); } catch { /* best effort */ }
+  }
+
+  if (!sawEvent) {
+    throw openAIStreamProtocolError("OpenAI streaming response ended without any events.");
+  }
+  if (!terminalType) {
+    throw openAIStreamProtocolError("OpenAI streaming response ended without a terminal response.");
+  }
+
+  const terminalCompleted = terminalType === "response.completed";
+  const terminalOutput = Array.isArray(terminalResponse?.output)
+    ? terminalResponse.output
+    : [];
+  if (terminalOutput.length > limits.maxItems) failLimit("terminal output item count");
+  const output = [];
+  const includedKeys = new Set();
+
+  for (let index = 0; index < terminalOutput.length; index += 1) {
+    const terminalItem = safeOpenAIItem(terminalOutput[index]);
+    const key = `index:${index}`;
+    const state = itemStates.get(key);
+    if (
+      state?.item?.id
+      && terminalItem.id
+      && state.item.id !== terminalItem.id
+    ) {
+      throw openAIStreamProtocolError("OpenAI terminal output identity conflicted with its streamed item.");
+    }
+    if (terminalItem.type === "function_call") {
+      if (
+        terminalCompleted
+        && terminalItem.status !== undefined
+        && terminalItem.status !== "completed"
+      ) {
+        throw openAIStreamProtocolError(
+          "OpenAI terminal response marked a function call as incomplete."
+        );
+      }
+      if (!state?.done || state.item?.type !== "function_call") {
+        if (terminalCompleted) {
+          throw openAIStreamProtocolError(
+            "OpenAI terminal response contained a function call without output_item.done."
+          );
+        }
+        continue;
+      }
+      if (!terminalFunctionMatches(state.item, terminalItem)) {
+        throw openAIStreamProtocolError("OpenAI terminal function call conflicted with its completed item.");
+      }
+      output.push(state.item);
+      includedKeys.add(key);
+      continue;
+    }
+    accountMessageItem(terminalItem, state?.item);
+    output.push(state?.item ?? terminalItem);
+    includedKeys.add(key);
+  }
+
+  for (const key of outputOrder) {
+    if (includedKeys.has(key)) continue;
+    const state = itemStates.get(key);
+    if (!state) continue;
+    if (state.item?.type === "function_call" && !state.done) {
+      if (terminalCompleted) {
+        throw openAIStreamProtocolError(
+          "OpenAI completed while a function call was still partial."
+        );
+      }
+      continue;
+    }
+    output.push(state.item);
+  }
+
+  const result = {
+    ...responseState,
+    ...(terminalResponse ?? {}),
+    status: terminalCompleted ? "completed" : "incomplete",
+    output
+  };
+  if (Object.keys(usage).length > 0) result.usage = plainProviderUsage(usage);
+  return result;
 }
 
 function appendOpenAIAssistantText(conversationInput, response) {
@@ -1441,6 +2283,8 @@ function estimateProviderConversationTokens(providerInstance, conversation, {
       }
     : {
         model,
+        store: false,
+        stream: true,
         instructions,
         input: requestMessages,
         ...(tools.length > 0 ? { tools } : {})
@@ -1746,7 +2590,7 @@ export class OpenAIResponsesProvider {
     return verdict;
   }
 
-  async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride }) {
+  async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     const generationRequest = arguments[0] ?? {};
     const model = this.resolveModel({ model: modelOverride, tier, task });
     if (!this.isConfigured()) throw new Error("OPENAI_API_KEY is not configured.");
@@ -1865,11 +2709,13 @@ export class OpenAIResponsesProvider {
         stopReason = "context-too-large";
         break;
       }
+      const wantStream = typeof onDelta === "function" || this.stallTimeoutMs > 0;
       const body = {
         model,
         store: false,
         instructions: baseInstructions,
-        input: conversationInput
+        input: conversationInput,
+        ...(wantStream ? { stream: true } : {})
       };
       if (toolList.length > 0) body.tools = toolList;
 
@@ -1879,7 +2725,8 @@ export class OpenAIResponsesProvider {
             timeoutMs: remainingMs,
             turnBudget,
             credentialRequest: credentialState.request,
-            compression: preparation
+            compression: preparation,
+            onDelta
           })
         ), context);
       } catch (error) {
@@ -2145,8 +2992,28 @@ export class OpenAIResponsesProvider {
     const requestedTimeoutMs = positiveNumber(options.timeoutMs, this.timeoutMs);
     const deadlineLimited = options.timeoutMs !== undefined && requestedTimeoutMs <= this.timeoutMs;
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, requestedTimeoutMs));
+    const streaming = body.stream === true;
+    const stallMs = streaming && this.stallTimeoutMs > 0
+      ? Math.max(1, Math.min(this.stallTimeoutMs, timeoutMs))
+      : 0;
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    let stalled = false;
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    let stallTimer = null;
+    const armStallTimeout = () => {
+      if (stallMs <= 0) return;
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        stalled = true;
+        controller.abort();
+      }, stallMs);
+    };
+    const onActivity = stallMs > 0
+      ? armStallTimeout
+      : undefined;
     const routedBody = providerRoutedBody(body, this.baseUrl, this.providerRouting);
     const serializedBody = JSON.stringify(routedBody);
     const startedAt = this.now();
@@ -2169,7 +3036,19 @@ export class OpenAIResponsesProvider {
           })
         }
       );
-      const json = await response.json().catch(() => ({}));
+      const contentType = response.headers?.get?.("content-type") ?? "";
+      const streamResponse = streaming && /text\/event-stream/i.test(contentType);
+      if (streamResponse) armStallTimeout();
+      const json = streamResponse
+        ? await readOpenAIEventStream(response, {
+            onDelta: options.onDelta,
+            onActivity,
+            signal: controller.signal
+          })
+        : await response.json().catch(() => ({}));
+      if (json?.status === "failed" || json?.error) {
+        throw openAIStreamError({ response: json }, "OpenAI failed to generate a response.");
+      }
       const latencyMs = Math.max(0, this.now() - startedAt);
       const callTools = (json.output ?? []).filter((item) => item.type === "function_call").map((item) => item.name);
       const efficiency = providerRequestEfficiency({
@@ -2196,17 +3075,17 @@ export class OpenAIResponsesProvider {
       return json;
     } catch (error) {
       if (externalSignal?.aborted) throw abortReason(externalSignal);
-      // The outer deadline and fetch abort timers race. Normalize the fetch
-      // winner so deadline expiry still returns a partial summary, while a
-      // provider's ordinary shorter request timeout keeps its old error path.
-      if (deadlineLimited && error?.name === "AbortError") throw new TurnDeadlineError();
-      // Our own per-request timer fired (not the caller's abort): convert the
-      // raw undici "This operation was aborted" into a typed RequestTimeoutError
-      // so the turn loop can stop gracefully instead of dying with a raw string.
-      if (timedOut && error?.name === "AbortError") throw new RequestTimeoutError(timeoutMs);
+      // Classify only the timer that actually fired. A turn deadline, request
+      // timeout, and stream stall can share the same underlying AbortError.
+      if (stalled && error?.name === "AbortError") throw new ModelStallError(stallMs);
+      if (timedOut && error?.name === "AbortError") {
+        if (deadlineLimited) throw new TurnDeadlineError();
+        throw new RequestTimeoutError(timeoutMs);
+      }
       throw error;
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timeoutTimer);
+      clearTimeout(stallTimer);
       externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }
