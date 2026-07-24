@@ -41,7 +41,18 @@ export { ComputerUseLog } from "./computer-use-log.js";
 export { McpStdioClient } from "./mcp-client.js";
 export { McpHttpClient } from "./mcp-http-client.js";
 export { McpOAuthClient } from "./mcp-oauth.js";
-export { MemoryCondenser } from "./memory-condenser.js";
+export {
+  MemoryCondenser,
+  compressLiveContext,
+  cooperativeContextLedgerSummarizer,
+  contextCompressionTrigger,
+  contextInputTokens,
+  createContextLedgerCandidate,
+  estimateContextTokens,
+  installContextLedgerCandidate,
+  previewContextLedger,
+  restoreContextLedger
+} from "./memory-condenser.js";
 export { OutcomeStore, scoreFromToolCalls } from "./outcome-store.js";
 export { ObservationStore } from "./observation-store.js";
 export { SessionIndex } from "./session-index.js";

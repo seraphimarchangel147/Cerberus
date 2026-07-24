@@ -11,6 +11,7 @@ import {
   classifyCredentialFailure,
   createCredentialPoolRegistry,
   credentialLeaseIdentity,
+  credentialPoolRedactionSnapshot,
   loadCredentialPoolConfig
 } from "../src/credential-pool.js";
 
@@ -475,4 +476,23 @@ test("failure classification reads ProviderError-style status and nested body me
     classifyCredentialFailure({ status: 401, message: "expired" }),
     { kind: "auth", status: 401, retrySame: false }
   );
+});
+
+test("private redaction snapshots are bounded before materialization", () => {
+  const credentials = Array.from({ length: 520 }, (_, index) => ({
+    id: `bounded-${index}`,
+    secretName: `BOUNDED_KEY_${index}`
+  }));
+  const env = Object.fromEntries(credentials.map((entry, index) => [
+    entry.secretName,
+    `bounded-value-${index}`
+  ]));
+  const credentialPool = pool({ credentials, env });
+  for (let index = 0; index < credentials.length; index += 1) {
+    credentialPool.acquire();
+  }
+
+  const snapshot = credentialPoolRedactionSnapshot(credentialPool);
+  assert.equal(snapshot.records.length, 512);
+  assert.equal(snapshot.overflow, true);
 });

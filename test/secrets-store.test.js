@@ -4,7 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { SecretsStore } from "../src/secrets-store.js";
+import {
+  SecretsStore,
+  secretsStoreRedactionSnapshot
+} from "../src/secrets-store.js";
 import { saveEnv, SETUP_FIELDS } from "../src/setup-wizard.js";
 
 function fixture(t, {
@@ -31,6 +34,97 @@ test("setup allowlist includes every built-in runtime credential", () => {
   ]) {
     assert.ok(SETUP_FIELDS.includes(name), `missing setup credential: ${name}`);
   }
+});
+
+test("redaction snapshots require an authoritative load and refresh on mutation", (t) => {
+  const { store } = fixture(t, { allowlist: ["ALPHA_SECRET"], env: {} });
+  assert.equal(secretsStoreRedactionSnapshot(store), null);
+
+  store.initialize({ decidedBy: "test:redaction-snapshot:init" });
+  assert.deepEqual(secretsStoreRedactionSnapshot(store), {
+    allowedNames: ["ALPHA_SECRET"],
+    records: [],
+    overflow: false
+  });
+
+  store.setSecret("ALPHA_SECRET", "snapshot-private-value", {
+    decidedBy: "test:redaction-snapshot:set"
+  });
+  assert.deepEqual(secretsStoreRedactionSnapshot(store), {
+    allowedNames: ["ALPHA_SECRET"],
+    records: [{
+      name: "ALPHA_SECRET",
+      value: "snapshot-private-value"
+    }],
+    overflow: false
+  });
+
+  store.removeSecret("ALPHA_SECRET", {
+    decidedBy: "test:redaction-snapshot:remove"
+  });
+  assert.deepEqual(secretsStoreRedactionSnapshot(store), {
+    allowedNames: ["ALPHA_SECRET"],
+    records: [],
+    overflow: false
+  });
+});
+
+test("a partially reported mutation refreshes redaction state at the disk commit", (t) => {
+  const env = Object.preventExtensions({});
+  const { store } = fixture(t, {
+    allowlist: ["ALPHA_SECRET"],
+    env
+  });
+  store.initialize({ decidedBy: "test:redaction-commit:init" });
+
+  assert.throws(
+    () => store.setSecret("ALPHA_SECRET", "committed-before-env-failure", {
+      decidedBy: "test:redaction-commit:set"
+    }),
+    TypeError
+  );
+  assert.deepEqual(secretsStoreRedactionSnapshot(store), {
+    allowedNames: ["ALPHA_SECRET"],
+    records: [{
+      name: "ALPHA_SECRET",
+      value: "committed-before-env-failure"
+    }],
+    overflow: false
+  });
+});
+
+test("redaction snapshots fail closed after an external atomic mutation", (t) => {
+  const { dataDir, store } = fixture(t, {
+    allowlist: ["ALPHA_SECRET"],
+    env: {}
+  });
+  store.initialize({ decidedBy: "test:redaction-external:first-init" });
+
+  const second = new SecretsStore({
+    dataDir,
+    allowlist: ["ALPHA_SECRET"],
+    env: {}
+  });
+  second.initialize({ decidedBy: "test:redaction-external:second-init" });
+  second.setSecret("ALPHA_SECRET", "externally-committed-value", {
+    decidedBy: "test:redaction-external:set"
+  });
+
+  assert.equal(secretsStoreRedactionSnapshot(store).overflow, true);
+  assert.equal(
+    store.getSecret("ALPHA_SECRET", {
+      decidedBy: "test:redaction-external:refresh"
+    }),
+    "externally-committed-value"
+  );
+  assert.deepEqual(secretsStoreRedactionSnapshot(store), {
+    allowedNames: ["ALPHA_SECRET"],
+    records: [{
+      name: "ALPHA_SECRET",
+      value: "externally-committed-value"
+    }],
+    overflow: false
+  });
 });
 
 test("secrets round-trip across instances and lists reveal masked metadata only", (t) => {

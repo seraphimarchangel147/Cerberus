@@ -9,9 +9,9 @@ import {
   AnthropicProvider,
   OpenAIResponsesProvider,
   capToolOutput,
-  compactConversation,
   reconcileOrphanedToolCalls
 } from "../src/model-provider.js";
+import { compressLiveContext } from "../src/memory-condenser.js";
 import { ToolOutputStore } from "../src/tool-output-store.js";
 
 function makeStore(t) {
@@ -88,7 +88,7 @@ test("unsafe tiny truncation budgets fail before dropping semantic receipts", ()
   );
 });
 
-test("over-budget transcript becomes a recap plus verbatim recent complete hops", () => {
+test("over-budget transcript becomes a ledger plus verbatim recent complete hops", async () => {
   const conversation = [
     { role: "user", content: `old request ${"a".repeat(500)}` },
     { type: "function_call", call_id: "old-call", name: "read", arguments: "{}" },
@@ -102,17 +102,18 @@ test("over-budget transcript becomes a recap plus verbatim recent complete hops"
   const recent = structuredClone(conversation.slice(-3));
   const before = JSON.stringify(conversation).length;
 
-  const result = compactConversation(conversation, {
+  const result = await compressLiveContext(conversation, {
     format: "openai",
-    budgetChars: 700,
+    maxDigestChars: 700,
     keepRecentHops: 1
   });
 
-  assert.equal(result.compacted, true);
-  assert.ok(result.afterChars < before);
-  assert.match(conversation[0].content, /^\[context recap:/);
-  assert.deepEqual(conversation.slice(-3), recent);
-  assert.equal(reconcileOrphanedToolCalls(conversation, "openai"), 0);
+  assert.equal(result.compressed, true);
+  assert.ok(result.preview.afterChars < before);
+  assert.match(result.conversation[0].content, /^\[context summary\]/u);
+  assert.deepEqual(result.conversation.slice(-3), recent);
+  assert.equal(reconcileOrphanedToolCalls(result.conversation, "openai"), 0);
+  assert.equal(conversation.length, 8, "the structured candidate does not mutate its source");
 });
 
 test("short successful turn sends the historical conversation bytes unchanged", async () => {

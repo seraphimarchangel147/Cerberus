@@ -685,3 +685,13 @@ RESPONSES SSE COMPLETE
 - Added hostile-input, cache, lineage, concurrency, routing, credential, privacy, AgentHost, fallback, setup, and serialization regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1236/1236 in the canonical WSL clone with no environment pinning.
 SAFE PROVIDER CONTINUATION COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: structured asynchronous context ledger (Codex)
+
+- Replaced unstructured live-context summaries with a reversible structured ledger of objective, authorization context, decisions, semantic tool receipts, state changes, evidence, artifacts, durable references, pending work, blockers, failures, and next actions while retaining exact current and recent tool pairs.
+- Added immutable preview, private source-bound single-use install, and restore lifecycle; bounded hostile snapshots and fail-open aggregate fallback; retired the competing compaction path.
+- Prepared candidates asynchronously but installed them only at exact usage-aware 50% and 85% thresholds, with cache bounds, live redaction revalidation, continuation invalidation, and stateless compression replay for OpenAI and Anthropic.
+- Hardened reasoning and credential redaction, durable-reference extraction, legacy failure classification, marker budgeting, optional summarizer isolation, synthetic-turn provenance, credential-pool rotation, and oversized-history behavior.
+- Added provider parity, lifecycle, TOCTOU, hostile-value, secret-rotation, reference, semantic receipt, continuation, threshold, and aggregate-bound regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1314/1314 in the canonical WSL clone with no environment pinning.
+STRUCTURED CONTEXT LEDGER COMPLETE

@@ -1,9 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import { types as utilTypes } from "node:util";
 import {
   CredentialPool,
   CredentialPoolExhaustedError,
   createCredentialPoolRegistry,
-  credentialLeaseIdentity
+  credentialLeaseIdentity,
+  credentialPoolRedactionSnapshot
 } from "./credential-pool.js";
 import { MoaProvider, normalizeMoaModelSpec } from "./moa-provider.js";
 import { ModelRouter } from "./model-router.js";
@@ -17,12 +19,14 @@ import { defaultToolOutputStore } from "./tool-output-store.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 import {
   CONTEXT_GATEWAY_RATIO,
-  compressLiveContext,
   contextCompressionTrigger,
   contextInputTokens,
+  createContextLedgerCandidate,
   estimateContextTokens,
+  installContextLedgerCandidate,
   markLiveContextSyntheticTurn
 } from "./memory-condenser.js";
+import { isCredentialEnvName } from "./redact.js";
 import {
   semanticToolError,
   snapshotToolValue,
@@ -39,7 +43,10 @@ import {
   resolveResponsesContinuationMode,
   ResponsesContinuationStore
 } from "./responses-continuation.js";
-import { summarizeText } from "./utils.js";
+import {
+  SecretsStore,
+  secretsStoreRedactionSnapshot
+} from "./secrets-store.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
@@ -66,6 +73,14 @@ const MAX_CACHE_IDENTITY_SESSIONS = 1000;
 const RUNTIME_CACHE_IDENTITIES = new WeakMap();
 const RUNTIME_TOOL_OUTCOME_IDS = new WeakMap();
 const RESPONSE_CONTINUATION_CANDIDATES = new WeakMap();
+const CONTEXT_LEDGER_PREPARATIONS = new WeakMap();
+const CONTEXT_LEDGER_CACHE_KEY = randomBytes(32);
+const MAX_CONTEXT_LEDGER_REDACT_VALUES = 256;
+const MAX_CONTEXT_LEDGER_REDACT_VALUE_CHARS = 16_384;
+const MAX_CONTEXT_LEDGER_REDACT_INSPECTIONS = 1_024;
+const MAX_CONTEXT_LEDGER_ENV_KEYS = 2_048;
+const MAX_CONTEXT_LEDGER_POOL_STATES = 512;
+const CONTEXT_LEDGER_REDACTION_OVERFLOW = new WeakSet();
 const UNKNOWN_CONTEXT_WINDOW_WARNINGS = new Set();
 const MIN_CONTEXT_DIGEST_CHARS = 40;
 const SYNTHETIC_CONTINUE = [
@@ -1737,6 +1752,13 @@ function appendOpenAIContinue(conversationInput) {
 }
 
 function appendAnthropicUserText(convo, text, { synthetic = false } = {}) {
+  if (synthetic) {
+    convo.push(markLiveContextSyntheticTurn({
+      role: "user",
+      content: text
+    }));
+    return;
+  }
   const last = convo.at(-1);
   if (last?.role === "user" && Array.isArray(last.content)) {
     last.content.push({ type: "text", text });
@@ -1744,7 +1766,7 @@ function appendAnthropicUserText(convo, text, { synthetic = false } = {}) {
     last.content = `${last.content}\n\n${text}`;
   } else {
     const message = { role: "user", content: text };
-    convo.push(synthetic ? markLiveContextSyntheticTurn(message) : message);
+    convo.push(message);
   }
 }
 
@@ -2050,67 +2072,6 @@ function smallestValidTruncation(base, target) {
     if (encoded.length <= target) return encoded;
   }
   return target >= 4 ? "null" : "0";
-}
-
-function transcriptChars(conversation) {
-  try { return JSON.stringify(conversation).length; } catch { return Number.MAX_SAFE_INTEGER; }
-}
-
-function adjustPairBoundary(conversation, format, boundary) {
-  const calls = new Map();
-  const results = new Map();
-  if (format === "anthropic") {
-    conversation.forEach((message, index) => {
-      for (const block of Array.isArray(message?.content) ? message.content : []) {
-        if (block?.type === "tool_use" && block.id) calls.set(block.id, index);
-        if (block?.type === "tool_result" && block.tool_use_id) results.set(block.tool_use_id, index);
-      }
-    });
-  } else {
-    conversation.forEach((item, index) => {
-      if (item?.type === "function_call" && item.call_id) calls.set(item.call_id, index);
-      if (item?.type === "function_call_output" && item.call_id) results.set(item.call_id, index);
-    });
-  }
-  for (const [id, callIndex] of calls) {
-    const resultIndex = results.get(id);
-    if (resultIndex === undefined) continue;
-    if ((callIndex < boundary) !== (resultIndex < boundary)) {
-      boundary = Math.min(boundary, callIndex, resultIndex);
-    }
-  }
-  return boundary;
-}
-
-// Replace only an old, well-formed prefix. Recent hops and the current user
-// turn stay byte-for-byte, and paired tool calls/results cross the boundary
-// together so compaction can never corrupt the provider transcript.
-export function compactConversation(conversation, {
-  format = "openai",
-  budgetChars = DEFAULT_CONTEXT_COMPACT_CHARS,
-  keepRecentHops = DEFAULT_CONTEXT_KEEP_RECENT_HOPS
-} = {}) {
-  const beforeChars = transcriptChars(conversation);
-  if (beforeChars <= budgetChars) return { compacted: false, beforeChars, afterChars: beforeChars };
-
-  reconcileOrphanedToolCalls(conversation, format);
-  const keepItems = (keepRecentHops * 2) + 1;
-  let boundary = conversation.length - keepItems;
-  if (boundary <= 0) return { compacted: false, beforeChars, afterChars: transcriptChars(conversation) };
-  boundary = adjustPairBoundary(conversation, format, boundary);
-  if (boundary <= 0) return { compacted: false, beforeChars, afterChars: transcriptChars(conversation) };
-
-  const compactedPrefix = conversation.slice(0, boundary);
-  const recapLimit = Math.max(500, Math.min(4000, Math.floor(budgetChars * 0.25)));
-  const recapText = `[context recap: ${compactedPrefix.length} older transcript items]\n${summarizeText(JSON.stringify(compactedPrefix), recapLimit)}`;
-  const recap = { role: "user", content: recapText };
-  const candidate = [recap, ...conversation.slice(boundary)];
-  const afterChars = transcriptChars(candidate);
-  if (afterChars >= transcriptChars(conversation)) {
-    return { compacted: false, beforeChars, afterChars: transcriptChars(conversation) };
-  }
-  conversation.splice(0, conversation.length, ...candidate);
-  return { compacted: true, beforeChars, afterChars };
 }
 
 function toolOutputStore(context) {
@@ -2424,13 +2385,602 @@ function emitContextCompression(context, event) {
   }
 }
 
+function safeOwnDataValue(value, key) {
+  if (
+    !value
+    || (typeof value !== "object" && typeof value !== "function")
+    || utilTypes.isProxy(value)
+  ) {
+    return undefined;
+  }
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && Object.hasOwn(descriptor, "value")
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function addContextLedgerRedactValues(target, values) {
+  if (values && utilTypes.isProxy(values)) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  if (
+    !values
+    || (typeof values !== "object" && typeof values !== "function")
+  ) {
+    if (values !== null && values !== undefined) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    }
+    return;
+  }
+  let source = [];
+  if (utilTypes.isSet(values)) {
+    try {
+      source = Set.prototype.values.call(values);
+    } catch {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      return;
+    }
+  } else if (Array.isArray(values)) {
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(values, "length");
+    if (!Number.isSafeInteger(lengthDescriptor?.value)) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    } else if (lengthDescriptor.value > MAX_CONTEXT_LEDGER_REDACT_VALUES) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    }
+    const length = Math.min(
+      MAX_CONTEXT_LEDGER_REDACT_VALUES,
+      Number.isSafeInteger(lengthDescriptor?.value)
+        ? lengthDescriptor.value
+        : 0
+    );
+    source = (function* redactionArrayValues() {
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+        if (descriptor && Object.hasOwn(descriptor, "value")) {
+          yield descriptor.value;
+        } else {
+          CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+        }
+      }
+    })();
+  } else {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  let inspected = 0;
+  for (const value of source) {
+    inspected += 1;
+    if (inspected > MAX_CONTEXT_LEDGER_REDACT_INSPECTIONS) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      break;
+    }
+    if (value === null || value === undefined) continue;
+    if (!["string", "number", "bigint", "boolean"].includes(typeof value)) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      continue;
+    }
+    const text = String(value);
+    if (!text.trim()) continue;
+    if (text.length > MAX_CONTEXT_LEDGER_REDACT_VALUE_CHARS) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      break;
+    }
+    if (target.has(text)) continue;
+    if (target.size >= MAX_CONTEXT_LEDGER_REDACT_VALUES) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      break;
+    }
+    target.add(text);
+  }
+}
+
+function addContextLedgerEnvValue(target, env, name) {
+  if (env && utilTypes.isProxy(env)) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return false;
+  }
+  if (
+    !env
+    || (typeof env !== "object" && typeof env !== "function")
+    || typeof name !== "string"
+  ) {
+    return false;
+  }
+  let descriptor;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(env, name);
+  } catch {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return false;
+  }
+  if (descriptor && Object.hasOwn(descriptor, "value")) {
+    addContextLedgerRedactValues(target, [descriptor.value]);
+    const value = descriptor.value;
+    return value !== null
+      && value !== undefined
+      && ["string", "number", "bigint", "boolean"].includes(typeof value)
+      && String(value).trim().length > 0;
+  }
+  if (descriptor) {
+    // Accessor-backed projections are deliberately not invoked on a paid
+    // request path, but their unknown value must still disable compression.
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+  }
+  return false;
+}
+
+function addContextLedgerCredentialEnv(target, env) {
+  if (env && utilTypes.isProxy(env)) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  if (
+    !env
+    || (typeof env !== "object" && typeof env !== "function")
+  ) {
+    return;
+  }
+  let descriptors;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(env);
+  } catch {
+    // Environment redaction is advisory and must never break a request.
+    return;
+  }
+  const keys = Reflect.ownKeys(descriptors)
+    .filter((name) => typeof name === "string");
+  if (keys.length > MAX_CONTEXT_LEDGER_ENV_KEYS) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+  }
+  for (const name of keys.slice(0, MAX_CONTEXT_LEDGER_ENV_KEYS)) {
+    const descriptor = descriptors[name];
+    if (
+      isCredentialEnvName(name)
+      && descriptor
+      && Object.hasOwn(descriptor, "value")
+    ) {
+      addContextLedgerRedactValues(target, [descriptor.value]);
+    }
+  }
+}
+
+function addContextLedgerStoreValues(target, store) {
+  if (store && utilTypes.isProxy(store)) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  if (
+    !store
+    || (typeof store !== "object" && typeof store !== "function")
+  ) {
+    return;
+  }
+  let builtInSnapshot = null;
+  let builtInAllowedNames = null;
+  if (store instanceof SecretsStore) {
+    try {
+      builtInSnapshot = secretsStoreRedactionSnapshot(store);
+      if (!builtInSnapshot || builtInSnapshot.overflow === true) {
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      } else if (
+        !Array.isArray(builtInSnapshot.records)
+        || !Array.isArray(builtInSnapshot.allowedNames)
+      ) {
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      } else {
+        builtInAllowedNames = new Set(builtInSnapshot.allowedNames);
+        for (const record of builtInSnapshot.records) {
+          addContextLedgerRedactValues(target, [safeOwnDataValue(record, "value")]);
+        }
+      }
+    } catch {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    }
+  }
+  const env = safeOwnDataValue(store, "env");
+  addContextLedgerCredentialEnv(target, env);
+  let allowlistDescriptor;
+  try {
+    allowlistDescriptor = Object.getOwnPropertyDescriptor(store, "allowlist");
+  } catch {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  if (allowlistDescriptor && !Object.hasOwn(allowlistDescriptor, "value")) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  const allowlist = allowlistDescriptor?.value;
+  if (allowlist && utilTypes.isProxy(allowlist)) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  if (!utilTypes.isSet(allowlist)) return;
+  if (
+    !env
+    || (typeof env !== "object" && typeof env !== "function")
+    || utilTypes.isProxy(env)
+  ) {
+    // A store that can resolve allowlisted values but exposes no safe current
+    // projection cannot prove that every live secret is covered. Never call
+    // getSecret() on this paid-request path because it may block or audit.
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  try {
+    let inspected = 0;
+    for (const name of Set.prototype.values.call(allowlist)) {
+      inspected += 1;
+      if (inspected > 512) {
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+        break;
+      }
+      if (typeof name !== "string") {
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+        continue;
+      }
+      const projected = addContextLedgerEnvValue(target, env, name);
+      const trustedMissing = store instanceof SecretsStore
+        && builtInSnapshot
+        && builtInSnapshot.overflow !== true
+        && builtInAllowedNames?.has(name);
+      if (!projected && !trustedMissing) {
+        // Only an authoritative snapshot loaded by the built-in store can
+        // prove that a missing own env property is currently unset. A merely
+        // constructed or duck-typed store may resolve an opaque value.
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      }
+    }
+  } catch {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+  }
+}
+
+function addContextLedgerPoolValues(target, pool) {
+  if (pool && utilTypes.isProxy(pool)) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  if (
+    !pool
+    || (typeof pool !== "object" && typeof pool !== "function")
+  ) {
+    return;
+  }
+  if (!(pool instanceof CredentialPool)) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    return;
+  }
+  const poolEnv = safeOwnDataValue(pool, "env");
+  const store = safeOwnDataValue(pool, "secretsStore");
+  const storeEnv = safeOwnDataValue(store, "env");
+  const entries = safeOwnDataValue(pool, "entries");
+  const states = safeOwnDataValue(pool, "states");
+  let acquiredRedactions = null;
+  try {
+    const snapshot = credentialPoolRedactionSnapshot(pool);
+    const records = safeOwnDataValue(snapshot, "records");
+    if (safeOwnDataValue(snapshot, "overflow") === true) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    }
+    if (Array.isArray(records) && !utilTypes.isProxy(records)) {
+      acquiredRedactions = new Map();
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(
+        records,
+        "length"
+      );
+      const length = Math.min(
+        512,
+        Number.isSafeInteger(lengthDescriptor?.value)
+          ? lengthDescriptor.value
+          : 0
+      );
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          records,
+          String(index)
+        );
+        if (!descriptor || !Object.hasOwn(descriptor, "value")) continue;
+        const entry = descriptor.value;
+        acquiredRedactions.set(safeOwnDataValue(entry, "id"), entry);
+      }
+    }
+  } catch {
+    acquiredRedactions = null;
+  }
+  if (!acquiredRedactions) {
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+  }
+  if (!Array.isArray(entries) || utilTypes.isProxy(entries)) {
+    // Opaque pool implementations can rotate to credentials that cannot be
+    // enumerated safely. Their active lease still works, but compression must
+    // remain disabled because alternate redaction coverage is unknowable.
+    CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+  } else {
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(entries, "length");
+    if (!Number.isSafeInteger(lengthDescriptor?.value)) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    }
+    if (
+      Number.isSafeInteger(lengthDescriptor?.value)
+      && lengthDescriptor.value > 512
+    ) {
+      CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+    }
+    const length = Math.min(
+      512,
+      Number.isSafeInteger(lengthDescriptor?.value) ? lengthDescriptor.value : 0
+    );
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(entries, String(index));
+      if (!descriptor || !Object.hasOwn(descriptor, "value")) {
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+        continue;
+      }
+      const entry = descriptor.value;
+      if (
+        !entry
+        || typeof entry !== "object"
+        || utilTypes.isProxy(entry)
+      ) {
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+        continue;
+      }
+      const entryId = safeOwnDataValue(entry, "id");
+      let state;
+      if (utilTypes.isMap(states) && !utilTypes.isProxy(states)) {
+        try {
+          state = Map.prototype.get.call(states, entryId);
+        } catch {
+          state = null;
+        }
+      } else {
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      }
+      const pinnedCredentialValues = [
+        safeOwnDataValue(state, "liveValue"),
+        safeOwnDataValue(state, "refreshedValue")
+      ];
+      const historicalCredentialValue = safeOwnDataValue(
+        acquiredRedactions?.get(entryId),
+        "value"
+      );
+      const credentialStateValues = [
+        ...pinnedCredentialValues,
+        historicalCredentialValue
+      ];
+      addContextLedgerRedactValues(target, credentialStateValues);
+      const pinnedCredentialKnown = pinnedCredentialValues.some((value) => (
+        value !== null
+        && value !== undefined
+        && ["string", "number", "bigint", "boolean"].includes(typeof value)
+        && String(value).trim().length > 0
+      ));
+      const secretName = safeOwnDataValue(entry, "secretName");
+      let poolCredentialKnown = false;
+      let storeCredentialKnown = false;
+      if (typeof secretName === "string") {
+        poolCredentialKnown = addContextLedgerEnvValue(
+          target,
+          poolEnv,
+          secretName
+        );
+        storeCredentialKnown = addContextLedgerEnvValue(
+          target,
+          storeEnv,
+          secretName
+        );
+      }
+      const inspectableCredentialKnown = poolCredentialKnown
+        || storeCredentialKnown;
+      const credentialKnown = inspectableCredentialKnown
+        || pinnedCredentialKnown;
+      if (!credentialKnown) {
+        // Calling an arbitrary resolver or SecretsStore.getSecret() here can
+        // synchronously block and append audit records on the paid-request
+        // path. A re-resolvable credential without an inspectable current
+        // projection therefore disables compression even if an older
+        // acquisition exists.
+        CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+      }
+
+      const refreshTokenName = safeOwnDataValue(entry, "refreshTokenSecretName");
+      const hasRefreshResolver = typeof safeOwnDataValue(
+        entry,
+        "resolveRefreshToken"
+      ) === "function";
+      if (typeof refreshTokenName === "string" || hasRefreshResolver) {
+        const refreshStateValue = safeOwnDataValue(
+          acquiredRedactions?.get(entryId),
+          "refreshToken"
+        );
+        addContextLedgerRedactValues(target, [refreshStateValue]);
+        let poolRefreshKnown = false;
+        let storeRefreshKnown = false;
+        if (typeof refreshTokenName === "string") {
+          poolRefreshKnown = addContextLedgerEnvValue(
+            target,
+            poolEnv,
+            refreshTokenName
+          );
+          storeRefreshKnown = addContextLedgerEnvValue(
+            target,
+            storeEnv,
+            refreshTokenName
+          );
+        }
+        if (!poolRefreshKnown && !storeRefreshKnown) {
+          // Historical refresh-token acquisitions cannot prove the value a
+          // resolver will return for a later request.
+          CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+        }
+      }
+    }
+  }
+  if (utilTypes.isMap(states) && !utilTypes.isProxy(states)) {
+    try {
+      let inspected = 0;
+      for (const state of Map.prototype.values.call(states)) {
+        inspected += 1;
+        if (inspected > MAX_CONTEXT_LEDGER_POOL_STATES) {
+          CONTEXT_LEDGER_REDACTION_OVERFLOW.add(target);
+          break;
+        }
+        addContextLedgerRedactValues(target, [
+          safeOwnDataValue(state, "liveValue"),
+          safeOwnDataValue(state, "refreshedValue")
+        ]);
+      }
+    } catch {
+      // Pool internals are advisory redaction input.
+    }
+  }
+  addContextLedgerCredentialEnv(target, poolEnv);
+  addContextLedgerStoreValues(target, store);
+}
+
+function contextLedgerRedactValues(providerInstance, context, extraValues = []) {
+  const values = new Set();
+  const providerKey = safeOwnDataValue(providerInstance, "apiKey");
+  const credentialPool = safeOwnDataValue(providerInstance, "credentialPool");
+  const providerStore = safeOwnDataValue(providerInstance, "secretsStore");
+  const poolStore = safeOwnDataValue(credentialPool, "secretsStore");
+  // Credentials capable of authorizing the current or a rotated request are
+  // always first so bulk configuration can never crowd them out of the bound.
+  addContextLedgerRedactValues(values, extraValues);
+  addContextLedgerRedactValues(values, [providerKey]);
+  addContextLedgerPoolValues(values, credentialPool);
+  addContextLedgerRedactValues(values, safeOwnDataValue(context, "__redactValues"));
+  addContextLedgerCredentialEnv(values, process.env);
+
+  const runtime = safeOwnDataValue(context, "runtime");
+  const stores = [
+    safeOwnDataValue(runtime, "secrets"),
+    providerStore,
+    poolStore
+  ];
+  const seenStores = new Set();
+  for (const store of stores) {
+    if (seenStores.has(store)) continue;
+    seenStores.add(store);
+    addContextLedgerStoreValues(values, store);
+  }
+  return {
+    values: Object.freeze([...values]),
+    overflow: CONTEXT_LEDGER_REDACTION_OVERFLOW.has(values)
+  };
+}
+
+function contextLedgerPreparationKey(options) {
+  const hmac = createHmac("sha256", CONTEXT_LEDGER_CACHE_KEY);
+  hmac.update("openagi-context-ledger-preparation-v1\0", "utf8");
+  hmac.update(String(options.format), "utf8");
+  hmac.update("\0", "utf8");
+  hmac.update(String(options.keepRecentHops), "utf8");
+  hmac.update("\0", "utf8");
+  hmac.update(String(options.maxDigestChars), "utf8");
+  hmac.update(options.redactionOverflow === true ? "\0overflow" : "\0complete", "utf8");
+  for (const value of options.redactValues ?? []) {
+    hmac.update("\0", "utf8");
+    hmac.update(String(value).length.toString(10), "utf8");
+    hmac.update(":", "utf8");
+    hmac.update(String(value), "utf8");
+  }
+  return hmac.digest("hex");
+}
+
+function contextLedgerOptions(providerInstance, format, context, {
+  maxDigestChars = providerInstance.contextDigestChars,
+  redactValues = []
+} = {}) {
+  const redaction = contextLedgerRedactValues(
+    providerInstance,
+    context,
+    redactValues
+  );
+  return {
+    format,
+    keepRecentHops: providerInstance.contextKeepRecentHops,
+    maxDigestChars,
+    redactValues: redaction.values,
+    redactionOverflow: redaction.overflow
+  };
+}
+
+function scheduledContextLedgerCandidate(conversation, options) {
+  if (!Array.isArray(conversation) || utilTypes.isProxy(conversation)) {
+    return Promise.resolve(null);
+  }
+  let entries = CONTEXT_LEDGER_PREPARATIONS.get(conversation);
+  if (!entries) {
+    entries = new Map();
+    CONTEXT_LEDGER_PREPARATIONS.set(conversation, entries);
+  }
+  const key = contextLedgerPreparationKey(options);
+  const current = entries.get(key);
+  const head = conversation[0];
+  const tail = conversation.at(-1);
+  if (
+    current
+    && current.length === conversation.length
+    && current.head === head
+    && current.tail === tail
+  ) {
+    return current.promise;
+  }
+  const promise = new Promise((resolve) => setImmediate(resolve))
+    .then(() => createContextLedgerCandidate(conversation, options))
+    .catch(() => null);
+  entries.delete(key);
+  entries.set(key, {
+    length: conversation.length,
+    head,
+    tail,
+    promise
+  });
+  void promise.then((candidate) => {
+    if (
+      !candidate?.compressed
+      && entries.get(key)?.promise === promise
+    ) {
+      entries.delete(key);
+    }
+  });
+  while (entries.size > 1) entries.delete(entries.keys().next().value);
+  return promise;
+}
+
+function primeProviderContextLedger(providerInstance, conversation, {
+  format,
+  model,
+  context,
+  redactValues = []
+}) {
+  if (!resolveModelContextWindowTokens(model, {
+    provider: format,
+    configured: providerInstance.contextWindowTokens
+  })) {
+    return Promise.resolve(null);
+  }
+  const options = contextLedgerOptions(providerInstance, format, context, {
+    redactValues
+  });
+  return scheduledContextLedgerCandidate(conversation, options);
+}
+
 async function prepareProviderConversation(providerInstance, conversation, {
   format,
   instructions,
   tools,
   model,
   usage = null,
-  context = {}
+  context = {},
+  redactValues = []
 }) {
   const contextWindowTokens = resolveModelContextWindowTokens(model, {
     provider: format,
@@ -2447,6 +2997,23 @@ async function prepareProviderConversation(providerInstance, conversation, {
     };
   }
 
+  const sourceDigestChars = Math.max(
+    MIN_CONTEXT_DIGEST_CHARS,
+    providerInstance.contextDigestChars
+  );
+  const baseLedgerOptions = contextLedgerOptions(
+    providerInstance,
+    format,
+    context,
+    {
+      maxDigestChars: sourceDigestChars,
+      redactValues
+    }
+  );
+  const preparedCandidate = scheduledContextLedgerCandidate(
+    conversation,
+    baseLedgerOptions
+  );
   const actualInputTokens = contextInputTokens(usage, { provider: format });
   const estimate = (candidate) => estimateProviderConversationTokens(providerInstance, candidate, {
     format,
@@ -2472,20 +3039,76 @@ async function prepareProviderConversation(providerInstance, conversation, {
 
   const safeTokenLimit = Math.max(0, Math.ceil(contextWindowTokens * CONTEXT_GATEWAY_RATIO) - 1);
   const charsPerToken = providerInstance.contextEstimateCharsPerToken;
-  const sourceDigestChars = Math.max(MIN_CONTEXT_DIGEST_CHARS, providerInstance.contextDigestChars);
-  const tryCompression = async (maxDigestChars) => {
-    const result = await compressLiveContext(conversation, {
-      format,
-      keepRecentHops: providerInstance.contextKeepRecentHops,
-      maxDigestChars
-    });
+  const tryCompression = async (
+    maxDigestChars,
+    pending = null,
+    { refreshOptions = false } = {}
+  ) => {
+    const options = maxDigestChars === sourceDigestChars && !refreshOptions
+      ? baseLedgerOptions
+      : contextLedgerOptions(providerInstance, format, context, {
+          maxDigestChars,
+          redactValues
+        });
+    const result = await (
+      pending
+      ?? createContextLedgerCandidate(conversation, options)
+    );
+    if (!result || typeof result !== "object") {
+      return {
+        result: {
+          compressed: false,
+          conversation: null,
+          failedOpen: true
+        },
+        estimatedTokens: estimatedInputTokens,
+        options
+      };
+    }
     return {
       result,
-      estimatedTokens: result.compressed ? estimate(result.conversation) : estimatedInputTokens
+      estimatedTokens: result.compressed ? estimate(result.conversation) : estimatedInputTokens,
+      options
     };
   };
 
-  let attempt = await tryCompression(sourceDigestChars);
+  let attempt = await tryCompression(sourceDigestChars, preparedCandidate);
+  const redactionOptionsAreCurrent = (options) => {
+    try {
+      const current = contextLedgerOptions(
+        providerInstance,
+        format,
+        context,
+        {
+          maxDigestChars: options.maxDigestChars,
+          redactValues
+        }
+      );
+      return contextLedgerPreparationKey(current)
+        === contextLedgerPreparationKey(options);
+    } catch {
+      return false;
+    }
+  };
+  const rejectCompression = () => {
+    const requestAllowed = estimatedInputTokens <= safeTokenLimit;
+    if (!requestAllowed) {
+      emitContextCompression(context, {
+        reason: trigger.reason,
+        blocked: true,
+        estimatedInputTokens: attempt.estimatedTokens,
+        thresholdTokens: safeTokenLimit + 1
+      });
+    }
+    return {
+      ...trigger,
+      ...attempt.result,
+      compressed: false,
+      requestAllowed,
+      estimatedInputTokens,
+      postCompressionEstimatedTokens: attempt.estimatedTokens
+    };
+  };
   if (attempt.result.compressed && attempt.estimatedTokens > safeTokenLimit) {
     const excessChars = (attempt.estimatedTokens - safeTokenLimit) * charsPerToken;
     const attemptedDigestChars = Math.max(
@@ -2506,25 +3129,69 @@ async function prepareProviderConversation(providerInstance, conversation, {
   }
 
   if (!attempt.result.compressed || attempt.estimatedTokens > safeTokenLimit) {
+    return rejectCompression();
+  }
+
+  if (!redactionOptionsAreCurrent(attempt.options)) {
+    attempt = await tryCompression(
+      attempt.options.maxDigestChars,
+      null,
+      { refreshOptions: true }
+    );
+  }
+  if (
+    !attempt.result.compressed
+    || attempt.estimatedTokens > safeTokenLimit
+    || !redactionOptionsAreCurrent(attempt.options)
+  ) {
+    return rejectCompression();
+  }
+
+  let installation = installContextLedgerCandidate(
+    attempt.result,
+    conversation
+  );
+  if (!installation?.installed) {
+    // A tool result or observer may have changed the working array while a
+    // candidate was prepared. Rebuild once against the authoritative source;
+    // a second mismatch fails closed instead of installing stale context.
+    attempt = await tryCompression(
+      attempt.options.maxDigestChars,
+      null,
+      { refreshOptions: true }
+    );
+    if (
+      attempt.result.compressed
+      && attempt.estimatedTokens <= safeTokenLimit
+      && redactionOptionsAreCurrent(attempt.options)
+    ) {
+      installation = installContextLedgerCandidate(
+        attempt.result,
+        conversation
+      );
+    }
+  }
+  if (!installation?.installed || !Array.isArray(installation.conversation)) {
     const requestAllowed = estimatedInputTokens <= safeTokenLimit;
     if (!requestAllowed) {
       emitContextCompression(context, {
         reason: trigger.reason,
         blocked: true,
-        estimatedInputTokens: attempt.estimatedTokens,
+        estimatedInputTokens,
         thresholdTokens: safeTokenLimit + 1
       });
     }
     return {
       ...trigger,
       ...attempt.result,
+      compressed: false,
       requestAllowed,
       estimatedInputTokens,
-      postCompressionEstimatedTokens: attempt.estimatedTokens
+      postCompressionEstimatedTokens: estimatedInputTokens
     };
   }
 
-  conversation.splice(0, conversation.length, ...attempt.result.conversation);
+  conversation.splice(0, conversation.length, ...installation.conversation);
   emitContextCompression(context, {
     reason: trigger.reason,
     summarizedItems: attempt.result.summarizedItems,
@@ -2659,6 +3326,7 @@ export class OpenAIResponsesProvider {
     this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
+    this.secretsStore = options.secretsStore ?? options.secrets ?? null;
     this.zeroDataRetention = options.zeroDataRetention === true;
     this.responsesContinuationStore = options.responsesContinuationStore
       ?? new ResponsesContinuationStore({
@@ -2778,6 +3446,15 @@ export class OpenAIResponsesProvider {
       : Array.isArray(context.__advertisedTools)
         ? []
         : toolRegistry?.toOpenAITools?.() ?? [];
+    void primeProviderContextLedger(this, conversationInput, {
+      format: "openai",
+      model,
+      context,
+      redactValues: [
+        credentialState.request.lease?.value,
+        credentialState.request.lease?.refreshToken
+      ]
+    });
     const promptCacheKey = createOpenAIPromptCacheKey({
       model,
       stableInstructions: baseInstructions,
@@ -2878,7 +3555,11 @@ export class OpenAIResponsesProvider {
         tools: toolList,
         model,
         usage: previousUsage,
-        context
+        context,
+        redactValues: [
+          credentialState.request.lease?.value,
+          credentialState.request.lease?.refreshToken
+        ]
       });
       previousUsage = null;
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -2889,10 +3570,23 @@ export class OpenAIResponsesProvider {
         stopReason = "context-too-large";
         break;
       }
-      if (preparation.compressed && continuationResponseId) {
+      if (preparation.compressed && continuationAvailable) {
         // A compressed local replay represents a new provider-side prefix.
-        // Never stack that digest on top of the uncompressed stored response.
+        // Invalidate both stored state and the live reservation so this request
+        // is stateless and cannot seed a continuation from mixed prefixes.
+        if (continuationIdentity) {
+          try {
+            this.responsesContinuationStore.invalidate(continuationIdentity);
+          } catch {
+            // Provider-side continuation state is an optimization. Clearing
+            // the live local reservation below is authoritative for this turn.
+          }
+        }
+        continuationAvailable = false;
+        continuationLineage = null;
+        continuationReservation = null;
         continuationResponseId = null;
+        continuationCredentialIdentity = null;
       }
       const wantStream = typeof onDelta === "function" || this.stallTimeoutMs > 0;
       const usePreviousResponse = Boolean(
@@ -3052,6 +3746,15 @@ export class OpenAIResponsesProvider {
         goalContinuationRevision = goalDecision.revision;
         appendOpenAIAssistantText(conversationInput, response);
         appendOpenAIContinue(conversationInput);
+        void primeProviderContextLedger(this, conversationInput, {
+          format: "openai",
+          model,
+          context,
+          redactValues: [
+            credentialState.request.lease?.value,
+            credentialState.request.lease?.refreshToken
+          ]
+        });
         continue;
       }
 
@@ -3180,6 +3883,15 @@ export class OpenAIResponsesProvider {
       if (calls.length === 0 || iterations % this.maxRequestHops === 0) {
         appendOpenAIContinue(conversationInput);
       }
+      void primeProviderContextLedger(this, conversationInput, {
+        format: "openai",
+        model,
+        context,
+        redactValues: [
+          credentialState.request.lease?.value,
+          credentialState.request.lease?.refreshToken
+        ]
+      });
     }
 
     let text;
@@ -3200,7 +3912,11 @@ export class OpenAIResponsesProvider {
           tools: [],
           model,
           usage: previousUsage,
-          context
+          context,
+          redactValues: [
+            credentialState.request.lease?.value,
+            credentialState.request.lease?.refreshToken
+          ]
         });
         previousUsage = null;
         if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -3492,6 +4208,7 @@ export class AnthropicProvider {
     this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
+    this.secretsStore = options.secretsStore ?? options.secrets ?? null;
     this.ownsRouter = !options.router;
     this.router = options.router ?? new ModelRouter({ envPrefix: "ANTHROPIC", baseModel: this.model });
     configureProviderCredentialPool(this, options, {
@@ -3622,6 +4339,15 @@ export class AnthropicProvider {
       })),
       { role: "user", content: finalUserContent }
     ];
+    void primeProviderContextLedger(this, convo, {
+      format: "anthropic",
+      model,
+      context,
+      redactValues: [
+        credentialState.request.lease?.value,
+        credentialState.request.lease?.refreshToken
+      ]
+    });
 
     const toolCalls = [];
     const completedToolCallIds = new Map();
@@ -3659,7 +4385,11 @@ export class AnthropicProvider {
         tools,
         model,
         usage: previousUsage,
-        context
+        context,
+        redactValues: [
+          credentialState.request.lease?.value,
+          credentialState.request.lease?.refreshToken
+        ]
       });
       previousUsage = null;
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -3755,6 +4485,15 @@ export class AnthropicProvider {
         }
         goalContinuationRevision = goalDecision.revision;
         appendAnthropicUserText(convo, SYNTHETIC_CONTINUE, { synthetic: true });
+        void primeProviderContextLedger(this, convo, {
+          format: "anthropic",
+          model,
+          context,
+          redactValues: [
+            credentialState.request.lease?.value,
+            credentialState.request.lease?.refreshToken
+          ]
+        });
         continue;
       }
 
@@ -3834,6 +4573,15 @@ export class AnthropicProvider {
       if (toolUses.length === 0 || iterations % this.maxRequestHops === 0) {
         appendAnthropicUserText(convo, SYNTHETIC_CONTINUE, { synthetic: true });
       }
+      void primeProviderContextLedger(this, convo, {
+        format: "anthropic",
+        model,
+        context,
+        redactValues: [
+          credentialState.request.lease?.value,
+          credentialState.request.lease?.refreshToken
+        ]
+      });
     }
 
     let text;
@@ -3854,7 +4602,11 @@ export class AnthropicProvider {
           tools: [],
           model,
           usage: previousUsage,
-          context
+          context,
+          redactValues: [
+            credentialState.request.lease?.value,
+            credentialState.request.lease?.refreshToken
+          ]
         });
         previousUsage = null;
         if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -4053,6 +4805,11 @@ function constructDirectProvider(
       ...(model ? { model } : {}),
       budgetGuard,
       providerRouting,
+      secretsStore: options.anthropic?.secretsStore
+        ?? options.anthropic?.secrets
+        ?? options.secretsStore
+        ?? options.secrets
+        ?? null,
       credentialPool: options.anthropic?.credentialPool ?? credentialPools.get("anthropic")
     });
   }
@@ -4062,6 +4819,11 @@ function constructDirectProvider(
       ...(model ? { model } : {}),
       budgetGuard,
       providerRouting,
+      secretsStore: options.openai?.secretsStore
+        ?? options.openai?.secrets
+        ?? options.secretsStore
+        ?? options.secrets
+        ?? null,
       credentialPool: options.openai?.credentialPool ?? credentialPools.get("openai")
     });
   }
