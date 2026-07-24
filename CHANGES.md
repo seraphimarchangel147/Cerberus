@@ -721,3 +721,15 @@ PROJECT COMPOSITION ROOT COMPLETE
 - Added durable-store, concurrency, lock, cancellation, restart, subagent, budget, approval, project, output-reference, HTTP, SSE, prompt, and hostile-input regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1477/1477 with zero failures and one intentional Windows permission-mode skip.
 DURABLE JOBS COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: semantic browser (Codex)
+
+- Added an opt-in project/session-scoped semantic browser with a lazy optional Playwright/CDP adapter, compact accessibility/DOM snapshots, opaque generation-bound references, typed navigation/input/selection/scroll/transfer actions, and on-demand screenshots.
+- Labeled every page-derived result as untrusted, invalidated references on live DOM changes and mutations, stripped fragment credentials, redacted entered-secret representations from later semantic output, and withheld untrusted adapter diagnostics.
+- Routed navigation, activation, form input, selection, secret input, uploads, downloads, and screenshots through the existing approval rail; rejected embedded credentials before approval persistence and resolved credential values only from project-granted SecretsStore references.
+- Added HTTP(S), DNS, private-network, redirect-origin, service-worker, and WebSocket guards; isolated every local or CDP browser context and prevented directly injected adapters from crossing project/session boundaries.
+- Confined downloads to project-owned paths and converted uploads to bounded opened byte payloads with file-identity checks, closing symlink and validate-then-use path races.
+- Added native screenshot attachment parity for OpenAI and Anthropic without retaining base64 in textual tool output, plus setup allowlisting and runtime lifecycle/public API wiring.
+- Added lifecycle, stale-reference, scope, approval, secret, SSRF, redirect, CDP, path-race, provider-image, prompt, optional-dependency, and hostile-adapter regressions. The compact semantic benchmark is below 20 percent of the equivalent three-screenshot-loop context.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1507/1507 with zero failures and one intentional Windows permission-mode skip.
+SEMANTIC BROWSER COMPLETE

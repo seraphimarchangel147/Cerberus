@@ -46,6 +46,7 @@ import { TaskStore } from "./task-store.js";
 import { GoalStore } from "./goal-store.js";
 import { KanbanStore } from "./kanban-store.js";
 import { ProjectStore } from "./project-store.js";
+import { createOptionalSemanticBrowserService } from "./semantic-browser.js";
 import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
@@ -71,7 +72,11 @@ import { composeDigest, deliverDigest } from "./outreach-digest.js";
 import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
-import { registerCoreTools, ToolRegistry } from "./tool-registry.js";
+import {
+  registerCoreTools,
+  registerSemanticBrowserTools,
+  ToolRegistry
+} from "./tool-registry.js";
 import { registerCodeTools } from "./code-tools.js";
 import { registerDefaultWorkflows, WorkflowRegistry } from "./workflow-registry.js";
 import { applyPersona } from "./persona.js";
@@ -294,6 +299,56 @@ export function resolveExternalMemoryProvider(options = {}) {
   }
 }
 
+function resolveSemanticBrowser(runtime, options, {
+  dataDir,
+  workspaceDir
+} = {}) {
+  if (Object.hasOwn(options, "semanticBrowser")) {
+    if (options.semanticBrowser === false || options.semanticBrowser === null) {
+      return null;
+    }
+    if (!options.semanticBrowser || typeof options.semanticBrowser !== "object") {
+      throw new TypeError("semanticBrowser must be a service object, false, or null.");
+    }
+    return options.semanticBrowser;
+  }
+
+  const semanticBrowserOptions = options.semanticBrowserOptions
+    && typeof options.semanticBrowserOptions === "object"
+    && !Array.isArray(options.semanticBrowserOptions)
+    ? options.semanticBrowserOptions
+    : {};
+  const factoryOptions = {
+    ...semanticBrowserOptions,
+    runtime,
+    projects: runtime.projects,
+    secrets: runtime.secrets,
+    env: options.env ?? process.env,
+    dataDir,
+    workspaceDir
+  };
+  if (Object.hasOwn(options, "semanticBrowserAdapter")) {
+    factoryOptions.adapter = options.semanticBrowserAdapter;
+  }
+  if (Object.hasOwn(options, "semanticBrowserAdapterFactory")) {
+    factoryOptions.adapterFactory = options.semanticBrowserAdapterFactory;
+  }
+
+  const created = typeof options.semanticBrowserFactory === "function"
+    ? options.semanticBrowserFactory(factoryOptions)
+    : createOptionalSemanticBrowserService(factoryOptions);
+  if (created && typeof created.then === "function") {
+    throw new TypeError("semanticBrowserFactory must return a service synchronously.");
+  }
+  if (created == null && typeof options.semanticBrowserFactory !== "function") {
+    return null;
+  }
+  if (!created || typeof created !== "object") {
+    throw new TypeError("semanticBrowserFactory returned no service.");
+  }
+  return created;
+}
+
 export class AbiRuntime {
   constructor(options = {}) {
     this.context = {
@@ -459,6 +514,10 @@ export class AbiRuntime {
       if (this.events) this.outreachMapper.attach();
     }
     this.skillReplay = options.skillReplay ?? new SkillReplay({ runtime: this, dataDir: options.dataDir, ...(options.skillReplayOptions ?? {}) });
+    this.semanticBrowser = resolveSemanticBrowser(this, options, {
+      dataDir: secretsDataDir,
+      workspaceDir: options.workspaceDir ?? process.cwd()
+    });
     this.outputs = [];
     this.feedback = [];
     // Overlap guard state for tick(): the hosted-interface ticker fires
@@ -690,6 +749,7 @@ export class AbiRuntime {
         dailyAt: "04:30"
       });
       registerCoreTools(this.tools, this);
+      registerSemanticBrowserTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
       // tests, and gated shell. Governed delegation registers separately.
       registerCodeTools(this.tools, this);
@@ -1527,6 +1587,7 @@ export class AbiRuntime {
       settled.push(...await Promise.allSettled([
         this.jobs?.close?.(),
         this.kanban?.close?.(),
+        this.semanticBrowser?.closeAll?.(),
         this.observations?.close?.(),
         this.sessionIndex?.close?.()
       ]));

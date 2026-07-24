@@ -185,7 +185,23 @@ export {
 } from "./model-router.js";
 export { PropagationController } from "./propagation-controller.js";
 export { SkillRegistry } from "./skills.js";
-export { registerCoreTools, ToolRegistry } from "./tool-registry.js";
+export {
+  registerCoreTools,
+  registerSemanticBrowserTools,
+  SEMANTIC_BROWSER_TOOL_NAMES,
+  ToolRegistry
+} from "./tool-registry.js";
+export {
+  SemanticBrowserError,
+  SemanticBrowserService,
+  createOptionalSemanticBrowserService,
+  createPlaywrightAdapterFactory,
+  createSemanticBrowserService,
+  isPrivateAddress,
+  semanticBrowserEnabled,
+  validateCdpUrl,
+  validateNavigationUrl
+} from "./semantic-browser.js";
 export { createHostedInterface } from "./hosted-interface.js";
 export {
   DEFAULT_API_SERVER_PORT,

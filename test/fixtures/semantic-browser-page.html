@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Semantic browser benchmark</title>
+</head>
+<body>
+  <main>
+    <h1>Travel request</h1>
+    <p id="status" role="status">Draft request</p>
+    <form id="travel-request">
+      <label>
+        Destination
+        <input name="destination" value="Boston">
+      </label>
+      <label>
+        Departure
+        <input name="departure" type="date" value="2026-08-10">
+      </label>
+      <label>
+        Return
+        <input name="return" type="date" value="2026-08-14">
+      </label>
+      <label>
+        Cabin
+        <select name="cabin">
+          <option>Economy</option>
+          <option>Premium economy</option>
+          <option>Business</option>
+        </select>
+      </label>
+      <label>
+        Notes
+        <textarea name="notes">Window seat if available</textarea>
+      </label>
+      <label>
+        Attachment
+        <input name="attachment" type="file">
+      </label>
+      <button type="submit">Review request</button>
+    </form>
+    <section aria-labelledby="policy-heading">
+      <h2 id="policy-heading">Travel policy</h2>
+      <ul>
+        <li>Choose refundable fares.</li>
+        <li>Keep receipts for reimbursement.</li>
+        <li>Submit manager approval for premium cabins.</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>
