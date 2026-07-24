@@ -3685,6 +3685,8 @@ function renderChat() {
     appendMessage({ role: "user", content: text, from: state.from, channel: state.channel, createdAt: new Date().toISOString() });
     const sendBtn = $("send");
     sendBtn.disabled = true;
+    // The avatar reacts to the harness working — spin it up while we wait.
+    if (window.cerbHoloReact) window.cerbHoloReact("thinking");
     try {
       const result = await postJson("/message", {
         text,
@@ -3847,14 +3849,24 @@ function cerbHoloStop() {
   if (cerbHoloRaf) { cancelAnimationFrame(cerbHoloRaf); cerbHoloRaf = 0; }
 }
 
-/* Extrude the 2D mark polylines (same geometry as cerbMarkSVG) into a
-   shallow 3D wireframe: a front ring, a back ring, and connecting struts
-   for every polyline. Returns a flat Float32Array of segment endpoints. */
-function cerbHoloGeometry() {
-  const W = 64, D = 3;
+/* ─── Holo avatar — geometry ────────────────────────────────────────────
+   The avatar is built from layered primitives that share ONE source of
+   truth (the Cerberus mark polylines — the same geometry as cerbMarkSVG,
+   so the brand mark and the projection are literally the same shape):
+     1. an extruded wireframe "skeleton" (front ring, back ring, struts),
+     2. a volumetric particle field sampled from the mark's strokes — the
+        img2threejs technique: rasterise the glyph, then turn every lit
+        pixel into a particle whose depth comes from its brightness, so
+        the strokes read as a shallow relief instead of a flat outline,
+     3. two counter-rotating orbital rings for the "projection" feel.
+   All of it is raw WebGL line/point primitives — zero dependencies. */
+
+/* Single source of truth for the mark's polylines (64x64 mark space). */
+function cerbMarkPolys() {
+  const W = 64;
   const mir = (pts) => pts.map((p) => [W - p[0], p[1]]);
   const sideHead = [[0,20],[10,15],[11,14],[13,6],[16,12],[20,14],[19,20],[18,25],[11,27],[5,25],[0,23]];
-  const polys = [
+  return [
     { pts: sideHead, closed: true },
     { pts: [[10,19],[13,18]], closed: false },
     { pts: [[9,16],[13,15]], closed: false },
@@ -3869,11 +3881,14 @@ function cerbHoloGeometry() {
     { pts: [[38,22],[35,24]], closed: false },
     { pts: [[30,30],[34,30],[32,33]], closed: true },
   ];
-  // Normalise 64x64 mark space into ~[-1,1], flip y so up is positive.
+}
+
+function cerbHoloGeometry() {
+  const D = 3;
   const v = (x, y, z) => [(x - 32) / 32, (32 - y) / 32, z / 32];
   const segs = [];
   const push = (a, b) => { segs.push(a[0], a[1], a[2], b[0], b[1], b[2]); };
-  for (const poly of polys) {
+  for (const poly of cerbMarkPolys()) {
     const n = poly.pts.length;
     const front = poly.pts.map((p) => v(p[0], p[1], D));
     const back = poly.pts.map((p) => v(p[0], p[1], -D));
@@ -3888,6 +3903,88 @@ function cerbHoloGeometry() {
   return new Float32Array(segs);
 }
 
+/* Volumetric particle field — the img2threejs technique applied to our own
+   mark: rasterise the glyph to an offscreen canvas, then turn every lit
+   pixel into a particle. Brightness drives depth, so the strokes read as
+   a shallow relief; three depth layers + deterministic jitter give volume. */
+function cerbHoloPointCloud() {
+  const S = 128;
+  const c = document.createElement("canvas");
+  c.width = c.height = S;
+  const ctx = c.getContext("2d");
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 3.0;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const scale = S / 64;
+  for (const poly of cerbMarkPolys()) {
+    ctx.beginPath();
+    poly.pts.forEach((p, i) => {
+      const x = p[0] * scale, y = p[1] * scale;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    if (poly.closed) ctx.closePath();
+    ctx.stroke();
+  }
+  const img = ctx.getImageData(0, 0, S, S).data;
+  const rand = mulberry32(1337);
+  const pts = [];
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const a = img[(y * S + x) * 4 + 3];
+      if (a < 30) continue;
+      const bright = a / 255;
+      const px = (x - S / 2) / (S / 2);
+      const py = (S / 2 - y) / (S / 2);
+      for (let layer = 0; layer < 5; layer++) {
+        const z = ((layer / 4) - 0.5) * 0.26 + (bright - 0.5) * 0.12;
+        pts.push(
+          px + (rand() - 0.5) * 0.010,
+          py + (rand() - 0.5) * 0.010,
+          z + (rand() - 0.5) * 0.02
+        );
+      }
+    }
+  }
+  return new Float32Array(pts);
+}
+
+/* Tiny deterministic PRNG so particle jitter is stable frame-to-frame. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* Orbital ring — a circle of line segments in the XZ plane. */
+function cerbRingGeometry(radius, segments = 64) {
+  const segs = [];
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i + 1) / segments) * Math.PI * 2;
+    segs.push(Math.cos(a0) * radius, 0, Math.sin(a0) * radius);
+    segs.push(Math.cos(a1) * radius, 0, Math.sin(a1) * radius);
+  }
+  return new Float32Array(segs);
+}
+
+/* Projector light cone — fans up from the emitter point on the grid
+   to the top of the projection volume, selling the "emitted" fiction. */
+function cerbConeGeometry(segments = 24) {
+  const segs = [];
+  const apexY = -0.95, topY = 0.7, topR = 1.1;
+  for (let i = 0; i < segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    segs.push(0, apexY, 0);
+    segs.push(Math.cos(a) * topR, topY, Math.sin(a) * topR);
+  }
+  return new Float32Array(segs);
+}
+
 /* Perspective grid floor beneath the projection. */
 function cerbGridGeometry() {
   const segs = [];
@@ -3897,6 +3994,39 @@ function cerbGridGeometry() {
   for (let z = -S; z <= S + 1e-9; z += step) push([-S, y, z], [S, y, z]);
   return new Float32Array(segs);
 }
+
+/* ─── Holo avatar — reactive state ──────────────────────────────────────
+   The avatar mirrors whatever the harness is doing. cerbHoloReact(mode) is
+   the single entry point; the render loop smooths "energy" toward the
+   mode's target so transitions feel analog, not snapped. Energy drives
+   rotation speed, pulse rate, particle twinkle, ring brightness, jitter. */
+const cerbHoloState = {
+  mode: "idle",       // idle | thinking | offline
+  energy: 0.3,        // smoothed 0..1
+  target: 0.3,
+  online: true,
+};
+window.cerbHoloReact = function (mode) {
+  cerbHoloState.mode = mode;
+  cerbHoloState.target = mode === "thinking" ? 1.0 : mode === "offline" ? 0.08 : 0.3;
+  cerbHoloState.online = mode !== "offline";
+  // Keep the emitter readout honest — don't claim "Projecting" while offline.
+  const status = document.getElementById("holoStatus");
+  if (status) status.textContent = mode === "offline" ? "Standby" : mode === "thinking" ? "Processing" : "Projecting";
+};
+
+/* Poll the daemon's public /health so the avatar tracks agent liveness. */
+(function cerbHoloHealthWatch() {
+  const check = () => {
+    fetch("/health").then((r) => r.json()).then((h) => {
+      const up = Boolean(h && h.ok);
+      if (up && cerbHoloState.mode === "offline") window.cerbHoloReact("idle");
+      else if (!up && cerbHoloState.mode !== "offline") window.cerbHoloReact("offline");
+    }).catch(() => { if (cerbHoloState.mode !== "offline") window.cerbHoloReact("offline"); });
+  };
+  check();
+  setInterval(check, 5000);
+})();
 
 /* Minimal column-major mat4 helpers (no library). */
 function mPersp(fov, aspect, near, far) {
@@ -3915,6 +4045,7 @@ function mRotY(a) { const c = Math.cos(a), s = Math.sin(a); return [c,0,-s,0, 0,
 function mRotX(a) { const c = Math.cos(a), s = Math.sin(a); return [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]; }
 function mTrans(x, y, z) { return [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]; }
 function mScale(s) { return [s,0,0,0, 0,s,0,0, 0,0,s,0, 0,0,0,1]; }
+function mScaleY(s) { return [1,0,0,0, 0,s,0,0, 0,0,1,0, 0,0,0,1]; }
 
 function cerbHoloStart() {
   const canvas = document.getElementById("holoCanvas");
@@ -3923,39 +4054,83 @@ function cerbHoloStart() {
   const status = document.getElementById("holoStatus");
   if (!gl) { if (status) status.textContent = "No signal"; return; }
 
-  const vsSrc = "attribute vec3 p;uniform mat4 mvp;void main(){gl_Position=mvp*vec4(p,1.0);}";
-  const fsSrc = "precision mediump float;uniform vec3 col;uniform float alpha;void main(){gl_FragColor=vec4(col,alpha);}";
-  const compile = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
-  const prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
-  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
-  gl.linkProgram(prog);
-  gl.useProgram(prog);
-  const locP = gl.getAttribLocation(prog, "p");
-  const locMvp = gl.getUniformLocation(prog, "mvp");
-  const locCol = gl.getUniformLocation(prog, "col");
-  const locAlpha = gl.getUniformLocation(prog, "alpha");
-  gl.enableVertexAttribArray(locP);
+  // Line program (wireframe skeleton, rings, grid).
+  const lineVs = "attribute vec3 p;uniform mat4 mvp;void main(){gl_Position=mvp*vec4(p,1.0);}";
+  const lineFs = "precision mediump float;uniform vec3 col;uniform float alpha;void main(){gl_FragColor=vec4(col,alpha);}";
+  // Point program (volumetric particle field) — per-particle phase twinkle.
+  const pointVs = "attribute vec3 p;attribute float ph;uniform mat4 mvp;uniform float time;uniform float energy;uniform float size;varying float vTw;varying float vDepth;void main(){vec4 clip=mvp*vec4(p,1.0);gl_Position=clip;float depth=clip.w;vDepth=clamp(1.0-(depth-3.1)/0.6,0.15,1.0);vTw=0.55+0.45*sin(time*(1.2+energy*3.5)+ph);gl_PointSize=size*(0.6+0.4*vTw)*(1.0+energy*0.6)*(0.6+0.5*vDepth);}";
+  const pointFs = "precision highp float;uniform vec3 col;uniform float alpha;uniform float time;varying float vTw;varying float vDepth;void main(){vec2 uv=gl_PointCoord-0.5;float d=length(uv);float fall=smoothstep(0.5,0.05,d);float flick=0.92+0.08*sin(time*23.0+gl_FragCoord.x*0.7);gl_FragColor=vec4(col,alpha*fall*vTw*(0.5+0.5*vDepth)*flick);}";
+
+  const compile = (type, s) => { const sh = gl.createShader(type); gl.shaderSource(sh, s); gl.compileShader(sh); if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.warn("[holo] shader:", gl.getShaderInfoLog(sh)); return sh; };
+  const link = (vs, fs) => { const p = gl.createProgram(); gl.attachShader(p, compile(gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.warn("[holo] link:", gl.getProgramInfoLog(p)); return p; };
+
+  const lineProg = link(lineVs, lineFs);
+  const pointProg = link(pointVs, pointFs);
+
+  const lP = gl.getAttribLocation(lineProg, "p");
+  const lMvp = gl.getUniformLocation(lineProg, "mvp");
+  const lCol = gl.getUniformLocation(lineProg, "col");
+  const lAlpha = gl.getUniformLocation(lineProg, "alpha");
+  const pP = gl.getAttribLocation(pointProg, "p");
+  const pPh = gl.getAttribLocation(pointProg, "ph");
+  const pMvp = gl.getUniformLocation(pointProg, "mvp");
+  const pCol = gl.getUniformLocation(pointProg, "col");
+  const pAlpha = gl.getUniformLocation(pointProg, "alpha");
+  const pTime = gl.getUniformLocation(pointProg, "time");
+  const pEnergy = gl.getUniformLocation(pointProg, "energy");
+  const pSize = gl.getUniformLocation(pointProg, "size");
+
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive — emissive hologram
   gl.clearColor(0.012, 0.012, 0.014, 1.0);
 
-  const makeBuf = (data) => {
-    const b = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, b);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    return { buf: b, count: data.length / 3 };
-  };
+  const makeBuf = (data) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); return { buf: b, count: data.length / 3 }; };
+
   const markBuf = makeBuf(cerbHoloGeometry());
   const gridBuf = makeBuf(cerbGridGeometry());
+  const ring1 = makeBuf(cerbRingGeometry(1.35));
+  const ring2 = makeBuf(cerbRingGeometry(1.6));
+  const coneBuf = makeBuf(cerbConeGeometry());
 
-  const drawBuf = (b, mvp, col, alpha) => {
+  // Point cloud + a per-particle phase attribute for twinkle.
+  const pcData = cerbHoloPointCloud();
+  const pcCount = pcData.length / 3;
+  const phases = new Float32Array(pcCount);
+  const prand = mulberry32(42);
+  for (let i = 0; i < pcCount; i++) phases[i] = prand() * Math.PI * 2;
+  const pcBuf = makeBuf(pcData);
+  const phBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, phBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, phases, gl.STATIC_DRAW);
+
+  const drawLines = (b, mvp, col, alpha) => {
+    gl.useProgram(lineProg);
     gl.bindBuffer(gl.ARRAY_BUFFER, b.buf);
-    gl.vertexAttribPointer(locP, 3, gl.FLOAT, false, 0, 0);
-    gl.uniformMatrix4fv(locMvp, false, new Float32Array(mvp));
-    gl.uniform3fv(locCol, col);
-    gl.uniform1f(locAlpha, alpha);
+    gl.enableVertexAttribArray(lP);
+    gl.vertexAttribPointer(lP, 3, gl.FLOAT, false, 0, 0);
+    gl.uniformMatrix4fv(lMvp, false, new Float32Array(mvp));
+    gl.uniform3fv(lCol, col);
+    gl.uniform1f(lAlpha, alpha);
     gl.drawArrays(gl.LINES, 0, b.count);
+  };
+
+  const drawPoints = (mvp, col, alpha, time, energy, size) => {
+    gl.useProgram(pointProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pcBuf.buf);
+    gl.enableVertexAttribArray(pP);
+    gl.vertexAttribPointer(pP, 3, gl.FLOAT, false, 0, 0);
+    if (pPh >= 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, phBuf);
+      gl.enableVertexAttribArray(pPh);
+      gl.vertexAttribPointer(pPh, 1, gl.FLOAT, false, 0, 0);
+    }
+    gl.uniformMatrix4fv(pMvp, false, new Float32Array(mvp));
+    gl.uniform3fv(pCol, col);
+    gl.uniform1f(pAlpha, alpha);
+    gl.uniform1f(pTime, time);
+    gl.uniform1f(pEnergy, energy);
+    gl.uniform1f(pSize, size);
+    gl.drawArrays(gl.POINTS, 0, pcCount);
   };
 
   const resize = () => {
@@ -3969,20 +4144,52 @@ function cerbHoloStart() {
 
   const draw = (t) => {
     const aspect = resize();
+    // Smooth energy toward its target — analog transitions, no snapping.
+    cerbHoloState.energy += (cerbHoloState.target - cerbHoloState.energy) * 0.06;
+    const e = cerbHoloState.energy;
     gl.clear(gl.COLOR_BUFFER_BIT);
     const proj = mPersp(0.9, aspect, 0.1, 20);
     const view = mTrans(0, -0.05, -3.4);
-    drawBuf(gridBuf, mMul(proj, view), [1.0, 0.16, 0.16], 0.16);
-    const yaw = Math.sin(t * 0.55) * 0.42;
-    const bob = Math.sin(t * 0.9) * 0.045;
-    const model = mMul(mTrans(0, 0.10 + bob, 0), mMul(mRotX(-0.10), mMul(mRotY(yaw), mScale(1.25))));
+
+    drawLines(gridBuf, mMul(proj, view), [1.0, 0.16, 0.16], 0.14);
+
+    // Projector light cone — the "emitted" fiction, brighter with energy.
+    const cone = mMul(mMul(proj, view), mTrans(0, 0, 0));
+    drawLines(coneBuf, cone, [1.0, 0.2, 0.18], 0.05 + e * 0.07);
+
+    // Orbital rings — counter-rotate; speed + brightness scale with energy.
+    const r1 = mMul(mMul(proj, view), mMul(mTrans(0, 0.1, 0), mMul(mRotX(1.2), mRotY(t * (0.3 + e * 0.9)))));
+    drawLines(ring1, r1, [1.0, 0.2, 0.18], 0.16 + e * 0.16);
+    const r2 = mMul(mMul(proj, view), mMul(mTrans(0, 0.1, 0), mMul(mRotX(-0.9), mRotY(-t * (0.22 + e * 0.7)))));
+    drawLines(ring2, r2, [1.0, 0.2, 0.18], 0.12 + e * 0.14);
+
+    // The avatar — yaw speed, bob, and high-energy jitter all track energy.
+    const yaw = Math.sin(t * (0.55 + e * 1.6)) * (0.42 + e * 0.25);
+    const bob = Math.sin(t * (0.9 + e * 1.2)) * 0.045;
+    const jitter = e > 0.7 ? Math.sin(t * 40) * 0.004 * e : 0;
+    const model = mMul(mTrans(jitter, 0.10 + bob, 0), mMul(mRotX(-0.10), mMul(mRotY(yaw), mScale(1.25))));
     const mvp = mMul(mMul(proj, view), model);
-    const pulse = 0.72 + 0.28 * Math.sin(t * 2.1);
-    drawBuf(markBuf, mvp, [1.0, 0.24, 0.20], pulse);
+
+    // Soft halo pass — the skeleton drawn slightly larger and dim, giving
+    // the emissive glow a bloom-like fringe (cheap, one extra draw call).
+    const halo = mMul(mMul(proj, view), mMul(model, mScale(1.06)));
+    drawLines(markBuf, halo, [1.0, 0.18, 0.16], 0.10 + e * 0.10);
+
+    // Wireframe skeleton — emissive pulse, rate scales with energy.
+    const pulse = (0.55 + 0.25 * Math.sin(t * (2.1 + e * 3.0))) * (0.5 + e * 0.7);
+    drawLines(markBuf, mvp, [1.0, 0.24, 0.20], Math.min(0.9, pulse));
+
+    // Floor reflection — the skeleton mirrored below the grid plane, dim.
+    const refl = mMul(mMul(proj, view), mMul(mTrans(jitter, -1.92 - bob, 0), mMul(mScaleY(-1.0), mMul(mRotX(-0.10), mMul(mRotY(yaw), mScale(1.25))))));
+    drawLines(markBuf, refl, [1.0, 0.2, 0.18], 0.06);
+
+    // Volumetric particle field over the skeleton.
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    drawPoints(mvp, [1.0, 0.30, 0.24], 0.75 + e * 0.3, t, e, 3.0 * dpr);
   };
 
-  // Reduced motion: one static frame (deferred to the next frame so the
-  // canvas has its laid-out size), then no loop.
+  // Reduced motion: one static frame (deferred so the canvas is laid out),
+  // then no loop.
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     requestAnimationFrame(() => draw(1.2));
     if (status) status.textContent = "Static";
@@ -3994,7 +4201,6 @@ function cerbHoloStart() {
   let last = performance.now();
   let t = 0;
   const frame = (now) => {
-    // Self-terminate the instant we're off-tab, hidden, or unmounted.
     if (!cerbHoloLive || document.hidden || state.tab !== "chat" || !canvas.isConnected) {
       cerbHoloStop();
       return;
