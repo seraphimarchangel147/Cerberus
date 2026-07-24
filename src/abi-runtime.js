@@ -50,6 +50,10 @@ import { CapabilityProfileStore } from "./capability-profile-store.js";
 import { SkillImportStore } from "./skill-import-store.js";
 import { createOptionalSemanticBrowserService } from "./semantic-browser.js";
 import { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
+import {
+  WorkspaceTimelineStore,
+  registerWorkspaceTimelineTools
+} from "./workspace-timeline-store.js";
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
@@ -388,6 +392,14 @@ export class AbiRuntime {
       projects: this.projects,
       ...(options.profileOptions ?? {})
     });
+    this.timeline = options.timeline === false
+      ? null
+      : options.timeline ?? new WorkspaceTimelineStore({
+          dataDir: secretsDataDir,
+          projects: this.projects,
+          workspaceDir: options.workspaceDir ?? process.cwd(),
+          ...(options.timelineOptions ?? {})
+        });
     this.skillImports = options.skillImports ?? new SkillImportStore({
       dataDir: secretsDataDir,
       projects: this.projects,
@@ -411,6 +423,7 @@ export class AbiRuntime {
     this.tools.bindHooks?.(this.hooks);
     this.tools.bindProjects?.(this.projects);
     this.tools.bindProfiles?.(this.profiles);
+    this.tools.bindTimeline?.(this.timeline);
     this.mcp.bindToolRegistry(this.tools);
     const checkpointOptIn = options.checkpointOptions?.enabled
       ?? checkpointsEnabled(options.env ?? process.env);
@@ -787,6 +800,7 @@ export class AbiRuntime {
       registerCapabilityProfileTools(this.tools, this);
       registerSolutionRecipeTools(this.tools, this);
       registerSemanticBrowserTools(this.tools, this);
+      registerWorkspaceTimelineTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
       // tests, and gated shell. Governed delegation registers separately.
       registerCodeTools(this.tools, this);
@@ -1625,6 +1639,7 @@ export class AbiRuntime {
         this.jobs?.close?.(),
         this.kanban?.close?.(),
         this.artifacts?.close?.(),
+        Promise.resolve().then(() => this.timeline?.close?.()),
         this.semanticBrowser?.closeAll?.(),
         this.observations?.close?.(),
         this.sessionIndex?.close?.()

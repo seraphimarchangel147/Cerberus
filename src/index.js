@@ -78,6 +78,21 @@ export {
   projectMemoryScope
 } from "./project-store.js";
 export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
+export {
+  DEFAULT_TIMELINE_DEBOUNCE_MS,
+  DEFAULT_TIMELINE_MAX_BINARY_BYTES,
+  DEFAULT_TIMELINE_MAX_BLOB_BYTES,
+  DEFAULT_TIMELINE_MAX_FILE_BYTES,
+  DEFAULT_TIMELINE_MAX_FILES,
+  DEFAULT_TIMELINE_MAX_SNAPSHOT_BYTES,
+  DEFAULT_TIMELINE_MAX_SNAPSHOTS,
+  WORKSPACE_TIMELINE_POLICY_VERSION,
+  WorkspaceTimelineConflictError,
+  WorkspaceTimelineError,
+  WorkspaceTimelineHeadError,
+  WorkspaceTimelineStore,
+  registerWorkspaceTimelineTools
+} from "./workspace-timeline-store.js";
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";
 export {

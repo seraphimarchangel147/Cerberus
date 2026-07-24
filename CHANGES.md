@@ -769,3 +769,13 @@ SOLUTION RECIPES COMPLETE
 - Added profile, bundle, race, CAS, branch, catalog, prompt, HTTP auth, import, project-boundary, persistence, corruption, and hostile-package regressions in both approval lanes.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1573/1574 tests with zero failures and one intentional Windows permission-mode skip.
 PROFILES AND GRANTS COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: workspace timeline (Codex)
+
+- Added a debounced project-scoped post-mutation workspace timeline with content-addressed manifests and blobs, append-only JSONL authority, atomic cache snapshots, cross-process locking, list, diff, preview, travel, and revert tools, and runtime lifecycle wiring.
+- Kept CheckpointStore as the fast pre-mutation rail while capturing successful and partial-failure filesystem dispatches after debounce; recovery snapshots current state first, uses expected-head CAS and human confirmation, and records only verified observed results.
+- Added deterministic opaque-path handling for sensitive files, symlinks, repositories, hardlinks, special files, ignored trees, oversized files, and large binaries without persisting excluded contents; case-folded and NFKC path identities prevent exclusion-to-absence deletion.
+- Hardened project and revision authorization, descriptor-based reads, root, ancestor, and path identity checks, per-path restore verification, exact post-apply scans, conflict-safe inverse revert, file and directory transitions, strict journal topology, and corrupt-cache recovery.
+- Added project-scoped quota and garbage collection with recovery-before retention and explicit bounded safety debt, plus hostile persistence, cross-project, integrity, TOCTOU, opaque-transition, Windows case-fold, runtime, prompt, and both-policy regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1593/1594 tests with zero failures and one intentional Windows permission-mode skip.
+WORKSPACE TIMELINE COMPLETE

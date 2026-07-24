@@ -97,6 +97,7 @@ export class ToolRegistry {
     this.toolSearchController = options.toolSearchController ?? null;
     this.projects = options.projects ?? null;
     this.profiles = options.profiles ?? null;
+    this.timeline = options.timeline ?? null;
     REGISTRY_FAILURE_STATE.set(this, {
       contextFailures: new WeakMap(),
       turnFailures: new Map(),
@@ -211,6 +212,10 @@ export class ToolRegistry {
 
   bindProfiles(profiles) {
     this.profiles = profiles ?? null;
+  }
+
+  bindTimeline(timeline) {
+    this.timeline = timeline ?? null;
   }
 
   bindJobCoordinator(coordinator) {
@@ -1323,6 +1328,12 @@ export class ToolRegistry {
       if (semantic.ok && context?.__approval) {
         semantic.result = appendApprovalNote(semantic.result, context.__approval);
       }
+      this._scheduleTimelineCapture({
+        name,
+        context,
+        tool,
+        dispatched
+      });
       this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
         ...semantic,
         dispatched,
@@ -1338,6 +1349,12 @@ export class ToolRegistry {
         retryable: errorDetails.retryable,
         changed: dispatched && tool?.sideEffects !== false ? null : false,
         evidence: checkpointEvidence(checkpointCapture)
+      });
+      this._scheduleTimelineCapture({
+        name,
+        context,
+        tool,
+        dispatched
       });
       this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
         ...semantic,
@@ -1358,6 +1375,22 @@ export class ToolRegistry {
       });
     } catch {
       // Observer hooks are advisory and never alter a tool result.
+    }
+  }
+
+  _scheduleTimelineCapture({ name, context, tool, dispatched }) {
+    if (!dispatched || tool?.sideEffects === false) return;
+    try {
+      this.timeline?.schedulePostMutation?.({
+        toolName: name,
+        tool,
+        context,
+        dispatched
+      });
+    } catch (error) {
+      console.warn(
+        `[workspace-timeline] capture scheduling failed: ${safeToolErrorMessage(error, "timeline scheduling failed")}`
+      );
     }
   }
 }
