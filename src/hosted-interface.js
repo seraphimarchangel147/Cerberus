@@ -3067,6 +3067,50 @@ function renderApp() {
       to   { background-position: 0% -130%; opacity: 0; }
     }
 
+    /* ─── Holo hero — volumetric Cerberus projection (ref-02) ────────────
+       The empty chat pane becomes a holographic emitter: a raw-WebGL
+       wireframe of the three-wolf mark floating over a perspective grid
+       plane, wrapped in HUD chrome (corner ticks, tracked captions, a
+       live status line). The canvas itself is inert — all motion lives
+       in the GL loop, which is hard-capped: it only runs while the Chat
+       tab is active AND the document is visible, and renders a single
+       static frame under prefers-reduced-motion. */
+    .holo-hero {
+      position: relative; width: 100%; max-width: 620px;
+      margin: var(--space-5) auto 0; padding: 0;
+      border: 1px solid var(--line);
+      clip-path: polygon(var(--chamfer) 0, 100% 0, 100% calc(100% - var(--chamfer)), calc(100% - var(--chamfer)) 100%, 0 100%, 0 var(--chamfer));
+      background:
+        radial-gradient(90% 70% at 50% 30%, rgba(255,43,43,.07) 0%, transparent 60%),
+        linear-gradient(180deg, rgba(12,13,16,.4) 0%, rgba(5,5,6,.9) 100%);
+      overflow: hidden;
+    }
+    .holo-hero canvas { display: block; width: 100%; height: 300px; }
+    .holo-hero .holo-cap {
+      position: absolute; top: 8px; left: 12px;
+      font-family: var(--font-mono); font-size: 9px; letter-spacing: .26em;
+      text-transform: uppercase; color: var(--accent); opacity: .85;
+      text-shadow: var(--glow-sm); pointer-events: none;
+    }
+    .holo-hero .holo-status {
+      position: absolute; bottom: 8px; right: 12px;
+      font-family: var(--font-mono); font-size: 9px; letter-spacing: .2em;
+      text-transform: uppercase; color: var(--muted); pointer-events: none;
+    }
+    .holo-hero .holo-status::before {
+      content: ""; display: inline-block; width: 5px; height: 5px;
+      border-radius: 50%; background: var(--accent); box-shadow: var(--glow-sm);
+      margin-right: 6px; vertical-align: 1px;
+      animation: cerb-pulse 2.2s ease-in-out infinite;
+    }
+    /* Corner ticks on the emitter frame. */
+    .holo-hero::before, .holo-hero::after {
+      content: ""; position: absolute; width: 12px; height: 12px;
+      border: 1px solid var(--accent); opacity: .7; pointer-events: none; z-index: 2;
+    }
+    .holo-hero::before { top: 4px; left: 4px; border-right: 0; border-bottom: 0; }
+    .holo-hero::after { bottom: 4px; right: 4px; border-left: 0; border-top: 0; }
+
     /* Respect reduced motion — freeze the drift, pulse, and materialise. */
     @media (prefers-reduced-motion: reduce) {
       body::before { animation: none; }
@@ -3078,6 +3122,7 @@ function renderApp() {
       .ui-btn, .composer button, .sidebar .add, .tier-pills button { transition: none; }
       .ui-btn:hover:not(:disabled), .composer button:hover:not(:disabled),
       .sidebar .add:hover:not(:disabled), .tier-pills button:hover:not(:disabled) { transform: none; }
+      .holo-hero .holo-status::before { animation: none; }
     }
   </style>
 </head>
@@ -3412,6 +3457,9 @@ newBtn.addEventListener("click", async () => {
 
 async function switchTab(tab) {
   state.tab = tab;
+  // The holo hero's WebGL loop only earns its frames on the Chat pane —
+  // kill it the instant we navigate away (it restarts if Chat re-renders).
+  cerbHoloStop();
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   const body = document.querySelector(".body");
   const showSidebar = (yes) => {
@@ -3556,7 +3604,10 @@ function renderChat() {
     const noSessions = (state.sessions ?? []).length === 0;
     let dismissed = false;
     try { dismissed = localStorage.getItem("openagi.welcomeDismissed") === "1"; } catch { /* ignore */ }
-    thread.innerHTML = (noSessions && !dismissed) ? renderFirstRunWelcome() : renderChatPlaceholder();
+    thread.innerHTML = (noSessions && !dismissed) ? renderFirstRunWelcome() : renderChatEmpty();
+    // Bring up the holographic projection if the empty-state emitter is
+    // present (no-op otherwise). The GL loop self-caps to this pane.
+    cerbHoloStart();
   }
   for (const m of state.messages) appendMessage(m, false);
   thread.scrollTop = thread.scrollHeight;
@@ -3762,6 +3813,208 @@ function renderChatPlaceholder() {
   return '<div class="ui-empty" style="margin: var(--space-4) 0;">Start a new conversation. Try "Remind me in 60 seconds to drink water" or "Remember that my standup is 9am Mondays".</div>';
 }
 
+function renderChatEmpty() {
+  // Empty chat pane = the holographic emitter (ref-02 volumetric hero):
+  // a raw-WebGL wireframe of the three-wolf mark floating over a grid
+  // plane, wrapped in HUD chrome, with the one-line prompt beneath it.
+  // The GL loop is hard-capped in cerbHoloStart (Chat-only, visible-only,
+  // single static frame under prefers-reduced-motion).
+  return (
+    '<div class="holo-hero" id="holoHero">' +
+      '<canvas id="holoCanvas" width="620" height="300" aria-hidden="true"></canvas>' +
+      '<div class="holo-cap">Cerberus // Holo-Projection 03</div>' +
+      '<div class="holo-status" id="holoStatus">Projecting</div>' +
+    '</div>' +
+    renderChatPlaceholder()
+  );
+}
+
+/* ─── Holo hero engine — raw WebGL, zero deps, hard-capped ──────────────
+   Draws the Cerberus mark as an extruded 3D wireframe (line segments)
+   over a perspective grid floor, additively blended for the emissive
+   hologram look. The render loop is deliberately throttled:
+     • runs only while the Chat tab is active,
+     • pauses on document.hidden,
+     • renders ONE static frame under prefers-reduced-motion,
+     • tears itself down when the canvas leaves the DOM.
+   Azazel's dashboard sits open for hours — this must not tax the GPU. */
+
+let cerbHoloRaf = 0;
+let cerbHoloLive = false;
+
+function cerbHoloStop() {
+  cerbHoloLive = false;
+  if (cerbHoloRaf) { cancelAnimationFrame(cerbHoloRaf); cerbHoloRaf = 0; }
+}
+
+/* Extrude the 2D mark polylines (same geometry as cerbMarkSVG) into a
+   shallow 3D wireframe: a front ring, a back ring, and connecting struts
+   for every polyline. Returns a flat Float32Array of segment endpoints. */
+function cerbHoloGeometry() {
+  const W = 64, D = 3;
+  const mir = (pts) => pts.map((p) => [W - p[0], p[1]]);
+  const sideHead = [[0,20],[10,15],[11,14],[13,6],[16,12],[20,14],[19,20],[18,25],[11,27],[5,25],[0,23]];
+  const polys = [
+    { pts: sideHead, closed: true },
+    { pts: [[10,19],[13,18]], closed: false },
+    { pts: [[9,16],[13,15]], closed: false },
+    { pts: [[2,22],[8,23]], closed: false },
+    { pts: mir(sideHead), closed: true },
+    { pts: mir([[10,19],[13,18]]), closed: false },
+    { pts: mir([[9,16],[13,15]]), closed: false },
+    { pts: mir([[2,22],[8,23]]), closed: false },
+    { pts: [[21,4],[26,13],[32,11],[38,13],[43,4],[44,15],[42,25],[37,33],[32,40],[27,33],[22,25],[20,15]], closed: true },
+    { pts: [[27,17],[32,19],[37,17]], closed: false },
+    { pts: [[26,22],[29,24]], closed: false },
+    { pts: [[38,22],[35,24]], closed: false },
+    { pts: [[30,30],[34,30],[32,33]], closed: true },
+  ];
+  // Normalise 64x64 mark space into ~[-1,1], flip y so up is positive.
+  const v = (x, y, z) => [(x - 32) / 32, (32 - y) / 32, z / 32];
+  const segs = [];
+  const push = (a, b) => { segs.push(a[0], a[1], a[2], b[0], b[1], b[2]); };
+  for (const poly of polys) {
+    const n = poly.pts.length;
+    const front = poly.pts.map((p) => v(p[0], p[1], D));
+    const back = poly.pts.map((p) => v(p[0], p[1], -D));
+    const last = poly.closed ? n : n - 1;
+    for (let i = 0; i < last; i++) {
+      const j = (i + 1) % n;
+      push(front[i], front[j]);
+      push(back[i], back[j]);
+    }
+    for (let i = 0; i < n; i++) push(front[i], back[i]);
+  }
+  return new Float32Array(segs);
+}
+
+/* Perspective grid floor beneath the projection. */
+function cerbGridGeometry() {
+  const segs = [];
+  const S = 2.6, step = 0.4, y = -0.95;
+  const push = (a, b) => { segs.push(a[0], a[1], a[2], b[0], b[1], b[2]); };
+  for (let x = -S; x <= S + 1e-9; x += step) push([x, y, -S], [x, y, S]);
+  for (let z = -S; z <= S + 1e-9; z += step) push([-S, y, z], [S, y, z]);
+  return new Float32Array(segs);
+}
+
+/* Minimal column-major mat4 helpers (no library). */
+function mPersp(fov, aspect, near, far) {
+  const f = 1 / Math.tan(fov / 2), nf = 1 / (near - far);
+  return [f / aspect, 0, 0, 0,  0, f, 0, 0,  0, 0, (far + near) * nf, -1,  0, 0, 2 * far * near * nf, 0];
+}
+function mMul(a, b) {
+  const o = [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0];
+  for (let c = 0; c < 4; c++)
+    for (let r = 0; r < 4; r++)
+      for (let k = 0; k < 4; k++)
+        o[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
+  return o;
+}
+function mRotY(a) { const c = Math.cos(a), s = Math.sin(a); return [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]; }
+function mRotX(a) { const c = Math.cos(a), s = Math.sin(a); return [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]; }
+function mTrans(x, y, z) { return [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]; }
+function mScale(s) { return [s,0,0,0, 0,s,0,0, 0,0,s,0, 0,0,0,1]; }
+
+function cerbHoloStart() {
+  const canvas = document.getElementById("holoCanvas");
+  if (!canvas || cerbHoloLive) return;
+  const gl = canvas.getContext("webgl", { antialias: true, alpha: false, powerPreference: "low-power" });
+  const status = document.getElementById("holoStatus");
+  if (!gl) { if (status) status.textContent = "No signal"; return; }
+
+  const vsSrc = "attribute vec3 p;uniform mat4 mvp;void main(){gl_Position=mvp*vec4(p,1.0);}";
+  const fsSrc = "precision mediump float;uniform vec3 col;uniform float alpha;void main(){gl_FragColor=vec4(col,alpha);}";
+  const compile = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const locP = gl.getAttribLocation(prog, "p");
+  const locMvp = gl.getUniformLocation(prog, "mvp");
+  const locCol = gl.getUniformLocation(prog, "col");
+  const locAlpha = gl.getUniformLocation(prog, "alpha");
+  gl.enableVertexAttribArray(locP);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive — emissive hologram
+  gl.clearColor(0.012, 0.013, 0.018, 1.0);
+
+  const makeBuf = (data) => {
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    return { buf: b, count: data.length / 3 };
+  };
+  const markBuf = makeBuf(cerbHoloGeometry());
+  const gridBuf = makeBuf(cerbGridGeometry());
+
+  const drawBuf = (b, mvp, col, alpha) => {
+    gl.bindBuffer(gl.ARRAY_BUFFER, b.buf);
+    gl.vertexAttribPointer(locP, 3, gl.FLOAT, false, 0, 0);
+    gl.uniformMatrix4fv(locMvp, false, new Float32Array(mvp));
+    gl.uniform3fv(locCol, col);
+    gl.uniform1f(locAlpha, alpha);
+    gl.drawArrays(gl.LINES, 0, b.count);
+  };
+
+  const resize = () => {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    gl.viewport(0, 0, w, h);
+    return w / h;
+  };
+
+  const draw = (t) => {
+    const aspect = resize();
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const proj = mPersp(0.9, aspect, 0.1, 20);
+    const view = mTrans(0, -0.05, -3.4);
+    drawBuf(gridBuf, mMul(proj, view), [1.0, 0.16, 0.16], 0.16);
+    const yaw = Math.sin(t * 0.55) * 0.42;
+    const bob = Math.sin(t * 0.9) * 0.045;
+    const model = mMul(mTrans(0, 0.10 + bob, 0), mMul(mRotX(-0.10), mMul(mRotY(yaw), mScale(1.25))));
+    const mvp = mMul(mMul(proj, view), model);
+    const pulse = 0.72 + 0.28 * Math.sin(t * 2.1);
+    drawBuf(markBuf, mvp, [1.0, 0.24, 0.20], pulse);
+  };
+
+  // Reduced motion: one static frame (deferred to the next frame so the
+  // canvas has its laid-out size), then no loop.
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    requestAnimationFrame(() => draw(1.2));
+    if (status) status.textContent = "Static";
+    return;
+  }
+
+  cerbHoloLive = true;
+  if (status) status.textContent = "Projecting";
+  let last = performance.now();
+  let t = 0;
+  const frame = (now) => {
+    // Self-terminate the instant we're off-tab, hidden, or unmounted.
+    if (!cerbHoloLive || document.hidden || state.tab !== "chat" || !canvas.isConnected) {
+      cerbHoloStop();
+      return;
+    }
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    t += dt;
+    draw(t);
+    cerbHoloRaf = requestAnimationFrame(frame);
+  };
+  cerbHoloRaf = requestAnimationFrame(frame);
+}
+
+// Pause the projection when the tab is hidden; resume when we return to a
+// visible Chat pane. Registered once — start/stop are idempotent.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) cerbHoloStop();
+  else if (state.tab === "chat") cerbHoloStart();
+});
+
 function renderFirstRunWelcome() {
   // First-run dashboard card. Points the user at the 4 high-value next
   // moves so they're not staring at an empty chat input wondering what
@@ -3797,6 +4050,11 @@ function renderFirstRunWelcome() {
 function appendMessage(msg, autoscroll = true) {
   const thread = $("thread");
   if (!thread) return;
+  // The holo hero is a landing/empty-state element — the moment the first
+  // real message lands, tear it down (and its GL loop) so the conversation
+  // owns the pane.
+  const holo = document.getElementById("holoHero");
+  if (holo) { cerbHoloStop(); holo.remove(); }
   const div = document.createElement("div");
   div.className = "msg " + (msg.role === "user" ? "user" : "assistant");
   const meta = msg.role === "assistant" && msg.metadata?.model ? \`\${msg.metadata.model} · \${msg.metadata.provider ?? ""}\` : msg.from ?? "";
