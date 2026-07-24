@@ -61,6 +61,14 @@ export {
 export { CheckpointStore, checkpointsEnabled } from "./checkpoint-store.js";
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";
+export {
+  ARTIFACT_KINDS,
+  ArtifactCanvasError,
+  ArtifactCanvasStore,
+  ArtifactRevisionError,
+  artifactPinnedRef,
+  parseArtifactPinnedRef
+} from "./artifact-canvas.js";
 export { McpStdioClient } from "./mcp-client.js";
 export { McpHttpClient } from "./mcp-http-client.js";
 export { McpOAuthClient } from "./mcp-oauth.js";

@@ -1305,6 +1305,137 @@ export class AgentHost {
     return { previousSessionId, sessionId };
   }
 
+  async branchSession(options = {}) {
+    const input = plainBranchRequest(options);
+    const sourceSessionId = boundedBranchIdentifier(
+      input.sourceSessionId,
+      "sourceSessionId",
+      2048
+    );
+    const messageId = boundedBranchIdentifier(
+      input.messageId ?? input.throughMessageId,
+      "messageId",
+      512
+    );
+
+    const selectedProjectId = input.projectId == null
+      ? this.runtime.projects?.projectForSession?.(sourceSessionId)?.id ?? DEFAULT_PROJECT_ID
+      : input.projectId;
+    const projectId = normalizeAgentHostProjectId(
+      selectedProjectId,
+      "branch project id"
+    );
+    const project = typeof this.runtime.projects?.authorize === "function"
+      ? this.runtime.projects.authorize(projectId, {
+          sessionId: sourceSessionId,
+          includeArchived: false
+        })
+      : projectId === DEFAULT_PROJECT_ID
+        ? {
+            id: DEFAULT_PROJECT_ID,
+            revision: 1,
+            hookIds: []
+          }
+        : null;
+    if (!project) {
+      throw new ProjectBoundaryError("Unknown session.", {
+        sourceSessionId,
+        projectId
+      });
+    }
+
+    if (typeof this.store?.createSessionBranch !== "function") {
+      throw new Error("Agent session store does not support branching.");
+    }
+    let targetSessionId = null;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const candidate = createId("session");
+      if (typeof this.store.hasSession === "function" && this.store.hasSession(candidate)) {
+        continue;
+      }
+      if (this.runtime.projects?.hasSessionBinding?.(candidate)) continue;
+      targetSessionId = candidate;
+      break;
+    }
+    if (!targetSessionId) {
+      throw new Error("Unable to allocate a unique branch session id.");
+    }
+
+    const createdAt = nowIso();
+    let targetBound = false;
+    let branched;
+    try {
+      if (typeof this.runtime.projects?.resolveForSession === "function") {
+        this.runtime.projects.resolveForSession(targetSessionId, {
+          requestedProjectId: project.id,
+          legacySession: false,
+          bind: true,
+          actor: "session:branch"
+        });
+        targetBound = true;
+      }
+      branched = await this.store.createSessionBranch(sourceSessionId, {
+        messageId,
+        targetSessionId,
+        projectId: project.id,
+        createdAt
+      });
+    } catch (error) {
+      let targetPersisted = true;
+      if (typeof this.store?.hasSession === "function") {
+        try {
+          targetPersisted = this.store.hasSession(targetSessionId);
+        } catch {
+          // A corrupt or unverifiable transcript must retain its binding.
+        }
+      }
+      if (
+        targetBound
+        && !targetPersisted
+        && typeof this.runtime.projects?.unbindSession === "function"
+      ) {
+        try {
+          this.runtime.projects.unbindSession(project.id, targetSessionId, {
+            actor: "session:branch:rollback"
+          });
+        } catch {
+          // The original branch failure remains authoritative.
+        }
+      }
+      throw error;
+    }
+    const target = branched?.session ?? branched;
+    const messages = Array.isArray(target?.messages)
+      ? target.messages
+      : this.store.getSession(targetSessionId).messages;
+    if (this.runtime.sessionIndex?.indexMessage) {
+      await Promise.allSettled(messages.map((message) => (
+        this.runtime.sessionIndex.indexMessage(
+          targetSessionId,
+          message?.agentId ?? input.agentId ?? "main",
+          message
+        )
+      )));
+    }
+    const event = {
+      projectId: project.id,
+      sourceSessionId,
+      sessionId: targetSessionId,
+      messageId,
+      messageCount: messages.length,
+      at: createdAt
+    };
+    try { this.runtime.events?.emit?.("session-branched", event); } catch { /* advisory */ }
+    this._notifyHook("session:branch", event);
+    return {
+      ...event,
+      projectRevision: this.runtime.projects?.authorize?.(project.id, {
+        sessionId: targetSessionId,
+        includeArchived: false
+      })?.revision ?? project.revision ?? 1
+    };
+  }
+
   async endActiveHookSessions(reason = "gateway-close") {
     const pending = new Set(this.backgroundReviewPromises.values());
     for (const [sessionId, projectScope] of this.activeHookSessions) {
@@ -1859,6 +1990,54 @@ export function formatScreenContextBlock(screenContext) {
     : (screenContext.app || "active window");
   const body = screenContext.text.slice(0, 4000);
   return `\nActive window the user is looking at right now (${where}):\n${body}\nGround your answer in this if it's relevant; don't quote it back verbatim.\n`;
+}
+
+function plainBranchRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("branchSession requires an options object.");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("branchSession options must be a plain object.");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((descriptor) => !Object.hasOwn(descriptor, "value"))) {
+    throw new TypeError("branchSession options cannot contain accessors.");
+  }
+  const allowed = new Set([
+    "sourceSessionId",
+    "messageId",
+    "throughMessageId",
+    "projectId",
+    "agentId"
+  ]);
+  if (Object.keys(descriptors).some((key) => !allowed.has(key))) {
+    throw new TypeError("branchSession options contain an unsupported field.");
+  }
+  if (
+    Object.hasOwn(descriptors, "messageId")
+    && Object.hasOwn(descriptors, "throughMessageId")
+  ) {
+    throw new TypeError("branchSession accepts only one message selector.");
+  }
+  return Object.fromEntries(
+    Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value])
+  );
+}
+
+function boundedBranchIdentifier(value, label, maxLength) {
+  if (typeof value !== "string") {
+    throw new TypeError(`${label} must be a string.`);
+  }
+  const text = value.trim();
+  if (
+    text.length < 1
+    || text.length > maxLength
+    || /[\u0000-\u001f\u007f]/u.test(text)
+  ) {
+    throw new TypeError(`${label} is invalid.`);
+  }
+  return text;
 }
 
 function cleanProfileString(value) {

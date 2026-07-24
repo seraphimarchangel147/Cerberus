@@ -106,8 +106,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   const hostedSessionsRequireProjectStore =
     typeof runtime.projects?.projectForSession === "function";
 
-  const events = new EventEmitter();
-  events.setMaxListeners(50);
+  const events = runtime.events
+    && typeof runtime.events.on === "function"
+    && typeof runtime.events.emit === "function"
+    ? runtime.events
+    : new EventEmitter();
+  events.setMaxListeners?.(50);
 
   const sseClients = new Set();
   function broadcast(event, data) {
@@ -131,43 +135,58 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       try { client.res.write(payload); } catch { /* dropped */ }
     }
   }
+  let previousProjectChange = null;
+  let hostedProjectChange = null;
   if (runtime.projects) {
-    const previousProjectChange = runtime.projects.onChange;
-    runtime.projects.onChange = (data) => {
+    previousProjectChange = runtime.projects.onChange;
+    hostedProjectChange = (data) => {
       try { previousProjectChange?.(data); } finally { events.emit("project", data); }
     };
+    runtime.projects.onChange = hostedProjectChange;
   }
-  events.on("project", (data) => broadcastProjectChange(data));
-  events.on("message", (data) => broadcast("message", data));
-  events.on("cron", (data) => broadcast("cron", data));
-  events.on("mcp", (data) => broadcast("mcp", data));
-  events.on("tunnel", (data) => broadcast("tunnel", data));
-  events.on("replay", (data) => broadcast("replay", data));
-  events.on("skill-candidate", (data) => broadcast("skill-candidate", data));
-  events.on("miner-result", (data) => broadcast("miner-result", data));
-  events.on("cron-catchup", (data) => broadcast("cron-catchup", data));
-  events.on("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
-  events.on("cron-interrupted", (data) => broadcast("cron-interrupted", data));
-  events.on("cron-model-mismatch", (data) => broadcast("cron-model-mismatch", data));
-  events.on("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
-  events.on("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
-  events.on("task-updated", (data) => broadcast("task-updated", data));
-  events.on("kanban-updated", (data) => broadcast("kanban-updated", data));
-  events.on("kanban-status", (data) => broadcast("kanban-status", data));
-  events.on("clarification-created", (data) => broadcast("clarification-created", data));
-  events.on("clarification-resolved", (data) => broadcast("clarification-resolved", data));
-  events.on("draft-created", (data) => broadcast("draft-created", data));
-  events.on("draft-resolved", (data) => broadcast("draft-resolved", data));
-  events.on("task-reminder", (data) => broadcast("task-reminder", data));
-  events.on("task-auto-changed", (data) => broadcast("task-auto-changed", data));
-  events.on("pending-action", (data) => broadcast("pending-action", sanitizeForAudit(data)));
-  events.on("pending-action-decided", (data) => (
+  const ownedEventListeners = [];
+  function bindHostedEvent(type, listener) {
+    events.on(type, listener);
+    ownedEventListeners.push({ type, listener });
+  }
+  bindHostedEvent("project", (data) => broadcastProjectChange(data));
+  bindHostedEvent("message", (data) => broadcast("message", data));
+  bindHostedEvent("cron", (data) => broadcast("cron", data));
+  bindHostedEvent("mcp", (data) => broadcast("mcp", data));
+  bindHostedEvent("tunnel", (data) => broadcast("tunnel", data));
+  bindHostedEvent("replay", (data) => broadcast("replay", data));
+  bindHostedEvent("skill-candidate", (data) => broadcast("skill-candidate", data));
+  bindHostedEvent("miner-result", (data) => broadcast("miner-result", data));
+  bindHostedEvent("cron-catchup", (data) => broadcast("cron-catchup", data));
+  bindHostedEvent("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
+  bindHostedEvent("cron-interrupted", (data) => broadcast("cron-interrupted", data));
+  bindHostedEvent("cron-model-mismatch", (data) => broadcast("cron-model-mismatch", data));
+  bindHostedEvent("proactive-suggestion", (data) => broadcast("proactive-suggestion", data));
+  bindHostedEvent("suggestion-resolved", (data) => broadcast("suggestion-resolved", data));
+  bindHostedEvent("task-updated", (data) => broadcast("task-updated", data));
+  bindHostedEvent("kanban-updated", (data) => broadcast("kanban-updated", data));
+  bindHostedEvent("kanban-status", (data) => broadcast("kanban-status", data));
+  bindHostedEvent("clarification-created", (data) => broadcast("clarification-created", data));
+  bindHostedEvent("clarification-resolved", (data) => broadcast("clarification-resolved", data));
+  bindHostedEvent("draft-created", (data) => broadcast("draft-created", data));
+  bindHostedEvent("draft-resolved", (data) => broadcast("draft-resolved", data));
+  for (const type of ["artifact-created", "artifact-updated", "artifact-restored"]) {
+    bindHostedEvent(type, (data) => broadcast("artifact", {
+      event: type,
+      ...data
+    }));
+  }
+  bindHostedEvent("session-branched", (data) => broadcast("session-branched", data));
+  bindHostedEvent("task-reminder", (data) => broadcast("task-reminder", data));
+  bindHostedEvent("task-auto-changed", (data) => broadcast("task-auto-changed", data));
+  bindHostedEvent("pending-action", (data) => broadcast("pending-action", sanitizeForAudit(data)));
+  bindHostedEvent("pending-action-decided", (data) => (
     broadcast("pending-action-decided", sanitizeForAudit(data))
   ));
-  events.on("daily-recap", (data) => broadcast("daily-recap", data));
-  events.on("daily-plan", (data) => broadcast("daily-plan", data));
-  events.on("task-unblocked", (data) => broadcast("task-unblocked", data));
-  events.on("job", (data) => {
+  bindHostedEvent("daily-recap", (data) => broadcast("daily-recap", data));
+  bindHostedEvent("daily-plan", (data) => broadcast("daily-plan", data));
+  bindHostedEvent("task-unblocked", (data) => broadcast("task-unblocked", data));
+  bindHostedEvent("job", (data) => {
     const status = jobSseStatusView(data);
     if (status) broadcast("job", status);
   });
@@ -175,10 +194,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   if (runtime.pendingActions?.bindEvents) runtime.pendingActions.bindEvents(events);
   if (runtime.computerUseLog?.bindEvents) runtime.computerUseLog.bindEvents(events);
   if (runtime.jobs?.bindEvents) runtime.jobs.bindEvents(events);
-  events.on("computer-use", (data) => broadcast("computer-use", data));
-  events.on("outreach", (data) => broadcast("outreach", data));
-  events.on("outreach-resolved", (data) => broadcast("outreach-resolved", data));
-  events.on("background-review", (data) => broadcast("background-review", data));
+  bindHostedEvent("computer-use", (data) => broadcast("computer-use", data));
+  bindHostedEvent("outreach", (data) => broadcast("outreach", data));
+  bindHostedEvent("outreach-resolved", (data) => broadcast("outreach-resolved", data));
+  bindHostedEvent("background-review", (data) => broadcast("background-review", data));
 
   // Expose the bus to runtime subsystems (pattern miner, session miner) so
   // they can emit "skill-candidate" without holding a reference to this
@@ -788,6 +807,60 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           projectRevision: project.revision,
           projectHookIds: project.hookIds
         }));
+      }
+      if (method === "POST" && /^\/sessions\/[^/]+\/branches$/u.test(pathname)) {
+        if (typeof runtime.agentHost?.branchSession !== "function") {
+          return sendJson(res, 503, { error: "session branching unavailable" });
+        }
+        const sourceSessionId = decodeURIComponent(
+          pathname.slice("/sessions/".length, -"/branches".length)
+        );
+        const body = await readJson(req).catch(() => null);
+        if (
+          !body
+          || typeof body !== "object"
+          || Array.isArray(body)
+          || Object.keys(body).length !== 1
+          || typeof body.messageId !== "string"
+          || !body.messageId.trim()
+        ) {
+          return sendJson(res, 400, { error: "messageId is required" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          assertHostedSessionProject(
+            runtime,
+            runtime.agentHost.store,
+            sourceSessionId,
+            project,
+            { projectStoreRequired: hostedSessionsRequireProjectStore }
+          );
+          const branch = await runtime.agentHost.branchSession({
+            sourceSessionId,
+            messageId: body.messageId,
+            projectId: project.id,
+            agentId: "main"
+          });
+          return sendJson(res, 201, branch);
+        } catch (error) {
+          if (error?.code === "SESSION_BRANCH_TARGET_EXISTS") {
+            return sendJson(res, 409, { error: "session branch conflict" });
+          }
+          if (error?.code === "SESSION_BRANCH_MESSAGE_AMBIGUOUS") {
+            return sendJson(res, 409, { error: "ambiguous branch message" });
+          }
+          if (
+            error?.code === "SESSION_NOT_FOUND"
+            || error?.code === "SESSION_BRANCH_MESSAGE_NOT_FOUND"
+            || error?.code === "PROJECT_BOUNDARY_VIOLATION"
+          ) {
+            return sendJson(res, 404, { error: "unknown session or message" });
+          }
+          if (error instanceof TypeError || error instanceof RangeError) {
+            return sendJson(res, 400, { error: error.message });
+          }
+          throw error;
+        }
       }
       if (method === "GET" && pathname.startsWith("/sessions/")) {
         const project = requireRequestProject(runtime, req, url);
@@ -2492,6 +2565,127 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       }
       // Drafts review queue — agent-produced artifacts awaiting approval.
       // ids are Map keys, never fs paths → no traversal surface.
+      // Versioned Artifact Canvas. All methods are authenticated and project-scoped.
+      if (method === "GET" && pathname === "/artifacts") {
+        if (!runtime.artifacts?.list) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const limitValue = url.searchParams.get("limit");
+          const limit = limitValue == null ? undefined : Number(limitValue);
+          return sendJson(res, 200, runtime.artifacts.list({
+            projectId: project.id,
+            ...(url.searchParams.has("kind")
+              ? { kind: url.searchParams.get("kind") }
+              : {}),
+            ...(limit == null ? {} : { limit })
+          }));
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/artifacts") {
+        if (!runtime.artifacts?.create) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const artifact = runtime.artifacts.create({
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          });
+          return sendJson(res, 201, artifact);
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/artifacts\/[^/]+\/versions$/u.test(pathname)) {
+        if (!runtime.artifacts?.versions) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/artifacts/".length, -"/versions".length)
+        );
+        try {
+          const limitValue = url.searchParams.get("limit");
+          const limit = limitValue == null ? undefined : Number(limitValue);
+          return sendJson(res, 200, runtime.artifacts.versions(id, {
+            projectId: project.id,
+            ...(limit == null ? {} : { limit }),
+            includeContent: url.searchParams.get("includeContent") === "1"
+          }));
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/artifacts\/[^/]+\/restore$/u.test(pathname)) {
+        if (!runtime.artifacts?.restore) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/artifacts/".length, -"/restore".length)
+        );
+        const body = await readJson(req).catch(() => null);
+        try {
+          const artifact = runtime.artifacts.restore(
+            id,
+            body?.revision ?? body?.targetRevision,
+            {
+              projectId: project.id,
+              expectedRevision: body?.expectedRevision,
+              actor: "http"
+            }
+          );
+          return sendJson(res, 200, artifact);
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/artifacts\/[^/]+$/u.test(pathname)) {
+        if (!runtime.artifacts?.get) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/artifacts/".length));
+        try {
+          const revisionValue = url.searchParams.get("revision");
+          const revision = revisionValue == null ? undefined : Number(revisionValue);
+          return sendJson(res, 200, runtime.artifacts.get(id, {
+            projectId: project.id,
+            ...(revision == null ? {} : { revision })
+          }));
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/artifacts\/[^/]+$/u.test(pathname)) {
+        if (!runtime.artifacts?.update) {
+          return sendJson(res, 503, { error: "artifact Canvas unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/artifacts/".length));
+        const body = await readJson(req).catch(() => null);
+        try {
+          const artifact = runtime.artifacts.update(id, {
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          });
+          return sendJson(res, 200, artifact);
+        } catch (error) {
+          return sendArtifactHttpError(res, error);
+        }
+      }
+      // Draft review queue.
       if (method === "GET" && pathname === "/drafts") {
         if (!runtime.drafts?.list) return sendJson(res, 503, { error: "no draft store" });
         const project = requireRequestProject(runtime, req, url);
@@ -2542,7 +2736,13 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         if (!target) return sendJson(res, 400, { error: "no target/recipient for this send" });
         let result;
         try {
-          result = await runtime.channels.deliver({ channel, target, text: draft.body, refId: draft.id });
+          result = await runtime.channels.deliver({
+            channel,
+            target,
+            text: draft.body,
+            projectId: project.id,
+            refId: draft.id
+          });
         } catch (error) { return sendJson(res, 502, { error: error.message }); }
         if (result?.delivered === false) {
           return sendJson(res, 502, { error: result.reason ?? "delivery failed", result });
@@ -3159,6 +3359,17 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       });
     },
     async close() {
+      for (const { type, listener } of ownedEventListeners.splice(0)) {
+        if (typeof events.off === "function") events.off(type, listener);
+        else events.removeListener?.(type, listener);
+      }
+      if (
+        runtime.projects
+        && hostedProjectChange
+        && runtime.projects.onChange === hostedProjectChange
+      ) {
+        runtime.projects.onChange = previousProjectChange;
+      }
       try { await runtime.agentHost?.endActiveHookSessions?.("gateway-close"); }
       catch (error) { console.warn(`[openagi] session review flush failed open: ${error?.message ?? String(error)}`); }
       try { runtime.hooks?.notify?.("gateway:shutdown", { host, port }); }
@@ -3579,6 +3790,35 @@ function requireDefaultRequestProject(runtime, req, url, body = null, operation 
   throw error;
 }
 
+function sendArtifactHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  if (
+    code.includes("NOT_FOUND")
+    || code.includes("BOUNDARY")
+    || code === "PROJECT_BOUNDARY_VIOLATION"
+  ) {
+    return sendJson(res, 404, { error: "unknown artifact" });
+  }
+  if (
+    code.includes("REVISION")
+    || code.includes("STALE")
+    || code.includes("CONFLICT")
+  ) {
+    return sendJson(res, 409, {
+      error: "artifact revision conflict",
+      code: code || "ARTIFACT_REVISION_CONFLICT"
+    });
+  }
+  if (
+    error instanceof TypeError
+    || error instanceof RangeError
+    || code.startsWith("ARTIFACT_INVALID")
+  ) {
+    return sendJson(res, 400, { error: error.message });
+  }
+  throw error;
+}
+
 function projectSkillScheduleId(projectId, skillSlug) {
   if (projectId === "default") return `skill-cron-${skillSlug}`;
   const projectKey = createHash("sha256")
@@ -3607,6 +3847,16 @@ function assertHostedSessionProject(
   { projectStoreRequired = false } = {}
 ) {
   assertHostedProjectStoreAvailable(runtime, projectStoreRequired);
+  const sessionExists = typeof store?.hasSession === "function"
+    ? store.hasSession(sessionId)
+    : typeof store?.listSessions === "function"
+      ? store.listSessions().some((session) => session?.id === sessionId)
+      : false;
+  if (!sessionExists) {
+    const error = new Error(`Unknown session '${sessionId}'.`);
+    error.code = "SESSION_NOT_FOUND";
+    throw error;
+  }
   if (typeof runtime.projects?.projectForSession === "function") {
     const boundProject = runtime.projects.projectForSession(sessionId);
     if (!boundProject || boundProject.id !== expectedProject.id) {

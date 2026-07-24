@@ -733,3 +733,15 @@ DURABLE JOBS COMPLETE
 - Added lifecycle, stale-reference, scope, approval, secret, SSRF, redirect, CDP, path-race, provider-image, prompt, optional-dependency, and hostile-adapter regressions. The compact semantic benchmark is below 20 percent of the equivalent three-screenshot-loop context.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1507/1507 with zero failures and one intentional Windows permission-mode skip.
 SEMANTIC BROWSER COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: Artifact Canvas and session branching (Codex)
+
+- Added a project-scoped Artifact Canvas for versioned Markdown and JSON-compatible data, with append-only JSONL revision events, atomic snapshots, cross-process mutation locking, strict size and structure bounds, stale-write rejection, recoverable restores, and pinned revision references.
+- Reserved artifact identities through ProjectStore before persistence, rolled reservations back on failed appends, refreshed authorization at storage boundaries, and emitted content-free lifecycle notifications only after durable mutations.
+- Added create, list, show, update, version-history, and restore agent tools; documented every tool in the system prompt; and exposed authenticated project-contained HTTP plus metadata-only SSE updates.
+- Extended Deliverable Mode to attach exact pinned artifact revisions with deterministic Markdown or JSON serialization while retaining invalid, unpinned, fenced, and foreign references as text and confining nondefault filesystem attachments to the active project workspace.
+- Added exact inclusive branch-from-message semantics without source mutation, fresh branch metadata, server-generated target sessions, durable project binding before transcript creation, metadata-only hooks and SSE, and composite session/message indexing.
+- Replaced lossy transcript filenames with hash-addressed paths, exact-id legacy migration, corrupt-record fail-closed checks, and deduplicated session listing while preserving backward compatibility.
+- Added persistence, stale-write, restore, project-boundary, HTTP, SSE, deliverable, transcript-collision, source-immutability, branch-indexing, prompt-visibility, hostile-data, and both-policy regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1537/1538 tests with zero failures and one intentional Windows permission-mode skip.
+ARTIFACT CANVAS COMPLETE

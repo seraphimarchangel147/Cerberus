@@ -55,6 +55,8 @@ export class SessionIndex {
     this.wasMissing = !fs.existsSync(this.dbPath) && !fs.existsSync(path.join(this.dir, "session-index.jsonl"));
     this.db = null;
     this.fallback = null; // JSONL fallback when node:sqlite isn't available
+    this.fallbackKeys = new Set();
+    this.transactionDepth = 0;
     this.forceFallback = options.fallback === true;
     this.fallbackPath = path.join(this.dir, "session-index.jsonl");
     this.ready = this.init();
@@ -63,6 +65,7 @@ export class SessionIndex {
   async init() {
     if (this.forceFallback) {
       this.fallback = true;
+      this._loadFallbackKeys();
       return;
     }
     const sqlite = await loadSqlite();
@@ -70,6 +73,7 @@ export class SessionIndex {
       // node:sqlite is available in Node 22.5+. If it's missing we degrade to
       // a JSONL append log so search still works (slower, no FTS ranking).
       this.fallback = true;
+      this._loadFallbackKeys();
       return;
     }
     try {
@@ -87,6 +91,15 @@ export class SessionIndex {
           text,
           tokenize='porter unicode61'
         );
+        CREATE TABLE IF NOT EXISTS message_keys (
+          session_id TEXT NOT NULL,
+          msg_id TEXT NOT NULL,
+          PRIMARY KEY (session_id, msg_id)
+        ) WITHOUT ROWID;
+        INSERT OR IGNORE INTO message_keys (session_id, msg_id)
+          SELECT session_id, msg_id
+          FROM messages
+          WHERE msg_id IS NOT NULL AND msg_id <> '';
       `);
     } catch (error) {
       // init() must never reject: some callers (createDefaultRuntime with
@@ -98,11 +111,21 @@ export class SessionIndex {
       console.error(`[openagi] session-index: sqlite init failed (${error.message}), falling back to JSONL`);
       this.db = null;
       this.fallback = true;
+      this._loadFallbackKeys();
     }
   }
 
   async indexMessage(sessionId, agentId, msg, { skipDedupe = false } = {}) {
     await this.ready;
+    return this._indexReadyMessage(
+      sessionId,
+      agentId,
+      msg,
+      { skipDedupe }
+    );
+  }
+
+  _indexReadyMessage(sessionId, agentId, msg, { skipDedupe = false } = {}) {
     if (!msg || typeof msg.content !== "string" || !msg.content.trim()) return { indexed: 0 };
     const row = {
       msgId: msg.id ?? null,
@@ -113,7 +136,14 @@ export class SessionIndex {
       text: msg.content
     };
     if (this.fallback) {
+      const key = row.msgId == null
+        ? null
+        : fallbackMessageKey(row.sessionId, row.msgId);
+      if (key && this.fallbackKeys.has(key)) {
+        return { indexed: 0, deduped: true };
+      }
       fs.appendFileSync(this.fallbackPath, JSON.stringify(row) + "\n");
+      if (key) this.fallbackKeys.add(key);
       return { indexed: 1, mode: "fallback-jsonl" };
     }
     // Dedupe by message id so a boot-time backfill racing live appends can't
@@ -128,14 +158,80 @@ export class SessionIndex {
     // (single-threaded Node has nothing to yield to once it's CPU-bound
     // inside one transaction). The live incremental path (agent-host's
     // per-turn indexMessage calls) keeps the dedup check.
-    if (row.msgId && !skipDedupe) {
-      const existing = this.db.prepare(`SELECT 1 FROM messages WHERE msg_id = ? LIMIT 1`).get(row.msgId);
-      if (existing) return { indexed: 0, deduped: true };
+    return this._indexSqliteRow(row, { skipDedupe });
+  }
+
+  _indexSqliteRow(row, { skipDedupe }) {
+    const ownsTransaction = this.transactionDepth === 0;
+    if (ownsTransaction) this.db.exec("BEGIN IMMEDIATE;");
+    this.transactionDepth += 1;
+    try {
+      if (row.msgId) {
+        if (!skipDedupe) {
+          const existing = this.db.prepare(
+            `SELECT 1 FROM message_keys
+             WHERE msg_id = ? AND session_id = ?
+             LIMIT 1`
+          ).get(row.msgId, row.sessionId);
+          if (existing) {
+            if (ownsTransaction) this.db.exec("COMMIT;");
+            return { indexed: 0, deduped: true };
+          }
+        }
+        const claimed = this.db.prepare(
+          `INSERT OR IGNORE INTO message_keys (session_id, msg_id)
+           VALUES (?, ?)`
+        ).run(row.sessionId, row.msgId);
+        if (Number(claimed.changes ?? 0) === 0) {
+          if (ownsTransaction) this.db.exec("COMMIT;");
+          return { indexed: 0, deduped: true };
+        }
+      }
+      this.db.prepare(
+        `INSERT INTO messages (msg_id, session_id, agent_id, ts, role, text)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        row.msgId,
+        row.sessionId,
+        row.agentId,
+        row.ts,
+        row.role,
+        row.text
+      );
+      if (ownsTransaction) this.db.exec("COMMIT;");
+      return { indexed: 1, mode: "sqlite" };
+    } catch (error) {
+      if (ownsTransaction) {
+        try { this.db.exec("ROLLBACK;"); } catch { /* best effort */ }
+      }
+      throw error;
+    } finally {
+      this.transactionDepth -= 1;
     }
-    this.db.prepare(
-      `INSERT INTO messages (msg_id, session_id, agent_id, ts, role, text) VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(row.msgId, row.sessionId, row.agentId, row.ts, row.role, row.text);
-    return { indexed: 1, mode: "sqlite" };
+  }
+
+  _loadFallbackKeys() {
+    this.fallbackKeys.clear();
+    let lines;
+    try {
+      lines = fs.readFileSync(this.fallbackPath, "utf8").split(/\r?\n/u);
+    } catch {
+      return;
+    }
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        const row = JSON.parse(line);
+        if (row?.msgId != null) {
+          this.fallbackKeys.add(fallbackMessageKey(
+            String(row.sessionId ?? ""),
+            String(row.msgId)
+          ));
+        }
+      } catch {
+        // Invalid fallback rows remain ignored by search and dedupe.
+      }
+    }
   }
 
   async search(query, { limit = 8, role = null, sessionId = null, since = null, until = null } = {}) {
@@ -221,21 +317,36 @@ export class SessionIndex {
     // messages) turned a first-boot backfill into one fsync per message —
     // minutes of downtime on slow storage instead of a couple of seconds.
     const inTransaction = !this.fallback && this.db;
-    if (inTransaction) this.db.exec("BEGIN;");
+    if (inTransaction) {
+      this.db.exec("BEGIN IMMEDIATE;");
+      this.transactionDepth += 1;
+    }
     try {
       for (const meta of agentStore.listSessions()) {
         const session = agentStore.getSession(meta.id);
         if (!session?.messages?.length) continue;
         sessions += 1;
         for (const msg of session.messages) {
-          const result = await this.indexMessage(session.id, msg.agentId ?? "main", msg, { skipDedupe: true });
+          // Keep the bulk transaction synchronous after it opens. Yielding
+          // here would let a live indexMessage call join this transaction and
+          // report success for a row that a later rebuild rollback removes.
+          const result = this._indexReadyMessage(
+            session.id,
+            msg.agentId ?? "main",
+            msg,
+            { skipDedupe: true }
+          );
           indexed += result.indexed ?? 0;
         }
       }
       if (inTransaction) this.db.exec("COMMIT;");
     } catch (error) {
-      if (inTransaction) this.db.exec("ROLLBACK;");
+      if (inTransaction) {
+        try { this.db.exec("ROLLBACK;"); } catch { /* best effort */ }
+      }
       throw error;
+    } finally {
+      if (inTransaction) this.transactionDepth -= 1;
     }
     return { sessions, indexed };
   }
@@ -258,6 +369,10 @@ export class SessionIndex {
       this.db = null;
     }
   }
+}
+
+function fallbackMessageKey(sessionId, messageId) {
+  return JSON.stringify([String(sessionId), String(messageId)]);
 }
 
 function normalizeSearchFilters({ role, sessionId, since, until }) {

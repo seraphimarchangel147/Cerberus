@@ -507,6 +507,33 @@ export class ProjectStore {
     return this.sessionProjects.has(normalizeSessionId(sessionId));
   }
 
+  unbindSession(projectId, sessionId, context = {}) {
+    const expected = normalizeProjectId(projectId);
+    const normalizedSessionId = normalizeSessionId(sessionId);
+    const contextValues = plainDataRecord(context, "session unbind context");
+    return this._runMutation(() => {
+      this._requireProject(expected);
+      const actual = this.sessionProjects.get(normalizedSessionId) ?? null;
+      if (actual === null) return false;
+      if (actual !== expected) {
+        throw new ProjectBoundaryError(
+          `Session '${normalizedSessionId}' is outside project '${expected}'.`,
+          {
+            projectId: expected,
+            sessionId: normalizedSessionId,
+            actualProjectId: actual
+          }
+        );
+      }
+      this.sessionProjects.delete(normalizedSessionId);
+      this._commit("unbind-session", expected, {
+        sessionId: normalizedSessionId,
+        actor: normalizeActor(contextValues)
+      });
+      return true;
+    });
+  }
+
   sessionsForProject(projectId) {
     const id = normalizeProjectId(projectId);
     return [...this.sessionProjects.entries()]

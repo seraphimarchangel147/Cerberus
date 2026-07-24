@@ -56,6 +56,7 @@ import { JobManager, registerJobTools } from "./job-manager.js";
 import { ComputerUseLog } from "./computer-use-log.js";
 import { ClarificationStore } from "./clarification-store.js";
 import { DraftStore } from "./draft-store.js";
+import { ArtifactCanvasStore } from "./artifact-canvas.js";
 import { registerComputerUseTools, isComputerUseEnabled } from "./integrations/computer-use.js";
 import { SuggestionFeedback } from "./suggestion-feedback.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
@@ -497,6 +498,15 @@ export class AbiRuntime {
     this.drafts = options.drafts ?? new DraftStore({
       runtime: this,
       dir: options.dataDir ? `${options.dataDir}/drafts` : undefined
+    });
+    this.artifacts = options.artifacts ?? new ArtifactCanvasStore({
+      runtime: this,
+      projects: this.projects,
+      dataDir: secretsDataDir,
+      dir: options.dataDir
+        ? path.join(options.dataDir, "drafts", "canvas")
+        : undefined,
+      ...(options.artifactOptions ?? {})
     });
     // Proactive outreach: store + mapper that turn existing runtime events
     // (drafts, suggestions, pending actions, clarifications) into a single
@@ -1587,6 +1597,7 @@ export class AbiRuntime {
       settled.push(...await Promise.allSettled([
         this.jobs?.close?.(),
         this.kanban?.close?.(),
+        this.artifacts?.close?.(),
         this.semanticBrowser?.closeAll?.(),
         this.observations?.close?.(),
         this.sessionIndex?.close?.()

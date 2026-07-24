@@ -67,6 +67,7 @@ const LOCAL_PATH_RE = new RegExp(
   `(?<![A-Za-z0-9_:/\\\\])((?:~[\\\\/]|[A-Za-z]:[\\\\/]|\\/)[^\\s<>"'\`]*?\\.(${EXTENSION_PATTERN}))(?=$|[\\s.,;:!?)}\\]>'"\`])`,
   "giu"
 );
+const PINNED_ARTIFACT_RE = /(?<![A-Za-z0-9_:/\\])(artifact:artifact_[a-f0-9]{16}@[1-9][0-9]{0,15})(?=$|[\s.,;:!?)}\]>'"`])/giu;
 const SENSITIVE_SEGMENTS = new Set([
   ".git",
   ".ssh",
@@ -123,6 +124,7 @@ export function scanDeliverables(text, options = {}) {
       if (linkStat.isSymbolicLink?.()) continue;
       realPath = settings.fsImpl.realpathSync(resolvedPath);
       if (isSensitivePath(realPath, settings.homeDir)) continue;
+      if (!withinProjectWorkspace(realPath, settings)) continue;
       stat = settings.fsImpl.statSync(realPath);
     } catch {
       continue;
@@ -170,6 +172,41 @@ export function scanDeliverables(text, options = {}) {
     totalBytes += buffer.byteLength;
   }
 
+  if (settings.resolveArtifact) {
+    const byArtifact = new Map();
+    PINNED_ARTIFACT_RE.lastIndex = 0;
+    while ((match = PINNED_ARTIFACT_RE.exec(source)) !== null) {
+      const start = match.index;
+      const end = start + match[1].length;
+      if (rangeIsProtected(start, end, protectedRanges)) continue;
+      const raw = match[1];
+      const occurrence = Object.freeze({ start, end, raw });
+      const duplicate = byArtifact.get(raw);
+      if (duplicate) {
+        duplicate.occurrences.push(occurrence);
+        continue;
+      }
+      if (candidates.length >= settings.maxFiles) continue;
+
+      let resolved;
+      try {
+        resolved = settings.resolveArtifact(raw, {
+          projectId: settings.projectId
+        });
+      } catch {
+        continue;
+      }
+      const candidate = artifactCandidate(resolved, raw, occurrence);
+      if (!candidate) continue;
+      if (candidate.size > settings.maxFileBytes) continue;
+      if (totalBytes + candidate.size > settings.maxTotalBytes) continue;
+      candidates.push(candidate);
+      byArtifact.set(raw, candidate);
+      totalBytes += candidate.size;
+    }
+  }
+
+  candidates.sort((left, right) => left.start - right.start);
   return candidates;
 }
 
@@ -208,9 +245,24 @@ export function stripDeliveredPaths(text, successfulCandidates = []) {
 }
 
 function scanSettings(options) {
+  const projectId = typeof options.projectId === "string" && options.projectId.trim()
+    ? options.projectId.trim().toLowerCase()
+    : "default";
+  const workspaceRoot = typeof options.workspaceRoot === "string"
+    && options.workspaceRoot.trim()
+    ? path.resolve(options.workspaceRoot)
+    : null;
+  const resolveArtifact = typeof options.resolveArtifact === "function"
+    ? options.resolveArtifact
+    : typeof options.artifactStore?.resolvePinnedRef === "function"
+      ? options.artifactStore.resolvePinnedRef.bind(options.artifactStore)
+      : null;
   return {
     fsImpl: options.fsImpl ?? fs,
     homeDir: path.resolve(options.homeDir ?? os.homedir()),
+    projectId,
+    workspaceRoot,
+    resolveArtifact,
     maxFiles: boundedInteger(options.maxFiles, DELIVERABLE_MAX_FILES, 1, 32),
     maxFileBytes: boundedInteger(
       options.maxFileBytes,
@@ -225,6 +277,92 @@ function scanSettings(options) {
       200 * 1024 * 1024
     )
   };
+}
+
+function artifactCandidate(value, raw, occurrence) {
+  const resolved = value?.artifact ?? value;
+  if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) {
+    return null;
+  }
+  const kind = resolved.kind;
+  if (kind !== "markdown" && kind !== "data") return null;
+  let buffer;
+  if (Buffer.isBuffer(resolved.buffer)) {
+    buffer = Buffer.from(resolved.buffer);
+  } else if (kind === "markdown") {
+    const content = resolved.content ?? resolved.body;
+    if (typeof content !== "string") return null;
+    buffer = Buffer.from(content, "utf8");
+  } else {
+    const content = Object.hasOwn(resolved, "content")
+      ? resolved.content
+      : resolved.data;
+    try {
+      buffer = Buffer.from(`${stableJson(content)}\n`, "utf8");
+    } catch {
+      return null;
+    }
+  }
+  const id = typeof resolved.id === "string" && resolved.id
+    ? resolved.id
+    : raw.slice("artifact:".length).split("@")[0];
+  const extension = kind === "markdown" ? "md" : "json";
+  const title = typeof resolved.title === "string" && resolved.title.trim()
+    ? resolved.title.trim()
+    : id;
+  const stem = safeAttachmentFilename(title)
+    .replace(/\.(?:md|json)$/iu, "")
+    .replace(/[. ]+$/gu, "")
+    || id;
+  return {
+    category: kind === "markdown" ? "document" : "data",
+    delivery: "file",
+    extension,
+    mimeType: kind === "markdown" ? "text/markdown" : "application/json",
+    artifactId: id,
+    revision: Number(resolved.revision ?? raw.split("@").at(-1)),
+    raw,
+    path: raw,
+    resolvedPath: null,
+    filename: safeAttachmentFilename(`${stem}.${extension}`),
+    buffer,
+    size: buffer.byteLength,
+    start: occurrence.start,
+    end: occurrence.end,
+    occurrences: [occurrence]
+  };
+}
+
+function stableJson(value, seen = new Set()) {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("Artifact data must be finite.");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new TypeError("Artifact data cannot be cyclic.");
+    seen.add(value);
+    const rendered = `[${value.map((item) => stableJson(item, seen)).join(",")}]`;
+    seen.delete(value);
+    return rendered;
+  }
+  if (!value || typeof value !== "object") {
+    throw new TypeError("Artifact data must be JSON-compatible.");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("Artifact data must use plain objects.");
+  }
+  if (seen.has(value)) throw new TypeError("Artifact data cannot be cyclic.");
+  seen.add(value);
+  const rendered = `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(value[key], seen)}`)
+    .join(",")}}`;
+  seen.delete(value);
+  return rendered;
 }
 
 function resolveMentionedPath(value, homeDir) {
@@ -253,6 +391,19 @@ function isSensitivePath(value, homeDir) {
     if ([".config", ".docker"].includes(first)) return true;
   }
   return false;
+}
+
+function withinProjectWorkspace(realPath, settings) {
+  if (settings.projectId === "default") return true;
+  if (!settings.workspaceRoot) return false;
+  let realRoot;
+  try {
+    realRoot = settings.fsImpl.realpathSync(settings.workspaceRoot);
+  } catch {
+    return false;
+  }
+  const relative = path.relative(realRoot, realPath);
+  return relative === "" || isRelativeInside(relative);
 }
 
 function safeAttachmentFilename(value) {

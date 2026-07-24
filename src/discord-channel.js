@@ -116,6 +116,9 @@ export class DiscordChannel {
     this.restFetch = options.fetch ?? globalThis.fetch;
     this.restSleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.deliverableOptions = options.deliverableOptions ?? {};
+    this.deliverableScope = typeof options.deliverableScope === "function"
+      ? options.deliverableScope
+      : null;
   }
 
   status() {
@@ -462,7 +465,11 @@ export class DiscordChannel {
       if (replyText && replyText !== "(no text)") {
         await this.deliverAgentReply(message.channel_id, replyText, {
           replyToId: message.id,
-          replyStream
+          replyStream,
+          deliveryContext: {
+            sessionId: result.session?.id ?? null,
+            projectId: result.project?.id ?? null
+          }
         });
       } else {
         // Never end a pinged turn in silence — surface the actual stop reason.
@@ -482,12 +489,15 @@ export class DiscordChannel {
   async deliverAgentReply(
     channelId,
     text,
-    { replyToId = null, replyStream = null } = {}
+    { replyToId = null, replyStream = null, deliveryContext = {} } = {}
   ) {
     const original = String(text ?? "");
     let candidates = [];
     try {
-      candidates = await scanDeliverables(original, this.deliverableOptions);
+      const scopedOptions = this.deliverableScope
+        ? this.deliverableScope(deliveryContext)
+        : this.deliverableOptions;
+      candidates = await scanDeliverables(original, scopedOptions);
       if (!Array.isArray(candidates)) candidates = [];
     } catch (error) {
       this.logDeliverableFailure("scan", null, error);

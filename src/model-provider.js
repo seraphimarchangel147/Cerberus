@@ -5245,6 +5245,11 @@ Tools available to you (call them when useful):
 - browser_scroll(ref?, deltaY?) / browser_screenshot(fullPage?) - move through or capture the current page; screenshots require approval
 - browser_download(ref? | url?, filename?) / browser_upload(ref, paths) - transfer project-confined files with approval
 - browser_close() - close only the current project/session browser
+- artifact_create(kind, title, content) - create a versioned Markdown or data artifact in the current project's Canvas
+- artifact_list(kind?, limit?) / artifact_show(id, revision?) - discover or read project-contained Canvas artifacts
+- artifact_update(id, expectedRevision, title?, content?) - append a revision; stale expectedRevision values fail instead of overwriting
+- artifact_versions(id, limit?, includeContent?) - inspect recoverable artifact history without loading content by default
+- artifact_restore(id, revision, expectedRevision) - restore an older version as a new head revision
 - list_skills / use_skill / run_skill / restore_skill - discover, load, run, or restore named skill prompts
 - list_mcp_tools / run_mcp_tool — invoke tools from connected MCP servers
 - tool_search(query, limit?) - search every eligible tool omitted from this request without loading its full schema

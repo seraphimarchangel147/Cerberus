@@ -1670,6 +1670,20 @@ function createProjectDraft(runtime, args, projectId) {
   }
 }
 
+function artifactMutationResult(artifact) {
+  if (!artifact || typeof artifact !== "object") return artifact;
+  return {
+    id: artifact.id,
+    projectId: artifact.projectId,
+    kind: artifact.kind,
+    title: artifact.title,
+    revision: artifact.revision,
+    pinnedRef: artifact.pinnedRef,
+    createdAt: artifact.createdAt,
+    updatedAt: artifact.updatedAt
+  };
+}
+
 async function requireProjectKanbanTask(runtime, taskId, context) {
   if (!runtime.kanban?.getTask) throw new Error("Kanban store is unavailable.");
   const task = await runtime.kanban.getTask(taskId);
@@ -3300,9 +3314,15 @@ export function registerCoreTools(registry, runtime) {
       required: ["channel", "target", "text"],
       additionalProperties: false
     },
-    handler: async (args) => {
+    handler: async (args, context = {}) => {
       if (!runtime.channels?.deliver) throw new Error("Channels are not bound to runtime.");
-      return runtime.channels.deliver({ channel: args.channel, target: args.target, text: args.text });
+      return runtime.channels.deliver({
+        channel: args.channel,
+        target: args.target,
+        text: args.text,
+        sessionId: context.sessionId ?? null,
+        projectId: context.__projectId ?? "default"
+      });
     }
   });
 
@@ -4584,6 +4604,171 @@ export function registerCoreTools(registry, runtime) {
       const plan = await computeDailyPlan(runtime, { date });
       if (args.format === "json") return plan;
       return { markdown: renderDailyPlanMarkdown(plan), counts: plan.counts };
+    }
+  });
+
+  registry.register({
+    name: "artifact_create",
+    description: "Create a versioned Markdown or JSON-compatible data artifact in the current project's Canvas. Returns a pinned artifact reference that can be delivered or cited without copying the content into chat.",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["markdown", "data"] },
+        title: { type: "string", description: "Short human-readable artifact title." },
+        content: {
+          oneOf: [
+            { type: "string" },
+            { type: "object", additionalProperties: true },
+            { type: "array", items: {} },
+            { type: "number" },
+            { type: "boolean" },
+            { type: "null" }
+          ],
+          description: "Markdown text for kind=markdown, or a JSON-compatible value for kind=data."
+        }
+      },
+      required: ["kind", "title", "content"],
+      additionalProperties: false
+    },
+    handler: async (args, context = {}) => {
+      if (!runtime.artifacts?.create) throw new Error("Artifact Canvas is unavailable.");
+      const artifact = runtime.artifacts.create({
+        ...args,
+        projectId: context.__projectId ?? "default"
+      }, {
+        projectId: context.__projectId ?? "default",
+        actor: context.agentId ?? "agent"
+      });
+      return artifactMutationResult(artifact);
+    }
+  });
+
+  registry.register({
+    name: "artifact_list",
+    sideEffects: false,
+    description: "List bounded summaries of versioned Canvas artifacts in the current project.",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["markdown", "data"] },
+        limit: { type: "integer", minimum: 1, maximum: 100 }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context = {}) => {
+      if (!runtime.artifacts?.list) throw new Error("Artifact Canvas is unavailable.");
+      return {
+        artifacts: runtime.artifacts.list({
+          ...args,
+          projectId: context.__projectId ?? "default"
+        })
+      };
+    }
+  });
+
+  registry.register({
+    name: "artifact_show",
+    sideEffects: false,
+    description: "Read one exact Canvas artifact revision from the current project. Omit revision for the latest version.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^artifact_[a-f0-9]{16}$" },
+        revision: { type: "integer", minimum: 1 }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    handler: async (args, context = {}) => {
+      if (!runtime.artifacts?.get) throw new Error("Artifact Canvas is unavailable.");
+      return runtime.artifacts.get(args.id, {
+        projectId: context.__projectId ?? "default",
+        ...(args.revision == null ? {} : { revision: args.revision })
+      });
+    }
+  });
+
+  registry.register({
+    name: "artifact_update",
+    description: "Append a new Canvas artifact revision. expectedRevision is mandatory; stale writes are rejected instead of overwriting newer work.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^artifact_[a-f0-9]{16}$" },
+        expectedRevision: { type: "integer", minimum: 1 },
+        title: { type: "string" },
+        content: {
+          oneOf: [
+            { type: "string" },
+            { type: "object", additionalProperties: true },
+            { type: "array", items: {} },
+            { type: "number" },
+            { type: "boolean" },
+            { type: "null" }
+          ]
+        }
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    handler: async (args, context = {}) => {
+      if (!runtime.artifacts?.update) throw new Error("Artifact Canvas is unavailable.");
+      const { id, ...patch } = args;
+      const artifact = runtime.artifacts.update(id, patch, {
+        projectId: context.__projectId ?? "default",
+        actor: context.agentId ?? "agent"
+      });
+      return artifactMutationResult(artifact);
+    }
+  });
+
+  registry.register({
+    name: "artifact_versions",
+    sideEffects: false,
+    description: "List recoverable revisions for one Canvas artifact in the current project. Content is omitted by default to conserve context.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^artifact_[a-f0-9]{16}$" },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+        includeContent: { type: "boolean" }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    handler: async (args, context = {}) => {
+      if (!runtime.artifacts?.versions) throw new Error("Artifact Canvas is unavailable.");
+      return {
+        versions: runtime.artifacts.versions(args.id, {
+          projectId: context.__projectId ?? "default",
+          limit: args.limit,
+          includeContent: args.includeContent === true
+        })
+      };
+    }
+  });
+
+  registry.register({
+    name: "artifact_restore",
+    description: "Restore a prior Canvas revision by appending it as a new head. expectedRevision protects against stale rollback requests.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^artifact_[a-f0-9]{16}$" },
+        revision: { type: "integer", minimum: 1, description: "Prior revision to restore." },
+        expectedRevision: { type: "integer", minimum: 1, description: "Current head revision." }
+      },
+      required: ["id", "revision", "expectedRevision"],
+      additionalProperties: false
+    },
+    handler: async (args, context = {}) => {
+      if (!runtime.artifacts?.restore) throw new Error("Artifact Canvas is unavailable.");
+      const artifact = runtime.artifacts.restore(args.id, args.revision, {
+        projectId: context.__projectId ?? "default",
+        expectedRevision: args.expectedRevision,
+        actor: context.agentId ?? "agent"
+      });
+      return artifactMutationResult(artifact);
     }
   });
 
