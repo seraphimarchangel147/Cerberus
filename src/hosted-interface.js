@@ -2820,6 +2820,98 @@ function renderApp() {
     .page-chat .page-chat-send:hover:not(:disabled) { opacity: 0.9; }
     .page-chat .page-chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* ═══ CERBERUS panel system (ref-05 laser-console idiom) ═══════════════
+       HUD tables, status pills with pulsing dots, a REBOOTING-LASERS-style
+       modal with segmented progress + streaming mono log, and serial-number
+       micro-labels on cards. */
+
+    /* Console tables — hairline rules, tracked mono headers, row hover glow. */
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table th {
+      text-align: left; font-family: var(--font-display); text-transform: uppercase;
+      letter-spacing: 0.12em; font-size: 10px; font-weight: 600; color: var(--muted);
+      padding: 6px 10px; border-bottom: 1px solid var(--line-hot);
+      background: rgba(255,43,43,.04);
+    }
+    table td {
+      padding: 7px 10px; border-bottom: 1px solid var(--line);
+      font-family: var(--font-mono); color: var(--text);
+    }
+    table tbody tr { transition: background .12s ease; }
+    table tbody tr:hover { background: rgba(255,43,43,.05); }
+    table tbody tr:last-child td { border-bottom: 0; }
+
+    /* Status pills — ONLINE / OFFLINE (ref-05). Emissive pulsing dot. */
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em;
+      text-transform: uppercase; padding: 3px 10px;
+      border: 1px solid var(--line); color: var(--muted); background: var(--panel);
+      clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+    }
+    .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
+    .pill.online { color: var(--accent); border-color: var(--line-hot); }
+    .pill.online::before { background: var(--accent); box-shadow: var(--glow-sm); animation: cerb-pulse 2s ease-in-out infinite; }
+    .pill.offline { color: var(--muted); }
+    .pill.offline::before { background: var(--muted); opacity: .5; }
+    .pill.warn { color: var(--warn); border-color: rgba(240,180,84,.3); }
+    .pill.warn::before { background: var(--warn); box-shadow: 0 0 6px rgba(240,180,84,.4); animation: cerb-pulse 1.4s ease-in-out infinite; }
+
+    /* Card serial micro-label — tiny mono serial in the corner (ref-04/06). */
+    .card .serial, .ui-card .serial {
+      position: absolute; top: 5px; right: 8px;
+      font-family: var(--font-mono); font-size: 8px; letter-spacing: .18em;
+      color: var(--muted); opacity: .45; text-transform: uppercase; pointer-events: none;
+    }
+    .card .name, .card .stat-value { position: relative; }
+
+    /* ── Modal (REBOOTING LASERS pattern) ───────────────────────────────────
+       Bordered chamfered dialog, segmented progress bar, streaming mono log.
+       Driven by cerbModal() in the script section. */
+    .cerb-modal-overlay {
+      position: fixed; inset: 0; z-index: 300; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(3,3,4,.78); backdrop-filter: blur(2px);
+    }
+    .cerb-modal-overlay.open { display: flex; }
+    .cerb-modal {
+      width: min(460px, 92vw); background: var(--panel); border: 1px solid var(--line-hot);
+      clip-path: polygon(var(--chamfer) 0, 100% 0, 100% calc(100% - var(--chamfer)), calc(100% - var(--chamfer)) 100%, 0 100%, 0 var(--chamfer));
+      box-shadow: 0 0 0 1px rgba(255,43,43,.15), var(--glow-md), var(--shadow);
+      padding: 18px 20px; position: relative;
+    }
+    .cerb-modal .cerb-modal-title {
+      font-family: var(--font-display); text-transform: uppercase; letter-spacing: .16em;
+      font-size: 13px; font-weight: 600; color: var(--accent); margin: 0 0 12px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .cerb-modal .cerb-modal-title::before {
+      content: ""; width: 6px; height: 6px; background: var(--accent);
+      box-shadow: var(--glow-sm); animation: cerb-pulse 1.2s ease-in-out infinite;
+    }
+    /* Segmented progress bar. */
+    .cerb-progress { display: flex; gap: 3px; margin: 12px 0; }
+    .cerb-progress .seg {
+      flex: 1; height: 6px; background: var(--panel-2); border: 1px solid var(--line);
+      transform: skewX(-18deg);
+    }
+    .cerb-progress .seg.fill { background: var(--accent); box-shadow: var(--glow-sm); border-color: var(--line-hot); }
+    /* Streaming log beneath the progress. */
+    .cerb-log {
+      font-family: var(--font-mono); font-size: 10px; line-height: 1.6;
+      color: var(--muted); background: var(--bg); border: 1px solid var(--line);
+      padding: 8px 10px; max-height: 120px; overflow-y: auto; white-space: pre-wrap;
+    }
+    .cerb-log .ln-ok { color: var(--accent); }
+    .cerb-log .ln-dim { color: var(--muted); opacity: .6; }
+
+    /* Section headers get a tracked HUD label + hairline rule. */
+    .pane h3 { position: relative; padding-bottom: 6px; }
+    .pane h3::after {
+      content: ""; position: absolute; left: 0; bottom: 0; width: 28px; height: 1px;
+      background: var(--accent); box-shadow: var(--glow-sm);
+    }
+
     /* ═══ CERBERUS / TRON:ARES chrome layer ═══════════════════════════════
        Chamfered HUD panels, corner ticks, emissive edges, scanline +
        drifting-grid ambience. All motion is transform/opacity only and
@@ -3181,6 +3273,46 @@ function showToast(msg, ok = true) {
   // Fade-out at 4s, remove at 4.5s so the transition has time.
   setTimeout(() => t.classList.add("ui-toast-leaving"), 4000);
   setTimeout(() => t.remove(), 4500);
+}
+
+/* Cerberus modal — the ref-05 "REBOOTING LASERS" pattern: a bordered,
+   chamfered dialog with a pulsing title, a segmented progress bar, and a
+   streaming monospace log beneath. Returns a handle:
+     m.setProgress(0..1)  — fills the segmented bar
+     m.log(text, cls)     — appends a log line (cls: "ln-ok" | "ln-dim")
+     m.close()            — dismisses
+   GPU-cheap (opacity/transform only) and reduced-motion safe. */
+function cerbModal(title, segments = 12) {
+  let overlay = document.getElementById("cerbModalOverlay");
+  if (overlay) overlay.remove();
+  overlay = document.createElement("div");
+  overlay.id = "cerbModalOverlay";
+  overlay.className = "cerb-modal-overlay open";
+  const segs = Array.from({ length: segments }, () => '<span class="seg"></span>').join("");
+  overlay.innerHTML =
+    '<div class="cerb-modal" role="dialog" aria-modal="true">' +
+      '<div class="cerb-modal-title">' + escapeHtml(title) + '</div>' +
+      '<div class="cerb-progress">' + segs + '</div>' +
+      '<div class="cerb-log"></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  const segEls = overlay.querySelectorAll(".cerb-progress .seg");
+  const logEl = overlay.querySelector(".cerb-log");
+  return {
+    setProgress(frac) {
+      const n = Math.round(Math.max(0, Math.min(1, frac)) * segEls.length);
+      segEls.forEach((s, i) => s.classList.toggle("fill", i < n));
+    },
+    log(text, cls = "ln-dim") {
+      const line = document.createElement("div");
+      line.className = cls;
+      line.textContent = text;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    },
+    close() { overlay.remove(); },
+    el: overlay,
+  };
 }
 
 newBtn.addEventListener("click", async () => {
