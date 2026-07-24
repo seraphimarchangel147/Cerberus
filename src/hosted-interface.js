@@ -176,6 +176,20 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       ...data
     }));
   }
+  for (const type of [
+    "recipe-proposed",
+    "recipe-edited",
+    "recipe-verified",
+    "recipe-failed",
+    "recipe-superseded",
+    "recipe-deleted",
+    "recipe-reindexed"
+  ]) {
+    bindHostedEvent(type, (data) => broadcast("recipe", {
+      event: type,
+      ...data
+    }));
+  }
   bindHostedEvent("session-branched", (data) => broadcast("session-branched", data));
   bindHostedEvent("task-reminder", (data) => broadcast("task-reminder", data));
   bindHostedEvent("task-auto-changed", (data) => broadcast("task-auto-changed", data));
@@ -2685,6 +2699,274 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendArtifactHttpError(res, error);
         }
       }
+      // Procedural recipe memory. Factual memory remains on the separate
+      // /memory and recall surfaces.
+      if (method === "GET" && pathname === "/recipes/index") {
+        if (!runtime.recipes?.indexStatus) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, runtime.recipes.indexStatus({
+            projectId: project.id
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/recipes/reindex") {
+        if (!runtime.recipes?.reindex) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          return sendJson(res, 200, await runtime.recipes.reindex({
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && pathname === "/recipes/export") {
+        if (!runtime.recipes?.export) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          return sendJson(res, 200, runtime.recipes.export({
+            projectId: project.id,
+            format: url.searchParams.get("format") ?? "json",
+            statuses: httpRecipeStatuses(url.searchParams.get("status")),
+            includeDeleted: url.searchParams.get("includeDeleted") === "1"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && pathname === "/recipes") {
+        if (!runtime.recipes?.search) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        try {
+          const items = runtime.recipes.search(
+            url.searchParams.get("q") ?? "",
+            {
+              projectId: project.id,
+              statuses: httpRecipeStatuses(url.searchParams.get("status")),
+              includeDeleted: url.searchParams.get("includeDeleted") === "1",
+              limit: url.searchParams.has("limit")
+                ? Number(url.searchParams.get("limit"))
+                : undefined
+            }
+          );
+          return sendJson(res, 200, { count: items.length, items });
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && pathname === "/recipes") {
+        if (!runtime.recipes?.propose) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        try {
+          const recipe = runtime.recipes.propose({
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          });
+          return sendJson(res, 201, recipe);
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/recipes\/[^/]+\/export$/u.test(pathname)) {
+        if (!runtime.recipes?.export) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/export".length)
+        );
+        try {
+          return sendJson(res, 200, runtime.recipes.export({
+            id,
+            projectId: project.id,
+            format: url.searchParams.get("format") ?? "json",
+            includeDeleted: true
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/recipes\/[^/]+\/verify$/u.test(pathname)) {
+        if (!runtime.recipes?.verify) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/verify".length)
+        );
+        try {
+          return sendJson(res, 200, await runtime.recipes.verify(id, {
+            expectedRevision: body?.expectedRevision,
+            method: body?.method,
+            evidence: body?.evidence
+          }, {
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/recipes\/[^/]+\/fail$/u.test(pathname)) {
+        if (!runtime.recipes?.fail) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/fail".length)
+        );
+        try {
+          return sendJson(res, 200, runtime.recipes.fail(id, {
+            expectedRevision: body?.expectedRevision,
+            reason: body?.reason,
+            evidence: body?.evidence
+          }, {
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "POST" && /^\/recipes\/[^/]+\/supersede$/u.test(pathname)) {
+        if (!runtime.recipes?.supersede) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/supersede".length)
+        );
+        try {
+          return sendJson(res, 200, runtime.recipes.supersede(
+            id,
+            body?.replacementId,
+            {
+              projectId: project.id,
+              expectedRevision: body?.expectedRevision,
+              replacementExpectedRevision: body?.replacementExpectedRevision,
+              actor: "http"
+            }
+          ));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (
+        method === "POST"
+        && /^\/recipes\/[^/]+\/skill-candidate$/u.test(pathname)
+      ) {
+        if (!runtime.recipes?.withVerifiedRecipe) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(
+          pathname.slice("/recipes/".length, -"/skill-candidate".length)
+        );
+        try {
+          const { createSkillCandidateFromRecipe } = await import(
+            "./skill-materialize.js"
+          );
+          const staged = runtime.recipes.withVerifiedRecipe(
+            id,
+            {
+              projectId: project.id,
+              expectedRevision: body?.expectedRevision
+            },
+            (recipe) => createSkillCandidateFromRecipe({ runtime, recipe })
+          );
+          events.emit("skill-candidate", {
+            source: "recipe-memory",
+            id: staged.candidate.id,
+            recipeId: id,
+            recipeRevision: body?.expectedRevision,
+            projectId: project.id
+          });
+          return sendJson(res, staged.created ? 201 : 200, {
+            id: staged.candidate.id,
+            source: "recipe-memory",
+            recipeId: id,
+            recipeRevision: body?.expectedRevision,
+            projectId: project.id,
+            created: staged.created,
+            status: staged.candidate.status
+          });
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "GET" && /^\/recipes\/[^/]+$/u.test(pathname)) {
+        if (!runtime.recipes?.get) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const project = requireRequestProject(runtime, req, url);
+        const id = decodeURIComponent(pathname.slice("/recipes/".length));
+        try {
+          return sendJson(res, 200, runtime.recipes.get(id, {
+            projectId: project.id
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "PATCH" && /^\/recipes\/[^/]+$/u.test(pathname)) {
+        if (!runtime.recipes?.edit) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => null);
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(pathname.slice("/recipes/".length));
+        try {
+          return sendJson(res, 200, runtime.recipes.edit(id, {
+            ...(body ?? {}),
+            projectId: project.id
+          }, {
+            projectId: project.id,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
+      if (method === "DELETE" && /^\/recipes\/[^/]+$/u.test(pathname)) {
+        if (!runtime.recipes?.remove) {
+          return sendJson(res, 503, { error: "recipe memory unavailable" });
+        }
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        const id = decodeURIComponent(pathname.slice("/recipes/".length));
+        try {
+          return sendJson(res, 200, runtime.recipes.remove(id, {
+            projectId: project.id,
+            expectedRevision: body?.expectedRevision,
+            actor: "http"
+          }));
+        } catch (error) {
+          return sendRecipeHttpError(res, error);
+        }
+      }
       // Draft review queue.
       if (method === "GET" && pathname === "/drafts") {
         if (!runtime.drafts?.list) return sendJson(res, 503, { error: "no draft store" });
@@ -2835,7 +3117,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         if (status === "accepted" && candidate.category === "skill" && runtime.skills?.reload) {
           try {
             const { createSkillFromSuggestion, createSkillFromCandidate } = await import("./skill-materialize.js");
-            const isMined = candidate.source === "pattern-miner" || candidate.source === "session-miner";
+            const isMined = candidate.source === "pattern-miner"
+              || candidate.source === "session-miner"
+              || candidate.source === "recipe-memory";
             const result = isMined
               ? createSkillFromCandidate({ runtime, candidate })
               : createSkillFromSuggestion({ runtime, suggestion: candidate });
@@ -3763,6 +4047,7 @@ function requireRequestProject(runtime, req, url, body = null) {
       hookIds: ["*"],
       scheduleIds: [],
       artifactIds: [],
+      recipeIds: [],
       kanbanBoardId: "default",
       policy: { toolPolicy: "full", allowedTools: ["*"] },
       modelProfile: {},
@@ -3815,6 +4100,48 @@ function sendArtifactHttpError(res, error) {
     || code.startsWith("ARTIFACT_INVALID")
   ) {
     return sendJson(res, 400, { error: error.message });
+  }
+  throw error;
+}
+
+function httpRecipeStatuses(value) {
+  if (value == null || !String(value).trim()) return undefined;
+  return String(value)
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function sendRecipeHttpError(res, error) {
+  const code = String(error?.code ?? "");
+  if (
+    code.includes("NOT_FOUND")
+    || code.includes("BOUNDARY")
+    || code === "PROJECT_BOUNDARY_VIOLATION"
+  ) {
+    return sendJson(res, 404, { error: "unknown recipe" });
+  }
+  if (
+    code.includes("REVISION")
+    || code.includes("STALE")
+    || code.includes("CONFLICT")
+  ) {
+    return sendJson(res, 409, {
+      error: "recipe revision conflict",
+      code: code || "RECIPE_REVISION_CONFLICT"
+    });
+  }
+  if (error instanceof RangeError) {
+    return sendJson(res, 413, { error: error.message });
+  }
+  if (
+    error instanceof TypeError
+    || code.startsWith("RECIPE_")
+  ) {
+    return sendJson(res, 400, {
+      error: error.message,
+      ...(code ? { code } : {})
+    });
   }
   throw error;
 }

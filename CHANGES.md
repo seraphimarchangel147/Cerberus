@@ -745,3 +745,15 @@ SEMANTIC BROWSER COMPLETE
 - Added persistence, stale-write, restore, project-boundary, HTTP, SSE, deliverable, transcript-collision, source-immutability, branch-indexing, prompt-visibility, hostile-data, and both-policy regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1537/1538 tests with zero failures and one intentional Windows permission-mode skip.
 ARTIFACT CANVAS COMPLETE
+
+## 2026-07-24 - Agent workspace upgrades: solution-recipe memory (Codex)
+
+- Added a project-scoped procedural-memory domain, independent from factual recall, with preconditions, ordered actions, evidence, failure modes, verification, soft deletion, and atomic supersession.
+- Persisted authoritative recipe state through append-only JSONL events and atomic snapshots with cross-process locking, global sequencing, revision CAS, append-uncertainty reconciliation, corruption fail-closed behavior, and project resource reservations.
+- Required explicit durable evidence and human approval before verification, destructive lifecycle changes, reindexing, or skill-candidate staging; semantic edits reset trust and failed or unverified attempts remain excluded from procedural recall.
+- Added embedding identities bound to provider, model, endpoint hash, dimension, algorithm, and text schema; identity drift marks indexes stale, verified recall falls back to lexical search, and bounded revision-checked reindexing atomically replaces only the active project namespace.
+- Hardened the shared vector store against stale-writer namespace loss and mismatched dimensions, and rejected secret-shaped or configured credential material before persistence, export, or embedding.
+- Added searchable agent tools, prompt guidance, authenticated CRUD, verification, supersession, deletion, export, reindex, metadata-only SSE, and review-only skill candidates with exact recipe lineage.
+- Added persistence, concurrency, corruption, evidence, trust-reset, fact separation, stale-index, vector-isolation, secret-redaction, project-boundary, HTTP, SSE, prompt, and review-path regressions in both approval lanes.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1551/1552 tests with zero failures and one intentional Windows permission-mode skip.
+SOLUTION RECIPES COMPLETE

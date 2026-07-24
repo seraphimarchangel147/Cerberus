@@ -24,6 +24,7 @@ const TOOL_POLICIES = new Set(["full", "confirm", "read-only", "none"]);
 const RESOURCE_FIELDS = new Set([
   "artifactIds",
   "hookIds",
+  "recipeIds",
   "scheduleIds"
 ]);
 const MAX_PROJECTS = 256;
@@ -57,6 +58,7 @@ const CREATE_FIELDS = new Set([
   "modelProfile",
   "name",
   "policy",
+  "recipeIds",
   "routingProfile",
   "scheduleIds",
   "secretRefs",
@@ -73,6 +75,7 @@ const UPDATE_FIELDS = new Set([
   "modelProfile",
   "name",
   "policy",
+  "recipeIds",
   "routingProfile",
   "scheduleIds",
   "secretRefs",
@@ -93,6 +96,7 @@ const STORED_PROJECT_FIELDS = new Set([
   "modelProfile",
   "name",
   "policy",
+  "recipeIds",
   "revision",
   "routingProfile",
   "scheduleIds",
@@ -297,6 +301,7 @@ export class ProjectStore {
           "kanbanBoardId"
         ),
         artifactIds: normalizeCapabilityList(source.artifactIds, "artifactIds"),
+        recipeIds: normalizeCapabilityList(source.recipeIds, "recipeIds"),
         createdAt: at,
         updatedAt: at,
         archivedAt: null,
@@ -381,6 +386,9 @@ export class ProjectStore {
         artifactIds: source.artifactIds === undefined
           ? current.artifactIds
           : normalizeCapabilityList(source.artifactIds, "artifactIds"),
+        recipeIds: source.recipeIds === undefined
+          ? current.recipeIds
+          : normalizeCapabilityList(source.recipeIds, "recipeIds"),
         revision: current.revision + 1,
         updatedAt: at,
         updatedBy: normalizeActor(contextValues)
@@ -673,6 +681,7 @@ export class ProjectStore {
       scheduleIds: [],
       kanbanBoardId: "default",
       artifactIds: [],
+      recipeIds: [],
       createdAt: at,
       updatedAt: at,
       archivedAt: null,
@@ -1223,6 +1232,7 @@ function normalizeStoredProject(raw) {
     scheduleIds: normalizeCapabilityList(source.scheduleIds, "scheduleIds"),
     kanbanBoardId: normalizeCapabilityName(source.kanbanBoardId, "kanbanBoardId"),
     artifactIds: normalizeCapabilityList(source.artifactIds, "artifactIds"),
+    recipeIds: normalizeCapabilityList(source.recipeIds, "recipeIds"),
     createdAt,
     updatedAt,
     archivedAt,

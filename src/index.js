@@ -69,6 +69,16 @@ export {
   artifactPinnedRef,
   parseArtifactPinnedRef
 } from "./artifact-canvas.js";
+export {
+  RECIPE_STATUSES,
+  RecipeRevisionError,
+  SolutionRecipeError,
+  SolutionRecipeStore,
+  currentEmbeddingIdentity,
+  recipeIndexText,
+  recipeTextHash,
+  renderRecipeMarkdown
+} from "./solution-recipe-store.js";
 export { McpStdioClient } from "./mcp-client.js";
 export { McpHttpClient } from "./mcp-http-client.js";
 export { McpOAuthClient } from "./mcp-oauth.js";
@@ -196,6 +206,7 @@ export { SkillRegistry } from "./skills.js";
 export {
   registerCoreTools,
   registerSemanticBrowserTools,
+  registerSolutionRecipeTools,
   SEMANTIC_BROWSER_TOOL_NAMES,
   ToolRegistry
 } from "./tool-registry.js";

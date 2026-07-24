@@ -26,6 +26,7 @@ import {
   snapshotToolValue,
   toolFailureFingerprint
 } from "./tool-outcome.js";
+import { createSkillCandidateFromRecipe } from "./skill-materialize.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
@@ -4955,6 +4956,427 @@ export function registerCoreTools(registry, runtime) {
   });
 
   return registry;
+}
+
+export function registerSolutionRecipeTools(registry, runtime) {
+  if (!runtime?.recipes) return registry;
+  const deferred = { toolSearch: "deferred" };
+  const recipeBody = recipeBodyToolProperties();
+
+  registry.register({
+    name: "recipe_search",
+    metadata: deferred,
+    sideEffects: false,
+    description: "Search recipe metadata in the current project, including candidates, failed attempts, verified procedures, and audit states. This never searches factual memory and omits full action bodies.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", maxLength: 4000 },
+        statuses: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["candidate", "verified", "failed", "superseded", "deleted"]
+          },
+          uniqueItems: true
+        },
+        includeDeleted: { type: "boolean" },
+        limit: { type: "integer", minimum: 1, maximum: 64 }
+      },
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe search"),
+    handler: async (args, context) => {
+      const projectId = recipeProjectId(runtime, context, "Recipe search");
+      const items = runtime.recipes.search(args.query ?? "", {
+        projectId,
+        statuses: args.statuses,
+        includeDeleted: args.includeDeleted === true,
+        limit: args.limit
+      });
+      return { count: items.length, items };
+    }
+  });
+
+  registry.register({
+    name: "recipe_get",
+    metadata: deferred,
+    sideEffects: false,
+    description: "Load one full project-scoped procedural recipe after recipe_search or recipe_recall returns its id.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe read"),
+    handler: async ({ id }, context) => runtime.recipes.get(id, {
+      projectId: recipeProjectId(runtime, context, "Recipe read")
+    })
+  });
+
+  registry.register({
+    name: "recipe_recall",
+    metadata: deferred,
+    sideEffects: false,
+    description: "Recall only active verified procedural recipes for a task. Facts remain in recall; candidates, failed attempts, superseded recipes, and deleted recipes are never returned here.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 1, maxLength: 4000 },
+        limit: { type: "integer", minimum: 1, maximum: 64 }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe recall"),
+    handler: async ({ query, limit }, context) => runtime.recipes.recall(query, {
+      projectId: recipeProjectId(runtime, context, "Recipe recall"),
+      limit
+    })
+  });
+
+  registry.register({
+    name: "recipe_create_draft",
+    metadata: deferred,
+    description: "Create an unverified procedural recipe candidate in the current project. This never makes the procedure recallable as verified, even when evidence is supplied.",
+    parameters: {
+      type: "object",
+      properties: recipeBody,
+      required: ["title", "summary", "preconditions", "actions"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe creation"),
+    handler: async (args, context) => runtime.recipes.propose(args, {
+      projectId: recipeProjectId(runtime, context, "Recipe creation"),
+      actor: recipeActor(context)
+    })
+  });
+
+  registry.register({
+    name: "recipe_update",
+    metadata: deferred,
+    description: "Edit a recipe with revision protection. Any semantic edit resets a previously verified recipe to an unverified candidate and removes it from procedural recall.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        expectedRevision: { type: "integer", minimum: 1 },
+        ...recipeBody
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe edit"),
+    handler: async ({ id, ...patch }, context) => runtime.recipes.edit(id, patch, {
+      projectId: recipeProjectId(runtime, context, "Recipe edit"),
+      actor: recipeActor(context)
+    })
+  });
+
+  registry.register({
+    name: "recipe_verify",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Mark the exact current recipe revision verified using project-owned durable evidence. A real human approval is required; hands-free auto-approval cannot establish verification.",
+    summarize: ({ id }) => `Verify procedural recipe ${boundedRecipeId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        expectedRevision: { type: "integer", minimum: 1 },
+        method: { type: "string", minLength: 1, maxLength: 1000 },
+        evidence: recipeEvidenceToolSchema()
+      },
+      required: ["id", "expectedRevision", "method", "evidence"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe verification"),
+    handler: async ({ id, expectedRevision, method, evidence }, context) => {
+      assertManualRecipeApproval(context, "Recipe verification");
+      return runtime.recipes.verify(id, {
+        expectedRevision,
+        method,
+        evidence
+      }, {
+        projectId: recipeProjectId(runtime, context, "Recipe verification"),
+        actor: recipeActor(context)
+      });
+    }
+  });
+
+  registry.register({
+    name: "recipe_fail",
+    metadata: deferred,
+    description: "Record that a candidate or active recipe attempt failed. Failed recipes remain auditable but immediately leave verified procedural recall.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        expectedRevision: { type: "integer", minimum: 1 },
+        reason: { type: "string", minLength: 1, maxLength: 2000 },
+        evidence: recipeEvidenceToolSchema()
+      },
+      required: ["id", "expectedRevision", "reason"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe failure recording"),
+    handler: async ({ id, expectedRevision, reason, evidence }, context) => (
+      runtime.recipes.fail(id, {
+        expectedRevision,
+        reason,
+        evidence
+      }, {
+        projectId: recipeProjectId(runtime, context, "Recipe failure recording"),
+        actor: recipeActor(context)
+      })
+    )
+  });
+
+  registry.register({
+    name: "recipe_supersede",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Atomically supersede one verified recipe with another verified recipe in the same project using revision checks on both.",
+    summarize: ({ id, replacementId }) => (
+      `Supersede recipe ${boundedRecipeId(id)} with ${boundedRecipeId(replacementId)}`
+    ),
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        expectedRevision: { type: "integer", minimum: 1 },
+        replacementId: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        replacementExpectedRevision: { type: "integer", minimum: 1 }
+      },
+      required: [
+        "id",
+        "expectedRevision",
+        "replacementId",
+        "replacementExpectedRevision"
+      ],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe supersession"),
+    handler: async (args, context) => {
+      assertManualRecipeApproval(context, "Recipe supersession");
+      return runtime.recipes.supersede(args.id, args.replacementId, {
+        projectId: recipeProjectId(runtime, context, "Recipe supersession"),
+        expectedRevision: args.expectedRevision,
+        replacementExpectedRevision: args.replacementExpectedRevision,
+        actor: recipeActor(context)
+      });
+    }
+  });
+
+  registry.register({
+    name: "recipe_delete",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Soft-delete one recipe revision so its audit trail survives while recall and promotion remain disabled.",
+    summarize: ({ id }) => `Delete recipe ${boundedRecipeId(id)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        expectedRevision: { type: "integer", minimum: 1 }
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe deletion"),
+    handler: async ({ id, expectedRevision }, context) => {
+      assertManualRecipeApproval(context, "Recipe deletion");
+      return runtime.recipes.remove(id, {
+        projectId: recipeProjectId(runtime, context, "Recipe deletion"),
+        expectedRevision,
+        actor: recipeActor(context)
+      });
+    }
+  });
+
+  registry.register({
+    name: "recipe_export",
+    metadata: deferred,
+    sideEffects: false,
+    description: "Export one recipe or the current project's bounded recipe collection as deterministic JSON or Markdown.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        format: { type: "string", enum: ["json", "markdown"] },
+        statuses: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["candidate", "verified", "failed", "superseded", "deleted"]
+          },
+          uniqueItems: true
+        },
+        includeDeleted: { type: "boolean" }
+      },
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe export"),
+    handler: async (args, context) => runtime.recipes.export({
+      ...args,
+      projectId: recipeProjectId(runtime, context, "Recipe export")
+    })
+  });
+
+  registry.register({
+    name: "recipe_skill_candidate",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Stage the exact current verified recipe revision as a review-only skill candidate. No skill code is created or executed until a separate human acceptance.",
+    summarize: ({ id }) => `Stage recipe ${boundedRecipeId(id)} as a skill candidate`,
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^recipe_[a-f0-9]{16}$" },
+        expectedRevision: { type: "integer", minimum: 1 }
+      },
+      required: ["id", "expectedRevision"],
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe promotion"),
+    handler: async ({ id, expectedRevision }, context) => {
+      assertManualRecipeApproval(context, "Recipe promotion");
+      const projectId = recipeProjectId(runtime, context, "Recipe promotion");
+      const staged = runtime.recipes.withVerifiedRecipe(
+        id,
+        { projectId, expectedRevision },
+        (recipe) => createSkillCandidateFromRecipe({ runtime, recipe })
+      );
+      runtime.events?.emit?.("skill-candidate", {
+        source: "recipe-memory",
+        id: staged.candidate.id,
+        recipeId: id,
+        recipeRevision: expectedRevision,
+        projectId
+      });
+      return {
+        id: staged.candidate.id,
+        source: "recipe-memory",
+        recipeId: id,
+        recipeRevision: expectedRevision,
+        projectId,
+        created: staged.created,
+        status: staged.candidate.status
+      };
+    }
+  });
+
+  registry.register({
+    name: "recipe_reindex",
+    metadata: deferred,
+    needsConfirmation: true,
+    description: "Rebuild the current project's derived recipe embeddings after an embedder identity change. Stale vectors are never searched; lexical recall remains available during rebuild.",
+    summarize: () => "Rebuild verified recipe embeddings for the current project",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    preflight: (_args, context) => recipeProjectId(runtime, context, "Recipe reindex"),
+    handler: async (_args, context) => {
+      assertManualRecipeApproval(context, "Recipe reindex");
+      return runtime.recipes.reindex({
+        projectId: recipeProjectId(runtime, context, "Recipe reindex"),
+        actor: recipeActor(context),
+        signal: context?.__abortSignal
+      });
+    }
+  });
+
+  return registry;
+}
+
+function recipeBodyToolProperties() {
+  return {
+    title: { type: "string", minLength: 1, maxLength: 240 },
+    summary: { type: "string", minLength: 1, maxLength: 4000 },
+    preconditions: {
+      type: "array",
+      minItems: 1,
+      maxItems: 64,
+      items: { type: "string", minLength: 1, maxLength: 1200 }
+    },
+    actions: {
+      type: "array",
+      minItems: 1,
+      maxItems: 64,
+      items: { type: "string", minLength: 1, maxLength: 1200 }
+    },
+    evidence: recipeEvidenceToolSchema(),
+    failureModes: {
+      type: "array",
+      maxItems: 64,
+      items: { type: "string", minLength: 1, maxLength: 1200 }
+    },
+    tags: {
+      type: "array",
+      maxItems: 64,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 100 }
+    }
+  };
+}
+
+function recipeEvidenceToolSchema() {
+  return {
+    type: "array",
+    maxItems: 64,
+    items: {
+      type: "object",
+      properties: {
+        ref: {
+          type: "string",
+          minLength: 1,
+          maxLength: 512,
+          description: "Pinned artifact, tool-output, checkpoint, or human-attestation reference."
+        },
+        kind: { type: "string", maxLength: 80 },
+        summary: { type: "string", maxLength: 1000 }
+      },
+      required: ["ref"],
+      additionalProperties: false
+    }
+  };
+}
+
+function recipeProjectId(runtime, context, operation) {
+  return requireProjectControlIdentity(runtime.projects, context, operation)
+    ?? "default";
+}
+
+function recipeActor(context) {
+  return context?.__approval?.decider
+    ?? context?.__approval?.decidedBy
+    ?? context?.from
+    ?? context?.agentId
+    ?? "agent";
+}
+
+function assertManualRecipeApproval(context, operation) {
+  const approval = context?.__approval;
+  const decider = String(
+    approval?.decider ?? approval?.decidedBy ?? ""
+  ).trim();
+  if (!approval || !decider || decider === "auto-approve") {
+    const error = new Error(
+      `${operation} requires an explicit human approval; auto-approve is insufficient.`
+    );
+    error.code = "RECIPE_MANUAL_APPROVAL_REQUIRED";
+    throw error;
+  }
+}
+
+function boundedRecipeId(value) {
+  const id = String(value ?? "").trim();
+  return /^recipe_[a-f0-9]{16}$/.test(id) ? id : "[invalid-recipe]";
 }
 
 function validateReplaceIds(value) {

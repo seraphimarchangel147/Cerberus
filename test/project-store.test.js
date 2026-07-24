@@ -185,16 +185,19 @@ test("resource attachments are bounded, deduplicated, and durable", (t) => {
   store.create(fullProjectInput({
     artifactIds: [],
     hookIds: [],
+    recipeIds: [],
     scheduleIds: []
   }));
   store.attachResource("alpha", "artifactIds", "draft-1");
   store.attachResource("alpha", "hookIds", "audit-1");
+  store.attachResource("alpha", "recipeIds", "recipe_0000000000000001");
   store.attachResource("alpha", "scheduleIds", "cron-1");
   store.attachResource("alpha", "artifactIds", "draft-1");
   store.detachResource("alpha", "scheduleIds", "cron-1");
   store.detachResource("alpha", "scheduleIds", "cron-1");
   store.attachResource("alpha", "scheduleIds", "cron-2");
   assert.deepEqual(store.get("alpha").artifactIds, ["draft-1"]);
+  assert.deepEqual(store.get("alpha").recipeIds, ["recipe_0000000000000001"]);
   assert.throws(
     () => store.attachResource("alpha", "secretRefs", "SECRET_KEY"),
     /Unsupported project resource field/
@@ -202,6 +205,10 @@ test("resource attachments are bounded, deduplicated, and durable", (t) => {
 
   const reloaded = new ProjectStore({ dataDir, defaultWorkspaceRoot });
   assert.deepEqual(reloaded.get("alpha").hookIds, ["audit-1"]);
+  assert.deepEqual(
+    reloaded.get("alpha").recipeIds,
+    ["recipe_0000000000000001"]
+  );
   assert.deepEqual(reloaded.get("alpha").scheduleIds, ["cron-2"]);
 });
 

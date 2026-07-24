@@ -57,6 +57,7 @@ import { ComputerUseLog } from "./computer-use-log.js";
 import { ClarificationStore } from "./clarification-store.js";
 import { DraftStore } from "./draft-store.js";
 import { ArtifactCanvasStore } from "./artifact-canvas.js";
+import { SolutionRecipeStore } from "./solution-recipe-store.js";
 import { registerComputerUseTools, isComputerUseEnabled } from "./integrations/computer-use.js";
 import { SuggestionFeedback } from "./suggestion-feedback.js";
 import { ScrutinyFitter } from "./scrutiny-fitter.js";
@@ -75,6 +76,7 @@ import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
 import {
   registerCoreTools,
+  registerSolutionRecipeTools,
   registerSemanticBrowserTools,
   ToolRegistry
 } from "./tool-registry.js";
@@ -454,6 +456,14 @@ export class AbiRuntime {
     this.vectorStore = options.vectorStore ?? new VectorStore({ embedder: this.embedder, ...(options.vectorStoreOptions ?? {}) });
     if (typeof this.propagation.bindVectorStore === "function") this.propagation.bindVectorStore(this.vectorStore);
     if (typeof this.memory.bindVectorStore === "function") this.memory.bindVectorStore(this.vectorStore);
+    this.recipes = options.recipes ?? new SolutionRecipeStore({
+      runtime: this,
+      projects: this.projects,
+      vectorStore: this.vectorStore,
+      embedder: this.embedder,
+      dataDir: secretsDataDir,
+      ...(options.recipeOptions ?? {})
+    });
     this.specialistRouter = options.specialistRouter ?? new SpecialistRouter({ vectorStore: this.vectorStore, ...(options.routerOptions ?? {}) });
     this.condenser = options.condenser ?? new MemoryCondenser({ runtime: this, ...(options.condenserOptions ?? {}) });
     this.scrutinyFitter = options.scrutinyFitter ?? new ScrutinyFitter({
@@ -759,6 +769,7 @@ export class AbiRuntime {
         dailyAt: "04:30"
       });
       registerCoreTools(this.tools, this);
+      registerSolutionRecipeTools(this.tools, this);
       registerSemanticBrowserTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
       // tests, and gated shell. Governed delegation registers separately.
