@@ -2290,6 +2290,77 @@ function readForm(req) {
   });
 }
 
+/* ─── Cerberus brand assets (inline SVG, Node-safe string builders) ────────
+   The three-wolf mark + a 19-glyph HUD icon set, drawn as line-art so they
+   inherit the emissive red via currentColor / var(--accent). Everything is a
+   plain string so it renders identically server-side (renderApp) and inline. */
+
+function cerbMarkSVG(size, opts = {}) {
+  const W = 64;
+  const stroke = opts.stroke || "currentColor";
+  const sw = opts.strokeWidth || 2;
+  const bg = opts.bg || "var(--bg, #050506)";
+  const mir = (pts) => pts.map(([x, y]) => [W - x, y]);
+  const poly = (pts, extra = "") =>
+    '<path d="' + pts.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join(" ") + ' Z" ' + extra + "/>";
+  const line = (pts) =>
+    '<path d="' + pts.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join(" ") + '" />';
+  // Side profile wolf head (left, facing out): long tapered muzzle, ear on a
+  // rounded cranium, jaw hook + neck gap, eye under a brow, mouth line.
+  const sideHead = [[0,20],[10,15],[11,14],[13,6],[16,12],[20,14],[19,20],[18,25],[11,27],[5,25],[0,23]];
+  const sideEye = [[10,19],[13,18]];
+  const sideBrow = [[9,16],[13,15]];
+  const sideMouth = [[2,22],[8,23]];
+  // Center frontal wolf head (bg fill sits it in front of the side heads).
+  const center = [[21,4],[26,13],[32,11],[38,13],[43,4],[44,15],[42,25],[37,33],[32,40],[27,33],[22,25],[20,15]];
+  const brow = [[27,17],[32,19],[37,17]];
+  const eyeL = [[26,22],[29,24]];
+  const eyeR = [[38,22],[35,24]];
+  const nose = [[30,30],[34,30],[32,33]];
+  let inner = "";
+  inner += "<g>" + poly(sideHead, 'fill="' + bg + '"') + line(sideEye) + line(sideBrow) + line(sideMouth) + "</g>";
+  inner += "<g>" + poly(mir(sideHead), 'fill="' + bg + '"') + line(mir(sideEye)) + line(mir(sideBrow)) + line(mir(sideMouth)) + "</g>";
+  inner += poly(center, 'fill="' + bg + '"');
+  inner += line(brow) + line(eyeL) + line(eyeR) + poly(nose);
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="' + size +
+    '" height="' + size + '" fill="none" stroke="' + stroke + '" stroke-width="' + sw +
+    '" stroke-linejoin="miter" stroke-linecap="square" aria-hidden="true">' + inner + "</svg>";
+}
+
+/* 19 nav glyphs + setup — minimal line-art HUD icons (24 grid, currentColor). */
+const HUD_ICONS = {
+  chat: '<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  tasks: '<path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>',
+  suggestions: '<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z"/>',
+  memory: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  integrations: '<path d="M9 2v6"/><path d="M15 2v6"/><path d="M7 8h10v3a5 5 0 0 1-10 0z"/><path d="M12 16v6"/>',
+  mcp: '<path d="M12 2l8 4.5v9L12 20l-8-4.5v-9z"/><path d="M12 11l8-4.5M12 11L4 6.5M12 11v9"/>',
+  skills: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.7 2.1 2.1.7-2.1.7L19 20.6l-.7-2.1-2.1-.7 2.1-.7z"/>',
+  cron: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  kanban: '<path d="M4 4h4v16H4z"/><path d="M10 4h4v12h-4z"/><path d="M16 4h4v8h-4z"/>',
+  channels: '<circle cx="12" cy="9" r="2"/><path d="M12 11v11"/><path d="M7.8 13.2a6 6 0 0 1 0-8.4"/><path d="M16.2 13.2a6 6 0 0 0 0-8.4"/>',
+  agents: '<rect x="5" y="8" width="14" height="12" rx="2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M9 13h.01"/><path d="M15 13h.01"/><path d="M9 17h6"/>',
+  nodes: '<circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="5" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M7.3 10.8l9.4-4.6M7.3 13.2l9.4 4.6"/>',
+  today: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/>',
+  activity: '<path d="M22 12h-4l-3 8L9 4l-3 8H2"/>',
+  "computer-use": '<path d="M4 4l7 17 2.5-7L21 11.5z"/>',
+  budget: '<rect x="2" y="6" width="20" height="13" rx="2"/><path d="M2 10h20"/><path d="M6 15h4"/>',
+  outcomes: '<circle cx="12" cy="9" r="6"/><path d="M8.5 14L7 22l5-3 5 3-1.5-8"/>',
+  health: '<path d="M20.8 6.6a5.5 5.5 0 0 0-8.8-1.6A5.5 5.5 0 0 0 3.2 6.6c-1.6 3.7 2.2 7.4 8.8 12.4 6.6-5 10.4-8.7 8.8-12.4z"/>',
+  scrutiny: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  setup: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
+};
+function hudIcon(name) {
+  const body = HUD_ICONS[name] || HUD_ICONS.chat;
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + body + "</svg>";
+}
+
+/* Inline SVG favicon from the mark (avoids a favicon.ico 404 + brands the tab). */
+function cerbFavicon() {
+  const svg = cerbMarkSVG(64, { stroke: "#ff2b2b", bg: "#050506" });
+  return "data:image/svg+xml," + encodeURIComponent(svg);
+}
+
 function renderApp() {
   return `<!doctype html>
 <html lang="en">
@@ -2297,6 +2368,7 @@ function renderApp() {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cerberus</title>
+  <link rel="icon" href="${cerbFavicon()}">
   <style>
     :root {
       color-scheme: light dark;
@@ -2400,12 +2472,13 @@ function renderApp() {
       border-bottom: 1px solid var(--line);
     }
     .railnav .brand-mark {
-      width: 28px; height: 28px; border-radius: 8px; flex: 0 0 auto;
-      display: grid; place-items: center; font-size: 16px;
-      background: var(--accent-soft); color: var(--accent);
-      border: 1px solid var(--line);
+      width: 30px; height: 30px; flex: 0 0 auto;
+      display: grid; place-items: center;
+      color: var(--accent);
+      filter: drop-shadow(0 0 6px rgba(255,43,43,.4));
     }
-    .railnav .brand-name { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+    .railnav .brand-mark svg { display: block; }
+    .railnav .brand-name { font-size: 15px; font-weight: 600; letter-spacing: 0.18em; color: var(--text); text-transform: uppercase; }
     .railnav nav {
       display: flex; flex-direction: column; gap: 1px;
       padding: 10px 10px 16px; overflow-y: auto; flex: 1 1 auto; min-height: 0;
@@ -2423,12 +2496,29 @@ function renderApp() {
       font-size: 13px; font-family: inherit; line-height: 1.2;
       transition: background 0.12s, color 0.12s;
     }
-    .railnav nav button .nav-ico { width: 16px; text-align: center; flex: 0 0 auto; opacity: 0.85; font-size: 13px; }
+    .railnav nav button .nav-ico { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; opacity: 0.85; }
+    .railnav nav button .nav-ico svg { display: block; }
     .railnav nav button:hover { color: var(--text); background: var(--muted-bg); }
     .railnav nav button.active {
-      color: var(--accent-foreground); background: var(--accent-bg);
+      position: relative;
+      color: var(--accent); background: var(--accent-soft);
       border-color: transparent; font-weight: 600;
       box-shadow: inset 2px 0 0 var(--accent);
+      text-shadow: 0 0 8px rgba(255,43,43,.5);
+    }
+    .railnav nav button.active .nav-ico { opacity: 1; }
+    /* Travelling light-trail down the active tab's left edge. */
+    .railnav nav button.active::after {
+      content: ""; position: absolute; left: 0; top: 0; width: 2px; height: 100%;
+      background: linear-gradient(180deg, transparent 0%, var(--accent-glow) 50%, transparent 100%);
+      background-size: 100% 200%;
+      animation: cerb-trail 2.4s ease-in-out infinite;
+      pointer-events: none;
+    }
+    @keyframes cerb-trail {
+      0%   { background-position: 0% 200%; opacity: 0; }
+      30%  { opacity: 1; }
+      100% { background-position: 0% -100%; opacity: 0; }
     }
     .railnav .rail-footer { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 10px; }
     #setupBtn {
@@ -2851,6 +2941,7 @@ function renderApp() {
       body::before { animation: none; }
       .topbar .status .status-pill::before { animation: none; }
       .cerb-in { animation: none; }
+      .railnav nav button.active::after { animation: none; opacity: .6; }
       .card, .ui-card, .mem-card { transition: none; }
     }
   </style>
@@ -2859,37 +2950,37 @@ function renderApp() {
 <div class="app">
   <aside class="railnav">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">🐺</span>
+      <span class="brand-mark" aria-hidden="true">${cerbMarkSVG(28, { stroke: "var(--accent)" })}</span>
       <span class="brand-name">Cerberus</span>
     </div>
     <nav id="nav">
       <div class="nav-group-label">Workspace</div>
-      <button data-tab="chat" class="active" title="Talk to your agent in natural language."><span class="nav-ico">💬</span><span>Chat</span></button>
-      <button data-tab="tasks" title="My tasks + agent tasks. The agent's own queue gets drained every 30 min by the autopilot pulse."><span class="nav-ico">✓</span><span>Tasks</span></button>
-      <button data-tab="suggestions" title="Things the proactive observer noticed + agent actions awaiting your approval."><span class="nav-ico">💡</span><span>Suggestions</span></button>
-      <button data-tab="memory" title="Short, medium, and long-term memory. Promotion happens automatically."><span class="nav-ico">🧠</span><span>Memory</span></button>
-      <button data-tab="integrations" title="Connect MCPs (Linear, GitHub, Stripe, …), sources (BuildBetter, Rize, inbox folder), and channels (Telegram)."><span class="nav-ico">🔌</span><span>Integrations</span></button>
+      <button data-tab="chat" class="active" title="Talk to your agent in natural language."><span class="nav-ico">${hudIcon("chat")}</span><span>Chat</span></button>
+      <button data-tab="tasks" title="My tasks + agent tasks. The agent's own queue gets drained every 30 min by the autopilot pulse."><span class="nav-ico">${hudIcon("tasks")}</span><span>Tasks</span></button>
+      <button data-tab="suggestions" title="Things the proactive observer noticed + agent actions awaiting your approval."><span class="nav-ico">${hudIcon("suggestions")}</span><span>Suggestions</span></button>
+      <button data-tab="memory" title="Short, medium, and long-term memory. Promotion happens automatically."><span class="nav-ico">${hudIcon("memory")}</span><span>Memory</span></button>
+      <button data-tab="integrations" title="Connect MCPs (Linear, GitHub, Stripe, …), sources (BuildBetter, Rize, inbox folder), and channels (Telegram)."><span class="nav-ico">${hudIcon("integrations")}</span><span>Integrations</span></button>
 
       <div class="nav-group-label">Build</div>
-      <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones."><span class="nav-ico">🧩</span><span>MCP</span></button>
-      <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored."><span class="nav-ico">✨</span><span>Skills</span></button>
-      <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs."><span class="nav-ico">⏱</span><span>Cron</span></button>
-      <button data-tab="kanban" title="Local multi-agent coordination board with blockers, runs, and handoffs."><span class="nav-ico">📋</span><span>Kanban</span></button>
-      <button data-tab="channels" title="Telegram / webhook channels the agent can deliver through."><span class="nav-ico">📡</span><span>Channels</span></button>
-      <button data-tab="agents" title="Specialists the propagation controller has spawned for repeated tasks."><span class="nav-ico">🤖</span><span>Agents</span></button>
-      <button data-tab="nodes" title="Which machines are paired, which one is main, and who's online right now."><span class="nav-ico">🖧</span><span>Nodes</span></button>
+      <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones."><span class="nav-ico">${hudIcon("mcp")}</span><span>MCP</span></button>
+      <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored."><span class="nav-ico">${hudIcon("skills")}</span><span>Skills</span></button>
+      <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs."><span class="nav-ico">${hudIcon("cron")}</span><span>Cron</span></button>
+      <button data-tab="kanban" title="Local multi-agent coordination board with blockers, runs, and handoffs."><span class="nav-ico">${hudIcon("kanban")}</span><span>Kanban</span></button>
+      <button data-tab="channels" title="Telegram / webhook channels the agent can deliver through."><span class="nav-ico">${hudIcon("channels")}</span><span>Channels</span></button>
+      <button data-tab="agents" title="Specialists the propagation controller has spawned for repeated tasks."><span class="nav-ico">${hudIcon("agents")}</span><span>Agents</span></button>
+      <button data-tab="nodes" title="Which machines are paired, which one is main, and who's online right now."><span class="nav-ico">${hudIcon("nodes")}</span><span>Nodes</span></button>
 
       <div class="nav-group-label">Diagnostics</div>
-      <button data-tab="today" title="What you got done today — completed tasks, skills run, actions approved, time tracked, themes."><span class="nav-ico">📅</span><span>Today</span></button>
-      <button data-tab="activity" title="Ambient capture log — what you were doing on screen (if capture is enabled)."><span class="nav-ico">📈</span><span>Activity</span></button>
-      <button data-tab="computer-use" title="Computer use (beta) — every action the agent intended to take, with the reasoning it gave."><span class="nav-ico">🖱</span><span>Computer Use</span></button>
-      <button data-tab="budget" title="Today's LLM spend + 14-day history."><span class="nav-ico">💳</span><span>Credits</span></button>
-      <button data-tab="outcomes" title="Quality scores for completed agent work, 7d + 30d rolling."><span class="nav-ico">🏅</span><span>Outcomes</span></button>
-      <button data-tab="health" title="Memory saturation, specialist health, MCP status, upcoming cron."><span class="nav-ico">❤</span><span>Health</span></button>
-      <button data-tab="scrutiny" title="Directional Adaptive Scrutiny — the 7-axis scorer's calibration + recent verdicts."><span class="nav-ico">🔎</span><span>Scrutiny</span></button>
+      <button data-tab="today" title="What you got done today — completed tasks, skills run, actions approved, time tracked, themes."><span class="nav-ico">${hudIcon("today")}</span><span>Today</span></button>
+      <button data-tab="activity" title="Ambient capture log — what you were doing on screen (if capture is enabled)."><span class="nav-ico">${hudIcon("activity")}</span><span>Activity</span></button>
+      <button data-tab="computer-use" title="Computer use (beta) — every action the agent intended to take, with the reasoning it gave."><span class="nav-ico">${hudIcon("computer-use")}</span><span>Computer Use</span></button>
+      <button data-tab="budget" title="Today's LLM spend + 14-day history."><span class="nav-ico">${hudIcon("budget")}</span><span>Credits</span></button>
+      <button data-tab="outcomes" title="Quality scores for completed agent work, 7d + 30d rolling."><span class="nav-ico">${hudIcon("outcomes")}</span><span>Outcomes</span></button>
+      <button data-tab="health" title="Memory saturation, specialist health, MCP status, upcoming cron."><span class="nav-ico">${hudIcon("health")}</span><span>Health</span></button>
+      <button data-tab="scrutiny" title="Directional Adaptive Scrutiny — the 7-axis scorer's calibration + recent verdicts."><span class="nav-ico">${hudIcon("scrutiny")}</span><span>Scrutiny</span></button>
     </nav>
     <div class="rail-footer">
-      <button id="setupBtn" title="Re-run the setup wizard or edit credentials"><span class="nav-ico">⚙</span><span>Setup</span></button>
+      <button id="setupBtn" title="Re-run the setup wizard or edit credentials"><span class="nav-ico">${hudIcon("setup")}</span><span>Setup</span></button>
     </div>
   </aside>
   <div class="content">
