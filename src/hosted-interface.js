@@ -2950,6 +2950,29 @@ function renderApp() {
       box-shadow: 0 0 0 1px rgba(255,43,43,.12), var(--glow-sm);
     }
 
+    /* Interactive glow — buttons/pills bloom + lift on hover, flash on
+       press. transform/box-shadow/opacity only (GPU-cheap, no layout).
+       The slight translateY reads as a 3D pop without a real perspective
+       pass, which keeps it cheap on the shared box. */
+    .ui-btn, .composer button, .sidebar .add, .tier-pills button {
+      transition: box-shadow .16s ease, transform .16s ease,
+                  filter .16s ease, border-color .16s ease, background .16s ease;
+    }
+    .ui-btn:hover:not(:disabled), .composer button:hover:not(:disabled),
+    .sidebar .add:hover:not(:disabled), .tier-pills button:hover:not(:disabled) {
+      box-shadow: 0 0 0 1px rgba(255,43,43,.22), var(--glow-md);
+      transform: translateY(-1px);
+    }
+    .ui-btn:active:not(:disabled), .composer button:active:not(:disabled),
+    .sidebar .add:active:not(:disabled), .tier-pills button:active:not(:disabled) {
+      transform: translateY(0) scale(.985);
+      filter: brightness(1.5);
+      box-shadow: 0 0 0 1px rgba(255,90,74,.5), var(--glow-md);
+    }
+    /* Primary send button gets a stronger emissive bloom — it's the hero
+       action on the chat pane. */
+    .composer button:hover:not(:disabled) { filter: brightness(1.2); }
+
     /* Display type — wide-tracked uppercase for headings + brand. */
     .pane h2, .railnav .brand-name {
       font-family: var(--font-display);
@@ -3019,13 +3042,29 @@ function renderApp() {
       50% { opacity: .35; }
     }
 
-    /* Panel materialise — scanline sweep + slight rise on tab switch.
-       Applied by the motion layer to the active pane (class .cerb-in). */
-    .cerb-in { animation: cerb-materialise .22s cubic-bezier(.2,.8,.3,1) both; }
+    /* Panel materialise — rise + one-shot scanline sweep on tab entry.
+       Applied by the motion layer to the main pane (class .cerb-in).
+       Strictly transform/opacity (no filter repaint) so it stays GPU-cheap
+       on the shared WSL box; the sweep is a compositor-friendly gradient
+       band that travels once and fades. */
+    .cerb-in { position: relative; animation: cerb-materialise .22s cubic-bezier(.2,.8,.3,1) both; }
+    .cerb-in::after {
+      content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 5;
+      background: linear-gradient(180deg,
+        transparent 0%, rgba(255,90,74,.10) 46%, rgba(255,43,43,.20) 50%,
+        rgba(255,90,74,.10) 54%, transparent 100%);
+      background-size: 100% 240%;
+      mix-blend-mode: screen;
+      animation: cerb-sweep .5s cubic-bezier(.2,.8,.3,1) both;
+    }
     @keyframes cerb-materialise {
-      0%   { opacity: 0; transform: translateY(6px); filter: brightness(1.6) saturate(1.4); }
-      60%  { opacity: 1; filter: brightness(1.15); }
-      100% { opacity: 1; transform: translateY(0); filter: none; }
+      0%   { opacity: 0; transform: translateY(8px) scale(.996); }
+      55%  { opacity: 1; }
+      100% { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes cerb-sweep {
+      from { background-position: 0% 130%; opacity: 1; }
+      to   { background-position: 0% -130%; opacity: 0; }
     }
 
     /* Respect reduced motion — freeze the drift, pulse, and materialise. */
@@ -3033,8 +3072,12 @@ function renderApp() {
       body::before { animation: none; }
       .topbar .status .status-pill::before { animation: none; }
       .cerb-in { animation: none; }
+      .cerb-in::after { animation: none; opacity: 0; }
       .railnav nav button.active::after { animation: none; opacity: .6; }
       .card, .ui-card, .mem-card { transition: none; }
+      .ui-btn, .composer button, .sidebar .add, .tier-pills button { transition: none; }
+      .ui-btn:hover:not(:disabled), .composer button:hover:not(:disabled),
+      .sidebar .add:hover:not(:disabled), .tier-pills button:hover:not(:disabled) { transform: none; }
     }
   </style>
 </head>
@@ -3446,6 +3489,21 @@ async function switchTab(tab) {
     await renderSuggestions();
   }
   renderTab();
+  cerbMaterialise();
+}
+
+/* HUD "materialise" — replays the .cerb-in scanline-sweep + rise on the
+   main pane every tab switch. The class is removed, a reflow is forced,
+   then re-added so the animation restarts even on repeat visits to the
+   same tab (otherwise it only plays once per page-load). Applied to the
+   #main section so it covers every tab, including chat (which has no
+   .pane wrapper). No-op under prefers-reduced-motion (CSS kills it). */
+function cerbMaterialise() {
+  const el = main;
+  if (!el) return;
+  el.classList.remove("cerb-in");
+  void el.offsetWidth; // force reflow so the animation restarts
+  el.classList.add("cerb-in");
 }
 
 function renderTab() {
