@@ -417,7 +417,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // Public liveness only — {ok, firstRun}. The full runtime status
         // (cron records + inputs, channel state, etc.) used to be public
         // here; it now requires auth (Tier-1 hardening, 2026-07).
-        const authed = checkAuth(req, url, getAuthToken()).ok;
+        //
+        // /health is a PUBLIC route, so it never passes through the
+        // loopback-trust branch above and no auth cookie is ever minted for
+        // a local operator. Without honouring loopbackTrusted here, the local
+        // dashboard's refreshHealth() reads an undefined `status`, throws, and
+        // pins the header pill to OFFLINE while the daemon is plainly up.
+        // Loopback peers are already trusted for every non-public route
+        // (secrets excepted), so extending that same trust to the status
+        // payload grants nothing new.
+        const authed = loopbackTrusted || checkAuth(req, url, getAuthToken()).ok;
         return sendJson(res, 200, authed
           ? { ok: true, firstRun: isFirstRun(), status: runtime.status() }
           : { ok: true, firstRun: isFirstRun() });
@@ -6662,7 +6671,9 @@ async function refreshHealth() {
       budgetLabel ? \`<span class="status-pill">\${escapeHtml(budgetLabel)}</span>\` : ""
     ].filter(Boolean);
     $("status").innerHTML = pills.join("");
-    if (p) renderProviderSwitch(p);
+    // Isolated: a throw inside the provider switch must not fall through to
+    // the catch below and repaint a healthy daemon as "offline".
+    if (p) { try { renderProviderSwitch(p); } catch (e) { console.error("providerSwitch:", e); } }
   } catch {
     $("status").innerHTML = '<span class="status-pill">offline</span>';
   }
@@ -6676,7 +6687,8 @@ async function refreshAmbientBadge() {
     host.style.cssText = "margin-left:12px;font-size:12px;padding:3px 9px;border-radius:10px;border:1px solid var(--line);color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap;";
     host.title = "Ambient context — what the agent sees from your screen. Click to view Activity tab.";
     host.addEventListener("click", () => switchTab("activity"));
-    const slot = document.querySelector("header .status")?.parentElement;
+    const slot = document.getElementById("status")?.parentElement
+      || document.querySelector(".topbar");
     if (slot) slot.appendChild(host);
   }
   try {
@@ -6707,7 +6719,14 @@ function renderProviderSwitch(p) {
     host.id = "providerSwitch";
     host.style.marginLeft = "12px";
     host.style.fontSize = "12px";
-    document.querySelector("header .status")?.parentElement?.appendChild(host);
+    // Mount into .topbar — #status lives there, NOT inside any <header>.
+    // The old "header .status" selector matched nothing (the only <header>
+    // is header.sub in the sidebar), so this span was never attached and the
+    // getElementById below threw, which refreshHealth()'s catch swallowed as
+    // "offline" — pinning the pill to OFFLINE on a healthy daemon.
+    const slot = document.getElementById("status")?.parentElement
+      || document.querySelector(".topbar");
+    if (slot) slot.appendChild(host);
   }
   const opts = [
     \`<option value="auto" \${p.preference === "auto" ? "selected" : ""}>auto</option>\`,
@@ -6716,7 +6735,7 @@ function renderProviderSwitch(p) {
     \`<option value="moa" \${p.preference === "moa" ? "selected" : ""} \${!p.available?.moa ? "disabled" : ""}>MoA\${p.moaPreset ? " / " + escapeHtml(p.moaPreset) : ""}\${p.available?.moa ? "" : " (no presets)"}</option>\`
   ].join("");
   host.innerHTML = \`<label style="color:var(--muted);">model: <select id="providerSelect" style="background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:12px;">\${opts}</select></label>\`;
-  document.getElementById("providerSelect").addEventListener("change", async (e) => {
+  document.getElementById("providerSelect")?.addEventListener("change", async (e) => {
     try {
       await postJson("/admin/provider", { preference: e.target.value });
       refreshHealth();
