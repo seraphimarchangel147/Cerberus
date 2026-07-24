@@ -93,8 +93,23 @@ export {
   CredentialPoolRequest,
   classifyCredentialFailure,
   createCredentialPoolRegistry,
+  credentialLeaseIdentity,
   loadCredentialPoolConfig
 } from "./credential-pool.js";
+export {
+  RESPONSES_CONTINUATION_ENV,
+  ResponsesContinuationStore,
+  continuationUnsupported,
+  createConversationContentIdentity,
+  createConversationLineageIdentity,
+  createCredentialLeaseIdentity,
+  createOpenAIPromptCacheKey,
+  createRoutingIdentity,
+  createVisibleToolCatalogIdentity,
+  extendConversationLineageIdentity,
+  parseResponsesContinuationMode,
+  resolveResponsesContinuationMode
+} from "./responses-continuation.js";
 export {
   DEFAULT_TOOL_SEARCH_THRESHOLD_BYTES,
   TOOL_SEARCH_BRIDGE_NAMES,

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { types as utilTypes } from "node:util";
 import { InMemoryAgentStore } from "./agent-store.js";
 import { createModelProvider } from "./model-provider.js";
 import { createId, nowIso } from "./utils.js";
@@ -9,6 +10,10 @@ import { sanitizeForAudit } from "./redact.js";
 import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review.js";
 import { TOOL_SEARCH_BRIDGE_NAMES } from "./tool-search.js";
 import { expandContextReferences } from "./context-references.js";
+import {
+  createConversationContentIdentity,
+  createConversationLineageIdentity
+} from "./responses-continuation.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -36,6 +41,7 @@ const TOOL_SEARCH_BRIDGE_NAME_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
 const DEFAULT_BACKGROUND_REVIEW_SNAPSHOT_WAIT_MS = 5000;
 const DEFAULT_BACKGROUND_REVIEW_FLUSH_MS = 60_000;
 const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
+const RESPONSES_CONTINUATION_METADATA_KEY = "responsesContinuationV1";
 
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
@@ -104,6 +110,71 @@ export function providerHistoryBeforeCurrentTurn(messages, currentMessageId) {
     throw new Error("Session append did not return the current user turn last.");
   }
   return messages.slice(0, lastIndex);
+}
+
+function freshResponsesContinuationMetadata({
+  lineageId = createConversationLineageIdentity([]),
+  headMessageId = null
+} = {}) {
+  return {
+    version: 1,
+    incarnation: createId("continuation"),
+    epoch: 0,
+    headMessageId: typeof headMessageId === "string" && headMessageId
+      ? headMessageId
+      : null,
+    lineageId
+  };
+}
+
+function validResponsesContinuationMetadata(value) {
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || utilTypes.isProxy(value)
+  ) {
+    return false;
+  }
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const read = (key) => {
+      const descriptor = descriptors[key];
+      return descriptor && Object.hasOwn(descriptor, "value")
+        ? descriptor.value
+        : undefined;
+    };
+    const version = read("version");
+    const incarnation = read("incarnation");
+    const epoch = read("epoch");
+    const headMessageId = read("headMessageId");
+    const lineageId = read("lineageId");
+    return Boolean(
+      version === 1
+      && typeof incarnation === "string"
+      && incarnation.length > 0
+      && Number.isSafeInteger(epoch)
+      && epoch >= 0
+      && (headMessageId === null || typeof headMessageId === "string")
+      && typeof lineageId === "string"
+      && /^[a-f0-9]{64}$/u.test(lineageId)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sameResponsesContinuationMetadata(left, right) {
+  return Boolean(
+    validResponsesContinuationMetadata(left)
+    && validResponsesContinuationMetadata(right)
+    && left.incarnation === right.incarnation
+    && left.epoch === right.epoch
+    && left.headMessageId === right.headMessageId
+    && left.lineageId === right.lineageId
+  );
 }
 
 function jsonUtf8Bytes(value) {
@@ -316,6 +387,18 @@ export class AgentHost {
     const memoryScope = requestedMemoryScope || (isSpecialist ? `specialist:${agent.id}` : "main");
     const sessionId = this.store.sessionKey({ channel, from, agentId, sessionId: input.sessionId });
     const turnId = String(input.__turnId ?? input.turnId ?? createId("turn"));
+    let continuationSessionMetadata = null;
+    if (!ephemeral && typeof this.store.ensureSessionMetadata === "function") {
+      try {
+        continuationSessionMetadata = await this.store.ensureSessionMetadata(
+          sessionId,
+          RESPONSES_CONTINUATION_METADATA_KEY,
+          () => freshResponsesContinuationMetadata()
+        );
+      } catch {
+        // Continuation metadata is an optimization; chat remains stateless.
+      }
+    }
     const sessionMemorySnapshot = await this.sessionMemorySnapshotFor(
       sessionId,
       memoryScope,
@@ -384,6 +467,57 @@ export class AgentHost {
       sessionBefore.messages,
       currentMessageId
     );
+    let continuationHistoryIdentity = null;
+    let continuationCurrentContentIdentity = null;
+    if (!ephemeral) {
+      try {
+        continuationHistoryIdentity = createConversationLineageIdentity(providerHistory);
+        continuationCurrentContentIdentity = createConversationContentIdentity(text);
+        const historyHeadMessageId = providerHistory.at(-1)?.id ?? null;
+        if (
+          !validResponsesContinuationMetadata(continuationSessionMetadata)
+          || continuationSessionMetadata.headMessageId !== historyHeadMessageId
+          || continuationSessionMetadata.lineageId !== continuationHistoryIdentity
+        ) {
+          const observed = continuationSessionMetadata;
+          const replacement = freshResponsesContinuationMetadata({
+            lineageId: continuationHistoryIdentity,
+            headMessageId: historyHeadMessageId
+          });
+          if (typeof this.store.updateSessionMetadata === "function") {
+            continuationSessionMetadata = await this.store.updateSessionMetadata(
+              sessionId,
+              RESPONSES_CONTINUATION_METADATA_KEY,
+              (current) => {
+                if (sameResponsesContinuationMetadata(current, observed)) {
+                  return replacement;
+                }
+                if (
+                  !validResponsesContinuationMetadata(current)
+                  && !validResponsesContinuationMetadata(observed)
+                ) {
+                  return replacement;
+                }
+                return current;
+              }
+            );
+          } else {
+            continuationSessionMetadata = null;
+          }
+        }
+        if (
+          !validResponsesContinuationMetadata(continuationSessionMetadata)
+          || continuationSessionMetadata.headMessageId !== historyHeadMessageId
+          || continuationSessionMetadata.lineageId !== continuationHistoryIdentity
+        ) {
+          continuationSessionMetadata = null;
+        }
+      } catch {
+        // Continuation is an optimization. Unsafe or unbounded transcript
+        // identity input falls back to the existing stateless request path.
+        continuationSessionMetadata = null;
+      }
+    }
 
     if (lifecycle) {
       lifecycle.base = {
@@ -637,6 +771,17 @@ export class AgentHost {
       // Discovery and forwarding intersect it with enforced policy/scope.
       __toolRadarOmitted: toolPlan.omittedNames,
       __memoryScope: memoryScope,
+      __continuationEligible: Boolean(
+        !ephemeral
+        && continuationHistoryIdentity
+        && continuationCurrentContentIdentity
+        && validResponsesContinuationMetadata(continuationSessionMetadata)
+      ),
+      __continuationHistoryIdentity: continuationHistoryIdentity,
+      __continuationCurrentContentIdentity: continuationCurrentContentIdentity,
+      __continuationContextEpoch: continuationSessionMetadata?.epoch ?? null,
+      __continuationSessionIncarnation: continuationSessionMetadata?.incarnation ?? null,
+      __continuationHeadMessageId: continuationSessionMetadata?.headMessageId ?? null,
       __turnId: turnId,
       __spawnDepth: Number.isInteger(parsedSpawnDepth) && parsedSpawnDepth >= 0 ? parsedSpawnDepth : 0,
       __abortSignal: turnAbortController.signal,
@@ -727,35 +872,92 @@ export class AgentHost {
       }
     }) ?? null;
 
-    const sessionAfter = ephemeral
-      ? { id: sessionId, messages: [{ role: "user", content: text }, { role: "assistant", content: modelResult.text }] }
-      : await this.store.appendMessage(sessionId, {
-          role: "assistant",
-          content: modelResult.text,
-          agentId,
-          channel,
-          from: "openagi",
-          metadata: {
-            provider: modelResult.provider,
-            model: modelResult.model,
-            responseId: modelResult.id,
-            usage: modelResult.usage ?? null,
-            requestShape: modelContext.__requestShape,
-            iterations: modelResult.iterations ?? null,
-            maxIterations: modelResult.maxIterations ?? null,
-            stopReason: modelResult.stopReason ?? null,
-            outputId: output.id,
-            outcomeId: outcomeRecord?.id ?? null,
-            conversational,
-            backgroundReview: input.backgroundReview !== false,
-            memoryScope,
-            toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
-              name: call.name,
-              arguments: sanitizeForAudit(call.arguments),
-              ok: call.result?.ok ?? false
-            }))
+    const continuationCandidate = modelResult.__responsesContinuationCandidate ?? null;
+    let sessionAfter;
+    try {
+      sessionAfter = ephemeral
+        ? { id: sessionId, messages: [{ role: "user", content: text }, { role: "assistant", content: modelResult.text }] }
+        : await this.store.appendMessage(sessionId, {
+            role: "assistant",
+            content: modelResult.text,
+            agentId,
+            channel,
+            from: "openagi",
+            metadata: {
+              provider: modelResult.provider,
+              model: modelResult.model,
+              responseId: modelResult.id,
+              usage: modelResult.usage ?? null,
+              requestShape: modelContext.__requestShape,
+              iterations: modelResult.iterations ?? null,
+              maxIterations: modelResult.maxIterations ?? null,
+              stopReason: modelResult.stopReason ?? null,
+              outputId: output.id,
+              outcomeId: outcomeRecord?.id ?? null,
+              conversational,
+              backgroundReview: input.backgroundReview !== false,
+              memoryScope,
+              toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
+                name: call.name,
+                arguments: sanitizeForAudit(call.arguments),
+                ok: call.result?.ok ?? false
+              }))
+            }
+          });
+    } catch (error) {
+      turnProvider.abandonResponsesContinuation?.(continuationCandidate);
+      throw error;
+    }
+
+    if (
+      !ephemeral
+      && validResponsesContinuationMetadata(continuationSessionMetadata)
+      && typeof this.store.updateSessionMetadata === "function"
+    ) {
+      let nextContinuationMetadata = null;
+      try {
+        const assistantMessageId = sessionAfter.messages.at(-1)?.id ?? null;
+        const nextLineageId = createConversationLineageIdentity(sessionAfter.messages);
+        const proposed = {
+          ...continuationSessionMetadata,
+          epoch: continuationSessionMetadata.epoch + 1,
+          headMessageId: assistantMessageId,
+          lineageId: nextLineageId
+        };
+        const updated = await this.store.updateSessionMetadata(
+          sessionId,
+          RESPONSES_CONTINUATION_METADATA_KEY,
+          (current) => {
+            const latestHead = this.store.getSession(sessionId).messages.at(-1)?.id ?? null;
+            if (
+              latestHead === assistantMessageId
+              && sameResponsesContinuationMetadata(current, continuationSessionMetadata)
+            ) {
+              return proposed;
+            }
+            return current;
           }
+        );
+        if (sameResponsesContinuationMetadata(updated, proposed)) {
+          nextContinuationMetadata = updated;
+        }
+      } catch {
+        // A stale or failed metadata update keeps the provider continuation
+        // uncommitted. The durable transcript remains authoritative.
+      }
+      if (nextContinuationMetadata && continuationCandidate) {
+        turnProvider.commitResponsesContinuation?.(continuationCandidate, {
+          messages: sessionAfter.messages,
+          contextEpoch: nextContinuationMetadata.epoch,
+          sessionIncarnation: nextContinuationMetadata.incarnation,
+          headMessageId: nextContinuationMetadata.headMessageId
         });
+      } else {
+        turnProvider.abandonResponsesContinuation?.(continuationCandidate);
+      }
+    } else {
+      turnProvider.abandonResponsesContinuation?.(continuationCandidate);
+    }
 
     if (outcomeRecord) outcomeRecord.refId = sessionAfter.messages.at(-1)?.id ?? null;
 

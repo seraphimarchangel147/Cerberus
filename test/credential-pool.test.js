@@ -10,6 +10,7 @@ import {
   CredentialPoolExhaustedError,
   classifyCredentialFailure,
   createCredentialPoolRegistry,
+  credentialLeaseIdentity,
   loadCredentialPoolConfig
 } from "../src/credential-pool.js";
 
@@ -428,6 +429,30 @@ test("secrets store resolution, leases, events, state, and inspection never seri
   });
   assert.doesNotMatch(safeSurfaces, /store-secret|unsafe-env/);
   assert.match(safeSurfaces, /promptCacheReset/);
+});
+
+test("credential lease identities bind the live secret without exposing a public fingerprint", () => {
+  const firstPool = pool({
+    credentials: [{ id: "first-label", secretName: "POOL_KEY_ONE" }],
+    env: { POOL_KEY_ONE: "shared-live-secret" }
+  });
+  const secondPool = pool({
+    credentials: [{ id: "second-label", secretName: "POOL_KEY_ONE" }],
+    env: { POOL_KEY_ONE: "shared-live-secret" }
+  });
+  const first = firstPool.acquire();
+  const equivalent = secondPool.acquire();
+  const identity = credentialLeaseIdentity(first);
+  assert.match(identity, /^[a-f0-9]{64}$/);
+  assert.equal(credentialLeaseIdentity(first), identity);
+  assert.equal(credentialLeaseIdentity(equivalent), identity);
+  firstPool.syncCredential(first.id, "rotated-live-secret");
+  assert.notEqual(credentialLeaseIdentity(firstPool.acquire()), identity);
+  assert.throws(
+    () => credentialLeaseIdentity({ ...first }),
+    /CredentialLease/
+  );
+  assert.equal(identity.includes("shared-live-secret"), false);
 });
 
 test("failure classification reads ProviderError-style status and nested body messages", () => {

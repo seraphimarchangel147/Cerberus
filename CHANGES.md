@@ -674,3 +674,14 @@ SEMANTIC TOOL OUTCOMES COMPLETE
 - Added adversarial protocol, cancellation, refusal, encoding, framing, usage, bound, and zero-partial-dispatch regressions.
 - Validation: `npm test` and `npm run test:prod-policy` each pass 1203/1203 in the canonical WSL clone with no environment pinning.
 RESPONSES SSE COMPLETE
+
+## 2026-07-23 - Agent workspace upgrades: safe provider continuation (Codex)
+
+- Added fixed-size OpenAI prompt cache keys over the exact model, stable instructions, and ordered visible tool catalog without exposing prompt, user, or credential content.
+- Kept Responses requests stateless and `store:false` by default, with an explicit setup-allowlisted continuation mode that remains disabled for ephemeral, ZDR, and data-collection-denied turns.
+- Bound one-shot provider state to the session incarnation, transcript lineage and epoch, provider endpoint, model, process-keyed live credential identity, effective routing, project or memory scope, prompt identity, and tool identity.
+- Delayed continuation commits until the assistant transcript and session-lineage CAS are durable; stale, concurrent, failed-append, synthetic, forced-answer, and compressed-prefix paths abandon or reseed provider state safely.
+- Added narrow 4xx unsupported-state fallback before any tool dispatch, credential-rotation replay only before local effects, bounded descriptor-safe identities, TTL/LRU state, negative-capability isolation, and opaque non-serializing candidates.
+- Added hostile-input, cache, lineage, concurrency, routing, credential, privacy, AgentHost, fallback, setup, and serialization regressions.
+- Validation: `npm test` and `npm run test:prod-policy` each pass 1236/1236 in the canonical WSL clone with no environment pinning.
+SAFE PROVIDER CONTINUATION COMPLETE

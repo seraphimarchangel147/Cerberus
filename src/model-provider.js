@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import {
   CredentialPool,
   CredentialPoolExhaustedError,
-  createCredentialPoolRegistry
+  createCredentialPoolRegistry,
+  credentialLeaseIdentity
 } from "./credential-pool.js";
 import { MoaProvider, normalizeMoaModelSpec } from "./moa-provider.js";
 import { ModelRouter } from "./model-router.js";
@@ -27,6 +28,17 @@ import {
   snapshotToolValue,
   toolFailureFingerprint
 } from "./tool-outcome.js";
+import {
+  continuationUnsupported,
+  createConversationContentIdentity,
+  createConversationLineageIdentity,
+  createOpenAIPromptCacheKey,
+  createRoutingIdentity,
+  createVisibleToolCatalogIdentity,
+  extendConversationLineageIdentity,
+  resolveResponsesContinuationMode,
+  ResponsesContinuationStore
+} from "./responses-continuation.js";
 import { summarizeText } from "./utils.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
@@ -53,6 +65,7 @@ const DEFAULT_CONTEXT_ESTIMATE_CHARS_PER_TOKEN = 4;
 const MAX_CACHE_IDENTITY_SESSIONS = 1000;
 const RUNTIME_CACHE_IDENTITIES = new WeakMap();
 const RUNTIME_TOOL_OUTCOME_IDS = new WeakMap();
+const RESPONSE_CONTINUATION_CANDIDATES = new WeakMap();
 const UNKNOWN_CONTEXT_WINDOW_WARNINGS = new Set();
 const MIN_CONTEXT_DIGEST_CHARS = 40;
 const SYNTHETIC_CONTINUE = [
@@ -111,6 +124,14 @@ export class ProviderError extends Error {
     this.retryAfterMs = Number.isFinite(retryAfterMs) ? retryAfterMs : null;
     this.providerCode = typeof providerCode === "string" ? providerCode : null;
     this.providerType = typeof providerType === "string" ? providerType : null;
+  }
+}
+
+class ContinuationCredentialChangedError extends Error {
+  constructor() {
+    super("The provider credential changed before a continued response could be requested.");
+    this.name = "ContinuationCredentialChangedError";
+    this.code = "CONTINUATION_CREDENTIAL_CHANGED";
   }
 }
 
@@ -2263,6 +2284,88 @@ export function trackPromptCacheIdentity(providerInstance, {
   return true;
 }
 
+function openAICredentialIdentity(provider, lease = null) {
+  const selected = lease ?? provider?.credentialPool?.lease ?? null;
+  if (!selected) return null;
+  try {
+    return credentialLeaseIdentity(selected);
+  } catch {
+    return null;
+  }
+}
+
+function openAIResponsesUrl(baseUrl) {
+  return `${String(baseUrl ?? "").replace(/\/+$/u, "")}/responses`;
+}
+
+function openAIContinuationIdentity(provider, {
+  model,
+  context,
+  promptIdentity,
+  toolIdentity,
+  lease
+}) {
+  return {
+    sessionId: context?.sessionId,
+    sessionIncarnation: context?.__continuationSessionIncarnation,
+    provider: provider?.credentialProviderName ?? "openai",
+    endpoint: openAIResponsesUrl(provider?.baseUrl),
+    model,
+    credentialIdentity: openAICredentialIdentity(provider, lease),
+    projectId: context?.projectId ?? context?.__projectId ?? null,
+    memoryScope: context?.__memoryScope ?? context?.memoryScope ?? null,
+    promptIdentity,
+    toolIdentity,
+    routingIdentity: createRoutingIdentity(
+      isProviderRoutingEndpoint(provider?.baseUrl)
+        ? provider?.providerRouting ?? null
+        : null
+    )
+  };
+}
+
+function openAIContinuationLineage({ messages, input, context }) {
+  const suppliedHistory = context?.__continuationHistoryIdentity;
+  const suppliedCurrent = context?.__continuationCurrentContentIdentity;
+  const contextEpoch = Number.isSafeInteger(context?.__continuationContextEpoch)
+    && context.__continuationContextEpoch >= 0
+    ? context.__continuationContextEpoch
+    : messages.length;
+  const historyIdentity = typeof suppliedHistory === "string"
+    ? suppliedHistory
+    : createConversationLineageIdentity(messages);
+  const currentContentIdentity = typeof suppliedCurrent === "string"
+    ? suppliedCurrent
+    : createConversationContentIdentity(input);
+  const currentLineageIdentity = extendConversationLineageIdentity(
+    historyIdentity,
+    [{ role: "user", contentIdentity: currentContentIdentity }]
+  );
+  return {
+    historyIdentity,
+    currentContentIdentity,
+    contextEpoch,
+    currentLineageIdentity
+  };
+}
+
+function responseContinuationEnabled(provider, context) {
+  const store = provider?.responsesContinuationStore;
+  return Boolean(
+    store
+    && store.mode !== "off"
+    && provider.zeroDataRetention !== true
+    && provider.providerRouting?.data_collection !== "deny"
+    && context?.__zeroDataRetention !== true
+    && context?.__continuationEligible === true
+  );
+}
+
+function continuationCredentialChanged(error) {
+  return error instanceof ContinuationCredentialChangedError
+    || error?.code === "CONTINUATION_CREDENTIAL_CHANGED";
+}
+
 function estimateProviderConversationTokens(providerInstance, conversation, {
   format,
   instructions,
@@ -2285,6 +2388,11 @@ function estimateProviderConversationTokens(providerInstance, conversation, {
         model,
         store: false,
         stream: true,
+        prompt_cache_key: createOpenAIPromptCacheKey({
+          model,
+          stableInstructions: instructions,
+          tools
+        }),
         instructions,
         input: requestMessages,
         ...(tools.length > 0 ? { tools } : {})
@@ -2551,6 +2659,12 @@ export class OpenAIResponsesProvider {
     this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
+    this.zeroDataRetention = options.zeroDataRetention === true;
+    this.responsesContinuationStore = options.responsesContinuationStore
+      ?? new ResponsesContinuationStore({
+        mode: options.responsesContinuationMode
+          ?? resolveResponsesContinuationMode(options.env ?? process.env)
+      });
     // Per-task model tiering. Defaults to base for everything until tier env
     // vars are set, so this is a no-op until the user opts in.
     this.ownsRouter = !options.router;
@@ -2581,6 +2695,11 @@ export class OpenAIResponsesProvider {
       model: this.resolveModel({ task: "goal" }),
       max_output_tokens: GOAL_JUDGE_MAX_TOKENS,
       store: false,
+      prompt_cache_key: createOpenAIPromptCacheKey({
+        model: this.resolveModel({ task: "goal" }),
+        stableInstructions: GOAL_JUDGE_INSTRUCTIONS,
+        tools: []
+      }),
       instructions: GOAL_JUDGE_INSTRUCTIONS,
       input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
     }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
@@ -2659,8 +2778,69 @@ export class OpenAIResponsesProvider {
       : Array.isArray(context.__advertisedTools)
         ? []
         : toolRegistry?.toOpenAITools?.() ?? [];
+    const promptCacheKey = createOpenAIPromptCacheKey({
+      model,
+      stableInstructions: baseInstructions,
+      tools: toolList
+    });
+    const visibleToolIdentity = createVisibleToolCatalogIdentity(toolList);
     const toolCalls = [];
     const completedToolCallIds = new Map();
+    let continuationAvailable = false;
+    let continuationIdentity = null;
+    let continuationLineage = null;
+    let continuationReservation = null;
+    let continuationResponseId = null;
+    let continuationCredentialIdentity = null;
+    let continuationUsedForcedAnswer = false;
+    let continuationMustStop = false;
+    let continuationTerminalEligible = false;
+
+    if (responseContinuationEnabled(this, context)) {
+      try {
+        continuationLineage = openAIContinuationLineage({
+          messages,
+          input,
+          context
+        });
+        continuationIdentity = openAIContinuationIdentity(this, {
+          model,
+          context,
+          promptIdentity: promptCacheKey,
+          toolIdentity: visibleToolIdentity,
+          lease: credentialState.request.lease
+        });
+        const claimed = this.responsesContinuationStore.claim(
+          continuationIdentity,
+          {
+            lineageIdentity: continuationLineage.historyIdentity,
+            contextEpoch: continuationLineage.contextEpoch
+          }
+        );
+        continuationReservation = claimed.reservation ?? null;
+        continuationAvailable = Boolean(
+          continuationReservation
+          && !["off", "unsupported", "invalid_identity", "invalid_claim"].includes(claimed.reason)
+        );
+        if (continuationAvailable && claimed.hit) {
+          continuationResponseId = claimed.responseId;
+        } else if (!continuationAvailable && continuationReservation) {
+          this.responsesContinuationStore.abandon(
+            continuationIdentity,
+            continuationReservation
+          );
+          continuationReservation = null;
+        }
+        continuationCredentialIdentity = continuationIdentity.credentialIdentity;
+      } catch {
+        continuationAvailable = false;
+        continuationIdentity = null;
+        continuationLineage = null;
+        continuationReservation = null;
+        continuationResponseId = null;
+        continuationCredentialIdentity = null;
+      }
+    }
 
     const deadline = this.now() + (maxTurnSeconds * 1000);
     const turnBudget = { limitUsd: this.maxTurnUsd, spentUsd: 0 };
@@ -2709,12 +2889,27 @@ export class OpenAIResponsesProvider {
         stopReason = "context-too-large";
         break;
       }
+      if (preparation.compressed && continuationResponseId) {
+        // A compressed local replay represents a new provider-side prefix.
+        // Never stack that digest on top of the uncompressed stored response.
+        continuationResponseId = null;
+      }
       const wantStream = typeof onDelta === "function" || this.stallTimeoutMs > 0;
+      const usePreviousResponse = Boolean(
+        continuationAvailable
+        && iterations === 1
+        && continuationResponseId
+        && toolCalls.length === 0
+      );
       const body = {
         model,
-        store: false,
+        store: continuationAvailable,
+        prompt_cache_key: promptCacheKey,
         instructions: baseInstructions,
-        input: conversationInput,
+        input: usePreviousResponse ? [finalUserTurn] : conversationInput,
+        ...(usePreviousResponse
+          ? { previous_response_id: continuationResponseId }
+          : {}),
         ...(wantStream ? { stream: true } : {})
       };
       if (toolList.length > 0) body.tools = toolList;
@@ -2726,26 +2921,97 @@ export class OpenAIResponsesProvider {
             turnBudget,
             credentialRequest: credentialState.request,
             compression: preparation,
-            onDelta
+            onDelta,
+            expectedContinuationCredentialIdentity: continuationAvailable
+              ? continuationCredentialIdentity
+              : null
           })
         ), context);
       } catch (error) {
-        if (isCredentialPoolExhausted(error) && successfulModelHops === 0 && toolCalls.length === 0) {
-          const fallback = await tryFallbackProvider(this, generationRequest, error);
-          if (fallback.used) return fallback.result;
+        let requestError = error;
+        const unsupportedPreviousResponse = usePreviousResponse
+          && continuationUnsupported(error);
+        const credentialChanged = continuationCredentialChanged(error);
+        const safeLocalReplay = toolCalls.length === 0
+          && (unsupportedPreviousResponse || credentialChanged);
+        if (safeLocalReplay) {
+          if (unsupportedPreviousResponse) {
+            this.responsesContinuationStore.markUnsupported(continuationIdentity);
+          } else if (continuationReservation) {
+            this.responsesContinuationStore.abandon(
+              continuationIdentity,
+              continuationReservation
+            );
+          }
+          continuationAvailable = false;
+          continuationReservation = null;
+          continuationResponseId = null;
+          continuationCredentialIdentity = null;
+          const fallbackBody = {
+            ...body,
+            store: false,
+            input: conversationInput
+          };
+          delete fallbackBody.previous_response_id;
+          try {
+            checkRequestBudget(this, turnBudget);
+            response = await withinTurn(this, deadline, (remainingMs) => (
+              this.postResponses(fallbackBody, context, {
+                timeoutMs: remainingMs,
+                turnBudget,
+                credentialRequest: credentialState.request,
+                compression: preparation,
+                onDelta
+              })
+            ), context);
+            requestError = null;
+          } catch (fallbackError) {
+            requestError = fallbackError;
+          }
+        } else if (credentialChanged && toolCalls.length > 0) {
+          // Crossing an account boundary after local effects risks exposing a
+          // different account's transcript. Stop without another provider hop.
+          continuationMustStop = true;
         }
-        if (isCredentialPoolExhausted(error)) {
+        if (!requestError) {
+          // The one allowed local replay completed before any tool dispatch.
+        } else if (isCredentialPoolExhausted(requestError) && successfulModelHops === 0 && toolCalls.length === 0) {
+          const fallback = await tryFallbackProvider(this, generationRequest, requestError);
+          if (fallback.used) {
+            if (continuationReservation && continuationIdentity) {
+              this.responsesContinuationStore.abandon(
+                continuationIdentity,
+                continuationReservation
+              );
+            }
+            return fallback.result;
+          }
+        } else if (isCredentialPoolExhausted(requestError)) {
           stopReason = "provider-error";
           break;
+        } else if (requestTimedOut(requestError)) {
+          stopReason = requestError instanceof ModelStallError ? "stalled" : "request-timeout";
+          break;
+        } else if (providerUnavailable(requestError) || continuationMustStop) {
+          stopReason = "provider-error";
+          break;
+        } else if (!deadlineExpired(this, deadline, requestError)) {
+          throw requestError;
+        } else {
+          stopReason = "turn-timeout";
+          break;
         }
-        if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
-        if (providerUnavailable(error)) { stopReason = "provider-error"; break; }
-        if (!deadlineExpired(this, deadline, error)) throw error;
-        stopReason = "turn-timeout";
-        break;
       }
 
       successfulModelHops += 1;
+      if (
+        continuationAvailable
+        && response?.store !== false
+        && typeof response?.id === "string"
+        && response.id.length > 0
+      ) {
+        continuationResponseId = response.id;
+      }
       addProviderUsage(usageAccumulator, response?.usage);
       previousUsage = response?.usage ?? null;
       const callBatch = collectOpenAIFunctionCalls(response);
@@ -2775,6 +3041,7 @@ export class OpenAIResponsesProvider {
         });
         if (!goalDecision.continue) {
           stopReason = goalDecision.stopReason;
+          continuationTerminalEligible = ["completed", "goal-satisfied"].includes(stopReason);
           break;
         }
         if (iterations >= maxIterations) {
@@ -2920,7 +3187,8 @@ export class OpenAIResponsesProvider {
     // path for the rationale). No tools, fresh short budget, so the model
     // always gets a chance to reply instead of returning only a canned string.
     const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout", "provider-error"]);
-    if (FORCE_ANSWER_REASONS.has(stopReason)) {
+    if (FORCE_ANSWER_REASONS.has(stopReason) && !continuationMustStop) {
+      continuationUsedForcedAnswer = true;
       reconcileOrphanedToolCalls(conversationInput, "openai");
       appendOpenAIContinue(conversationInput);
       conversationInput.at(-1).content[0].text = forceAnswerPrompt(stopReason, iterations, maxIterations);
@@ -2943,6 +3211,11 @@ export class OpenAIResponsesProvider {
           response = await this.postResponses({
             model,
             store: false,
+            prompt_cache_key: createOpenAIPromptCacheKey({
+              model,
+              stableInstructions: baseInstructions,
+              tools: []
+            }),
             instructions: baseInstructions,
             input: conversationInput
           }, context, {
@@ -2970,7 +3243,7 @@ export class OpenAIResponsesProvider {
       text = extractResponseText(response) || "(no text)";
     }
 
-    return {
+    const result = {
       provider: "openai",
       model,
       id: response?.id,
@@ -2981,6 +3254,111 @@ export class OpenAIResponsesProvider {
       stopReason,
       usage: finalizedProviderUsage(usageAccumulator)
     };
+    const finalResponseText = extractResponseText(response);
+    const actualCredentialIdentity = openAICredentialIdentity(
+      this,
+      credentialState.request.lease
+    );
+    const canCommitContinuation = Boolean(
+      continuationAvailable
+      && continuationReservation
+      && continuationLineage
+      && continuationTerminalEligible
+      && !continuationUsedForcedAnswer
+      && !continuationMustStop
+      && response?.store !== false
+      && typeof response?.id === "string"
+      && response.id.length > 0
+      && finalResponseText === text
+      && actualCredentialIdentity
+      && actualCredentialIdentity === continuationCredentialIdentity
+    );
+    if (canCommitContinuation) {
+      const expectedLineageIdentity = extendConversationLineageIdentity(
+        continuationLineage.currentLineageIdentity,
+        [{ role: "assistant", content: text }]
+      );
+      const candidate = Object.freeze({});
+      RESPONSE_CONTINUATION_CANDIDATES.set(candidate, Object.freeze({
+        owner: this,
+        identity: continuationIdentity,
+        responseId: response.id,
+        reservation: continuationReservation,
+        expectedLineageIdentity,
+        expectedContextEpoch: continuationLineage.contextEpoch + 1,
+        sessionIncarnation: context.__continuationSessionIncarnation
+      }));
+      Object.defineProperty(result, "__responsesContinuationCandidate", {
+        value: candidate,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      });
+    } else if (continuationReservation && continuationIdentity) {
+      this.responsesContinuationStore.abandon(
+        continuationIdentity,
+        continuationReservation
+      );
+    }
+    return result;
+  }
+
+  commitResponsesContinuation(candidate, {
+    messages = [],
+    contextEpoch,
+    sessionIncarnation
+  } = {}) {
+    const pending = candidate && typeof candidate === "object"
+      ? RESPONSE_CONTINUATION_CANDIDATES.get(candidate)
+      : null;
+    if (!pending || pending.owner !== this) {
+      return { committed: false, reason: "invalid_candidate" };
+    }
+    RESPONSE_CONTINUATION_CANDIDATES.delete(candidate);
+    let actualLineageIdentity;
+    try {
+      actualLineageIdentity = createConversationLineageIdentity(messages);
+    } catch {
+      this.responsesContinuationStore.abandon(
+        pending.identity,
+        pending.reservation
+      );
+      return { committed: false, reason: "invalid_transcript" };
+    }
+    if (
+      sessionIncarnation !== pending.sessionIncarnation
+      || contextEpoch !== pending.expectedContextEpoch
+      || actualLineageIdentity !== pending.expectedLineageIdentity
+    ) {
+      this.responsesContinuationStore.abandon(
+        pending.identity,
+        pending.reservation
+      );
+      return { committed: false, reason: "transcript_mismatch" };
+    }
+    return this.responsesContinuationStore.commit(
+      pending.identity,
+      pending.responseId,
+      {
+        lineageIdentity: actualLineageIdentity,
+        contextEpoch,
+        reservation: pending.reservation
+      }
+    );
+  }
+
+  abandonResponsesContinuation(candidate) {
+    const pending = candidate && typeof candidate === "object"
+      ? RESPONSE_CONTINUATION_CANDIDATES.get(candidate)
+      : null;
+    if (!pending || pending.owner !== this) {
+      return { abandoned: false, reason: "invalid_candidate" };
+    }
+    RESPONSE_CONTINUATION_CANDIDATES.delete(candidate);
+    return this.responsesContinuationStore.abandon(
+      pending.identity,
+      pending.reservation
+    );
   }
 
   async postResponses(body, context = {}, options = {}) {
@@ -3025,15 +3403,27 @@ export class OpenAIResponsesProvider {
           context,
           signal: controller.signal,
           model: body.model,
-          request: (credential) => fetch(`${this.baseUrl}/responses`, {
-            method: "POST",
-            signal: controller.signal,
-            headers: {
-              "content-type": "application/json",
-              authorization: `Bearer ${credential}`
-            },
-            body: serializedBody
-          })
+          request: (credential, lease) => {
+            const expectedCredentialIdentity = options.expectedContinuationCredentialIdentity;
+            if (expectedCredentialIdentity) {
+              const actualCredentialIdentity = openAICredentialIdentity(this, lease);
+              if (
+                !actualCredentialIdentity
+                || actualCredentialIdentity !== expectedCredentialIdentity
+              ) {
+                throw new ContinuationCredentialChangedError();
+              }
+            }
+            return fetch(openAIResponsesUrl(this.baseUrl), {
+              method: "POST",
+              signal: controller.signal,
+              headers: {
+                "content-type": "application/json",
+                authorization: `Bearer ${credential}`
+              },
+              body: serializedBody
+            });
+          }
         }
       );
       const contentType = response.headers?.get?.("content-type") ?? "";

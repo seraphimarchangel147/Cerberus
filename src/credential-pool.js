@@ -1,5 +1,6 @@
 import path from "node:path";
 import util from "node:util";
+import { createHmac, randomBytes } from "node:crypto";
 import {
   appendJsonLine,
   readJsonFile,
@@ -35,6 +36,7 @@ const DEFAULT_PROVIDER_ENV_KEYS = Object.freeze({
 });
 const LEASE_VALUES = new WeakMap();
 const LEASE_REFRESH_VALUES = new WeakMap();
+const LEASE_IDENTITY_KEY = randomBytes(32);
 
 export class CredentialPoolExhaustedError extends Error {
   constructor(provider, { failures = [] } = {}) {
@@ -82,6 +84,22 @@ export class CredentialLease {
   [util.inspect.custom]() {
     return `CredentialLease <${this.provider}/${this.id} [REDACTED]>`;
   }
+}
+
+export function credentialLeaseIdentity(lease) {
+  if (!(lease instanceof CredentialLease)) {
+    throw new TypeError("Credential identity requires a CredentialLease");
+  }
+  const value = LEASE_VALUES.get(lease);
+  if (!nonBlankSecret(value)) {
+    throw new TypeError("Credential lease has no usable credential");
+  }
+  return createHmac("sha256", LEASE_IDENTITY_KEY)
+    .update("openagi-credential-lease-identity-v1\0", "utf8")
+    .update(lease.provider, "utf8")
+    .update("\0", "utf8")
+    .update(String(value), "utf8")
+    .digest("hex");
 }
 
 export function classifyCredentialFailure(error) {
