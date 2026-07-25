@@ -10966,7 +10966,15 @@ switchTab(initialTab);
    wagging) and a SIDE pose when walking/running. Animation is sampled at
    15 fps (frame advances 4 "60fps-ticks" per drawn frame so real-time speed
    is unchanged). Three easter-egg idles fire roughly every 5 minutes while
-   idle: nuzzle-the-pack, breath-fire, and howl. */
+   idle: nuzzle-the-pack, breath-fire, and howl.
+
+   EVOLUTION — the pup can evolve into PRIME CERBERUS, a larger 24-bit form
+   with a richer palette, chest rune, gold armor plating, horns and a heavier
+   flame mane. Evolution triggers after ~20 minutes of uptime, or randomly as
+   the pet gains XP from harness activity (thinking / working / done). The
+   evolved form has its own idle / thinking / working animations. A settings
+   panel (gear button) toggles the pet on/off and customises size, glow, and
+   auto-evolution; stage + XP persist across reloads via localStorage. */
 (function () {
   "use strict";
   if (window.__cerbPetLoaded) return;
@@ -10974,7 +10982,9 @@ switchTab(initialTab);
 
   var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  var W = 64, H = 52;
+  /* ── geometry: base form 64x52, prime form 80x64 ── */
+  var BW = 64, BH = 52;
+  var PW = 80, PH = 64;
   var FPS = 15, FRAME_MS = 1000 / FPS;
   var TICKS_PER_FRAME = Math.round(60 / FPS);   // keep real-time speed
 
@@ -11000,9 +11010,46 @@ switchTab(initialTab);
     earIn:    "#7a3222"
   };
 
+  /* richer 24-bit palette for the prime form — more fur stops, gold armor,
+     ember rune, hotter flame gradient */
+  var PAL2 = {
+    outline:  "#16101c",
+    furDeep:  "#12121c",
+    furDark:  "#1c2230",
+    furMid:   "#283244",
+    furLight: "#3a4a60",
+    furHi:    "#54687f",
+    rim:      "#e8b84a",
+    rimHot:   "#ffd97a",
+    armor:    "#8a6420",
+    armorHi:  "#d4a844",
+    armorDk:  "#5a4214",
+    rune:     "#ff3a2a",
+    runeCore: "#ffb08a",
+    flameCore:"#fffbe8",
+    flameYel: "#ffd94a",
+    flameOrg: "#ff9a2a",
+    flameRed: "#f04a1e",
+    flameMag: "#c02a5a",
+    eye:      "#ffb02a",
+    eyeCore:  "#fff4c8",
+    fang:     "#f4ecd8",
+    claw:     "#d8cfb8",
+    mouth:    "#6a1824",
+    tongue:   "#d05a72",
+    nose:     "#0e0c16",
+    earIn:    "#8a3a28",
+    horn:     "#e8dcc0",
+    hornDk:   "#a89878"
+  };
+
   var off = document.createElement("canvas");
-  off.width = W; off.height = H;
+  off.width = BW; off.height = BH;
   var octx = off.getContext("2d", { willReadFrequently: true });
+
+  var off2 = document.createElement("canvas");
+  off2.width = PW; off2.height = PH;
+  var octx2 = off2.getContext("2d", { willReadFrequently: true });
 
   function pxEllipse(ctx, cx, cy, rx, ry, color) {
     ctx.fillStyle = color;
@@ -11036,7 +11083,8 @@ switchTab(initialTab);
     }
   }
 
-  function flameTongue(ctx, bx, by, h, w, sway, seed) {
+  function flameTongue(ctx, bx, by, h, w, sway, seed, pal) {
+    pal = pal || PAL;
     for (var i = 0; i < h; i++) {
       var t = i/h;
       var y = Math.round(by - i);
@@ -11044,64 +11092,126 @@ switchTab(initialTab);
       var half = Math.max(0, Math.round((w/2) * (1 - t*0.7)));
       if (t > 0.75 && ((i + seed) % 3 === 0)) half = Math.max(0, half-1);
       var color;
-      if (t < 0.18) color = PAL.flameCore;
-      else if (t < 0.42) color = PAL.flameYel;
-      else if (t < 0.72) color = PAL.flameOrg;
-      else color = PAL.flameRed;
+      if (t < 0.18) color = pal.flameCore;
+      else if (t < 0.42) color = pal.flameYel;
+      else if (t < 0.72) color = pal.flameOrg;
+      else color = pal.flameRed;
       ctx.fillStyle = color;
       ctx.fillRect(x-half, y, half*2+1, 1);
     }
   }
 
-  function drawHead(ctx, cx, cy, o) {
+  function drawHead(ctx, cx, cy, o, pal) {
+    pal = pal || PAL;
     var dir = o.dir||0, s = o.size||1, roar = o.roar||false, blink = o.blink||0;
     var gx = o.gazeX||0, gy = o.gazeY||0;
     var hw = Math.round(6*s), hh = Math.round(5*s);
     var snoutX = dir * Math.round(3*s);
 
-    pxEllipse(ctx, cx, cy, hw+1, hh+1, PAL.outline);
+    pxEllipse(ctx, cx, cy, hw+1, hh+1, pal.outline);
 
     var earH = Math.round(4*s);
-    pxTri(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, cx-hw+4, cy-hh, PAL.furDark);
-    pxTri(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, cx+hw-4, cy-hh, PAL.furDark);
-    pxRect(ctx, cx-hw, cy-hh-1, 1, 2, PAL.earIn);
-    pxRect(ctx, cx+hw-1, cy-hh-1, 1, 2, PAL.earIn);
+    pxTri(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, cx-hw+4, cy-hh, pal.furDark);
+    pxTri(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, cx+hw-4, cy-hh, pal.furDark);
+    pxRect(ctx, cx-hw, cy-hh-1, 1, 2, pal.earIn);
+    pxRect(ctx, cx+hw-1, cy-hh-1, 1, 2, pal.earIn);
 
-    pxEllipse(ctx, cx, cy, hw, hh, PAL.furMid);
-    pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, PAL.furLight);
+    pxEllipse(ctx, cx, cy, hw, hh, pal.furMid);
+    pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, pal.furLight);
 
-    pxEllipse(ctx, cx+snoutX, cy+2, 3, 2, PAL.furLight);
-    pxRect(ctx, cx+snoutX + dir*2 - 1, cy+1, 2, 2, PAL.nose);
+    pxEllipse(ctx, cx+snoutX, cy+2, 3, 2, pal.furLight);
+    pxRect(ctx, cx+snoutX + dir*2 - 1, cy+1, 2, 2, pal.nose);
 
     var ey = cy-2;
     var exL = cx-4 + (dir<0?1:0), exR = cx+2 + (dir>0?-1:0);
     if (blink > 0.9) {
-      pxRect(ctx, exL, ey+1, 2, 1, PAL.outline);
-      pxRect(ctx, exR, ey+1, 2, 1, PAL.outline);
+      pxRect(ctx, exL, ey+1, 2, 1, pal.outline);
+      pxRect(ctx, exR, ey+1, 2, 1, pal.outline);
     } else {
-      pxRect(ctx, exL+gx, ey+gy, 2, 2, PAL.eye);
-      pxRect(ctx, exL+gx, ey+gy, 1, 1, PAL.eyeCore);
-      pxRect(ctx, exR+gx, ey+gy, 2, 2, PAL.eye);
-      pxRect(ctx, exR+1+gx, ey+gy, 1, 1, PAL.eyeCore);
+      pxRect(ctx, exL+gx, ey+gy, 2, 2, pal.eye);
+      pxRect(ctx, exL+gx, ey+gy, 1, 1, pal.eyeCore);
+      pxRect(ctx, exR+gx, ey+gy, 2, 2, pal.eye);
+      pxRect(ctx, exR+1+gx, ey+gy, 1, 1, pal.eyeCore);
     }
 
     var mx = cx + snoutX;
     if (roar) {
       var mw = Math.round(6*s), mh = Math.round(4*s), my = cy+2;
-      pxEllipse(ctx, mx, my+mh/2, mw/2, mh/2, PAL.mouth);
-      pxEllipse(ctx, mx, my+mh/2+1, Math.max(1,mw/2-2), Math.max(1,mh/2-1), PAL.tongue);
-      pxTri(ctx, mx-mw/2+1, my, mx-mw/2+2, my+3, mx-mw/2+3, my, PAL.fang);
-      pxTri(ctx, mx+mw/2-3, my, mx+mw/2-2, my+3, mx+mw/2-1, my, PAL.fang);
-      pxRect(ctx, mx-mw/2+2, my+mh-1, mw-4, 1, PAL.fang);
+      pxEllipse(ctx, mx, my+mh/2, mw/2, mh/2, pal.mouth);
+      pxEllipse(ctx, mx, my+mh/2+1, Math.max(1,mw/2-2), Math.max(1,mh/2-1), pal.tongue);
+      pxTri(ctx, mx-mw/2+1, my, mx-mw/2+2, my+3, mx-mw/2+3, my, pal.fang);
+      pxTri(ctx, mx+mw/2-3, my, mx+mw/2-2, my+3, mx+mw/2-1, my, pal.fang);
+      pxRect(ctx, mx-mw/2+2, my+mh-1, mw-4, 1, pal.fang);
     } else {
-      pxRect(ctx, mx-3, cy+3, 6, 1, PAL.outline);
-      pxTri(ctx, mx+dir*2-1, cy+3, mx+dir*2, cy+5, mx+dir*2+1, cy+3, PAL.fang);
+      pxRect(ctx, mx-3, cy+3, 6, 1, pal.outline);
+      pxTri(ctx, mx+dir*2-1, cy+3, mx+dir*2, cy+5, mx+dir*2+1, cy+3, pal.fang);
     }
   }
 
-  /* ── SIDE view — used while walking / running ── */
+  /* prime head — larger, with horns on the center head and richer shading */
+  function drawHead2(ctx, cx, cy, o) {
+    var pal = PAL2;
+    var dir = o.dir||0, s = o.size||1, roar = o.roar||false, blink = o.blink||0;
+    var gx = o.gazeX||0, gy = o.gazeY||0;
+    var horn = o.horn||false;
+    var hw = Math.round(7*s), hh = Math.round(6*s);
+    var snoutX = dir * Math.round(4*s);
+
+    pxEllipse(ctx, cx, cy, hw+1, hh+1, pal.outline);
+
+    var earH = Math.round(5*s);
+    pxTri(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, cx-hw+4, cy-hh, pal.furDark);
+    pxTri(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, cx+hw-4, cy-hh, pal.furDark);
+    pxRect(ctx, cx-hw, cy-hh-1, 1, 2, pal.earIn);
+    pxRect(ctx, cx+hw-1, cy-hh-1, 1, 2, pal.earIn);
+
+    if (horn) {
+      var hornH = Math.round(7*s), hornW = Math.round(3*s);
+      pxTri(ctx, cx-hornW, cy-hh+1, cx-hornW-2, cy-hh-hornH, cx-1, cy-hh, pal.horn);
+      pxTri(ctx, cx+hornW, cy-hh+1, cx+hornW+2, cy-hh-hornH, cx+1, cy-hh, pal.horn);
+      pxRect(ctx, cx-hornW-1, cy-hh-hornH+2, 1, 3, pal.hornDk);
+      pxRect(ctx, cx+hornW+1, cy-hh-hornH+2, 1, 3, pal.hornDk);
+      pxRect(ctx, cx-hornW-2, cy-hh-hornH, 1, 2, pal.rune);   /* ember tip */
+      pxRect(ctx, cx+hornW+2, cy-hh-hornH, 1, 2, pal.rune);
+    }
+
+    pxEllipse(ctx, cx, cy, hw, hh, pal.furMid);
+    pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, pal.furLight);
+    pxEllipse(ctx, cx-2, cy-hh+3, hw-5, 1, pal.furHi);
+
+    pxEllipse(ctx, cx+snoutX, cy+2, 4, 3, pal.furLight);
+    pxEllipse(ctx, cx+snoutX, cy+1, 3, 1, pal.furHi);
+    pxRect(ctx, cx+snoutX + dir*3 - 1, cy+1, 2, 2, pal.nose);
+
+    var ey = cy-2;
+    var exL = cx-5 + (dir<0?1:0), exR = cx+2 + (dir>0?-1:0);
+    if (blink > 0.9) {
+      pxRect(ctx, exL, ey+1, 3, 1, pal.outline);
+      pxRect(ctx, exR, ey+1, 3, 1, pal.outline);
+    } else {
+      pxRect(ctx, exL+gx, ey+gy, 3, 2, pal.eye);
+      pxRect(ctx, exL+gx, ey+gy, 1, 1, pal.eyeCore);
+      pxRect(ctx, exR+gx, ey+gy, 3, 2, pal.eye);
+      pxRect(ctx, exR+2+gx, ey+gy, 1, 1, pal.eyeCore);
+    }
+
+    var mx = cx + snoutX;
+    if (roar) {
+      var mw = Math.round(7*s), mh = Math.round(5*s), my = cy+2;
+      pxEllipse(ctx, mx, my+mh/2, mw/2, mh/2, pal.mouth);
+      pxEllipse(ctx, mx, my+mh/2+1, Math.max(1,mw/2-2), Math.max(1,mh/2-1), pal.tongue);
+      pxTri(ctx, mx-mw/2+1, my, mx-mw/2+2, my+3, mx-mw/2+3, my, pal.fang);
+      pxTri(ctx, mx+mw/2-3, my, mx+mw/2-2, my+3, mx+mw/2-1, my, pal.fang);
+      pxRect(ctx, mx-mw/2+2, my+mh-1, mw-4, 1, pal.fang);
+    } else {
+      pxRect(ctx, mx-4, cy+4, 8, 1, pal.outline);
+      pxTri(ctx, mx+dir*3-1, cy+4, mx+dir*3, cy+6, mx+dir*3+1, cy+4, pal.fang);
+    }
+  }
+
+  /* ── BASE SIDE view — used while walking / running ── */
   function drawPupSide(ctx, P) {
-    ctx.clearRect(0,0,W,H);
+    ctx.clearRect(0,0,BW,BH);
     var bob = P.bob||0;
     var walk = P.walk||0;
     var flameI = P.flameI==null?1:P.flameI;
@@ -11184,10 +11294,9 @@ switchTab(initialTab);
     }
   }
 
-  /* ── FRONT view — stationary idle / review / waiting (three heads fanned,
-        tail wagging). Also hosts the easter-egg animations. ── */
+  /* ── BASE FRONT view — stationary idle / review / waiting ── */
   function drawPupFront(ctx, P) {
-    ctx.clearRect(0,0,W,H);
+    ctx.clearRect(0,0,BW,BH);
     var bob = P.bob||0;
     var flameI = P.flameI==null?1:P.flameI;
     var flick = P.flick||0;
@@ -11196,11 +11305,9 @@ switchTab(initialTab);
     var droop = sad*3;
     var howl = P.howl||0;
 
-    /* easter-egg head offsets */
     var hl = P.headL||0, hr = P.headR||0, hc = P.headC||0;
-    var headLift = howl*4;                 /* howl throws heads back/up */
+    var headLift = howl*4;
 
-    /* flame mane — symmetric arc behind the three heads */
     var headFlames = [{x:10,h:15,l:-2},{x:16,h:19,l:-1},{x:22,h:22,l:0},{x:27,h:23,l:0},{x:32,h:23,l:0},{x:37,h:22,l:0},{x:42,h:19,l:1},{x:48,h:15,l:2}];
     for (var fi=0; fi<headFlames.length; fi++) {
       var tg = headFlames[fi];
@@ -11209,21 +11316,17 @@ switchTab(initialTab);
       flameTongue(ctx, tg.x, 28+bob*0.4, Math.max(5,hMod2), 6, sw2, fi);
     }
 
-    /* haunches + chest (front-facing, centered) */
     pxEllipse(ctx, 32, 36+bob*0.3, 16, 8, PAL.furDark);
     pxEllipse(ctx, 32, 33+bob*0.3, 10, 9, PAL.furMid);
     pxEllipse(ctx, 32, 28+bob*0.3, 6, 3, PAL.furLight);
     pxEllipse(ctx, 32, 41+bob*0.3, 12, 2, PAL.furDeep);
 
-    /* tail — curls up on the right, flame tip, always wagging when idle */
     var wag = Math.sin((P.tailWag||0))*3;
     pxLine(ctx, 45, 35, 52+wag*0.4, 30, 3, PAL.furDark);
     pxLine(ctx, 52+wag*0.4, 30, 55+wag, 23, 3, PAL.furDark);
     flameTongue(ctx, 55+wag, 24, 8*flameI, 4, wag, 9);
 
-    /* front legs */
     if (P.wave) {
-      /* left planted, right raised + waving */
       pxLine(ctx, 26, 37, 25, 47, 4, PAL.furMid);
       pxRect(ctx, 22, 46, 6, 3, PAL.furMid);
       pxRect(ctx, 22, 48, 1, 2, PAL.claw); pxRect(ctx, 25, 48, 1, 2, PAL.claw);
@@ -11240,12 +11343,10 @@ switchTab(initialTab);
       pxRect(ctx, 37, 48, 1, 2, PAL.claw); pxRect(ctx, 40, 48, 1, 2, PAL.claw);
     }
 
-    /* necks — three, fanned, symmetric */
     pxLine(ctx, 16+hl, 20+bob*0.8+droop-headLift, 24, 30+bob*0.3, 4, PAL.furDark);
     pxLine(ctx, 32+hc, 15+bob+droop*0.5-headLift, 32, 30+bob*0.3, 5, PAL.furDark);
     pxLine(ctx, 48+hr, 20+bob*0.8+droop-headLift, 40, 30+bob*0.3, 4, PAL.furDark);
 
-    /* heads — three fanned; gaze can be overridden per-head for easter eggs */
     var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
     var glx = P.gazeLOverride!=null ? P.gazeLOverride : hgx;
     var grx = P.gazeROverride!=null ? P.gazeROverride : hgx;
@@ -11253,15 +11354,13 @@ switchTab(initialTab);
     drawHead(ctx, 32+hc, 11+bob+droop*0.5-headLift,  {dir:0,  size:1.15, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy});
     drawHead(ctx, 48+hr, 15+bob*0.8+droop-headLift, {dir:1,  size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:grx, gazeY:hgy});
 
-    /* easter egg: breath fire — a bold solid cone pouring from the center
-       mouth down over the chest, white-hot at the source fading to red */
     if (P.fireBreath) {
       var fb = P.fireBreath;
       var topY = 17, botY = 44;
       for (var by = topY; by <= botY; by++) {
-        var bt = (by - topY) / (botY - topY);      /* 0 at mouth, 1 at ground */
-        var halfW = (1 + bt * 7) * fb;             /* widens as it falls */
-        var wob = Math.sin(flick*0.4 + by*0.7) * bt * 1.5;  /* flicker */
+        var bt = (by - topY) / (botY - topY);
+        var halfW = (1 + bt * 7) * fb;
+        var wob = Math.sin(flick*0.4 + by*0.7) * bt * 1.5;
         var color;
         if (bt < 0.25) color = PAL.flameCore;
         else if (bt < 0.5) color = PAL.flameYel;
@@ -11272,7 +11371,6 @@ switchTab(initialTab);
         ctx.fillRect(Math.round(32 - halfW + wob), by, Math.round(halfW*2), 1);
         ctx.globalAlpha = 1;
       }
-      /* stray sparks popping off the cone */
       for (var si=0; si<4; si++) {
         var st = ((flick*0.6 + si*5) % 10)/10;
         var sx = 32 + Math.sin(si*9.1) * (2+st*8) * fb;
@@ -11285,7 +11383,223 @@ switchTab(initialTab);
     }
   }
 
-  function applyRim(ctx) {
+  /* ── PRIME SIDE view — larger, armored, heavier mane ── */
+  function drawPrimeSide(ctx, P) {
+    ctx.clearRect(0,0,PW,PH);
+    var pal = PAL2;
+    var bob = P.bob||0;
+    var walk = P.walk||0;
+    var flameI = P.flameI==null?1:P.flameI;
+    var flick = P.flick||0;
+    var gx = P.gazeX||0, gy = P.gazeY||0;
+    var squash = P.squash||1;
+    var sad = P.sad||0;
+    var lean = P.lean||0;
+
+    /* heavy mane — two rows of flames */
+    var x;
+    for (x = 16; x <= 64; x += 4) {
+      var hgt = (17 + Math.round(4*Math.sin(x*0.28))) * flameI;
+      var sway = Math.sin(flick*0.18 + x*0.5) * 1.4 + lean*0.6;
+      var hMod = hgt + Math.round(Math.sin(flick*0.28 + x) * 2);
+      flameTongue(ctx, x, 34+bob*0.4, Math.max(5,hMod), 7, sway, x, pal);
+    }
+    var headFlames = [{x:11,h:20,l:-2},{x:17,h:25,l:-1},{x:23,h:29,l:0},{x:30,h:30,l:0},{x:36,h:28,l:1},{x:42,h:23,l:1}];
+    for (var fi=0; fi<headFlames.length; fi++) {
+      var tg = headFlames[fi];
+      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.4 + tg.l + lean*0.6;
+      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
+      flameTongue(ctx, tg.x, 33+bob*0.4, Math.max(6,hMod2), 7, sw2, fi, pal);
+    }
+
+    var legAmp = walk ? 6 : 0;
+    function legSwing(ph){ return Math.round(Math.sin(walk + ph) * legAmp); }
+
+    pxLine(ctx, 18+legSwing(0), 44, 17+legSwing(0), 56, 5, pal.furDark);
+    pxRect(ctx, 13+legSwing(0), 55, 7, 3, pal.furDark);
+    pxRect(ctx, 13+legSwing(0), 57, 1, 2, pal.claw); pxRect(ctx, 17+legSwing(0), 57, 1, 2, pal.claw);
+    pxLine(ctx, 49+legSwing(Math.PI), 44, 51+legSwing(Math.PI), 56, 5, pal.furDark);
+    pxRect(ctx, 47+legSwing(Math.PI), 55, 7, 3, pal.furDark);
+    pxRect(ctx, 47+legSwing(Math.PI), 57, 1, 2, pal.claw); pxRect(ctx, 51+legSwing(Math.PI), 57, 1, 2, pal.claw);
+
+    var wag = Math.sin((P.tailWag||0))*2.5;
+    pxLine(ctx, 59, 39, 68+wag*0.4, 34, 4, pal.furDark);
+    pxLine(ctx, 68+wag*0.4, 34, 72+wag, 26, 4, pal.furDark);
+    flameTongue(ctx, 72+wag, 27, 9*flameI, 5, wag, 9, pal);
+    flameTongue(ctx, 70+wag, 30, 6*flameI, 4, wag, 5, pal);
+
+    var bw = 21*squash, bh = 9/squash;
+    pxEllipse(ctx, 39, 42+bob*0.3, bw, bh, pal.furDark);
+    pxEllipse(ctx, 21, 40+bob*0.3, 10*squash, 9/squash, pal.furMid);
+    pxEllipse(ctx, 54, 40+bob*0.3, 9*squash, 9/squash, pal.furDark);
+    pxEllipse(ctx, 36, 34+bob*0.3, 15, 3, pal.furLight);
+    pxEllipse(ctx, 19, 38+bob*0.3, 4, 3, pal.furLight);
+    pxEllipse(ctx, 39, 48+bob*0.3, 15, 2, pal.furDeep);
+
+    /* gold armor plate on the shoulder */
+    pxEllipse(ctx, 21, 36+bob*0.3, 6, 4, pal.armor);
+    pxEllipse(ctx, 20, 35+bob*0.3, 4, 2, pal.armorHi);
+    pxRect(ctx, 24, 37+bob*0.3, 2, 2, pal.armorDk);
+
+    pxLine(ctx, 25+legSwing(Math.PI), 45, 25+legSwing(Math.PI), 58, 5, pal.furMid);
+    pxRect(ctx, 21+legSwing(Math.PI), 57, 7, 3, pal.furMid);
+    pxRect(ctx, 21+legSwing(Math.PI), 59, 1, 2, pal.claw); pxRect(ctx, 25+legSwing(Math.PI), 59, 1, 2, pal.claw); pxRect(ctx, 27+legSwing(Math.PI), 59, 1, 2, pal.claw);
+    pxLine(ctx, 55+legSwing(0), 44, 57+legSwing(0), 51, 5, pal.furMid);
+    pxLine(ctx, 57+legSwing(0), 51, 56+legSwing(0), 58, 4, pal.furMid);
+    pxRect(ctx, 52+legSwing(0), 57, 7, 3, pal.furMid);
+    pxRect(ctx, 52+legSwing(0), 59, 1, 2, pal.claw); pxRect(ctx, 56+legSwing(0), 59, 1, 2, pal.claw); pxRect(ctx, 58+legSwing(0), 59, 1, 2, pal.claw);
+
+    var droop = sad*3;
+    var nl = -lean;
+    pxLine(ctx, 14+nl, 23+bob*0.8+droop, 14, 36+bob*0.3, 5, pal.furDark);
+    pxLine(ctx, 27+nl, 18+bob+droop*0.5, 27, 36+bob*0.3, 6, pal.furDark);
+    pxLine(ctx, 41+nl, 23+bob*0.8+droop, 41, 36+bob*0.3, 5, pal.furDark);
+
+    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
+    drawHead2(ctx, 14+nl, 18+bob*0.8+droop+(lean?1:0), {dir:-1, size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
+    drawHead2(ctx, 27+nl, 13+bob+droop*0.5+(lean?1:0),  {dir:0,  size:1.2, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy, horn:true});
+    drawHead2(ctx, 41+nl, 18+bob*0.8+droop+(lean?1:0), {dir:1,  size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
+
+    if (walk) {
+      for (var ei=0; ei<4; ei++) {
+        var ex = 60 + ((flick*0.8 + ei*9) % 16);
+        var ey = 28 + ((ei*7 + flick*0.3) % 18);
+        ctx.fillStyle = ei%2 ? pal.flameOrg : pal.flameYel;
+        ctx.globalAlpha = 0.8 - (ex-60)/22;
+        ctx.fillRect(Math.round(ex), Math.round(ey), 1, 1);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  /* ── PRIME FRONT view — armored, horned, glowing chest rune ── */
+  function drawPrimeFront(ctx, P) {
+    ctx.clearRect(0,0,PW,PH);
+    var pal = PAL2;
+    var bob = P.bob||0;
+    var flameI = P.flameI==null?1:P.flameI;
+    var flick = P.flick||0;
+    var gx = P.gazeX||0, gy = P.gazeY||0;
+    var sad = P.sad||0;
+    var droop = sad*3;
+    var howl = P.howl||0;
+
+    var hl = P.headL||0, hr = P.headR||0, hc = P.headC||0;
+    var headLift = howl*5;
+
+    var headFlames = [{x:12,h:19,l:-2},{x:20,h:24,l:-1},{x:27,h:28,l:0},{x:34,h:29,l:0},{x:40,h:29,l:0},{x:46,h:28,l:0},{x:53,h:24,l:1},{x:60,h:19,l:2}];
+    for (var fi=0; fi<headFlames.length; fi++) {
+      var tg = headFlames[fi];
+      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.4 + tg.l;
+      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
+      flameTongue(ctx, tg.x, 36+bob*0.4, Math.max(6,hMod2), 7, sw2, fi, pal);
+    }
+
+    pxEllipse(ctx, 40, 45+bob*0.3, 20, 10, pal.furDark);
+    pxEllipse(ctx, 40, 41+bob*0.3, 13, 11, pal.furMid);
+    pxEllipse(ctx, 40, 35+bob*0.3, 8, 4, pal.furLight);
+    pxEllipse(ctx, 40, 33+bob*0.3, 5, 2, pal.furHi);
+    pxEllipse(ctx, 40, 52+bob*0.3, 15, 2, pal.furDeep);
+
+    /* gold armor plates on both shoulders — dark-rimmed so they read as
+       metal pauldrons, not flame */
+    pxEllipse(ctx, 24, 40+bob*0.3, 7, 6, pal.outline);
+    pxEllipse(ctx, 24, 40+bob*0.3, 6, 5, pal.armor);
+    pxEllipse(ctx, 23, 39+bob*0.3, 4, 2, pal.armorHi);
+    pxRect(ctx, 26, 41+bob*0.3, 2, 2, pal.armorDk);
+    pxEllipse(ctx, 56, 40+bob*0.3, 7, 6, pal.outline);
+    pxEllipse(ctx, 56, 40+bob*0.3, 6, 5, pal.armor);
+    pxEllipse(ctx, 55, 39+bob*0.3, 4, 2, pal.armorHi);
+    pxRect(ctx, 52, 41+bob*0.3, 2, 2, pal.armorDk);
+
+    /* glowing chest rune — pulses with the breath, flares when thinking.
+       drawn opaque (alpha red over dark fur reads pink) with a soft halo */
+    var runePulse = P.runeFlare ? 1 : (0.6 + 0.4*Math.sin(flick*0.12));
+    ctx.globalAlpha = runePulse * 0.3;                 /* outer glow */
+    pxTri(ctx, 40, 35+bob*0.3, 31, 49+bob*0.3, 49, 49+bob*0.3, pal.rune);
+    ctx.globalAlpha = 1;
+    pxTri(ctx, 40, 37+bob*0.3, 34, 47+bob*0.3, 46, 47+bob*0.3, pal.rune);   /* solid core */
+    pxTri(ctx, 40, 49+bob*0.3, 35, 41+bob*0.3, 45, 41+bob*0.3, pal.rune);
+    pxRect(ctx, 39, 41+bob*0.3, 2, 3, pal.runeCore);   /* hot center */
+    pxRect(ctx, 39, 39+bob*0.3, 2, 1, pal.flameCore);
+
+    var wag = Math.sin((P.tailWag||0))*3.5;
+    pxLine(ctx, 56, 44, 65+wag*0.4, 38, 4, pal.furDark);
+    pxLine(ctx, 65+wag*0.4, 38, 69+wag, 29, 4, pal.furDark);
+    flameTongue(ctx, 69+wag, 30, 10*flameI, 5, wag, 9, pal);
+    flameTongue(ctx, 67+wag, 33, 7*flameI, 4, wag, 5, pal);
+
+    if (P.wave) {
+      pxLine(ctx, 33, 46, 32, 58, 5, pal.furMid);
+      pxRect(ctx, 28, 57, 7, 3, pal.furMid);
+      pxRect(ctx, 28, 59, 1, 2, pal.claw); pxRect(ctx, 32, 59, 1, 2, pal.claw);
+      var wv = Math.sin(flick*0.5)*3.5;
+      pxLine(ctx, 48, 42, 53+wv, 32, 5, pal.furMid);
+      pxRect(ctx, 51+wv, 29, 6, 3, pal.furMid);
+      pxRect(ctx, 52+wv, 28, 1, 2, pal.claw); pxRect(ctx, 56+wv, 28, 1, 2, pal.claw);
+    } else {
+      pxLine(ctx, 33, 46, 32, 58, 5, pal.furMid);
+      pxRect(ctx, 28, 57, 7, 3, pal.furMid);
+      pxRect(ctx, 28, 59, 1, 2, pal.claw); pxRect(ctx, 32, 59, 1, 2, pal.claw);
+      pxLine(ctx, 48, 46, 49, 58, 5, pal.furMid);
+      pxRect(ctx, 45, 57, 7, 3, pal.furMid);
+      pxRect(ctx, 46, 59, 1, 2, pal.claw); pxRect(ctx, 50, 59, 1, 2, pal.claw);
+    }
+
+    pxLine(ctx, 20+hl, 25+bob*0.8+droop-headLift, 30, 38+bob*0.3, 5, pal.furDark);
+    pxLine(ctx, 40+hc, 19+bob+droop*0.5-headLift, 40, 38+bob*0.3, 6, pal.furDark);
+    pxLine(ctx, 60+hr, 25+bob*0.8+droop-headLift, 50, 38+bob*0.3, 5, pal.furDark);
+
+    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
+    var glx = P.gazeLOverride!=null ? P.gazeLOverride : hgx;
+    var grx = P.gazeROverride!=null ? P.gazeROverride : hgx;
+    drawHead2(ctx, 20+hl, 19+bob*0.8+droop-headLift, {dir:-1, size:1.0, roar:P.roarSide||false, blink:P.blink, gazeX:glx, gazeY:hgy});
+    drawHead2(ctx, 40+hc, 14+bob+droop*0.5-headLift,  {dir:0,  size:1.25, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy, horn:true});
+    drawHead2(ctx, 60+hr, 19+bob*0.8+droop-headLift, {dir:1,  size:1.0, roar:P.roarSide||false, blink:P.blink, gazeX:grx, gazeY:hgy});
+
+    /* thinking: orbiting sparks around the heads */
+    if (P.runeFlare) {
+      for (var oi=0; oi<5; oi++) {
+        var ang = flick*0.15 + oi*(Math.PI*2/5);
+        var ox = 40 + Math.cos(ang)*26;
+        var oy = 20 + Math.sin(ang)*10;
+        ctx.fillStyle = oi%2 ? pal.flameYel : pal.rune;
+        ctx.globalAlpha = 0.9;
+        ctx.fillRect(Math.round(ox), Math.round(oy), 2, 2);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    if (P.fireBreath) {
+      var fb = P.fireBreath;
+      var topY = 22, botY = 55;
+      for (var by = topY; by <= botY; by++) {
+        var bt = (by - topY) / (botY - topY);
+        var halfW = (1 + bt * 9) * fb;
+        var wob = Math.sin(flick*0.4 + by*0.7) * bt * 1.8;
+        var color;
+        if (bt < 0.25) color = pal.flameCore;
+        else if (bt < 0.5) color = pal.flameYel;
+        else if (bt < 0.78) color = pal.flameOrg;
+        else color = pal.flameRed;
+        ctx.fillStyle = color;
+        ctx.globalAlpha = fb * (0.85 + 0.15*Math.sin(flick*0.5+by));
+        ctx.fillRect(Math.round(40 - halfW + wob), by, Math.round(halfW*2), 1);
+        ctx.globalAlpha = 1;
+      }
+      for (var si=0; si<5; si++) {
+        var st = ((flick*0.6 + si*5) % 10)/10;
+        var sx = 40 + Math.sin(si*9.1) * (2+st*10) * fb;
+        var sy = 22 + st*32*fb;
+        ctx.fillStyle = si%2 ? pal.flameYel : pal.flameMag;
+        ctx.globalAlpha = (1-st)*fb;
+        ctx.fillRect(Math.round(sx), Math.round(sy), 1, 1);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function applyRim(ctx, W, H, pal) {
     var img = ctx.getImageData(0,0,W,H);
     var d = img.data;
     function isSolid(x,y){ return x>=0&&y>=0&&x<W&&y<H && d[(y*W+x)*4+3]>0; }
@@ -11296,13 +11610,13 @@ switchTab(initialTab);
       if (!edge) continue;
       var r=d[i],g=d[i+1],b=d[i+2];
       if (r<110 && g<110 && b<130) {
-        if (!isSolid(x,y-1)) { d[i]=0xf0; d[i+1]=0xc0; d[i+2]=0x60; }
-        else { d[i]=0xd9; d[i+1]=0xa4; d[i+2]=0x41; }
+        if (!isSolid(x,y-1)) { d[i]=parseInt(pal.rimHot.slice(1,3),16); d[i+1]=parseInt(pal.rimHot.slice(3,5),16); d[i+2]=parseInt(pal.rimHot.slice(5,7),16); }
+        else { d[i]=parseInt(pal.rim.slice(1,3),16); d[i+1]=parseInt(pal.rim.slice(3,5),16); d[i+2]=parseInt(pal.rim.slice(5,7),16); }
       }
     }
     ctx.putImageData(img,0,0);
   }
-  function applyOutline(ctx, color) {
+  function applyOutline(ctx, W, H, color) {
     var img = ctx.getImageData(0,0,W,H);
     var d = img.data;
     function isSolid(x,y){ return x>=0&&y>=0&&x<W&&y<H && d[(y*W+x)*4+3]>0; }
@@ -11321,31 +11635,51 @@ switchTab(initialTab);
   }
 
   var embers = [];
-  for (var ei2=0; ei2<5; ei2++) embers.push({x:6+Math.random()*52, y:8+Math.random()*38, vy:0.12+Math.random()*0.2, c:Math.random()});
-  function drawEmbers(ctx, t) {
+  for (var ei2=0; ei2<6; ei2++) embers.push({x:6+Math.random()*60, y:8+Math.random()*44, vy:0.12+Math.random()*0.2, c:Math.random()});
+  function drawEmbers(ctx, t, W) {
     for (var i=0;i<embers.length;i++) {
       var e = embers[i];
       e.y -= e.vy;
       e.x += Math.sin(t.flick*0.1 + e.c*10)*0.18;
-      if (e.y < 3) { e.y = 48; e.x = 6+Math.random()*52; }
+      if (e.y < 3) { e.y = 56; e.x = 6+Math.random()*(W-12); }
       var a = Math.min(1, (e.y-3)/16);
       ctx.globalAlpha = a;
-      ctx.fillStyle = e.c>0.5 ? PAL.flameYel : PAL.flameOrg;
+      ctx.fillStyle = e.c>0.5 ? (t.stage?PAL2.flameYel:PAL.flameYel) : (t.stage?PAL2.flameOrg:PAL.flameOrg);
       ctx.fillRect(Math.round(e.x), Math.round(e.y), 1, 1);
       ctx.globalAlpha = 1;
     }
   }
 
+  /* ── settings (persisted) ── */
+  var SETTINGS_KEY = "cerbPetSettings";
+  var settings = { enabled: true, scale: 3, glow: true, autoEvolve: true, stage: 0, xp: 0 };
+  try {
+    var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+    if (saved) for (var k in settings) if (saved[k] !== undefined) settings[k] = saved[k];
+  } catch (e) {}
+  function saveSettings() {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+  }
+
   /* ── canvas element, fixed to viewport bottom ── */
-  var SCALE = 3;
   var canvas = document.createElement("canvas");
   canvas.id = "cerbPet";
-  canvas.width = W; canvas.height = H;
-  /* drop-shadow seats the sprite in the crimson scene with a soft ember glow
-     (no white sticker look); pointer-events:none so it never blocks the UI. */
-  canvas.style.cssText = "position:fixed;z-index:9999;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;filter:drop-shadow(0 0 6px rgba(224,69,26,0.45)) drop-shadow(0 4px 8px rgba(0,0,0,0.6));width:"+(W*SCALE)+"px;height:"+(H*SCALE)+"px;";
+  canvas.width = PW; canvas.height = PH;   /* prime-sized buffer; base is centered */
+  canvas.style.cssText = "position:fixed;z-index:9999;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;";
   document.body.appendChild(canvas);
   var nctx = canvas.getContext("2d");
+
+  function applyCanvasStyle() {
+    var sc = settings.scale;
+    var w = (settings.stage ? PW : BW) * sc;
+    var h = (settings.stage ? PH : BH) * sc;
+    var glow = settings.glow ? "filter:drop-shadow(0 0 6px rgba(224,69,26,0.45)) drop-shadow(0 4px 8px rgba(0,0,0,0.6));" : "";
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    canvas.style.filter = settings.glow ? "drop-shadow(0 0 6px rgba(224,69,26,0.45)) drop-shadow(0 4px 8px rgba(0,0,0,0.6))" : "none";
+    canvas.style.display = settings.enabled ? "block" : "none";
+  }
+  applyCanvasStyle();
 
   var STATES = {
     idle:    { flameI:1.0, walk:0, bobAmp:1,   roarCenter:true,  roarSide:false, tailSpeed:0.10, sad:0 },
@@ -11358,19 +11692,55 @@ switchTab(initialTab);
   };
 
   var state = "idle";
-  var frame = 0;             /* advances TICKS_PER_FRAME per drawn frame */
+  var frame = 0;
   var petX = window.innerWidth - 150, petY = window.innerHeight - 120;
   var mouseX = petX, mouseY = petY - 100;
   var facing = -1;
   var jumpT = -1;
   var paused = false;
 
+  /* ── evolution ── */
+  var XP_MAX = 100;
+  var EVOLVE_MS = 20 * 60 * 1000;      /* ~20 minutes of uptime */
+  var bornAt = Date.now();
+  var evolving = false;
+  var evolveT = 0;                     /* 0..1 during the evolve animation */
+
+  function gainXP(n) {
+    if (settings.stage >= 1) return;   /* already prime */
+    settings.xp += n;
+    if (settings.autoEvolve && settings.xp >= XP_MAX) doEvolve();
+    saveSettings();
+    updatePanel();
+  }
+  function doEvolve() {
+    if (settings.stage >= 1 || evolving) return;
+    evolving = true;
+    evolveT = 0;
+  }
+  function finishEvolve() {
+    settings.stage = 1;
+    settings.xp = 0;
+    evolving = false;
+    evolveT = 0;
+    saveSettings();
+    applyCanvasStyle();
+    updatePanel();
+  }
+  function resetToBase() {
+    settings.stage = 0;
+    settings.xp = 0;
+    evolving = false;
+    saveSettings();
+    applyCanvasStyle();
+    updatePanel();
+  }
+
   /* ── easter-egg idles ── */
-  var egg = null;            /* null | 'play' | 'fire' | 'howl' */
-  var eggFrame = 0;          /* drawn-frame counter for egg timing */
-  var eggT = 0;              /* 0..1 progress within the egg */
-  var EGG_INTERVAL = 5 * 60 * FPS;   /* ~5 min at 15fps */
-  var EGG_DURATION = 4 * FPS;        /* each egg lasts ~4s */
+  var egg = null;
+  var eggT = 0;
+  var EGG_INTERVAL = 5 * 60 * FPS;
+  var EGG_DURATION = 4 * FPS;
   var nextEggIn = EGG_INTERVAL;
 
   window.addEventListener("mousemove", function (e) {
@@ -11381,10 +11751,9 @@ switchTab(initialTab);
     if (!STATES[s]) return;
     state = s;
     if (s === "jumping") jumpT = 0;
-    if (s !== "idle") { egg = null; eggT = 0; }   /* leave the egg behind */
+    if (s !== "idle") { egg = null; eggT = 0; }
   }
 
-  /* console / test trigger for the easter eggs */
   window.cerbPetEgg = function (name) {
     if (name === "play" || name === "fire" || name === "howl") {
       setState("idle");
@@ -11392,31 +11761,155 @@ switchTab(initialTab);
     }
   };
 
-  /* harness reactivity — same contract as cerbHoloReact */
   window.cerbPetReact = function (mode) {
-    if (mode === "thinking" || mode === "processing") setState("review");
-    else if (mode === "offline") setState("failed");
-    else if (mode === "online") setState("idle");
+    if (mode === "thinking" || mode === "processing") { setState("review"); gainXP(2); }
+    else if (mode === "working") { setState("running"); gainXP(1); }
+    else if (mode === "done") { setState("waving"); gainXP(3); }
+    else if (mode === "error") { setState("failed"); }
+    else if (mode === "offline") { setState("failed"); }
+    else if (mode === "online") { setState("idle"); }
+    else if (mode === "idle") { setState("idle"); }
   };
   window.cerbPetSetState = setState;
+  window.cerbPetEvolve = doEvolve;
+  window.cerbPetGetInfo = function () {
+    return { stage: settings.stage, xp: settings.xp, xpMax: XP_MAX, enabled: settings.enabled,
+             scale: settings.scale, glow: settings.glow, autoEvolve: settings.autoEvolve, state: state };
+  };
 
   document.addEventListener("visibilitychange", function () {
     paused = document.hidden;
   });
 
+  /* ── settings panel (gear button + card) ── */
+  var gear = document.createElement("button");
+  gear.id = "cerbPetGear";
+  gear.title = "Cerberus pet settings";
+  gear.innerHTML = "&#9881;";
+  gear.style.cssText = "position:fixed;z-index:10000;right:14px;top:54px;width:34px;height:34px;border-radius:50%;border:1px solid rgba(224,69,26,0.5);background:rgba(18,10,10,0.85);color:#e8b84a;font-size:17px;line-height:1;cursor:pointer;pointer-events:auto;transition:transform .15s, border-color .15s;";
+  gear.onmouseenter = function(){ gear.style.transform="rotate(45deg)"; gear.style.borderColor="#ff8a1e"; };
+  gear.onmouseleave = function(){ gear.style.transform="rotate(0deg)"; gear.style.borderColor="rgba(224,69,26,0.5)"; };
+  document.body.appendChild(gear);
+
+  var panel = document.createElement("div");
+  panel.id = "cerbPetPanel";
+  panel.style.cssText = "position:fixed;z-index:10001;right:14px;top:96px;width:230px;background:rgba(16,9,9,0.96);border:1px solid rgba(224,69,26,0.45);border-radius:10px;padding:14px;font-family:inherit;color:#e8e0d8;font-size:12px;display:none;pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,0.6);";
+  document.body.appendChild(panel);
+
+  var panelOpen = false;
+  gear.addEventListener("click", function () {
+    panelOpen = !panelOpen;
+    panel.style.display = panelOpen ? "block" : "none";
+    if (panelOpen) updatePanel();
+  });
+
+  function row(label) {
+    var d = document.createElement("div");
+    d.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin:8px 0;";
+    var l = document.createElement("span");
+    l.textContent = label;
+    l.style.cssText = "color:#c9beb0;";
+    d.appendChild(l);
+    return d;
+  }
+  function toggle(get, set) {
+    var b = document.createElement("button");
+    b.style.cssText = "width:40px;height:20px;border-radius:10px;border:1px solid rgba(224,69,26,0.5);background:#2a1512;position:relative;cursor:pointer;padding:0;";
+    var knob = document.createElement("span");
+    knob.style.cssText = "position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#8a8078;transition:left .15s, background .15s;";
+    b.appendChild(knob);
+    function paint(){ var on=get(); knob.style.left=on?"22px":"2px"; knob.style.background=on?"#ff8a1e":"#8a8078"; b.style.background=on?"rgba(224,69,26,0.35)":"#2a1512"; }
+    b.addEventListener("click", function(){ set(!get()); paint(); saveSettings(); applyCanvasStyle(); });
+    paint();
+    return b;
+  }
+  function btn(label, fn, accent) {
+    var b = document.createElement("button");
+    b.textContent = label;
+    b.style.cssText = "width:100%;margin:6px 0 0;padding:7px 0;border-radius:6px;border:1px solid " + (accent?"rgba(255,138,30,0.6)":"rgba(224,69,26,0.4)") + ";background:" + (accent?"rgba(255,138,30,0.15)":"rgba(224,69,26,0.1)") + ";color:" + (accent?"#ffd97a":"#e8b84a") + ";font-size:12px;font-family:inherit;cursor:pointer;";
+    b.addEventListener("click", fn);
+    return b;
+  }
+
+  function buildPanel() {
+    panel.innerHTML = "";
+    var title = document.createElement("div");
+    title.innerHTML = "<b style='color:#ffd97a;font-size:13px;letter-spacing:1px;'>CERBERUS PET</b>";
+    title.style.cssText = "margin-bottom:6px;border-bottom:1px solid rgba(224,69,26,0.3);padding-bottom:6px;";
+    panel.appendChild(title);
+
+    var stageLine = document.createElement("div");
+    stageLine.id = "cerbPetStage";
+    stageLine.style.cssText = "margin:6px 0;color:#c9beb0;";
+    panel.appendChild(stageLine);
+
+    var xpWrap = document.createElement("div");
+    xpWrap.style.cssText = "height:6px;border-radius:3px;background:#2a1512;overflow:hidden;margin:4px 0 8px;";
+    var xpBar = document.createElement("div");
+    xpBar.id = "cerbPetXP";
+    xpBar.style.cssText = "height:100%;width:0%;background:linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a);border-radius:3px;transition:width .3s;";
+    xpWrap.appendChild(xpBar);
+    panel.appendChild(xpWrap);
+
+    var r1 = row("Show pet"); r1.appendChild(toggle(function(){return settings.enabled;}, function(v){settings.enabled=v;})); panel.appendChild(r1);
+    var r2 = row("Ember glow"); r2.appendChild(toggle(function(){return settings.glow;}, function(v){settings.glow=v;})); panel.appendChild(r2);
+    var r3 = row("Auto-evolve"); r3.appendChild(toggle(function(){return settings.autoEvolve;}, function(v){settings.autoEvolve=v;})); panel.appendChild(r3);
+
+    var r4 = row("Size");
+    var sizes = document.createElement("span");
+    [2,3,4].forEach(function(s){
+      var b = document.createElement("button");
+      b.textContent = s+"x";
+      b.style.cssText = "width:30px;height:22px;margin-left:4px;border-radius:5px;border:1px solid rgba(224,69,26,0.4);background:rgba(224,69,26,0.1);color:#e8b84a;font-size:11px;cursor:pointer;";
+      b.addEventListener("click", function(){ settings.scale=s; saveSettings(); applyCanvasStyle(); updatePanel(); });
+      b.setAttribute("data-size", s);
+      sizes.appendChild(b);
+    });
+    r4.appendChild(sizes);
+    panel.appendChild(r4);
+
+    panel.appendChild(btn("Evolve now", function(){ doEvolve(); }, true));
+    panel.appendChild(btn("Reset to pup", function(){ resetToBase(); }, false));
+  }
+  buildPanel();
+
+  function updatePanel() {
+    var stageEl = document.getElementById("cerbPetStage");
+    var xpEl = document.getElementById("cerbPetXP");
+    if (stageEl) stageEl.innerHTML = settings.stage >= 1
+      ? "Form: <b style='color:#ffd97a;'>PRIME CERBERUS</b>"
+      : "Form: <b style='color:#e8b84a;'>Pup</b> &nbsp;·&nbsp; XP " + settings.xp + "/" + XP_MAX;
+    if (xpEl) xpEl.style.width = (settings.stage >= 1 ? 100 : Math.min(100, settings.xp)) + "%";
+    var sizeBtns = panel.querySelectorAll("[data-size]");
+    for (var i=0;i<sizeBtns.length;i++) {
+      var on = parseInt(sizeBtns[i].getAttribute("data-size")) === settings.scale;
+      sizeBtns[i].style.background = on ? "rgba(255,138,30,0.4)" : "rgba(224,69,26,0.1)";
+    }
+  }
+  updatePanel();
+
   var lastDraw = 0;
   function tick(now) {
     requestAnimationFrame(tick);
-    if (paused) return;
-    if (now - lastDraw < FRAME_MS - 1) return;   /* 15 fps gate */
+    if (paused || !settings.enabled) return;
+    if (now - lastDraw < FRAME_MS - 1) return;
     lastDraw = now;
     frame += TICKS_PER_FRAME;
-    eggFrame++;
 
     var S = STATES[state];
 
-    /* ── easter-egg scheduling (idle only) ── */
-    if (state === "idle" && !egg) {
+    /* ── evolution: uptime timer + random chance while working ── */
+    if (!evolving && settings.stage < 1 && settings.autoEvolve) {
+      if (Date.now() - bornAt > EVOLVE_MS) doEvolve();
+      else if ((state === "running" || state === "review") && Math.random() < 0.0008) doEvolve();
+    }
+    if (evolving) {
+      evolveT += 1 / (2.2 * FPS);
+      if (evolveT >= 1) finishEvolve();
+    }
+
+    /* ── easter-egg scheduling (idle only, base form only) ── */
+    if (state === "idle" && !egg && settings.stage < 1) {
       nextEggIn--;
       if (nextEggIn <= 0) {
         var roll = Math.random();
@@ -11454,7 +11947,6 @@ switchTab(initialTab);
         if (Math.abs(dx2) > 4) facing = dx2 > 0 ? 1 : -1;
         moving = true;
       }
-      /* keep on screen (and above the composer zone) */
       petY = Math.max(window.innerHeight*0.4, Math.min(window.innerHeight - 120, petY));
       petX = Math.max(40, Math.min(window.innerWidth - 40, petX));
     }
@@ -11464,10 +11956,12 @@ switchTab(initialTab);
     var gdx = mouseX - petX, gdy = mouseY - petY;
     var gazeX = Math.max(-1, Math.min(1, Math.round(gdx/60)));
     var gazeY = Math.max(-1, Math.min(1, Math.round(gdy/80)));
-    if (state === "review") {                    /* thinking: eyes scan side to side */
+    var runeFlare = false;
+    if (state === "review") {
       gazeX = Math.max(-1, Math.min(1, Math.round(Math.sin(frame*0.15)*1.4)));
       gazeY = 0;
-    } else if (state === "failed") {             /* error: look down, dejected */
+      runeFlare = true;                 /* prime: rune flares + sparks orbit */
+    } else if (state === "failed") {
       gazeX = 0; gazeY = 1;
     }
 
@@ -11483,26 +11977,28 @@ switchTab(initialTab);
     }
 
     var flameI = S.flameI;
-    var tailSpeed = S.tailSpeed;
+    /* prime runs a little hotter */
+    if (settings.stage >= 1) flameI = flameI * 1.15 + 0.1;
 
     var P = {
       bob:bob, walk:walkPhase, flameI:flameI, flick:frame,
       gazeX:gazeX, gazeY:gazeY, squash:squash, sad:S.sad,
       lean:(state==="running")?3:0,
-      tailWag:frame * tailSpeed * 2,
+      tailWag:frame * S.tailSpeed * 2,
       roarCenter:S.roarCenter, roarSide:S.roarSide,
       blink:(frame % 110 < 4) ? 1 : 0,
       view:viewFront ? "front" : "side",
-      wave:(state==="waving")?1:0
+      wave:(state==="waving")?1:0,
+      runeFlare:runeFlare,
+      stage:settings.stage
     };
 
-    /* ── apply easter-egg pose overrides (front view only) ── */
     if (egg === "play") {
-      P.headL = eggEnv*6;  P.headR = -eggEnv*6;      /* heads nudge together */
-      P.gazeLOverride = 1; P.gazeROverride = -1;      /* look at each other */
+      P.headL = eggEnv*6;  P.headR = -eggEnv*6;
+      P.gazeLOverride = 1; P.gazeROverride = -1;
       P.roarCenter = false; P.roarSide = false;
-      if (eggEnv > 0.5) P.blink = 1;                  /* happy squint */
-      P.tailWag = frame * 0.3 * 2;                    /* excited wag */
+      if (eggEnv > 0.5) P.blink = 1;
+      P.tailWag = frame * 0.3 * 2;
     } else if (egg === "fire") {
       P.fireBreath = eggEnv;
       P.roarCenter = true;
@@ -11510,26 +12006,52 @@ switchTab(initialTab);
     } else if (egg === "howl") {
       P.howl = eggEnv;
       P.roarCenter = true; P.roarSide = true;
-      P.flameI = flameI + eggEnv*0.8;                 /* mane flares */
-      if (eggEnv > 0.4) P.blink = 1;                  /* eyes shut, head back */
+      P.flameI = flameI + eggEnv*0.8;
+      if (eggEnv > 0.4) P.blink = 1;
     }
 
-    if (P.view === "front") drawPupFront(octx, P);
-    else drawPupSide(octx, P);
-    applyRim(octx);
-    applyOutline(octx, PAL.outline);
+    /* ── render the right form into its off-screen buffer ── */
+    var isPrime = settings.stage >= 1;
+    var srcCanvas, srcCtx, sw, sh;
+    if (isPrime) {
+      if (P.view === "front") drawPrimeFront(octx2, P); else drawPrimeSide(octx2, P);
+      applyRim(octx2, PW, PH, PAL2);
+      applyOutline(octx2, PW, PH, PAL2.outline);
+      srcCanvas = off2; sw = PW; sh = PH;
+    } else {
+      if (P.view === "front") drawPupFront(octx, P); else drawPupSide(octx, P);
+      applyRim(octx, BW, BH, PAL);
+      applyOutline(octx, BW, BH, PAL.outline);
+      srcCanvas = off; sw = BW; sh = BH;
+    }
 
-    nctx.clearRect(0,0,W,H);
-    pxEllipse(nctx, 32, 50, 22, 2, "rgba(0,0,0,0.5)");
-    nctx.save();
-    /* art faces left; flip when travelling right so movement isn't reversed */
-    if (P.view === "side" && facing > 0) { nctx.translate(W, 0); nctx.scale(-1, 1); }
-    nctx.drawImage(off, 0, 0);
-    nctx.restore();
-    drawEmbers(nctx, P);
+    nctx.clearRect(0,0,PW,PH);
 
-    canvas.style.left = (petX - W*SCALE/2) + "px";
-    canvas.style.top  = (petY - H*SCALE + yOff*SCALE) + "px";
+    /* evolving: white flash + expanding ring before the reveal */
+    if (evolving) {
+      var cx = PW/2, cy = PH/2;
+      nctx.save();
+      nctx.globalAlpha = Math.min(1, evolveT*2);
+      nctx.fillStyle = "#fff4d0";
+      nctx.beginPath(); nctx.arc(cx, cy, 6 + evolveT*40, 0, Math.PI*2); nctx.fill();
+      nctx.globalAlpha = (1-evolveT);
+      nctx.strokeStyle = "#ffd24a"; nctx.lineWidth = 2;
+      nctx.beginPath(); nctx.arc(cx, cy, evolveT*46, 0, Math.PI*2); nctx.stroke();
+      nctx.restore();
+    } else {
+      var ox = Math.round((PW - sw)/2), oy = PH - sh;
+      pxEllipse(nctx, PW/2, PH-2, isPrime?27:22, 2, "rgba(0,0,0,0.5)");
+      nctx.save();
+      if (P.view === "side" && facing > 0) { nctx.translate(PW, 0); nctx.scale(-1, 1); ox = PW - ox - sw; }
+      nctx.drawImage(srcCanvas, ox, oy);
+      nctx.restore();
+    }
+    drawEmbers(nctx, P, PW);
+
+    var sc = settings.scale;
+    var dispW = (isPrime?PW:BW) * sc, dispH = (isPrime?PH:BH) * sc;
+    canvas.style.left = (petX - dispW/2) + "px";
+    canvas.style.top  = (petY - dispH + yOff*sc) + "px";
   }
   requestAnimationFrame(tick);
 })();
