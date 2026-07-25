@@ -62,6 +62,7 @@ function finalizeOutput(output, details) {
     receipts: details.receipts,
     truncated: output.truncated,
     timedOut: Boolean(details.timedOut),
+    cancelled: Boolean(details.cancelled),
     ...(error ? { error } : {})
   };
 }
@@ -72,6 +73,14 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
   const output = { parts: [], bytes: 0, truncated: false };
   const receipts = [];
   let toolCallsMade = 0;
+  if (context?.__abortSignal?.aborted) {
+    return finalizeOutput(output, {
+      toolCallsMade,
+      receipts,
+      cancelled: true,
+      error: "execute_code cancelled before worker dispatch"
+    });
+  }
 
   return new Promise((resolve) => {
     const worker = new Worker(WORKER_URL, {
@@ -87,11 +96,20 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
       }
     });
     let finalizing = false;
+    const abortSignal = context?.__abortSignal;
+    const onAbort = () => {
+      void finish({
+        timedOut: false,
+        cancelled: true,
+        error: "execute_code cancelled because the turn ended"
+      });
+    };
 
     const finish = async (details) => {
       if (finalizing) return;
       finalizing = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener?.("abort", onAbort);
       await worker.terminate().catch(() => {});
       resolve(finalizeOutput(output, { toolCallsMade, receipts, ...details }));
     };
@@ -99,6 +117,8 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
     const timer = setTimeout(() => {
       void finish({ timedOut: true, error: `execute_code timed out after ${timeoutMs}ms` });
     }, timeoutMs);
+    abortSignal?.addEventListener?.("abort", onAbort, { once: true });
+    if (abortSignal?.aborted) onAbort();
 
     worker.on("message", async (message) => {
       if (finalizing || !message || typeof message !== "object") return;

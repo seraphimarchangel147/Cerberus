@@ -2,6 +2,15 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - End-to-end tool cancellation rail (Codex)
+
+- Added abort checks before preflight, security hooks, approvals, checkpoints, and handler dispatch so a cancelled turn cannot start new work.
+- A cancellation observed after handler dispatch now returns `tool_execution_cancelled` with `changed:null` for mutations, retains checkpoint evidence, schedules workspace inspection, and never reports semantic success.
+- Read-only cancellation stays explicitly unchanged, while every pre-dispatch cancellation carries a receipt proving `dispatched:false`.
+- Resource-aware batches stop launching later waves after cancellation and mark unstarted entries as rejected instead of silently invoking them.
+- `execute_code` now terminates its worker on turn abort, reports cancellation separately from timeout, and preserves receipts already collected from nested calls.
+CANCELLATION RAIL COMPLETE
+
 ## 2026-07-25 - Canonical tool execution receipts (Codex)
 
 - Added one bounded receipt to every semantic tool envelope with an opaque operation id, real tool name, status/code, dispatch fact, change certainty, and wall-clock timing; argument values and secrets never enter the receipt.

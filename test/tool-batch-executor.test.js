@@ -221,3 +221,40 @@ test("the hard cap cannot be raised above four", async () => {
   assert.equal(TOOL_BATCH_MAX_CONCURRENCY, 4);
   assert.deepEqual(result.waves.map((wave) => wave.width), [4, 4, 1]);
 });
+
+test("an aborted batch never launches a later wave", async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "read_item",
+    sideEffects: false,
+    parameters: { type: "object", additionalProperties: false },
+    handler: async () => true
+  });
+  const controller = new AbortController();
+  const invoked = [];
+  const result = await executeToolBatch(
+    Array.from({ length: 5 }, (_, id) => ({
+      name: "read_item",
+      args: { id }
+    })),
+    {
+      toolRegistry: registry,
+      context: { __abortSignal: controller.signal },
+      maxConcurrency: 2,
+      invoke: async (_entry, index) => {
+        invoked.push(index);
+        if (index === 0) controller.abort();
+        return index;
+      }
+    }
+  );
+
+  assert.deepEqual(invoked, [0, 1]);
+  assert.equal(result.results[0].status, "fulfilled");
+  assert.equal(result.results[1].status, "fulfilled");
+  assert.ok(result.results.slice(2).every((entry) => (
+    entry.status === "rejected"
+    && entry.reason.code === "TOOL_BATCH_CANCELLED"
+    && entry.batch.skipped === true
+  )));
+});

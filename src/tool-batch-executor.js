@@ -26,6 +26,22 @@ export async function executeToolBatch(entries, {
   const results = Array(entries.length);
 
   for (const wave of waves) {
+    if (batchWasAborted(context)) {
+      for (const plan of wave.entries) {
+        results[plan.index] = {
+          status: "rejected",
+          reason: batchAbortError(),
+          batch: {
+            wave: wave.index,
+            parallel: false,
+            width: 0,
+            classification: plan.kind,
+            skipped: true
+          }
+        };
+      }
+      continue;
+    }
     const settled = await Promise.allSettled(
       wave.entries.map((plan) => invoke(plan.entry, plan.index))
     );
@@ -53,6 +69,21 @@ export async function executeToolBatch(entries, {
       entries: wave.entries.map((plan) => plan.index)
     }))
   };
+}
+
+function batchWasAborted(context) {
+  try {
+    return context?.__abortSignal?.aborted === true;
+  } catch {
+    return true;
+  }
+}
+
+function batchAbortError() {
+  const error = new Error("Tool batch cancelled before this wave was dispatched.");
+  error.name = "AbortError";
+  error.code = "TOOL_BATCH_CANCELLED";
+  return error;
 }
 
 function classifyEntry(entry, index, toolRegistry, context, barrierNames) {

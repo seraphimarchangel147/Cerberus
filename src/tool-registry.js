@@ -654,6 +654,18 @@ export class ToolRegistry {
         { tracking: null, markTracked: true }
       );
     }
+    if (tool && invocationWasAborted(context)) {
+      const outcome = await this._finalizeInvocation(
+        tool,
+        name,
+        args,
+        context,
+        cancelledToolEnvelope(tool, { dispatched: false }),
+        { tracking, markTracked: true }
+      );
+      if (ownsTracking) this._releaseFailureTracking(tracking);
+      return outcome;
+    }
     if (tool?.preflight) {
       try {
         const result = tool.preflight(args ?? {}, context);
@@ -1160,6 +1172,9 @@ export class ToolRegistry {
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
     }
+    if (invocationWasAborted(context)) {
+      return cancelledToolEnvelope(tool, { dispatched: false });
+    }
     if (tool.sideEffects && this.startupBarrier) {
       try {
         await this.startupBarrier;
@@ -1174,6 +1189,9 @@ export class ToolRegistry {
           }
         );
       }
+    }
+    if (invocationWasAborted(context)) {
+      return cancelledToolEnvelope(tool, { dispatched: false });
     }
     const projectScope = validateProjectScope(
       this.projects,
@@ -1287,6 +1305,9 @@ export class ToolRegistry {
         } else {
           console.warn(`[hooks] pre_tool_call registry failed open for read-only tool: ${detail}`);
         }
+      }
+      if (invocationWasAborted(context)) {
+        return cancelledToolEnvelope(tool, { dispatched: false });
       }
       if (hookDecision?.action === "block") {
         if (isTrustedCatastrophicBlock(hookDecision)) {
@@ -1497,6 +1518,24 @@ export class ToolRegistry {
       const receiptState = context?.[EXECUTION_RECEIPT_STATE];
       if (receiptState) receiptState.dispatched = true;
       const result = await tool.handler(args ?? {}, context);
+      if (invocationWasAborted(context) && tool.sideEffects !== false) {
+        const semantic = cancelledToolEnvelope(tool, {
+          dispatched: true,
+          evidence: checkpointEvidence(checkpointCapture)
+        });
+        this._scheduleTimelineCapture({
+          name,
+          context,
+          tool,
+          dispatched
+        });
+        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+          ...semantic,
+          dispatched,
+          durationMs: Date.now() - startedAt
+        });
+        return semantic;
+      }
       let semantic = await semanticToolResult(
         tool,
         result,
@@ -1523,6 +1562,12 @@ export class ToolRegistry {
           );
         }
       }
+      if (invocationWasAborted(context) && tool.sideEffects !== false) {
+        semantic = cancelledToolEnvelope(tool, {
+          dispatched: true,
+          evidence: checkpointEvidence(checkpointCapture)
+        });
+      }
       if (semantic.ok && context?.__approval) {
         semantic.result = appendApprovalNote(semantic.result, context.__approval);
       }
@@ -1540,14 +1585,19 @@ export class ToolRegistry {
       return semantic;
     } catch (error) {
       const errorDetails = safeToolErrorDetails(error);
-      const semantic = semanticToolError(tool, errorDetails.message, {
-        code: errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
-          ? "checkpoint_target_ambiguous"
-          : "handler_error",
-        retryable: errorDetails.retryable,
-        changed: dispatched && tool?.sideEffects !== false ? null : false,
-        evidence: checkpointEvidence(checkpointCapture)
-      });
+      const semantic = invocationWasAborted(context)
+        ? cancelledToolEnvelope(tool, {
+            dispatched,
+            evidence: checkpointEvidence(checkpointCapture)
+          })
+        : semanticToolError(tool, errorDetails.message, {
+            code: errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
+              ? "checkpoint_target_ambiguous"
+              : "handler_error",
+            retryable: errorDetails.retryable,
+            changed: dispatched && tool?.sideEffects !== false ? null : false,
+            evidence: checkpointEvidence(checkpointCapture)
+          });
       this._scheduleTimelineCapture({
         name,
         context,
@@ -2818,6 +2868,37 @@ function checkpointEvidence(capture) {
     .map((checkpoint) => String(checkpoint?.id ?? "").trim())
     .filter(Boolean)
     .map((id) => `checkpoint:${id}`);
+}
+
+function invocationWasAborted(context) {
+  try {
+    return context?.__abortSignal?.aborted === true;
+  } catch {
+    return true;
+  }
+}
+
+function cancelledToolEnvelope(tool, {
+  dispatched,
+  evidence = []
+} = {}) {
+  const uncertainChange = dispatched === true && tool?.sideEffects !== false;
+  return semanticToolError(
+    tool,
+    dispatched
+      ? "Turn ended while the tool handler was running; completion is uncertain."
+      : "Turn ended before tool dispatch.",
+    {
+      code: dispatched ? "tool_execution_cancelled" : "tool_dispatch_cancelled",
+      status: dispatched ? "failed" : "blocked",
+      retryable: false,
+      changed: uncertainChange ? null : false,
+      evidence,
+      nextSteps: uncertainChange
+        ? ["Inspect the target state before retrying this operation."]
+        : []
+    }
+  );
 }
 
 function classifyLegacyToolFailure(value) {
