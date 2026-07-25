@@ -5255,6 +5255,11 @@ Tools available to you (call them when useful):
 - job_status(jobId) / job_wait(jobId, timeoutMs?) - inspect or briefly wait for durable background work
 - job_collect(jobId, offset?, maxChars?) - collect an inline result or a bounded chunk from a large durable result
 - job_cancel(jobId) - request cancellation of queued or running background work
+- code_read(path, offset?, limit?) / code_search(pattern, dir?, glob?) - inspect source and obtain full SHA-256 content tags before editing
+- code_edit(path, tag, edits, summary?) - apply line-anchored edits only against the exact version read; syntax-invalid or stale candidates leave the file untouched
+- code_write(path, content, expectedTag?, summary?) - atomically create a file, or replace an existing file only with its latest SHA-256 expectedTag
+- code_lint(path?) / code_test(file?) - syntax-check source or run the isolated test lane
+- code_shell(command, cwd?) - run a bounded shell command through the normal approval, secret, project, and catastrophic-policy gates
 - browser_open(url?) / browser_navigate(url) - open or navigate an isolated semantic browser; domain access requires approval
 - browser_inspect(query?, maxNodes?) - read a compact untrusted page snapshot with generation-scoped element refs
 - browser_activate(ref, submit?) - activate an element; navigation or submission requires approval
@@ -5295,6 +5300,7 @@ Guidelines:
 - Use list_skill_revisions before rollback_skill. A rollback only accepts the current head revision and is confirmation-gated, so refresh history instead of guessing an id.
 - Call inspect_skill_capabilities before running an imported or uncertain skill; if it reports a partial or text-only scope, do not assume omitted tools are available.
 - Use checkpoints as the fast pre-mutation safety gate. Use timeline_preview before any slower post-mutation timeline recovery.
+- Read before editing. Reuse a code_read/code_search tag only for the exact file version it describes; after any successful write, use the returned tag or read again.
 
 The latest user message may begin with a [context] block assembled by the runtime (scrutiny decision, memory hits). Treat it as trusted background — the user did not type it.`;
 }

@@ -848,3 +848,14 @@ HERMES MEMORY AND SKILLS DEEP DIVE COMPLETE
 - Made normalization contracts explicit where tools intentionally clamp permissive input, and updated legacy test doubles to declare their accepted fixture arguments instead of relying on implicit open inputs.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1634/1635 tests with zero failures and one intentional Windows permission-mode skip.
 TOOL CONTRACT V2 COMPLETE
+
+## 2026-07-25 - Unified Tool Kernel: transactional code edits (Codex)
+
+- Replaced collision-prone four-hex edit tags with exact-byte full SHA-256 digests across reads, searches, edits, and whole-file writes.
+- Required compare-and-swap `expectedTag` authority for every existing-file `code_write`; blind overwrites, stale edits, and create races now fail without replacing the winner.
+- Syntax-checks JavaScript candidates in private temporary storage before commit, so invalid source neither replaces an existing file nor creates a new one.
+- Uses the shared atomic text writer for exact replacement, preserves existing file modes, rechecks live content after asynchronous validation, and verifies the committed digest.
+- Returns previous and committed digest receipts, rejects symbolic-link and non-regular targets, and documents all code tools plus read-before-edit discipline in the static system prompt.
+- Added race, collision-strength, stale-write, syntax rollback, writer failure, schema, mode, LSP, project-isolation, and both-policy regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1642/1643 tests with zero failures and one intentional Windows permission-mode skip.
+TRANSACTIONAL CODE EDITS COMPLETE

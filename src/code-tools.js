@@ -1,6 +1,6 @@
 // Inline IDE lane for OpenAGI (Azazel) — "hashline-lite".
 // Inspired by oh-my-pi's hashline editing + the zerohermes code_intel lane:
-//   * code_read / code_search mint a 4-hex content-hash TAG per file
+//   * code_read / code_search mint a full SHA-256 content tag per file
 //   * code_edit applies LINE-anchored range edits, but only if the caller's
 //     tag still matches the live file — stale anchors are REJECTED before
 //     they can corrupt code (no string-match "not found" loops, no blind writes)
@@ -29,6 +29,7 @@ import {
   filterNewDiagnostics,
   formatLspDiagnostics
 } from "./lsp-client.js";
+import { writeTextAtomic } from "./file-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "..");
@@ -40,7 +41,7 @@ const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
 
 // ── tags ─────────────────────────────────────────────────────────────
 export function mintTag(content) {
-  return createHash("sha256").update(String(content).replace(/\r\n/g, "\n")).digest("hex").slice(0, 4);
+  return createHash("sha256").update(String(content), "utf8").digest("hex");
 }
 
 // ── path guard ───────────────────────────────────────────────────────
@@ -516,6 +517,86 @@ async function collectNewLspDiagnostics(lspClient, filePath, baseline, syntaxCle
   }
 }
 
+function readTextFileState(filePath) {
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        exists: false,
+        content: null,
+        tag: null,
+        mode: 0o644
+      };
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    throw new Error(`Atomic code mutation refuses a symbolic-link target: ${filePath}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`Code mutation requires a regular file target: ${filePath}`);
+  }
+  const content = fs.readFileSync(filePath, "utf8");
+  return {
+    exists: true,
+    content,
+    tag: mintTag(content),
+    mode: stat.mode & 0o777
+  };
+}
+
+function assertUnchangedTextState(filePath, expected, observed) {
+  if (expected.exists !== observed.exists) {
+    throw new Error(
+      `Stale write: ${filePath} ${expected.exists ? "was removed" : "was created"} before commit. ` +
+      "Re-read the target and retry."
+    );
+  }
+  if (expected.exists && expected.tag !== observed.tag) {
+    throw new Error(
+      `Stale write: file is now #${observed.tag}, expected #${expected.tag}. ` +
+      "Re-read the file and retry."
+    );
+  }
+}
+
+function commitAtomicText(filePath, content, expectedState, atomicWriter) {
+  const observed = readTextFileState(filePath);
+  assertUnchangedTextState(filePath, expectedState, observed);
+  atomicWriter(filePath, content, observed.exists ? observed.mode : expectedState.mode);
+  const committed = readTextFileState(filePath);
+  const intendedTag = mintTag(content);
+  if (!committed.exists || committed.tag !== intendedTag) {
+    throw new Error(`Atomic write verification failed for ${filePath}.`);
+  }
+  return committed;
+}
+
+async function validateCandidateSyntax(content, filePath) {
+  if (!filePath.endsWith(".js") && !filePath.endsWith(".mjs")) return null;
+  const candidateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-code-candidate-"));
+  const candidatePath = path.join(candidateDir, "candidate.mjs");
+  try {
+    writeTextAtomic(candidatePath, content, 0o600);
+    const result = await run(process.execPath, ["--check", candidatePath]);
+    if (!result.ok) {
+      const detail = (result.stderr || result.stdout || "syntax error").trim();
+      throw new Error(
+        `Syntax validation failed for ${filePath}; no file was changed. ${detail}`.slice(0, MAX_OUTPUT)
+      );
+    }
+    return "ok";
+  } finally {
+    try {
+      fs.rmSync(candidateDir, { recursive: true, force: true });
+    } catch {
+      // The private candidate contains no committed state; temp cleanup is best effort.
+    }
+  }
+}
+
 export function registerCodeTools(registry, runtime, options = {}) {
   const safetyOptions = {
     dataDir: runtime?.secrets?.dataDir
@@ -526,9 +607,10 @@ export function registerCodeTools(registry, runtime, options = {}) {
   const lspClient = options.lspClient
     ?? runtime?.lspClient
     ?? createLspClient({ dataDir: safetyOptions.dataDir });
+  const atomicWriter = options.writeTextAtomic ?? writeTextAtomic;
   registry.register({
     name: "code_read",
-    description: "Read a file with line numbers. Returns a 4-hex content tag — REQUIRED by code_edit to prove you saw the current version. Re-read after any edit to get the fresh tag.",
+    description: "Read a file with line numbers. Returns a full SHA-256 content tag required by code_edit and by code_write when overwriting an existing file. Re-read after any edit to get the fresh tag.",
     sideEffects: false,
     parameters: {
       type: "object",
@@ -571,7 +653,7 @@ export function registerCodeTools(registry, runtime, options = {}) {
 
   registry.register({
     name: "code_search",
-    description: "Regex search across files (like ripgrep). Returns matches with line numbers plus each matching file's current 4-hex tag (usable by code_edit).",
+    description: "Regex search across files (like ripgrep). Returns matches with line numbers plus each matching file's full SHA-256 tag for compare-and-swap edits.",
     sideEffects: false,
     parameters: {
       type: "object",
@@ -625,12 +707,16 @@ export function registerCodeTools(registry, runtime, options = {}) {
 
   registry.register({
     name: "code_edit",
-    description: "Line-anchored file edit (hashline-lite). Provide the file's 4-hex tag from your latest code_read/code_search — if the file changed since, the edit is REJECTED (stale anchor) and you must re-read. Each edit replaces lines start..end (inclusive, 1-based) with new text. Edits are applied bottom-up so line numbers all refer to the version you read. To insert without deleting, set end = start-1.",
+    description: "Transactional line-anchored file edit. Provide the file's full SHA-256 tag from your latest code_read/code_search. The candidate is syntax-checked before an atomic compare-and-swap commit; stale content leaves the file untouched. Each edit replaces lines start..end (inclusive, 1-based) with new text. Edits are applied bottom-up so line numbers all refer to the version you read. To insert without deleting, set end = start-1.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string" },
-        tag: { type: "string", description: "4-hex tag from code_read/code_search." },
+        tag: {
+          type: "string",
+          pattern: "^[a-fA-F0-9]{64}$",
+          description: "Full SHA-256 tag from code_read/code_search."
+        },
         edits: {
           type: "array",
           minItems: 1,
@@ -670,8 +756,10 @@ export function registerCodeTools(registry, runtime, options = {}) {
         options.beforeFsOperation,
         "edit-read"
       );
-      const content = fs.readFileSync(abs, "utf8");
-      const liveTag = mintTag(content);
+      const initialState = readTextFileState(abs);
+      if (!initialState.exists) throw new Error(`Cannot edit a missing file: ${abs}`);
+      const content = initialState.content;
+      const liveTag = initialState.tag;
       if (liveTag !== String(args.tag).toLowerCase()) {
         throw new Error(`Stale anchor: file is now #${liveTag}, you provided #${args.tag}. Re-read the file and retry with fresh line numbers.`);
       }
@@ -694,19 +782,15 @@ export function registerCodeTools(registry, runtime, options = {}) {
       }
       const next = lines.join("\n");
       const lspBaseline = await captureLspBaseline(lspClient, abs);
+      const lint = await validateCandidateSyntax(next, abs);
       revalidateBeforeFsOperation(
         abs,
         scope.safetyOptions,
         options.beforeFsOperation,
         "edit-write"
       );
-      fs.writeFileSync(abs, next, "utf8");
-      const newTag = mintTag(next);
-      let lint = null;
-      if (abs.endsWith(".js") || abs.endsWith(".mjs")) {
-        const r = await run(process.execPath, ["--check", abs]);
-        lint = r.ok ? "ok" : (r.stderr || "syntax error");
-      }
+      const committed = commitAtomicText(abs, next, initialState, atomicWriter);
+      const newTag = committed.tag;
       const lspDiagnostics = await collectNewLspDiagnostics(
         lspClient,
         abs,
@@ -717,6 +801,8 @@ export function registerCodeTools(registry, runtime, options = {}) {
       return {
         path: abs,
         tag: newTag,
+        previousTag: initialState.tag,
+        atomic: true,
         totalLines: lines.length,
         lint,
         lsp_diagnostics: lspDiagnostics
@@ -726,12 +812,17 @@ export function registerCodeTools(registry, runtime, options = {}) {
 
   registry.register({
     name: "code_write",
-    description: "Create or overwrite a whole file inside the current project workspace. For existing files prefer code_edit (anchored, safer). Runs the homoglyph guard and node --check on .js files.",
+    description: "Transactionally create or replace a whole file inside the current project workspace. New files require no expectedTag. Existing files require the full SHA-256 expectedTag from code_read/code_search; blind or stale overwrites are rejected. JavaScript candidates are syntax-checked before an atomic commit.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string" },
         content: { type: "string" },
+        expectedTag: {
+          type: "string",
+          pattern: "^[a-fA-F0-9]{64}$",
+          description: "Required full SHA-256 tag when the target already exists."
+        },
         summary: { type: "string", description: "One-line changelog summary." }
       },
       required: ["path", "content"],
@@ -754,20 +845,28 @@ export function registerCodeTools(registry, runtime, options = {}) {
       const ghost = scanGhosts(args.content);
       if (ghost) throw new Error(`Rejected: suspicious character ${ghost.codePoint} at line ${ghost.line} (homoglyph/zero-width).`);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      const existed = fs.existsSync(abs);
+      const initialState = readTextFileState(abs);
+      const existed = initialState.exists;
+      if (existed && !args.expectedTag) {
+        throw new Error(
+          `Blind overwrite rejected for ${abs}. Read the file and retry with expectedTag #${initialState.tag}.`
+        );
+      }
+      if (existed && initialState.tag !== String(args.expectedTag).toLowerCase()) {
+        throw new Error(
+          `Stale write: file is now #${initialState.tag}, you provided #${args.expectedTag}. ` +
+          "Re-read the file and retry."
+        );
+      }
       const lspBaseline = await captureLspBaseline(lspClient, abs);
+      const lint = await validateCandidateSyntax(args.content, abs);
       revalidateBeforeFsOperation(
         abs,
         scope.safetyOptions,
         options.beforeFsOperation,
         "write"
       );
-      fs.writeFileSync(abs, args.content, "utf8");
-      let lint = null;
-      if (abs.endsWith(".js") || abs.endsWith(".mjs")) {
-        const r = await run(process.execPath, ["--check", abs]);
-        lint = r.ok ? "ok" : (r.stderr || "syntax error");
-      }
+      const committed = commitAtomicText(abs, args.content, initialState, atomicWriter);
       const lspDiagnostics = await collectNewLspDiagnostics(
         lspClient,
         abs,
@@ -777,7 +876,9 @@ export function registerCodeTools(registry, runtime, options = {}) {
       appendChangelog(existed ? "rewrite" : "create", abs, args.summary);
       return {
         path: abs,
-        tag: mintTag(args.content),
+        tag: committed.tag,
+        previousTag: initialState.tag,
+        atomic: true,
         created: !existed,
         lint,
         lsp_diagnostics: lspDiagnostics
