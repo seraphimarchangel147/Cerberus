@@ -986,3 +986,7 @@ TRANSACTIONAL CODE EDITS COMPLETE
 - Added scheduler, cap, conflict, rejection, provider-ordering, mutation-barrier, duplicate-security, approval-suspension, and both-policy regressions.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1652/1653 tests with zero failures and one intentional Windows permission-mode skip.
 RESOURCE AWARE TOOL BATCHING COMPLETE
+
+## 2026-07-25 — Agent draft-action log (Azazel)
+
+- 2026-07-25T13:00:23.438Z · **azazel** · create `drafts/dashboard-loop-verification-checklist.md` — Draft checklist for dashboard + loop verification (plan-action draft only)
