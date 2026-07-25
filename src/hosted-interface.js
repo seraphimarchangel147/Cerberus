@@ -5380,6 +5380,8 @@ const HUD_ICONS = {
   health: '<path d="M20.8 6.6a5.5 5.5 0 0 0-8.8-1.6A5.5 5.5 0 0 0 3.2 6.6c-1.6 3.7 2.2 7.4 8.8 12.4 6.6-5 10.4-8.7 8.8-12.4z"/>',
   scrutiny: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
   setup: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
+  update: '<path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
+  restart: '<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v5h-5"/>',
 };
 function hudIcon(name) {
   const body = HUD_ICONS[name] || HUD_ICONS.chat;
@@ -5569,6 +5571,23 @@ function renderApp() {
     }
     #setupBtn:hover { color: var(--text); border-color: var(--accent); }
 
+    /* Gateway controls pinned in the rail footer — always reachable, not
+       buried in the Models tab. Restart is destructive (drops in-flight
+       turns), so it carries the accent border as a visual warning. */
+    .railnav .rail-gw { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
+    .railnav .rail-gw button {
+      display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%;
+      background: transparent; border: 1px solid var(--line); color: var(--muted);
+      padding: 7px 6px; border-radius: var(--radius-sm); cursor: pointer;
+      font-size: 12px; font-family: inherit; white-space: nowrap;
+    }
+    .railnav .rail-gw button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+    .railnav .rail-gw button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .railnav .rail-gw button.busy { opacity: 0.6; pointer-events: none; }
+    .railnav .rail-gw #railRestart:hover:not(:disabled) { color: var(--accent); }
+    .rail-gw-status { font-size: 11px; color: var(--muted); line-height: 1.4; margin-bottom: 8px; min-height: 0; word-break: break-word; }
+    .rail-gw-status:empty { display: none; }
+
     /* Content column: slim topbar (live status) + the working body. */
     .content { display: grid; grid-template-rows: 44px 1fr; min-width: 0; min-height: 0; }
     .topbar {
@@ -5585,6 +5604,10 @@ function renderApp() {
       :root { --rail-w: 60px; }
       .railnav .brand-name, .nav-group-label, .railnav nav button span:not(.nav-ico), #setupBtn span:not(.nav-ico) { display: none; }
       .railnav nav button { justify-content: center; }
+      /* Collapsed rail: gateway controls stack to icon-only, one per row. */
+      .railnav .rail-gw { grid-template-columns: 1fr; }
+      .railnav .rail-gw button span:not(.nav-ico) { display: none; }
+      .rail-gw-status { display: none; }
     }
     .sidebar {
       background: var(--panel);
@@ -6203,6 +6226,11 @@ function renderApp() {
       <button data-tab="scrutiny" title="Directional Adaptive Scrutiny — the 7-axis scorer's calibration + recent verdicts."><span class="nav-ico">${hudIcon("scrutiny")}</span><span>Scrutiny</span></button>
     </nav>
     <div class="rail-footer">
+      <div class="rail-gw">
+        <button id="railUpdate" title="Pull the latest gateway code (git). Requires a restart to take effect."><span class="nav-ico">${hudIcon("update")}</span><span>Update</span></button>
+        <button id="railRestart" title="Restart the gateway process. In-flight turns are dropped."><span class="nav-ico">${hudIcon("restart")}</span><span>Restart</span></button>
+      </div>
+      <div class="rail-gw-status" id="railGwResult"></div>
       <button id="setupBtn" title="Re-run the setup wizard or edit credentials"><span class="nav-ico">${hudIcon("setup")}</span><span>Setup</span></button>
     </div>
   </aside>
@@ -6257,6 +6285,72 @@ document.querySelectorAll("nav button[data-tab]").forEach((btn) => {
 document.getElementById("setupBtn")?.addEventListener("click", () => {
   window.location.href = "/setup";
 });
+
+// ── Rail-footer gateway controls ──────────────────────────────────────
+// Same /gateway/* routes the Models tab uses, surfaced globally so the
+// operator never has to hunt for a restart. Restart stays disabled unless
+// the daemon reports a supervisor (OPENAGI_SUPERVISED=1) — without one,
+// exiting would stop the agent rather than cycle it.
+(() => {
+  const upd = document.getElementById("railUpdate");
+  const rst = document.getElementById("railRestart");
+  const out = document.getElementById("railGwResult");
+  if (!upd || !rst || !out) return;
+
+  const say = (msg) => { out.textContent = msg || ""; };
+  const busy = (btn, on) => { btn.classList.toggle("busy", Boolean(on)); };
+
+  // Gate Restart on supervisor presence, and keep the reason discoverable.
+  fetchJson("/gateway/status", { projectScoped: false }).then((s) => {
+    if (!s || s.supervised) return;
+    rst.disabled = true;
+    rst.title = "No process supervisor detected (OPENAGI_SUPERVISED=1). Exiting would stop the agent, not restart it.";
+  }).catch(() => { /* status unavailable — leave enabled, POST still guards */ });
+
+  upd.addEventListener("click", async () => {
+    busy(upd, true);
+    say("Pulling update…");
+    try {
+      const r = await postJson("/gateway/update", {});
+      say(r.updated
+        ? "Updated. Restart to run the new code."
+        : "Already up to date.");
+    } catch (e) {
+      say("Update failed: " + e.message);
+    } finally {
+      busy(upd, false);
+    }
+  });
+
+  rst.addEventListener("click", async () => {
+    if (!confirm("Restart the gateway? In-flight turns will be dropped.")) return;
+    busy(rst, true);
+    say("Restarting…");
+    try {
+      await postJson("/gateway/restart", {});
+      // The process exits mid-flight, so the socket drops by design. Poll
+      // the new one rather than treating the dropped request as a failure.
+      const waitForBoot = async (attempt) => {
+        if (attempt > 40) {
+          say("Gateway did not come back — check the service.");
+          busy(rst, false);
+          return;
+        }
+        try {
+          const s = await fetchJson("/gateway/status", { projectScoped: false });
+          say("Back up — pid " + s.pid + ".");
+          busy(rst, false);
+        } catch {
+          setTimeout(() => waitForBoot(attempt + 1), 500);
+        }
+      };
+      setTimeout(() => waitForBoot(0), 1200);
+    } catch (e) {
+      say("Restart refused: " + e.message);
+      busy(rst, false);
+    }
+  });
+})();
 
 // Tiny markdown renderer for chat replies. No backtick characters in this
 // function's source so it can live inside the dashboard's outer template

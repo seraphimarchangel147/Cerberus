@@ -990,3 +990,36 @@ RESOURCE AWARE TOOL BATCHING COMPLETE
 ## 2026-07-25 — Agent draft-action log (Azazel)
 
 - 2026-07-25T13:00:23.438Z · **azazel** · create `drafts/dashboard-loop-verification-checklist.md` — Draft checklist for dashboard + loop verification (plan-action draft only)
+
+- 2026-07-25T22:32:34.365Z · **azazel** · create `web/galactic-spiral.html` — Galactic spiral/vortex parametric particle effect — scalable canvas, DPR-aware, tab-hidden pause, reduced-motion fallback
+
+## 2026-07-25 - Rail-footer gateway controls: Update + Restart (Seraphim)
+
+Surfaced the gateway Update and Restart controls in the dashboard's left-rail
+footer (`src/hosted-interface.js`), next to Setup. Requested by the Creator.
+
+- **Problem.** The `/gateway/update` and `/gateway/restart` routes and their
+  handlers already existed, but the only UI reaching them lived inside the
+  Models tab (`gwUpdate` / `gwRestart`). An operator wanting a restart had to
+  know which tab hid it. Backend was complete; the affordance was not.
+- **Added `#railUpdate` / `#railRestart`** in `.rail-footer`, with a shared
+  `#railGwResult` status line that self-hides when empty. Two new HUD glyphs
+  (`update` download-tray, `restart` circular-arrow) so they are not another
+  copy of the Setup gear.
+- **Restart is gated on supervision.** On load the rail queries
+  `/gateway/status` and disables Restart when `supervised` is false, moving the
+  reason into the tooltip. Without a supervisor, exiting stops the agent rather
+  than cycling it. The POST route keeps its own 409 guard, so the UI gate is a
+  convenience, never the security boundary.
+- **Restart resolves by polling, not by the response.** The process exits
+  mid-request by design, so the socket drop is expected; the handler polls
+  `/gateway/status` (40 attempts, 500ms) and reports the new pid, instead of
+  reading the dropped request as a failure.
+- Confirm dialog retained on Restart (in-flight turns are dropped), busy-state
+  locking on both buttons, and a collapsed-rail (<=820px) rule that stacks them
+  icon-only and hides the status line.
+- Validation: `node --check` + module import clean; `OPENAGI_AUTO_APPROVE=0 npm
+  test` passes 1731/1731 with zero failures. Live daemon verified: buttons
+  render in served HTML, `/gateway/status` reports `supervised: true`, and
+  `POST /gateway/update` returns `already up to date` end-to-end.
+RAIL FOOTER GATEWAY CONTROLS COMPLETE

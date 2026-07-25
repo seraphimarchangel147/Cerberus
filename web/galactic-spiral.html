@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Galactic Spiral / Vortex Particles (no_050-inspired)</title>
+<!--
+  Galactic Spiral / Vortex — parametric-trig particle field.
+  Built for reuse as a scalable web-design effect:
+    * Fully self-contained (no deps), DPR-aware, resize-safe.
+    * Scales off min(viewport) so it holds composition at any size.
+    * Hardener additions over the reference version:
+        - pauses when the tab is hidden (saves battery / CPU)
+        - respects prefers-reduced-motion (renders one static frame)
+    * Tunables live in the CONFIG block below.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W, H, dpr, scale, cx, cy, t = 0;
+
+  // ---- CONFIG: tunable parameters (density / performance / look) ----
+  const N = 4200;          // particles
+  const C = 9;             // clusters
+  const FADE = 0.085;      // trail residual (0.05–0.15)
+  const SPEED = 1.0;       // overall time scale
+  const HUE = 190;         // base hue (190 = ice cyan; 265 = violet, 25 = ember)
+  // -------------------------------------------------------------------
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width  = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width  = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    scale = Math.min(W, H) / 520;
+    cx = W / 2;
+    cy = H / 2;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  function particle(i, time) {
+    const c = Math.floor(i * C / N);
+    const local = i % Math.floor(N / C);
+    const l = local / (N / C);
+
+    // cluster centers
+    const phiC = c * 2.39996 + 0.045 * time;
+    const cx0 = 135 * Math.cos(phiC) + 28 * Math.sin(0.13 * time + c);
+    const cy0 = 105 * Math.sin(phiC) + 22 * Math.cos(0.11 * time + c);
+
+    // spiral
+    const arms = 2 + (c % 3);
+    const k = 0.19 + 0.05 * Math.sin(c);
+    const phi = arms * Math.PI * 2 * l + k * 14 * l + (0.65 * time) / (0.35 + l);
+    let r = (10 + 38 * l) * (1 + 0.13 * Math.sin(3 * phi + 0.45 * time) + 0.07 * Math.cos(5 * phi));
+
+    let x = cx0 + r * Math.cos(phi) + 7 * Math.sin(2.3 * phi + time);
+    let y = cy0 + r * Math.sin(phi) + 7 * Math.cos(1.8 * phi + 0.85 * time);
+
+    // mild global rotation
+    const g = 0.04 * time;
+    const xr = x * Math.cos(g) - y * Math.sin(g);
+    const yr = x * Math.sin(g) + y * Math.cos(g);
+
+    // size / brightness (brighter cores)
+    const core = Math.exp(-r / 28);
+    const size = (0.9 + 1.6 * core) * scale;
+    const alpha = 0.35 + 0.65 * core;
+
+    return { x: cx + xr * scale, y: cy + yr * scale, size, alpha };
+  }
+
+  function draw(time) {
+    // residual trails
+    ctx.fillStyle = `rgba(0,0,0,${FADE})`;
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < N; i++) {
+      const p = particle(i, time);
+      // soft glow (outer) + bright core
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * 2.2, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${HUE + 5}, 45%, 75%, ${p.alpha * 0.18})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${HUE}, 30%, 92%, ${p.alpha})`;
+      ctx.fill();
+    }
+  }
+
+  let rafId = null;
+  function frame(now) {
+    t = (now / 1000) * SPEED;
+    draw(t);
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function start() { if (rafId === null) rafId = requestAnimationFrame(frame); }
+  function stop()  { if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; } }
+
+  // Pause when tab hidden — this effect is meant to sit behind real pages.
+  document.addEventListener('visibilitychange', () => {
+    document.hidden ? stop() : start();
+  });
+
+  // Respect reduced-motion: render a single composed frame and hold it.
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    draw(12.5); // a mid-evolution timestamp with good arm separation
+  } else {
+    start();
+  }
+})();
+</script>
+</body>
+</html>
