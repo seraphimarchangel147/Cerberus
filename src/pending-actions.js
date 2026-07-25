@@ -209,7 +209,8 @@ export class PendingActionStore {
     deciderDisplayName,
     result,
     error,
-    outcome
+    outcome,
+    receipt
   }) {
     const action = this.actions.get(id);
     if (!action) return null;
@@ -229,6 +230,7 @@ export class PendingActionStore {
     if (result !== undefined) next.result = result;
     if (error !== undefined) next.error = error;
     if (outcome !== undefined) next.outcome = outcome;
+    if (receipt !== undefined) next.receipt = receipt;
     if (decision === "deny" || result !== undefined || error !== undefined) {
       next.completedAt = nowIso();
     }
@@ -245,7 +247,8 @@ export class PendingActionStore {
       deciderDisplayName: next.deciderDisplayName,
       result,
       error,
-      outcome
+      outcome,
+      receipt
     });
     next._resolveDecision?.({
       decision: next.status === "approved" ? "approve" : "deny",
@@ -255,7 +258,8 @@ export class PendingActionStore {
       completed: Boolean(next.completedAt),
       result: next.result,
       error: next.error,
-      ...(next.outcome ? { outcome: next.outcome } : {})
+      ...(next.outcome ? { outcome: next.outcome } : {}),
+      ...(next.receipt ? { receipt: next.receipt } : {})
     });
     if (next.completedAt) {
       next._resolveCompletion?.(next.status === "approved" && !next.error
@@ -289,7 +293,8 @@ export class PendingActionStore {
         completed: Boolean(action.completedAt),
         result: action.result,
         error: action.error,
-        ...(action.outcome ? { outcome: action.outcome } : {})
+        ...(action.outcome ? { outcome: action.outcome } : {}),
+        ...(action.receipt ? { receipt: action.receipt } : {})
       });
     }
     attachRuntimeState(action);
@@ -335,7 +340,7 @@ export class PendingActionStore {
     return this.actions.get(id)?._waiting === true;
   }
 
-  complete(id, { result, error, outcome } = {}) {
+  complete(id, { result, error, outcome, receipt } = {}) {
     const action = this.actions.get(id);
     if (!action || action.status !== "approved" || action.completedAt) return action ?? null;
     const next = inheritRuntimeState(action, {
@@ -343,6 +348,7 @@ export class PendingActionStore {
       result: result ?? null,
       error: error ?? null,
       outcome: outcome ?? null,
+      ...(receipt ? { receipt } : {}),
       completedAt: nowIso()
     });
     this._assertTransitionCapacity(next);
@@ -352,7 +358,8 @@ export class PendingActionStore {
       completedAt: next.completedAt,
       result: next.result,
       error: next.error,
-      outcome: next.outcome
+      outcome: next.outcome,
+      receipt: next.receipt ?? null
     });
     next._resolveCompletion?.(semanticCompletion(!next.error, next));
     return next;
@@ -472,7 +479,8 @@ export class PendingActionStore {
         deciderDisplayName: event.deciderDisplayName ?? null,
         result: event.result !== undefined ? event.result : action.result,
         error: event.error !== undefined ? event.error : action.error,
-        outcome: event.outcome !== undefined ? event.outcome : action.outcome
+        outcome: event.outcome !== undefined ? event.outcome : action.outcome,
+        receipt: event.receipt !== undefined ? event.receipt : action.receipt
       }, this.maxActionBytes);
       if (next) this.actions.set(event.id, next);
       return;
@@ -488,7 +496,8 @@ export class PendingActionStore {
         completedAt: event.completedAt,
         result: event.result ?? null,
         error: event.error ?? null,
-        outcome: event.outcome ?? null
+        outcome: event.outcome ?? null,
+        receipt: event.receipt ?? null
       }, this.maxActionBytes);
       if (next) this.actions.set(event.id, next);
     }
@@ -506,6 +515,7 @@ export class PendingActionStore {
         result: null,
         error: interruptedApprovalError(),
         outcome: interruptedApprovalOutcome(),
+        receipt: null,
         completedAt: nowIso()
       });
       this._assertTransitionCapacity(next);
@@ -515,7 +525,8 @@ export class PendingActionStore {
         completedAt: next.completedAt,
         result: next.result,
         error: next.error,
-        outcome: next.outcome
+        outcome: next.outcome,
+        receipt: next.receipt
       });
     }
   }
@@ -795,7 +806,11 @@ function normalizePersistedAction(value, maxBytes) {
   } catch {
     return null;
   }
+  const receiptValue = value.receipt ?? null;
+  const receipt = normalizeExecutionReceipt(receiptValue, value.toolName);
   if (
+    (receiptValue !== null && receipt === null)
+    ||
     !validNullableTimestamp(decidedAt)
     || !validNullableTimestamp(completedAt)
     || !timestampsInOrder(value.createdAt, decidedAt, completedAt)
@@ -811,6 +826,7 @@ function normalizePersistedAction(value, maxBytes) {
         || value.result !== null
         || value.error !== null
         || value.outcome !== null
+        || receiptValue !== null
       )
     )
     || (
@@ -824,6 +840,7 @@ function normalizePersistedAction(value, maxBytes) {
             value.result !== null
             || value.error !== null
             || value.outcome !== null
+            || receiptValue !== null
           )
         )
       )
@@ -860,7 +877,42 @@ function normalizePersistedAction(value, maxBytes) {
     deciderDisplayName: value.deciderDisplayName,
     result: value.result,
     error: value.error,
-    outcome: value.outcome
+    outcome: value.outcome,
+    ...(receipt ? { receipt } : {})
+  };
+}
+
+function normalizeExecutionReceipt(value, toolName) {
+  if (value === null || value === undefined) return null;
+  if (
+    !isPlainObject(value)
+    || !validBoundedString(value.id, 200, { allowEmpty: false })
+    || !/^[A-Za-z0-9._:-]+$/.test(value.id)
+    || value.tool !== toolName
+    || !validBoundedString(value.status, 32, { allowEmpty: false })
+    || !/^[a-z][a-z0-9_-]*$/.test(value.status)
+    || !validBoundedString(value.code, 80, { allowEmpty: false })
+    || !/^[A-Za-z][A-Za-z0-9_.-]*$/.test(value.code)
+    || typeof value.dispatched !== "boolean"
+    || ![true, false, null].includes(value.changed)
+    || !validTimestamp(value.startedAt)
+    || !validTimestamp(value.finishedAt)
+    || !Number.isSafeInteger(value.durationMs)
+    || value.durationMs < 0
+    || Date.parse(value.finishedAt) < Date.parse(value.startedAt)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    tool: value.tool,
+    status: value.status,
+    code: value.code,
+    dispatched: value.dispatched,
+    changed: value.changed,
+    startedAt: value.startedAt,
+    finishedAt: value.finishedAt,
+    durationMs: value.durationMs
   };
 }
 
@@ -1038,7 +1090,8 @@ function decisionSnapshot(action) {
     completed: Boolean(action.completedAt),
     result: action.result,
     error: action.error,
-    ...(action.outcome ? { outcome: action.outcome } : {})
+    ...(action.outcome ? { outcome: action.outcome } : {}),
+    ...(action.receipt ? { receipt: action.receipt } : {})
   };
 }
 
@@ -1070,6 +1123,9 @@ function semanticCompletion(ok, action) {
     : { ok: false, error: action.error ?? "denied" };
   if (action.outcome && typeof action.outcome === "object") {
     completion.outcome = action.outcome;
+  }
+  if (action.receipt && typeof action.receipt === "object") {
+    completion.receipt = action.receipt;
   }
   return completion;
 }
@@ -1187,7 +1243,8 @@ export async function approvePendingAction(runtime, id, decision = {}) {
   store.complete?.(id, {
     result: invokeResult.ok ? invokeResult.result : null,
     error: invokeResult.ok ? null : invokeResult.error,
-    outcome: invokeResult.outcome ?? null
+    outcome: invokeResult.outcome ?? null,
+    receipt: invokeResult.receipt ?? null
   });
   return invokeResult;
 }

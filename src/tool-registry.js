@@ -48,6 +48,7 @@ const INTERNAL_INVOCATION = Symbol("internal-invocation");
 const EXACT_CATASTROPHIC_APPROVAL = Symbol("exact-catastrophic-approval");
 const EXACT_MANUAL_APPROVAL = Symbol("exact-manual-approval");
 const SEMANTIC_OUTCOME_TRACKED = Symbol("semantic-outcome-tracked");
+const EXECUTION_RECEIPT_STATE = Symbol("execution-receipt-state");
 const REGISTRY_FAILURE_STATE = new WeakMap();
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
@@ -520,6 +521,13 @@ export class ToolRegistry {
   // agent is doing in real time. context.__onToolEvent is advisory and
   // best-effort — a throwing observer must never break a tool call.
   async invoke(name, args, context = {}, internalToken = null) {
+    const internal = normalizeInternalInvocation(internalToken);
+    const receiptState = internal.failureTracking?.receiptState
+      ?? createExecutionReceiptState(name);
+    context = {
+      ...(context ?? {}),
+      [EXECUTION_RECEIPT_STATE]: receiptState
+    };
     const tool = this.tools.get(name);
     try {
       const safeArgs = snapshotToolValue(args ?? {});
@@ -628,10 +636,13 @@ export class ToolRegistry {
       // the internal hook token so a bridge can never smuggle a prior pass.
       return this.invoke(targetName, targetArgs, context, null);
     }
-    const internal = normalizeInternalInvocation(internalToken);
     const inheritedTracking = internal.failureTracking;
     const tracking = inheritedTracking
       ?? this._beginFailureTracking(name, args, context, tool);
+    if (tracking?.reserved && !tracking.receiptState) {
+      receiptState.id = tracking.operationReceipt;
+      tracking.receiptState = receiptState;
+    }
     const ownsTracking = !inheritedTracking && tracking?.reserved === true;
     if (tracking?.blocked) {
       return this._finalizeInvocation(
@@ -712,6 +723,7 @@ export class ToolRegistry {
           ok: outcome.ok,
           error: outcome.ok ? null : (outcome.error ?? null),
           pending: Boolean(outcome.outcome?.status === "pending"),
+          receipt: outcome.receipt ?? null,
           outcome: outcome.outcome
             ? {
                 status: outcome.outcome.status,
@@ -737,12 +749,17 @@ export class ToolRegistry {
     { tracking = null, markTracked = true } = {}
   ) {
     if (value?.[SEMANTIC_OUTCOME_TRACKED]) return value;
-    const semantic = await ensureSemanticToolEnvelope(
+    let semantic = await ensureSemanticToolEnvelope(
       tool,
       value,
       args,
       context,
       classifyLegacyToolFailure(value)
+    );
+    semantic = attachExecutionReceipt(
+      semantic,
+      name,
+      context?.[EXECUTION_RECEIPT_STATE]
     );
     if (tracking?.reserved) {
       this._recordFailureOutcome(tracking, semantic);
@@ -1015,12 +1032,14 @@ export class ToolRegistry {
           ? {
               ok: false,
               error: decision.error,
-              ...(decision.outcome ? { outcome: decision.outcome } : {})
+              ...(decision.outcome ? { outcome: decision.outcome } : {}),
+              ...(decision.receipt ? { receipt: decision.receipt } : {})
             }
           : {
               ok: true,
               result: decision.result,
-              ...(decision.outcome ? { outcome: decision.outcome } : {})
+              ...(decision.outcome ? { outcome: decision.outcome } : {}),
+              ...(decision.receipt ? { receipt: decision.receipt } : {})
             };
       }
       if (
@@ -1096,7 +1115,8 @@ export class ToolRegistry {
       this.pendingActions.complete?.(action.id, {
         result: invokeResult.ok ? invokeResult.result : null,
         error: invokeResult.ok ? null : invokeResult.error,
-        outcome: invokeResult.outcome ?? null
+        outcome: invokeResult.outcome ?? null,
+        receipt: invokeResult.receipt ?? null
       });
       return invokeResult;
     }
@@ -1373,7 +1393,8 @@ export class ToolRegistry {
           decidedBy: "auto-approve",
           result: invokeResult.ok ? invokeResult.result : null,
           error: invokeResult.ok ? null : invokeResult.error,
-          outcome: invokeResult.outcome ?? null
+          outcome: invokeResult.outcome ?? null,
+          receipt: invokeResult.receipt ?? null
         });
         return invokeResult;
       }
@@ -1473,6 +1494,8 @@ export class ToolRegistry {
         );
       }
       dispatched = true;
+      const receiptState = context?.[EXECUTION_RECEIPT_STATE];
+      if (receiptState) receiptState.dispatched = true;
       const result = await tool.handler(args ?? {}, context);
       let semantic = await semanticToolResult(
         tool,
@@ -1649,6 +1672,57 @@ function createFailureScope({ turnKey = null, context = null } = {}) {
 
 function createOperationReceipt(scope, fingerprint) {
   return `${scope.operationNamespace}_${fingerprint.slice(0, 24)}`;
+}
+
+function createExecutionReceiptState(toolName) {
+  return Object.seal({
+    id: createId("receipt"),
+    tool: boundedReceiptText(toolName, "unknown_tool"),
+    startedAtMs: Date.now(),
+    dispatched: false
+  });
+}
+
+function attachExecutionReceipt(envelope, toolName, state) {
+  const safeState = state ?? createExecutionReceiptState(toolName);
+  if (
+    envelope?.receipt?.id === safeState.id
+    && envelope.receipt.tool === boundedReceiptText(toolName, safeState.tool ?? "unknown_tool")
+    && envelope.receipt.status === envelope?.outcome?.status
+    && envelope.receipt.code === envelope?.outcome?.code
+    && envelope.receipt.dispatched === (safeState.dispatched === true)
+  ) {
+    return envelope;
+  }
+  const finishedAtMs = Date.now();
+  const outcome = envelope?.outcome ?? {};
+  const receipt = Object.freeze({
+    id: boundedReceiptText(safeState.id, createId("receipt")),
+    tool: boundedReceiptText(toolName, safeState.tool ?? "unknown_tool"),
+    status: boundedReceiptText(outcome.status, envelope?.ok ? "succeeded" : "failed"),
+    code: boundedReceiptText(outcome.code, envelope?.ok ? "ok" : "tool_error"),
+    dispatched: safeState.dispatched === true,
+    changed: outcome.changed === true
+      ? true
+      : outcome.changed === false
+        ? false
+        : null,
+    startedAt: new Date(safeState.startedAtMs).toISOString(),
+    finishedAt: new Date(finishedAtMs).toISOString(),
+    durationMs: Math.max(0, finishedAtMs - safeState.startedAtMs)
+  });
+  return {
+    ...envelope,
+    receipt
+  };
+}
+
+function boundedReceiptText(value, fallback) {
+  const text = String(value ?? "").trim();
+  if (!text || text.length > 200 || !/^[A-Za-z0-9._:-]+$/u.test(text)) {
+    return fallback;
+  }
+  return text;
 }
 
 function scopeHasInFlight(scope) {

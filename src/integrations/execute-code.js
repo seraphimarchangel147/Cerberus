@@ -59,6 +59,7 @@ function finalizeOutput(output, details) {
   return {
     stdout,
     toolCallsMade: details.toolCallsMade,
+    receipts: details.receipts,
     truncated: output.truncated,
     timedOut: Boolean(details.timedOut),
     ...(error ? { error } : {})
@@ -69,6 +70,7 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
   const code = String(args.code ?? "");
   const timeoutMs = boundedTimeout(args.timeoutMs);
   const output = { parts: [], bytes: 0, truncated: false };
+  const receipts = [];
   let toolCallsMade = 0;
 
   return new Promise((resolve) => {
@@ -91,7 +93,7 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
       finalizing = true;
       clearTimeout(timer);
       await worker.terminate().catch(() => {});
-      resolve(finalizeOutput(output, { toolCallsMade, ...details }));
+      resolve(finalizeOutput(output, { toolCallsMade, receipts, ...details }));
     };
 
     const timer = setTimeout(() => {
@@ -122,6 +124,7 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
         toolCallsMade += 1;
         try {
           const outcome = await runtime.tools.invoke(name, message.args ?? {}, nestedToolContext(context));
+          if (outcome?.receipt) receipts.push(outcome.receipt);
           envelope = outcome.ok
             ? safeEnvelope({ ok: true, result: outcome.result ?? null })
             : safeEnvelope({ ok: false, error: outcome.error ?? `Tool ${name} failed` });

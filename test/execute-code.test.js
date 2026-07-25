@@ -53,6 +53,13 @@ test("execute_code reduces several code_read calls to only the printed summary",
 
   assert.equal(result.stdout, "3 files / 6 lines\n");
   assert.equal(result.toolCallsMade, 3);
+  assert.equal(result.receipts.length, 3);
+  assert.deepEqual(result.receipts.map((receipt) => receipt.tool), [
+    "code_read",
+    "code_read",
+    "code_read"
+  ]);
+  assert.ok(result.receipts.every((receipt) => receipt.dispatched === true));
   assert.equal(result.truncated, false);
   assert.equal(result.timedOut, false);
   assert.doesNotMatch(result.stdout, /private-/);

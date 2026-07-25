@@ -78,6 +78,37 @@ test("truncated tool output stays valid JSON and retains semantic receipts", (t)
   assert.ok(capped.output.length <= 240);
 });
 
+test("truncated tool output retains canonical dispatch identity", (t) => {
+  const store = makeStore(t);
+  const capped = capToolOutput({
+    body: "x".repeat(2000),
+    outcome: {
+      status: "failed",
+      code: "handler_error",
+      changed: null
+    },
+    receipt: {
+      id: "operation_0123456789abcdef_0123456789abcdef01234567",
+      tool: "code_write",
+      status: "failed",
+      code: "handler_error",
+      dispatched: true,
+      changed: null,
+      startedAt: "2026-07-25T00:00:00.000Z",
+      finishedAt: "2026-07-25T00:00:00.100Z",
+      durationMs: 100
+    }
+  }, {
+    maxChars: 240,
+    store
+  });
+
+  const visible = JSON.parse(capped.output);
+  assert.equal(visible.receipt.id, "operation_0123456789abcdef_0123456789abcdef01234567");
+  assert.equal(visible.receipt.dispatched, true);
+  assert.ok(capped.output.length <= 240);
+});
+
 test("unsafe tiny truncation budgets fail before dropping semantic receipts", () => {
   assert.throws(
     () => capToolOutput(

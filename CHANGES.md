@@ -2,6 +2,15 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Canonical tool execution receipts (Codex)
+
+- Added one bounded receipt to every semantic tool envelope with an opaque operation id, real tool name, status/code, dispatch fact, change certainty, and wall-clock timing; argument values and secrets never enter the receipt.
+- Preserved the same receipt through approval suspension, auto-approval, persistent pending-action completion, provider batching, lifecycle events, and duplicate-accounting recursion.
+- `execute_code` now returns a bounded list of child receipts while preserving its compact `callTool` result API, so nested work is no longer invisible.
+- Oversized model-facing tool output retains compact outcome and receipt identity alongside its durable output reference.
+- Documented receipt interpretation in the static model prompt and added direct, vetoed, failed, approved, persisted, nested, batched, and truncated-output regressions.
+EXECUTION RECEIPTS COMPLETE
+
 ## 2026-07-25 - Fail-closed built-in security vetoes (Codex)
 
 - Assigned every hook an immutable failure mode: built-in gateway security vetoes fail closed, while runtime/plugin/shell extensions and asynchronous observers remain fail open.

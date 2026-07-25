@@ -2135,11 +2135,13 @@ export function capToolOutput(value, {
   }
   const target = Math.max(1, Math.trunc(maxChars));
   const compactOutcome = compactToolOutcome(safeValue?.outcome);
+  const compactReceipt = compactExecutionReceipt(safeValue?.receipt);
   const base = {
     truncated: true,
     originalChars: output.length,
     ...(ref ? { ref } : {}),
-    ...(compactOutcome ? { outcome: compactOutcome } : {})
+    ...(compactOutcome ? { outcome: compactOutcome } : {}),
+    ...(compactReceipt ? { receipt: compactReceipt } : {})
   };
   let previewChars = Math.max(0, target - JSON.stringify({ ...base, preview: "" }).length);
   let encoded;
@@ -2181,9 +2183,22 @@ function compactToolOutcome(outcome) {
   };
 }
 
+function compactExecutionReceipt(receipt) {
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return null;
+  return {
+    id: String(receipt.id ?? "receipt_unknown").slice(0, 200),
+    tool: String(receipt.tool ?? "unknown_tool").slice(0, 128),
+    status: String(receipt.status ?? "failed").slice(0, 16),
+    code: String(receipt.code ?? "tool_error").slice(0, 64),
+    dispatched: receipt.dispatched === true,
+    changed: receipt.changed === true ? true : receipt.changed === false ? false : null
+  };
+}
+
 function smallestValidTruncation(base, target) {
   const candidates = [];
   const outcome = base.outcome ? { ...base.outcome } : null;
+  const receipt = base.receipt ? { ...base.receipt } : null;
   if (outcome?.evidence) {
     for (let keep = outcome.evidence.length; keep >= 0; keep -= 1) {
       candidates.push({
@@ -2201,9 +2216,28 @@ function smallestValidTruncation(base, target) {
     candidates.push({
       truncated: true,
       ...(base.ref ? { ref: base.ref } : {}),
+      ...(receipt ? { receipt } : {}),
       outcome: {
         status: outcome.status,
         code: outcome.code
+      }
+    });
+  }
+  if (receipt) {
+    candidates.push({
+      truncated: true,
+      ...(base.ref ? { ref: base.ref } : {}),
+      receipt: {
+        id: receipt.id,
+        tool: receipt.tool,
+        dispatched: receipt.dispatched
+      }
+    });
+    candidates.push({
+      truncated: true,
+      receipt: {
+        id: receipt.id,
+        dispatched: receipt.dispatched
       }
     });
   }
@@ -5363,6 +5397,7 @@ Guidelines:
 - Call inspect_skill_capabilities before running an imported or uncertain skill; if it reports a partial or text-only scope, do not assume omitted tools are available.
 - Use checkpoints as the fast pre-mutation safety gate. Use timeline_preview before any slower post-mutation timeline recovery.
 - Read before editing. Reuse a code_read/code_search tag only for the exact file version it describes; after any successful write, use the returned tag or read again.
+- Treat each tool's receipt and semantic outcome as authoritative: dispatched=false means its handler did not run, and changed=null after dispatch requires inspection before retrying.
 
 The latest user message may begin with a [context] block assembled by the runtime (scrutiny decision, memory hits). Treat it as trusted background — the user did not type it.`;
 }

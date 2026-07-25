@@ -96,6 +96,8 @@ test("OpenAI executes independent reads concurrently and serializes results in c
   assert.equal(result.stopReason, "completed");
   assert.equal(state.peak, 3);
   assert.deepEqual(result.toolCalls.map((call) => call.result.result.id), [1, 2, 3]);
+  assert.ok(result.toolCalls.every((call) => call.result.receipt.dispatched === true));
+  assert.equal(new Set(result.toolCalls.map((call) => call.result.receipt.id)).size, 3);
   assert.deepEqual(
     requests[1].input
       .filter((item) => item.type === "function_call_output")
@@ -153,6 +155,7 @@ test("Anthropic executes independent reads concurrently and preserves tool-resul
   assert.equal(result.stopReason, "completed");
   assert.equal(state.peak, 3);
   assert.deepEqual(result.toolCalls.map((call) => call.result.result.id), [1, 2, 3]);
+  assert.ok(result.toolCalls.every((call) => call.result.receipt.dispatched === true));
   const resultMessage = requests[1].messages.find((message) => (
     message.role === "user"
     && Array.isArray(message.content)
