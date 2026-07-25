@@ -106,3 +106,29 @@ test("presetEnvKeys covers the vendor key and the lane it drives", () => {
   assert.ok(keys.includes("OPENAI_BASE_URL"));
   assert.ok(!keys.includes("ANTHROPIC_API_KEY"));
 });
+
+test("the production Kimi coding lane is recognized, not reported as 'none'", () => {
+  // Regression: Azazel runs kimi-k3 over the ANTHROPIC protocol at
+  // api.kimi.com/coding/v1. Before this preset existed the Models tab showed
+  // active:null while plainly serving that model.
+  const live = {
+    OPENAGI_PROVIDER: "anthropic",
+    ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/v1",
+    ANTHROPIC_MODEL: "kimi-k3"
+  };
+  assert.equal(activeProviderPreset(live), "kimi-coding");
+  const preset = getProviderPreset("kimi-coding");
+  assert.equal(preset.lane, "anthropic");
+  assert.ok(preset.models.includes("kimi-k3"));
+});
+
+test("two presets may share a vendor key without colliding", () => {
+  // moonshot (OpenAI protocol) and kimi-coding (Anthropic protocol) are the
+  // same vendor on different lanes and intentionally share MOONSHOT_API_KEY.
+  assert.equal(getProviderPreset("moonshot").keyEnv, getProviderPreset("kimi-coding").keyEnv);
+  const openaiSide = presetActivationEnv("moonshot", { env: { MOONSHOT_API_KEY: "sk-m" } });
+  const anthropicSide = presetActivationEnv("kimi-coding", { env: { MOONSHOT_API_KEY: "sk-m" } });
+  assert.equal(openaiSide.OPENAGI_PROVIDER, "openai");
+  assert.equal(anthropicSide.OPENAGI_PROVIDER, "anthropic");
+  assert.equal(anthropicSide.ANTHROPIC_MODEL, "kimi-k3");
+});

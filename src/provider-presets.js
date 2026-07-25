@@ -84,6 +84,22 @@ const PRESET_LIST = Object.freeze([
     note: "One key, many models. Honors OPENAGI_PROVIDER_ROUTING for upstream preference."
   },
   {
+    id: "kimi-coding",
+    label: "Kimi (Anthropic-compatible)",
+    lane: "anthropic",
+    // Moonshot exposes an ANTHROPIC-protocol coding endpoint distinct from
+    // their OpenAI-compatible one. This is the lane Azazel actually runs on in
+    // production, so it must be a first-class preset — without it the Models
+    // tab reports "active: none" while plainly serving kimi-k3.
+    baseUrl: "https://api.kimi.com/coding/v1",
+    keyEnv: "MOONSHOT_API_KEY",
+    defaultModel: "kimi-k3",
+    models: ["kimi-k3", "kimi-k2-0905-preview"],
+    keyUrl: "https://platform.moonshot.ai/console/api-keys",
+    oauth: false,
+    note: "Anthropic-protocol Kimi endpoint. The production lane for this agent."
+  },
+  {
     id: "moonshot",
     label: "Moonshot (Kimi)",
     lane: "openai",
