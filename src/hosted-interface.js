@@ -6500,11 +6500,136 @@ function showProject(projectId, { refreshSidebar = true } = {}) {
     archived ? '' : '<button id="projectSelectBtn"' + (selected ? ' disabled' : '') + '>Select</button>',
     archived ? '' : '<button id="projectEditBtn">Edit</button>',
     archived || project.id === "default" ? '' : '<button id="projectArchiveBtn" class="danger">Archive</button>',
-    '</div></div>'
+    '</div></div>',
+    // Live workspace surfaces for this project. The Artifact Canvas, durable
+    // job runner, and recipe memory all shipped with full HTTP APIs but no
+    // dashboard presence — these panels are their first visible surface.
+    '<div class="grid stats" style="margin-top:16px;">',
+    '<div class="card"><span class="desc">Artifacts</span><div class="stat-value" id="pwsArtifactCount">-</div></div>',
+    '<div class="card"><span class="desc">Jobs</span><div class="stat-value" id="pwsJobCount">-</div></div>',
+    '<div class="card"><span class="desc">Recipes</span><div class="stat-value" id="pwsRecipeCount">-</div></div>',
+    '</div>',
+    '<div class="hud-label" style="margin-top:18px;">// WORKSPACE SURFACES</div>',
+    '<div class="grid" id="projectWorkspaceSurfaces"></div>'
   ].join("");
   document.getElementById("projectSelectBtn")?.addEventListener("click", () => selectProject(project));
   document.getElementById("projectEditBtn")?.addEventListener("click", () => openProjectEditor(project));
   document.getElementById("projectArchiveBtn")?.addEventListener("click", () => archiveProject(project));
+  renderProjectWorkspaceSurfaces(project.id);
+}
+
+// Artifact Canvas / durable jobs / recipe memory, rendered inline on the
+// project they belong to. Each surface is optional at runtime (the feature can
+// be disabled, in which case its route answers 503) so every panel degrades to
+// a quiet "unavailable" card instead of blanking the whole tab.
+async function renderProjectWorkspaceSurfaces(projectId) {
+  const host = document.getElementById("projectWorkspaceSurfaces");
+  if (!host) return;
+  const panels = [
+    {
+      key: "artifacts",
+      title: "Artifact Canvas",
+      note: "Versioned markdown + data artifacts.",
+      countEl: "pwsArtifactCount",
+      load: async () => {
+        const rows = await fetchJson("/artifacts?limit=8");
+        return Array.isArray(rows) ? rows : [];
+      },
+      row: (a) => ({
+        name: a.title || a.id,
+        meta: [a.kind, "rev " + a.revision, relTime(a.updatedAt)].filter(Boolean).join(" - "),
+        badge: "v" + a.revision
+      })
+    },
+    {
+      key: "jobs",
+      title: "Durable jobs",
+      note: "Policy-aware background work; survives restart.",
+      countEl: "pwsJobCount",
+      load: async () => {
+        const body = await fetchJson("/jobs?limit=8");
+        return Array.isArray(body.jobs) ? body.jobs : [];
+      },
+      row: (j) => ({
+        name: j.target || j.kind || j.id,
+        meta: [j.kind, "attempt " + (j.attempt ?? 0) + "/" + (j.maxAttempts ?? 0), relTime(j.updatedAt)]
+          .filter(Boolean).join(" - "),
+        badge: j.status,
+        badgeClass: j.status === "succeeded" ? "ok"
+          : j.status === "failed" || j.status === "cancelled" ? "err"
+          : "warn"
+      })
+    },
+    {
+      key: "recipes",
+      title: "Recipe memory",
+      note: "Verified procedures promoted from real runs.",
+      countEl: "pwsRecipeCount",
+      load: async () => {
+        const body = await fetchJson("/recipes?limit=8");
+        return Array.isArray(body.items) ? body.items : [];
+      },
+      row: (r) => ({
+        name: r.title || r.id,
+        meta: [r.summary, relTime(r.updatedAt ?? r.createdAt)].filter(Boolean).join(" - "),
+        badge: r.status,
+        badgeClass: r.status === "verified" ? "ok"
+          : r.status === "failed" ? "err"
+          : ""
+      })
+    }
+  ];
+
+  host.innerHTML = panels
+    .map((panel) => '<div class="card" id="pws-' + panel.key + '">'
+      + '<div class="row between"><span class="name">' + escapeHtml(panel.title) + '</span>'
+      + '<span class="chip">loading</span></div>'
+      + '<div class="desc">' + escapeHtml(panel.note) + '</div></div>')
+    .join("");
+
+  for (const panel of panels) {
+    const card = document.getElementById("pws-" + panel.key);
+    if (!card) continue;
+    try {
+      const items = await panel.load();
+      const counter = document.getElementById(panel.countEl);
+      if (counter) counter.textContent = String(items.length);
+      const body = items.length === 0
+        ? '<div class="desc">Nothing yet.</div>'
+        : items.map((item) => {
+            const view = panel.row(item);
+            const badge = view.badge
+              ? '<span class="badge ' + escapeHtml(view.badgeClass ?? "") + '">'
+                + escapeHtml(view.badge) + '</span>'
+              : "";
+            return '<div class="row between" style="padding:6px 0;border-top:1px solid var(--line);">'
+              + '<span>' + escapeHtml(view.name) + '</span>' + badge + '</div>'
+              + '<div class="desc">' + escapeHtml(view.meta) + '</div>';
+          }).join("");
+      card.innerHTML = '<div class="row between"><span class="name">' + escapeHtml(panel.title) + '</span>'
+        + '<span class="chip">' + items.length + '</span></div>'
+        + '<div class="desc">' + escapeHtml(panel.note) + '</div>'
+        + body;
+    } catch (error) {
+      const counter = document.getElementById(panel.countEl);
+      if (counter) counter.textContent = "-";
+      card.innerHTML = '<div class="row between"><span class="name">' + escapeHtml(panel.title) + '</span>'
+        + '<span class="chip">unavailable</span></div>'
+        + '<div class="desc">' + escapeHtml(error.message || "Surface unavailable.") + '</div>';
+    }
+  }
+}
+
+// Compact relative timestamp for HUD rows ("3m", "2h", "5d").
+function relTime(value) {
+  if (!value) return "";
+  const then = new Date(value).getTime();
+  if (!Number.isFinite(then)) return "";
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60) return secs + "s";
+  if (secs < 3600) return Math.round(secs / 60) + "m";
+  if (secs < 86400) return Math.round(secs / 3600) + "h";
+  return Math.round(secs / 86400) + "d";
 }
 
 function openProjectComposer() {
