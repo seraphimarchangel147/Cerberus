@@ -794,3 +794,12 @@ WORKSPACE TIMELINE COMPLETE
 PERSISTENT TERMINALS COMPLETE
 
 AGENT WORKSPACE PHASE 2 COMPLETE
+
+## 2026-07-25 - Hermes-informed memory trust foundation (Codex)
+
+- Made the durable memory journal authoritative over its cache snapshot, with replay after snapshot failures, cross-process mutation serialization, stale-instance refresh, and fail-closed malformed-journal handling.
+- Added deterministic memory-intake screening for hidden controls, prompt-control attempts, credential-shaped values, and configured secret values; direct remember and correction writes now record explicit provenance.
+- Changed post-session model review from silent memory mutation to a screened durable pending action. Only an exact, human-approved replay can materialize it, including when ordinary auto-approval is enabled.
+- Kept proposal handlers out of model tool catalogs, preserved existing dashboard approval flows, and added provenance for pending and human-approved review memory.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1617/1618 tests with zero failures and one intentional Windows permission-mode skip.
+MEMORY TRUST FOUNDATION COMPLETE

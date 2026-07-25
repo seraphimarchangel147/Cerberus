@@ -28,6 +28,13 @@ import {
   toolFailureFingerprint
 } from "./tool-outcome.js";
 import { createSkillCandidateFromRecipe } from "./skill-materialize.js";
+import {
+  assertSafeMemoryContent,
+  backgroundMemoryProvenance,
+  normalizeMemoryTags,
+  prepareBackgroundMemoryProposal,
+  sameBackgroundMemoryProposal
+} from "./memory-intake-policy.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
@@ -361,6 +368,10 @@ export class ToolRegistry {
       options.context ?? {}
     );
     const listed = this.list({ readOnly: options.readOnly === true })
+      // Internal replay handlers are callable only by a trusted runtime path
+      // (for example, a durable approval action). They are not model tools,
+      // so an agent cannot turn an auto-approved ordinary call into a bypass.
+      .filter((tool) => tool.metadata?.internal !== true)
       .filter((tool) => !projectToolBoundaryError(tool, projectContext))
       .filter((tool) => !profileCapabilityBoundaryError(
         tool,
@@ -1047,6 +1058,9 @@ export class ToolRegistry {
         {
           ...(context ?? {}),
           __confirmed: true,
+          // Bind replay-only handlers to the exact durable action that a
+          // human approved. Model arguments cannot create this context field.
+          __pendingActionId: action.id,
           __approval: {
             description: action.reason ?? "flagged as dangerous",
             via: decision.approvedVia ?? "pending-action",
@@ -2760,6 +2774,47 @@ function externalMemoryIdentity(context = {}) {
   };
 }
 
+function approvedBackgroundMemoryProposal(runtime, rawProposal, context = {}) {
+  const actionId = String(context?.__pendingActionId ?? "").trim();
+  const approval = context?.__approval;
+  const decider = String(approval?.decider ?? "").trim();
+  if (!actionId || !decider || decider === "auto-approve") {
+    throw new Error("Background memory proposals require an explicit human approval.");
+  }
+  const action = runtime?.pendingActions?.get?.(actionId, {
+    projectId: context?.__projectId ?? context?.projectId
+  });
+  if (
+    !action
+    || action.status !== "approved"
+    || action.toolName !== "apply_background_memory_proposal"
+  ) {
+    throw new Error("The approved background memory action is unavailable or no longer valid.");
+  }
+  const proposal = prepareBackgroundMemoryProposal(rawProposal, {
+    runtime,
+    turn: {
+      sessionId: action.context?.sessionId ?? context?.sessionId,
+      projectId: action.context?.__projectId ?? action.context?.projectId,
+      memoryScope: action.context?.__memoryScope
+    },
+    scope: action.context?.__memoryScope
+  });
+  if (
+    !sameBackgroundMemoryProposal(action.args?.proposal, proposal)
+    || action.context?.__memoryScope !== proposal.scope
+  ) {
+    throw new Error("The background memory proposal no longer matches its approved action.");
+  }
+  return { action, proposal, decider };
+}
+
+function backgroundMemoryConfidenceProfile(confidence) {
+  if (confidence === "high") return { tier: "long", strength: 0.85 };
+  if (confidence === "medium") return { tier: "medium", strength: 0.68 };
+  return { tier: "medium", strength: 0.48 };
+}
+
 async function invokeExternalMemory(provider, method, args, upstreamSignal = null) {
   if (!provider) {
     return {
@@ -3606,16 +3661,27 @@ export function registerCoreTools(registry, runtime) {
       const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
         ? context.__memoryScope
         : context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const content = assertSafeMemoryContent(args.content, { runtime });
+      const tags = normalizeMemoryTags(args.tags);
       const item = runtime.memory.remember(
         {
           source: context.channel ?? "tool",
           scope,
-          content: String(args.content ?? "").trim(),
-          tags: ["tool:remember", ...(args.tags ?? [])],
+          content,
+          tags: ["tool:remember", ...tags],
           risk,
           repetition: 0.4,
           novelty: 0.55,
-          metadata: { agentId: context.agentId, sessionId: context.sessionId }
+          metadata: {
+            agentId: context.agentId,
+            sessionId: context.sessionId,
+            provenance: {
+              sourceType: "explicit-memory-tool",
+              trust: "direct-tool-request",
+              sessionId: context.sessionId ?? null,
+              projectId: context.__projectId ?? context.projectId ?? null
+            }
+          }
         },
         {
           source: "remember-tool",
@@ -3728,14 +3794,24 @@ export function registerCoreTools(registry, runtime) {
       const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
         ? context.__memoryScope
         : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const content = assertSafeMemoryContent(args.correction, { runtime });
       const result = runtime.memory.correct({
         id: args.id ?? null,
         query: args.query ?? null,
-        content: String(args.correction ?? "").trim(),
-        tags: args.tags ?? [],
+        content,
+        tags: normalizeMemoryTags(args.tags),
         scope,
         source: "correct-memory-tool",
-        metadata: { agentId: context.agentId, sessionId: context.sessionId }
+        metadata: {
+          agentId: context.agentId,
+          sessionId: context.sessionId,
+          provenance: {
+            sourceType: "explicit-memory-correction",
+            trust: "direct-tool-request",
+            sessionId: context.sessionId ?? null,
+            projectId: context.__projectId ?? context.projectId ?? null
+          }
+        }
       });
       const external = await invokeExternalMemory(
         runtime.externalMemoryProvider,
@@ -5224,6 +5300,99 @@ export function registerCoreTools(registry, runtime) {
           ...args,
           projectId: context.__projectId ?? "default"
         })
+      };
+    }
+  });
+
+  // This replay-only handler is deliberately omitted from model catalogs. A
+  // BackgroundReviewer creates a durable pending action directly; the handler
+  // verifies its exact action identity and a human decision before any memory
+  // mutation. Ordinary auto-approval therefore cannot promote a model review
+  // into a durable fact.
+  registry.register({
+    name: "apply_background_memory_proposal",
+    metadata: { internal: true },
+    needsConfirmation: true,
+    description: "Internal durable replay handler for a human-approved background memory proposal.",
+    parameters: {
+      type: "object",
+      properties: {
+        proposal: {
+          type: "object",
+          properties: {
+            content: { type: "string" },
+            kind: { type: "string", enum: ["preference", "correction", "environment"] },
+            confidence: { type: "string", enum: ["high", "medium", "low"] },
+            scope: { type: "string" },
+            tags: { type: "array", items: { type: "string" } },
+            provenance: { type: "object" }
+          },
+          required: ["content", "kind", "confidence", "scope", "tags", "provenance"],
+          additionalProperties: false
+        }
+      },
+      required: ["proposal"],
+      additionalProperties: false
+    },
+    handler: async ({ proposal }, context) => {
+      if (!runtime.memory?.remember) throw new Error("Memory system is unavailable.");
+      const approved = approvedBackgroundMemoryProposal(runtime, proposal, context);
+      const confidence = approved.proposal.confidence;
+      const profile = backgroundMemoryConfidenceProfile(confidence);
+      const item = runtime.memory.remember({
+        source: "background-review-approved",
+        scope: approved.proposal.scope,
+        content: approved.proposal.content,
+        kind: approved.proposal.kind,
+        tags: [
+          "background-review",
+          "human-approved",
+          approved.proposal.kind,
+          ...approved.proposal.tags
+        ],
+        novelty: 0.55,
+        risk: approved.proposal.kind === "correction" ? 0.35 : 0.1,
+        repetition: 0.25,
+        specificity: 0.8,
+        metadata: {
+          confidence,
+          reviewedAt: approved.action.createdAt ?? nowIso(),
+          provenance: backgroundMemoryProvenance(approved.proposal, {
+            approvedBy: approved.decider,
+            approvedAt: approved.action.decidedAt ?? nowIso(),
+            actionId: approved.action.id
+          })
+        }
+      }, {
+        source: "background-review-approved",
+        strength: profile.strength,
+        tier: profile.tier,
+        critical: false,
+        capacityManaged: true
+      });
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "setUserModel",
+        {
+          ...externalMemoryIdentity(context),
+          content: item.content,
+          metadata: {
+            type: "memory",
+            action: "background-review-approved",
+            tags: item.tags ?? [],
+            localMemoryId: item.id,
+            scope: item.scope,
+            sessionId: context.sessionId ?? null
+          }
+        },
+        context?.__abortSignal
+      );
+      return {
+        id: item.id,
+        tier: item.tier,
+        content: item.content,
+        approvalActionId: approved.action.id,
+        ...(external.enabled ? { externalMemory: external.status } : {})
       };
     }
   });

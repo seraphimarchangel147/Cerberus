@@ -1,8 +1,11 @@
 import path from "node:path";
 import { appendJsonLine } from "./file-utils.js";
 import { resolveDataDir } from "./data-dir.js";
-import { MemoryCapacityError } from "./memory-system.js";
 import { nowIso, tokenOverlapScore } from "./utils.js";
+import {
+  MemoryIntakeError,
+  prepareBackgroundMemoryProposal
+} from "./memory-intake-policy.js";
 
 export const DEFAULT_BACKGROUND_REVIEW_MAX_ITERATIONS = 2;
 export const DEFAULT_BACKGROUND_REVIEW_MAX_TURN_SECONDS = 60;
@@ -16,11 +19,6 @@ const REVIEW_INSTRUCTIONS = [
 ].join("\n");
 
 const ALLOWED_MEMORY_KINDS = new Set(["preference", "correction", "environment"]);
-const CONFIDENCE_PROFILE = Object.freeze({
-  high: { tier: "long", strength: 0.85 },
-  medium: { tier: "medium", strength: 0.68 },
-  low: { tier: "medium", strength: 0.48 }
-});
 
 export function backgroundReviewEnabled(env = process.env) {
   return /^(?:1|true|on)$/iu.test(String(env.OPENAGI_BACKGROUND_REVIEW ?? "").trim());
@@ -89,7 +87,8 @@ export class BackgroundReviewer {
       at: record.at,
       sessionId: turn.sessionId,
       projectId,
-      memoriesAdded: applied.memories.length,
+      memoriesAdded: 0,
+      memoriesStaged: applied.memories.length,
       duplicatesSkipped: applied.duplicatesSkipped,
       skillTitle: applied.skill?.candidate?.title ?? null,
       skillPending: Boolean(applied.skill)
@@ -120,61 +119,33 @@ export function applyBackgroundReviewProposal({ runtime, proposal, turn = {} }) 
   let duplicatesSkipped = 0;
 
   for (const raw of Array.isArray(proposal?.memories) ? proposal.memories.slice(0, 3) : []) {
-    // Capacity-managed writes must reject over-limit proposals intact. A
-    // pre-slice here would silently turn an invalid memory into a different
-    // fact and bypass MemoryCapacityError.
-    const content = String(raw?.content ?? "").trim();
     const kind = String(raw?.kind ?? "").toLowerCase();
-    const confidence = String(raw?.confidence ?? "low").toLowerCase();
-    const profile = CONFIDENCE_PROFILE[confidence] ?? CONFIDENCE_PROFILE.low;
-    if (!content || !ALLOWED_MEMORY_KINDS.has(kind) || !memory?.remember) continue;
+    if (!ALLOWED_MEMORY_KINDS.has(kind) || !memory?.remember) continue;
 
-    const duplicate = findNearDuplicate(memory, content, scope);
-    if (duplicate) {
-      duplicate.metadata = {
-        ...(duplicate.metadata ?? {}),
-        backgroundReviewSessions: [...new Set([
-          ...(duplicate.metadata?.backgroundReviewSessions ?? []),
-          turn.sessionId
-        ].filter(Boolean))],
-        duplicateMergedAt: nowIso()
-      };
-      duplicate.strength = Math.min(1, (duplicate.strength ?? 0.5) + 0.03);
-      try {
-        memory.persist?.("background-review-duplicate", { id: duplicate.id, item: duplicate });
-      } catch {
-        // Duplicate reinforcement is best-effort; review remains non-blocking.
+    let candidate;
+    try {
+      candidate = prepareBackgroundMemoryProposal(raw, { runtime, turn, scope });
+    } catch (error) {
+      if (error instanceof MemoryIntakeError) {
+        memoryErrors.push(error.message);
+        continue;
       }
+      throw error;
+    }
+
+    const duplicate = findNearDuplicate(memory, candidate.content, candidate.scope);
+    if (duplicate) {
+      // A model-produced duplicate is evidence, not authority. Do not let it
+      // silently reinforce an existing durable fact; keep the review pass
+      // side-effect free until a human accepts a concrete proposal.
       duplicatesSkipped += 1;
       continue;
     }
 
     try {
-      const item = memory.remember({
-        source: "background-review",
-        scope,
-        content,
-        kind,
-        tags: [...new Set(["background-review", kind, ...cleanTags(raw.tags)])],
-        novelty: 0.55,
-        risk: kind === "correction" ? 0.35 : 0.1,
-        repetition: 0.25,
-        specificity: 0.8,
-        metadata: {
-          sessionId: turn.sessionId ?? null,
-          confidence,
-          reviewedAt: nowIso()
-        }
-      }, {
-        source: "background-review",
-        strength: profile.strength,
-        tier: profile.tier,
-        critical: false,
-        capacityManaged: true
-      });
-      memories.push(item);
+      const staged = stageBackgroundMemoryProposal({ runtime, candidate, turn });
+      memories.push(staged);
     } catch (error) {
-      if (!(error instanceof MemoryCapacityError)) throw error;
       memoryErrors.push(error.message);
     }
   }
@@ -207,6 +178,43 @@ export function applyBackgroundReviewProposal({ runtime, proposal, turn = {} }) 
   return { memories, memoryErrors, duplicatesSkipped, skill };
 }
 
+export function stageBackgroundMemoryProposal({ runtime, candidate, turn = {} }) {
+  const pendingActions = runtime?.pendingActions;
+  if (!pendingActions?.enqueue) {
+    throw new Error("Background memory review requires the durable approval queue.");
+  }
+  const context = {
+    channel: "background-review",
+    from: "background-review",
+    sessionId: turn.sessionId ?? null,
+    agentId: turn.agentId ?? "main",
+    __memoryScope: candidate.scope,
+    ...(turn.projectId ? { __projectId: turn.projectId, projectId: turn.projectId } : {}),
+    ...(Number.isSafeInteger(turn.projectRevision)
+      ? { __projectRevision: turn.projectRevision }
+      : {})
+  };
+  const approvalIdentity = runtime?.tools?.approvalIdentity?.(
+    "apply_background_memory_proposal",
+    context
+  ) ?? null;
+  const action = pendingActions.enqueue({
+    toolName: "apply_background_memory_proposal",
+    args: { proposal: candidate },
+    context,
+    summary: `Save reviewed ${candidate.kind} memory: ${candidate.content.slice(0, 160)}`,
+    reason: "A post-session model proposed this memory. It will be saved only after explicit human approval.",
+    approvalIdentity
+  });
+  return {
+    actionId: action.id,
+    status: action.status,
+    kind: candidate.kind,
+    confidence: candidate.confidence,
+    scope: candidate.scope
+  };
+}
+
 function findNearDuplicate(memory, content, scope, threshold = 0.72) {
   for (const existing of memory?.items?.values?.() ?? []) {
     if (existing.metadata?.capacityManaged !== true
@@ -218,13 +226,6 @@ function findNearDuplicate(memory, content, scope, threshold = 0.72) {
     if ((forward + reverse) / 2 >= threshold) return existing;
   }
   return null;
-}
-
-function cleanTags(tags) {
-  return (Array.isArray(tags) ? tags : [])
-    .map((tag) => String(tag ?? "").trim().toLowerCase())
-    .filter(Boolean)
-    .slice(0, 8);
 }
 
 function buildReviewPrompt(turn) {

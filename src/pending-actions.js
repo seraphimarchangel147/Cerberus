@@ -1167,6 +1167,10 @@ export async function approvePendingAction(runtime, id, decision = {}) {
     invokeResult = await runtime.tools.invoke(action.toolName, action.args, {
       ...(action.context ?? {}),
       __confirmed: true,
+      // A replay-only handler may need to bind its side effect to this exact
+      // durable action. This context field is runtime-created, never model
+      // supplied, and is intentionally not persisted as a general argument.
+      __pendingActionId: action.id,
       __approval: {
         description: action.reason ?? "flagged as dangerous",
         via: decision.approvedVia ?? "manual-approval",

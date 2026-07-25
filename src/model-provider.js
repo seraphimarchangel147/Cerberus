@@ -5220,6 +5220,7 @@ Tools available to you (call them when useful):
 - remember(content, tags?, importance?, replaceIds?) - save a durable note and mirror it to the optional external user model; after a capacity error, consolidate overlapping recall results marked replaceable
 - recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope
 - correct_memory(correction, query? | id?, tags?) - supersede a wrong memory with the corrected fact and mirror the correction to the optional external user model
+- Post-session review memories are only proposals: they are screened, shown as pending actions, and require an explicit human approval before they can become durable memory.
 - recipe_search(query?, statuses?, limit?) / recipe_get(id) - inspect procedural recipe metadata or load one full recipe; factual memory stays separate
 - recipe_recall(query, limit?) - retrieve only active verified procedures; candidates, failures, superseded recipes, and deleted recipes are excluded
 - recipe_create_draft(title, summary, preconditions, actions, evidence?, failureModes?, tags?) - record an unverified procedural candidate

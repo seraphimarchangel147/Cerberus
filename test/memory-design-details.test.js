@@ -232,7 +232,7 @@ test("specialist projections inherit main memory and preflight the effective bod
   assert.deepEqual([...memory.items], before, "a global write cannot overflow an inherited view");
 });
 
-test("oversized background-review memory errors intact instead of being sliced to fit", () => {
+test("oversized background-review memory is rejected before it can be staged", () => {
   const memory = new MemorySystem({ curatedMemoryMaxChars: 2200 });
   const content = "z".repeat(2300);
   const result = applyBackgroundReviewProposal({
@@ -245,7 +245,7 @@ test("oversized background-review memory errors intact instead of being sliced t
 
   assert.equal(result.memories.length, 0);
   assert.equal(result.memoryErrors.length, 1);
-  assert.match(result.memoryErrors[0], /Nothing was saved/);
+  assert.match(result.memoryErrors[0], /safety limit/);
   assert.equal(memory.items.size, 0);
 });
 
