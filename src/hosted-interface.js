@@ -172,6 +172,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   }
   bindHostedEvent("project", (data) => broadcastProjectChange(data));
   bindHostedEvent("message", (data) => broadcast("message", data));
+  // Live agent activity from ANY channel (Discord, Telegram, cron, API).
+  // Drives the pixel pet / holo avatar so the dashboard reflects what the
+  // harness is actually doing, not just what the web composer submitted.
+  bindHostedEvent("agent-activity", (data) => broadcast("agent-activity", data));
   bindHostedEvent("cron", (data) => broadcast("cron", data));
   bindHostedEvent("mcp", (data) => broadcast("mcp", data));
   bindHostedEvent("tunnel", (data) => broadcast("tunnel", data));
@@ -282,15 +286,32 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   if (runtime.agentHost) {
     const original = runtime.agentHost.handleMessage.bind(runtime.agentHost);
     runtime.agentHost.handleMessage = async (input) => {
-      const result = await original(input);
-      events.emit("message", {
-        sessionId: result.session.id,
-        projectId: result.project?.id ?? result.session?.projectId ?? "default",
-        agent: result.agent,
-        reply: result.reply,
-        toolCalls: result.output?.scrutiny?.action ? [] : []
-      });
-      return result;
+      try {
+        const result = await original(input);
+        events.emit("message", {
+          sessionId: result.session.id,
+          projectId: result.project?.id ?? result.session?.projectId ?? "default",
+          agent: result.agent,
+          reply: result.reply,
+          toolCalls: result.output?.scrutiny?.action ? [] : []
+        });
+        // Terminal beat for the live-activity lane: lets the pet settle into
+        // its happy "done" wave once a turn from any channel completes.
+        try {
+          events.emit("agent-activity", {
+            projectId: result.project?.id ?? result.session?.projectId ?? "default",
+            sessionId: result.session?.id ?? null,
+            phase: "turn-end",
+            ok: true
+          });
+        } catch { /* advisory */ }
+        return result;
+      } catch (err) {
+        try {
+          events.emit("agent-activity", { projectId: "default", phase: "turn-end", ok: false });
+        } catch { /* advisory */ }
+        throw err;
+      }
     };
   }
 
@@ -10360,6 +10381,39 @@ evt.addEventListener("message", (e) => {
   } catch {}
 });
 evt.addEventListener("cron", () => { if (state.tab === "cron") refreshCron(); });
+
+// ── Live harness activity → pixel pet + holo avatar ──────────────────────
+// Fires for turns driven by ANY channel (Discord, Telegram, cron, API), so
+// the pet visibly thinks/works while Azazel is answering someone in Discord.
+// Tool "start" = working, iteration/verdict = thinking, turn end = done.
+var petActivityIdle = null;
+function petActivityPoke(mode) {
+  if (window.cerbPetReact) { try { window.cerbPetReact(mode); } catch (e) {} }
+  if (window.cerbHoloReact) {
+    try { window.cerbHoloReact(mode === "done" ? "idle" : "thinking"); } catch (e) {}
+  }
+  // Fall back to idle if the harness goes quiet (turn ended without a
+  // terminal event, e.g. an aborted or errored turn upstream).
+  if (petActivityIdle) clearTimeout(petActivityIdle);
+  if (mode !== "done") {
+    petActivityIdle = setTimeout(function () {
+      if (window.cerbPetReact) { try { window.cerbPetReact("idle"); } catch (e) {} }
+      if (window.cerbHoloReact) { try { window.cerbHoloReact("idle"); } catch (e) {} }
+    }, 45000);
+  }
+}
+evt.addEventListener("agent-activity", (e) => {
+  try {
+    const data = JSON.parse(e.data);
+    const phase = data.phase;
+    if (phase === "start") petActivityPoke("working");
+    else if (phase === "iteration" || phase === "verdict" || phase === "subagent") petActivityPoke("thinking");
+    else if (phase === "end") petActivityPoke(data.ok === false ? "error" : "working");
+    else if (phase === "turn-end") petActivityPoke("done");
+    else if (phase === "awaiting-approval") petActivityPoke("thinking");
+  } catch (err) {}
+});
+
 evt.addEventListener("project", () => {
   if (state.tab === "projects") refreshProjects().catch(() => {});
 });

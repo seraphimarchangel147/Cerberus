@@ -997,6 +997,23 @@ export class AgentHost {
       if (typeof input.onToolEvent === "function") {
         try { input.onToolEvent(event); } catch { /* advisory */ }
       }
+      // Mirror live tool activity onto the runtime event bus so dashboard
+      // surfaces (SSE -> pixel pet, holo avatar) react to turns driven by ANY
+      // channel — Discord, Telegram, cron, API — not just the web composer.
+      // Best-effort and advisory: never let a listener fault break the turn.
+      try {
+        this.runtime.events?.emit?.("agent-activity", {
+          projectId: project.id,
+          sessionId,
+          channel,
+          agentId,
+          phase: event?.phase ?? null,
+          name: event?.name ?? event?.toolName ?? null,
+          ok: event?.ok ?? null,
+          n: event?.n ?? null,
+          max: event?.max ?? null
+        });
+      } catch { /* advisory */ }
       if (lifecycle && event?.phase === "iteration") {
         this._notifyHook("agent:step", {
           ...lifecycle.base,
@@ -1074,7 +1091,9 @@ export class AgentHost {
       __turnAbortController: turnAbortController,
       // Live-progress observer: channels (Discord) pass a callback so the
       // user can watch tool activity in real time. Best-effort, advisory.
-      __onToolEvent: lifecycle || typeof input.onToolEvent === "function" ? forwardToolEvent : null
+      // Always attached now — even with no channel callback, forwardToolEvent
+      // mirrors activity onto the runtime bus for dashboard/pet reactivity.
+      __onToolEvent: forwardToolEvent
     };
 
     let modelResult;

@@ -1023,3 +1023,22 @@ footer (`src/hosted-interface.js`), next to Setup. Requested by the Creator.
   render in served HTML, `/gateway/status` reports `supervised: true`, and
   `POST /gateway/update` returns `already up to date` end-to-end.
 RAIL FOOTER GATEWAY CONTROLS COMPLETE
+
+- 2026-07-25T23:07:02.001Z · **azazel** · edit `src/setup-wizard.js`
+
+## Pet reactivity wired to the real harness activity lane
+- Bug: the Cerberus pet only reacted to the dashboard composer submit handler
+  (`cerbPetReact("thinking")`). Work driven from Discord, Telegram, or cron left
+  the pet idle for the whole turn. Root cause: `__onToolEvent` was only attached
+  when a channel supplied a callback, so most turns emitted no tool events at all.
+- `src/agent-host.js` — `forwardToolEvent` now also mirrors every tool event onto
+  the runtime bus as `agent-activity`, and `__onToolEvent` is always attached.
+- `src/hosted-interface.js` — broadcast `agent-activity` over SSE; emit a
+  `turn-end` beat on turn completion and on throw; client maps phases to pet
+  states (start->working, iteration/verdict/subagent->thinking, end->working/error,
+  turn-end->done) with a 45s watchdog back to idle.
+- Verified on an isolated throwaway daemon (:43997, own data dir, Discord/Telegram
+  tokens stripped) with real provider creds: a `channel:"discord"` message that
+  forces a shell tool call produced 7 `agent-activity` SSE events —
+  start x2, iteration x2, end x2, turn-end x1 — reaching a subscribed client.
+PET ACTIVITY LANE COMPLETE
