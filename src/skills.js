@@ -120,6 +120,39 @@ export class SkillRegistry {
     return isValidSkillSlug(name) && this.skills.has(name);
   }
 
+  // Hermes-parity: a compact always-on catalog injected into the system
+  // prompt. Without this the model only learns skills exist if it happens to
+  // call list_skills — which it rarely does, so hand-authored procedural
+  // knowledge sits unused. Archived skills are excluded; stale ones are
+  // marked so the model prefers fresh procedures.
+  promptIndex({ maxSkills = 60, maxDescription = 96 } = {}) {
+    let rows;
+    try {
+      rows = [...this.skills.values()];
+    } catch {
+      return "";
+    }
+    const active = rows
+      .filter((skill) => normalizeSkillState(skill?.state) !== "archived")
+      .slice(0, maxSkills);
+    if (active.length === 0) return "";
+    const lines = active.map((skill) => {
+      const desc = String(skill.description ?? "").replace(/\s+/g, " ").trim();
+      const clipped = desc.length > maxDescription
+        ? `${desc.slice(0, maxDescription - 1)}…`
+        : desc;
+      const stale = normalizeSkillState(skill?.state) === "stale" ? " (stale)" : "";
+      return `- ${skill.name}${stale}: ${clipped || "no description"}`;
+    });
+    return [
+      "",
+      "",
+      "## Skills (mandatory scan)",
+      "Before acting, scan this list. If a skill matches or is even partially relevant to the task, you MUST load it with use_skill(name) and follow its instructions — err on the side of loading. Skills encode proven workflows, exact commands, and the user's preferred approach; they outperform improvising. If a skill you used was wrong, stale, or missing a step, patch it immediately with edit_skill. Delete irrelevant skills with delete_skill.",
+      ...lines
+    ].join("\n");
+  }
+
   mustGet(name) {
     assertSkillSlug(name);
     const skill = this.skills.get(name);

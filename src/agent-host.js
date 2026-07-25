@@ -37,6 +37,10 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "schedule_message",
   "run_skill",
   "list_skills",
+  // The system prompt now carries an always-on skill index that instructs the
+  // model to load matching skills with use_skill. That directive is a lie if
+  // use_skill isn't reachable on the chat lane — so it is core.
+  "use_skill",
   "goal_status",
   "pause_goal",
   "resume_goal",
@@ -1839,6 +1843,13 @@ export class AgentHost {
             persona ? `Profile persona:\n${persona}` : ""
           ].filter(Boolean).join("\n")
       : "";
+    const skillBlock = (() => {
+      try {
+        return this.runtime?.skills?.promptIndex?.() ?? "";
+      } catch {
+        return "";
+      }
+    })();
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
 Your job is to help through the ABI loop:
@@ -1846,7 +1857,7 @@ Your job is to help through the ABI loop:
 2. Use memory deliberately. When the user CORRECTS something you previously stored or said (a time, a name, a decision, a preference), call correct_memory with the corrected fact — never just remember a second conflicting version.
 3. Propagate bounded specialists only when repeated or novel high-risk work justifies it.
 
-Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}`;
+Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}${skillBlock}`;
   }
 
   // Per-turn [context] block prepended to the latest user message (see
