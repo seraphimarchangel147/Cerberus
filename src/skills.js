@@ -3,9 +3,9 @@ import path from "node:path";
 import { ensureDir, appendJsonLine, writeTextAtomic } from "./file-utils.js";
 import { scoreFromToolCalls } from "./outcome-store.js";
 import { resolveDataDir } from "./data-dir.js";
-import { nowIso } from "./utils.js";
+import { nowIso, stableHash } from "./utils.js";
 import { pickUserSkillsDir, slugify, dedupeSlug } from "./skill-materialize.js";
-import { appendSkillRevision } from "./skill-revisions.js";
+import { appendSkillRevision, loadSkillRevisions } from "./skill-revisions.js";
 
 // Subdirectories inside a skill dir that count as "linked files" — the
 // Hermes convention: a skill can carry deep reference docs, runnable
@@ -186,6 +186,74 @@ export class SkillRegistry {
       .sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? "")))
       .slice(0, limit);
     return { edits };
+  }
+
+  revisionHistory(name, limit = 20) {
+    const skill = this.mustGet(name);
+    const boundedLimit = positiveInteger(limit, 20, { min: 1, max: 100 });
+    const currentHash = stableHash(fs.readFileSync(skill.path, "utf8"));
+    const revisions = loadSkillRevisions(skill.dir);
+    const head = revisions.at(-1) ?? null;
+    return {
+      skill: skill.name,
+      currentHash,
+      revisions: revisions
+        .slice()
+        .reverse()
+        .slice(0, boundedLimit)
+        .map((revision) => ({
+          id: revision.id,
+          at: revision.at,
+          action: revision.action,
+          by: revision.by ?? "system",
+          beforeHash: revision.beforeHash,
+          afterHash: revision.afterHash,
+          isHead: revision.id === head?.id,
+          rollbackEligible: revision.id === head?.id &&
+            revision.before !== null &&
+            revision.afterHash === currentHash
+        }))
+    };
+  }
+
+  rollbackSkillRevision(name, revisionId, by = "agent") {
+    const skill = this.mustGet(name);
+    const requestedId = String(revisionId ?? "").trim();
+    if (!requestedId) throw new Error("rollbackSkillRevision requires a revisionId");
+    const revisions = loadSkillRevisions(skill.dir);
+    const head = revisions.at(-1);
+    if (!head) throw new Error(`Skill '${name}' has no revision history to roll back.`);
+    if (head.id !== requestedId) {
+      throw new Error("Only the current skill revision can be rolled back; refresh list_skill_revisions first.");
+    }
+    if (head.before === null || head.after === null || !head.afterHash) {
+      throw new Error(`Skill '${name}' revision '${requestedId}' has no recoverable prior document.`);
+    }
+    const current = fs.readFileSync(skill.path, "utf8");
+    if (stableHash(current) !== head.afterHash) {
+      throw new Error(`Skill '${name}' changed after this revision was recorded; refusing to overwrite it.`);
+    }
+    assertRollbackDocument(skill.name, head.before);
+    writeTextAtomic(skill.path, head.before);
+    appendSkillRevision(skill.dir, {
+      skill: name,
+      action: "rolled-back",
+      by,
+      before: current,
+      after: head.before,
+      metadata: {
+        restoredRevisionId: head.id,
+        restoredAction: head.action
+      }
+    });
+    this.logEdit({ skill: name, action: "rolled-back", by, summary: `restored ${head.id}` });
+    this.reload();
+    return {
+      skill: name,
+      rolledBackRevisionId: head.id,
+      restoredAction: head.action,
+      currentHash: stableHash(head.before)
+    };
   }
 
   // MARK: — in-context loading (Hermes-style "view")
@@ -568,6 +636,53 @@ export class SkillRegistry {
     });
 
     toolRegistry.register({
+      name: "list_skill_revisions",
+      sideEffects: false,
+      source: "skill",
+      description: "Inspect compact, hash-only revision history for one active skill. Use this before rollback_skill; only the current head can be rolled back.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Skill name from list_skills." },
+          limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum newest-first revisions (default 20)." }
+        },
+        required: ["name"],
+        additionalProperties: false
+      },
+      handler: (args, context) => {
+        assertProjectSkill(context, args.name);
+        return this.revisionHistory(args.name, args.limit ?? 20);
+      }
+    });
+
+    toolRegistry.register({
+      name: "rollback_skill",
+      source: "skill",
+      needsConfirmation: true,
+      description: "Restore the immediately preceding document for the current skill revision. Requires a revision id from list_skill_revisions and human confirmation; stale or edited heads fail closed.",
+      summarize: ({ name, revisionId }) => `Roll back skill '${String(name ?? "")}' revision '${String(revisionId ?? "")}'.`,
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Skill name from list_skill_revisions." },
+          revisionId: { type: "string", description: "Current head revision id returned by list_skill_revisions." }
+        },
+        required: ["name", "revisionId"],
+        additionalProperties: false
+      },
+      preflight: (_args, context) => assertDefaultProjectSkillControl(
+        this.runtime?.projects,
+        context,
+        "Skill rollback"
+      ),
+      handler: (args, context) => {
+        assertProjectSkill(context, args.name);
+        assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill rollback");
+        return this.rollbackSkillRevision(args.name, args.revisionId, context?.agentId ?? "agent");
+      }
+    });
+
+    toolRegistry.register({
       name: "edit_skill",
       source: "skill",
       description: "Improve an existing skill. Preferred: targeted patch via old_string/new_string (old_string must match exactly once). Or pass description/body/category to replace those fields. Patch skills IMMEDIATELY when you find them stale or wrong.",
@@ -686,15 +801,13 @@ export class SkillRegistry {
     const declaredAllowed = Array.isArray(skill.allowedTools) ? skill.allowedTools : null;
     const effectiveAllowed = declaredAllowed && inheritedAllowed
       ? declaredAllowed.filter((toolName) => inheritedAllowed.includes(toolName))
-      : declaredAllowed ?? inheritedAllowed;
-    if (!effectiveAllowed) {
+      : declaredAllowed ?? inheritedAllowed ?? [];
+    if (!declaredAllowed && !inheritedAllowed) {
       try {
-        this.warn(`[openagi] skill '${skill.name}' ran with the full tool registry because it has no allowed_tools frontmatter; prefer use_skill for contextual procedures.`);
+        this.warn(`[openagi] skill '${skill.name}' has no allowed_tools frontmatter or inherited tool boundary; it will run without tools. Prefer use_skill or declare the minimum tools.`);
       } catch { /* visibility must not break execution */ }
     }
-    const advertisedTools = effectiveAllowed
-      ? (this.runtime.tools?.toOpenAITools?.({ only: effectiveAllowed }) ?? [])
-      : (this.runtime.tools?.toOpenAITools?.() ?? []);
+    const advertisedTools = this.runtime.tools?.toOpenAITools?.({ only: effectiveAllowed }) ?? [];
     // Story 2: record outcome lineage for the skill run. If the skill
     // was materialized from a proactive-suggestion, the outcome carries
     // that suggestion id forward so /proactive/suggestions/:id/outcome
@@ -729,10 +842,8 @@ export class SkillRegistry {
         context: {
           ...nestedContext,
           skill: skill.name,
-          ...(effectiveAllowed ? {
-            __advertisedTools: effectiveAllowed,
-            __allowedTools: effectiveAllowed
-          } : {})
+          __advertisedTools: effectiveAllowed,
+          __allowedTools: effectiveAllowed
         }
       });
       // Tool-using skill completions are graded by their per-call results.
@@ -843,6 +954,16 @@ function readUtf8FileCapped(filePath, maxBytes, label) {
 
 function parseSkill(filePath, dir) {
   const text = readUtf8FileCapped(filePath, MAX_SKILL_FILE_BYTES, "SKILL.md");
+  const parsed = parseSkillDocument(text);
+  return {
+    ...parsed,
+    linkedFiles: scanLinkedFiles(dir),
+    dir,
+    path: filePath
+  };
+}
+
+function parseSkillDocument(text) {
   // Accept the historical one-newline form for existing hand-authored
   // skills, while every writer in this repo emits the canonical blank line.
   const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n([\s\S]*)$/.exec(text);
@@ -873,11 +994,17 @@ function parseSkill(filePath, dir) {
     ownerProjectId: meta.ownerProjectId ?? null,
     createdBy: meta.createdBy ?? null,
     createdAt: meta.createdAt ?? null,
-    linkedFiles: scanLinkedFiles(dir),
-    body,
-    dir,
-    path: filePath
+    body
   };
+}
+
+function assertRollbackDocument(name, document) {
+  if (typeof document !== "string") throw new Error("Rollback revision does not contain a skill document.");
+  assertSkillDocumentSize(document);
+  const parsed = parseSkillDocument(document);
+  if (parsed.name !== name) {
+    throw new Error(`Rollback revision belongs to '${parsed.name}', not '${name}'.`);
+  }
 }
 
 // Hermes-style linked files: references/, templates/, scripts/, assets/
@@ -1130,6 +1257,12 @@ function positiveDays(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function positiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return fallback;
+  return parsed;
 }
 
 function validDate(value, label) {

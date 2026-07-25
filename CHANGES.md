@@ -812,3 +812,12 @@ MEMORY TRUST FOUNDATION COMPLETE
 - Routed post-session preference proposals to the caller's profile scope, while keeping non-preference review learning project-scoped and approval-gated.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1621/1622 tests with zero failures and one intentional Windows permission-mode skip.
 PROFILE MEMORY COMPLETE
+
+## 2026-07-25 - Hermes-informed skill safety and reversible curation (Codex)
+
+- Changed isolated `run_skill` generations to fail closed: absent both declared `allowed_tools` and an inherited boundary, they receive no tool schemas and an invoke-time empty allowlist rather than the full registry.
+- Added compact, hash-only `list_skill_revisions` and confirmation-gated `rollback_skill` tools. Rollback accepts only the exact current revision, verifies the current document hash, validates the restored document, and writes a new recoverable revision.
+- Made curator state transitions immediately auditable and reversible through the same head-only rollback path; corrupt revision journals cannot supply rollback bytes.
+- Documented the new agent-facing revision tools in the static system prompt.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1622/1623 tests with zero failures and one intentional Windows permission-mode skip.
+SKILL SAFETY AND CURATION COMPLETE

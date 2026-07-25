@@ -63,6 +63,12 @@ test("skill curator ages agent-created skills without deleting and can restore a
   assert.equal(registry.mustGet("age-me").state, "archived");
   assert.match(fs.readFileSync(archived.reportPath, "utf8"), /age-me \| stale \| archived/);
 
+  const revision = registry.revisionHistory("age-me").revisions[0];
+  assert.equal(revision.action, "curator-archived");
+  assert.equal(revision.rollbackEligible, true, "a curator state transition remains directly recoverable");
+  registry.rollbackSkillRevision("age-me", revision.id, "tester");
+  assert.equal(registry.mustGet("age-me").state, "stale");
+
   registry.restoreSkill("age-me", "tester", new Date("2026-04-05T01:00:00.000Z"));
   assert.equal(registry.mustGet("age-me").state, "active");
   registry.curate({ now: "2026-04-06T00:00:00.000Z", staleDays: 30, archiveDays: 90 });
