@@ -830,3 +830,11 @@ SKILL SAFETY AND CURATION COMPLETE
 - Documented both agent-facing tools and the epistemic-use guidelines in the static system prompt.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1626/1627 tests with zero failures and one intentional Windows permission-mode skip.
 MEMORY AND SKILL AWARENESS COMPLETE
+
+## 2026-07-25 - Hermes memory and skills deep dive (Codex)
+
+- Added a source-linked comparison of Hermes' official memory, skills, curator, and external-provider design with the current Cerberus implementation.
+- Recorded the original two-phase adoption work, the tool-calling and evidence-awareness improvements it delivered, and deliberately deferred follow-ups that require a separate privacy or authority design.
+- Documented why Cerberus keeps Hermes' compact and progressive ergonomics while requiring durable provenance, caller-scoped isolation, finite skill grants, human-approved background writes, and revision-safe recovery.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1626/1627 tests with zero failures and one intentional Windows permission-mode skip.
+HERMES MEMORY AND SKILLS DEEP DIVE COMPLETE
