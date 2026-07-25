@@ -1042,3 +1042,15 @@ RAIL FOOTER GATEWAY CONTROLS COMPLETE
   forces a shell tool call produced 7 `agent-activity` SSE events —
   start x2, iteration x2, end x2, turn-end x1 — reaching a subscribed client.
 PET ACTIVITY LANE COMPLETE
+
+- 2026-07-25T23:20:10.056Z · **azazel** · edit `src/directional-adaptive-scrutiny.js` — Cautious fallback: hedge to 'ask' only when signal uncertainty >= 0.5, else defer to signal default; add askUncertaintyThreshold option
+- 2026-07-25T23:26:10.805Z · **azazel** · edit `src/provider-presets.js` — Add validatePresetKey: advisory, fail-soft key ping (Anthropic x-api-key / OpenAI Bearer GET /models, 6s timeout, injectable fetch)
+
+## Always-on evolution HUD
+- The XP/stage readout only existed inside the gear panel. Added a permanent
+  bottom-centre strip (`#cerbPetHud`) showing form (PUP / PRIME CERBERUS), the
+  live reactive state (idle/thinking/working/done/error) with a colour-coded
+  pulse dot, and an animated XP bar. Mirrors settings.xp/settings.stage — no
+  second counter. Refreshed from setState, gainXP, evolve, reset, and toggles,
+  so it moves in real time while any channel (Discord/Telegram/cron) drives work.
+PET EVOLUTION HUD COMPLETE

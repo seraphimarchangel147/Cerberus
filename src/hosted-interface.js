@@ -11735,6 +11735,76 @@ switchTab(initialTab);
   }
   applyCanvasStyle();
 
+  /* ── always-on evolution HUD (pinned bottom-centre) ──────────────────────
+     The gear panel already showed XP, but only when opened. The Creator wants
+     evolution progress AND the live reactive state visible at a glance while
+     the harness is working, so this strip is permanent. It mirrors the same
+     settings.xp / settings.stage source of truth — no second counter. */
+  var hud = document.createElement("div");
+  hud.id = "cerbPetHud";
+  hud.style.cssText = [
+    "position:fixed", "z-index:10000", "left:50%", "transform:translateX(-50%)",
+    "bottom:10px", "min-width:230px", "padding:6px 12px 7px",
+    "border-radius:9px", "border:1px solid rgba(224,69,26,0.45)",
+    "background:rgba(14,8,8,0.86)", "backdrop-filter:blur(6px)",
+    "font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace",
+    "color:#c9beb0", "pointer-events:none",
+    "box-shadow:0 4px 18px rgba(0,0,0,0.55)"
+  ].join(";") + ";";
+  hud.innerHTML =
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">'
+    + '<span id="cerbHudDot" style="width:7px;height:7px;border-radius:50%;background:#6b5a52;flex:none;box-shadow:0 0 6px rgba(0,0,0,0);"></span>'
+    + '<span id="cerbHudForm" style="color:#ffd97a;font-weight:700;letter-spacing:0.6px;">PUP</span>'
+    + '<span id="cerbHudState" style="color:#8d7e72;">idle</span>'
+    + '<span id="cerbHudXP" style="margin-left:auto;color:#e8b84a;">0/100</span>'
+    + '</div>'
+    + '<div style="height:5px;border-radius:3px;background:#2a1512;overflow:hidden;">'
+    + '<div id="cerbHudBar" style="height:100%;width:0%;border-radius:3px;'
+    + 'background:linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a);transition:width .35s ease;"></div>'
+    + '</div>';
+  document.body.appendChild(hud);
+
+  /* Colour per live reactive state so "Azazel is working" is readable at a
+     glance without watching the sprite itself. */
+  var HUD_TONE = {
+    idle:    ["#6b5a52", "idle"],
+    running: ["#ff8a1e", "working"],
+    review:  ["#ffd24a", "thinking"],
+    waving:  ["#7ddc7d", "done"],
+    jumping: ["#7ddc7d", "done"],
+    failed:  ["#e0451a", "error"],
+    waiting: ["#8d7e72", "waiting"]
+  };
+
+  function updateHud() {
+    if (!hud) return;
+    hud.style.display = settings.enabled ? "block" : "none";
+    var prime = settings.stage >= 1;
+    var pct = prime ? 100 : Math.max(0, Math.min(100, (settings.xp / XP_MAX) * 100));
+    var bar = document.getElementById("cerbHudBar");
+    var xpEl = document.getElementById("cerbHudXP");
+    var formEl = document.getElementById("cerbHudForm");
+    var stEl = document.getElementById("cerbHudState");
+    var dot = document.getElementById("cerbHudDot");
+    if (bar) {
+      bar.style.width = pct + "%";
+      bar.style.background = prime
+        ? "linear-gradient(90deg,#ffd24a,#fff4d0,#ffd24a)"
+        : "linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a)";
+    }
+    if (xpEl) xpEl.textContent = prime ? "MAX" : (Math.floor(settings.xp) + "/" + XP_MAX);
+    if (formEl) {
+      formEl.textContent = prime ? "PRIME CERBERUS" : "PUP";
+      formEl.style.color = prime ? "#fff4d0" : "#ffd97a";
+    }
+    var tone = HUD_TONE[state] || HUD_TONE.idle;
+    if (stEl) { stEl.textContent = tone[1]; stEl.style.color = tone[0]; }
+    if (dot) {
+      dot.style.background = tone[0];
+      dot.style.boxShadow = (state === "idle") ? "none" : "0 0 7px " + tone[0];
+    }
+  }
+
   var STATES = {
     idle:    { flameI:1.0, walk:0, bobAmp:1,   roarCenter:true,  roarSide:false, tailSpeed:0.10, sad:0 },
     running: { flameI:1.5, walk:1, bobAmp:1.5, roarCenter:true,  roarSide:true,  tailSpeed:0.30, sad:0 },
@@ -11766,6 +11836,7 @@ switchTab(initialTab);
     if (settings.autoEvolve && settings.xp >= XP_MAX) doEvolve();
     saveSettings();
     updatePanel();
+    updateHud();
   }
   function doEvolve() {
     if (settings.stage >= 1 || evolving) return;
@@ -11780,6 +11851,7 @@ switchTab(initialTab);
     saveSettings();
     applyCanvasStyle();
     updatePanel();
+    updateHud();
   }
   function resetToBase() {
     settings.stage = 0;
@@ -11788,6 +11860,7 @@ switchTab(initialTab);
     saveSettings();
     applyCanvasStyle();
     updatePanel();
+    updateHud();
   }
 
   /* ── easter-egg idles ── */
@@ -11806,6 +11879,7 @@ switchTab(initialTab);
     state = s;
     if (s === "jumping") jumpT = 0;
     if (s !== "idle") { egg = null; eggT = 0; }
+    updateHud();
   }
 
   window.cerbPetEgg = function (name) {
@@ -11873,7 +11947,7 @@ switchTab(initialTab);
     knob.style.cssText = "position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#8a8078;transition:left .15s, background .15s;";
     b.appendChild(knob);
     function paint(){ var on=get(); knob.style.left=on?"22px":"2px"; knob.style.background=on?"#ff8a1e":"#8a8078"; b.style.background=on?"rgba(224,69,26,0.35)":"#2a1512"; }
-    b.addEventListener("click", function(){ set(!get()); paint(); saveSettings(); applyCanvasStyle(); });
+    b.addEventListener("click", function(){ set(!get()); paint(); saveSettings(); applyCanvasStyle(); updateHud(); });
     paint();
     return b;
   }
@@ -11941,6 +12015,7 @@ switchTab(initialTab);
     }
   }
   updatePanel();
+  updateHud();
 
   var lastDraw = 0;
   function tick(now) {
