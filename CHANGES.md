@@ -859,3 +859,14 @@ TOOL CONTRACT V2 COMPLETE
 - Added race, collision-strength, stale-write, syntax rollback, writer failure, schema, mode, LSP, project-isolation, and both-policy regressions.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1642/1643 tests with zero failures and one intentional Windows permission-mode skip.
 TRANSACTIONAL CODE EDITS COMPLETE
+
+## 2026-07-25 - Unified Tool Kernel: resource-aware provider batching (Codex)
+
+- Added an order-preserving tool batch executor with a hard concurrency cap of four and deterministic execution-wave receipts.
+- Parallelizes read-only calls, never mixes reads with mutations, and parallelizes side effects only when trusted synchronous `jobResources` resolve to finite non-overlapping resources.
+- Keeps approvals, goal controls, unknown tools, invalid resource resolvers, and unscoped mutations as exclusive sequential barriers.
+- Wired both OpenAI Responses and Anthropic tool loops to the same scheduler while retaining duplicate-call identity checks, semantic outcomes, model-visible result ordering, deadlines, and goal-loop safety.
+- Emits compact `tool-batch` progress events with call count, wave count, parallel-wave count, and maximum width for live harness awareness.
+- Added scheduler, cap, conflict, rejection, provider-ordering, mutation-barrier, duplicate-security, approval-suspension, and both-policy regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1652/1653 tests with zero failures and one intentional Windows permission-mode skip.
+RESOURCE AWARE TOOL BATCHING COMPLETE

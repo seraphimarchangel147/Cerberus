@@ -17,6 +17,7 @@ import {
 } from "./provider-routing.js";
 import { defaultToolOutputStore } from "./tool-output-store.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
+import { executeToolBatch } from "./tool-batch-executor.js";
 import {
   CONTEXT_GATEWAY_RATIO,
   contextCompressionTrigger,
@@ -3993,12 +3994,30 @@ export class OpenAIResponsesProvider {
         });
       }
 
-      for (const call of calls) {
+      const preparedToolBatch = prepareProviderToolBatch(calls, {
+        completed: completedToolCallIds,
+        goalRevision: goalContinuationRevision,
+        idOf: (call) => call.call_id,
+        nameOf: (call) => call.name,
+        parse: (call) => parseFunctionCallArguments(call.arguments)
+      });
+      const batchResults = await invokePreparedToolBatch({
+        provider: this,
+        deadline,
+        context,
+        toolRegistry,
+        prepared: preparedToolBatch
+      });
+
+      for (let callIndex = 0; callIndex < calls.length; callIndex += 1) {
+        const call = calls[callIndex];
         if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
           stopReason = "goal-preempted";
           break iterationLoop;
         }
-        const parsed = parseFunctionCallArguments(call.arguments);
+        const parsed = preparedToolBatch
+          ? { ok: true, value: preparedToolBatch[callIndex].args }
+          : parseFunctionCallArguments(call.arguments);
         const parsedArgs = parsed.value;
         let invocation;
         const duplicate = parsed.ok
@@ -4012,6 +4031,19 @@ export class OpenAIResponsesProvider {
             "Tool arguments must be a valid JSON object; the tool was not invoked.",
             { code: "invalid_tool_arguments" }
           );
+        } else if (batchResults) {
+          const settled = batchResults[callIndex];
+          if (settled.status === "rejected") {
+            const error = settled.reason;
+            if (requestTimedOut(error)) {
+              stopReason = "request-timeout";
+              break iterationLoop;
+            }
+            if (!deadlineExpired(this, deadline, error)) throw error;
+            stopReason = "turn-timeout";
+            break iterationLoop;
+          }
+          invocation = settled.value;
         } else {
           try {
             invocation = await withinTurn(this, deadline, () => (
@@ -4737,12 +4769,29 @@ export class AnthropicProvider {
       // batch hits the deadline. Reconciliation can then mark only the calls
       // that truly never ran instead of discarding successful tool work.
       if (toolUses.length > 0) convo.push({ role: "user", content: toolResults });
-      for (const use of toolUses) {
+      const preparedToolBatch = prepareProviderToolBatch(toolUses, {
+        completed: completedToolCallIds,
+        goalRevision: goalContinuationRevision,
+        idOf: (use) => use.id,
+        nameOf: (use) => use.name,
+        parse: (use) => plainToolArguments(use.input)
+      });
+      const batchResults = await invokePreparedToolBatch({
+        provider: this,
+        deadline,
+        context,
+        toolRegistry,
+        prepared: preparedToolBatch
+      });
+      for (let useIndex = 0; useIndex < toolUses.length; useIndex += 1) {
+        const use = toolUses[useIndex];
         if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
           stopReason = "goal-preempted";
           break iterationLoop;
         }
-        const parsedArgs = plainToolArguments(use.input);
+        const parsedArgs = preparedToolBatch
+          ? { ok: true, value: preparedToolBatch[useIndex].args }
+          : plainToolArguments(use.input);
         let invocation;
         if (!parsedArgs.ok) {
           invocation = semanticToolError(
@@ -4750,6 +4799,19 @@ export class AnthropicProvider {
             "Tool arguments must be a JSON object; the tool was not invoked.",
             { code: "invalid_tool_arguments" }
           );
+        } else if (batchResults) {
+          const settled = batchResults[useIndex];
+          if (settled.status === "rejected") {
+            const error = settled.reason;
+            if (requestTimedOut(error)) {
+              stopReason = "request-timeout";
+              break iterationLoop;
+            }
+            if (!deadlineExpired(this, deadline, error)) throw error;
+            stopReason = "turn-timeout";
+            break iterationLoop;
+          }
+          invocation = settled.value;
         } else {
           try {
             invocation = await withinTurn(this, deadline, () => (
@@ -5431,6 +5493,76 @@ function rememberToolCall(ledger, callId, name, args, invocation) {
     invocation
   });
   return true;
+}
+
+function prepareProviderToolBatch(items, {
+  completed,
+  goalRevision,
+  idOf,
+  nameOf,
+  parse
+}) {
+  if (!Array.isArray(items) || items.length < 2 || goalRevision !== null) return null;
+  const seenIds = new Set();
+  const prepared = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const id = idOf(item);
+    const name = nameOf(item);
+    const parsed = parse(item);
+    if (
+      !parsed?.ok
+      || !validProviderCallId(id)
+      || GOAL_CONTROL_TOOLS.has(name)
+      || seenIds.has(id)
+      || duplicateToolCall(completed, id, name, parsed.value)
+    ) {
+      return null;
+    }
+    seenIds.add(id);
+    prepared.push({
+      index,
+      id,
+      name,
+      args: parsed.value
+    });
+  }
+  return prepared;
+}
+
+async function invokePreparedToolBatch({
+  provider,
+  deadline,
+  context,
+  toolRegistry,
+  prepared
+}) {
+  if (!prepared) return null;
+  const execution = await executeToolBatch(prepared, {
+    toolRegistry,
+    context,
+    barrierNames: GOAL_CONTROL_TOOLS,
+    invoke: (entry) => withinTurn(provider, deadline, () => (
+      toolRegistry?.invoke?.(
+        entry.name,
+        entry.args,
+        providerToolCallContext(context, entry.id, entry.name, entry.args)
+      )
+        ?? Promise.resolve({ ok: false, error: "no toolRegistry" })
+    ), context)
+  });
+  try {
+    context?.__onToolEvent?.({
+      phase: "tool-batch",
+      calls: prepared.length,
+      waves: execution.waves.length,
+      parallelWaves: execution.waves.filter((wave) => wave.width > 1).length,
+      maxWidth: Math.max(1, ...execution.waves.map((wave) => wave.width))
+    });
+  } catch {
+    // Progress observers are advisory.
+  }
+  return execution.results;
 }
 
 function providerToolCallContext(context, callId, name, args) {
