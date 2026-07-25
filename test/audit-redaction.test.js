@@ -54,6 +54,7 @@ test("pending-action persistence is masked while approved execution receives the
   const seen = [];
   tools.register({
     name: "code_shell",
+    parameters: { type: "object", additionalProperties: true },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async (args) => { seen.push(args); return { exitCode: 0 }; }

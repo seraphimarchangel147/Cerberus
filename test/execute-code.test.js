@@ -99,6 +99,12 @@ test("execute_code cannot carry wrapper approval past the catastrophic gate", as
   // never reach a shell, even if this regression itself fails.
   tools.register({
     name: "code_shell",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", minLength: 1 } },
+      required: ["command"],
+      additionalProperties: false
+    },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async () => { executions += 1; return { exitCode: 0 }; }

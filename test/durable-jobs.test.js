@@ -79,6 +79,7 @@ test("durable direct jobs re-enter ToolRegistry with stripped authority", async 
   let childContext;
   h.tools.register({
     name: "job_test_echo",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: false,
     handler: async (args, context) => {
       childContext = context;
@@ -206,6 +207,7 @@ test("default concurrency is three and overlapping mutations stay serialized", a
   let peak = 0;
   h.tools.register({
     name: "job_test_mutation",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: true,
     jobResourceRevision: "test-mutation-v1",
     jobResources: ({ id }) => [{
@@ -269,6 +271,7 @@ test("foreground mutations honor active durable resource leases", async (t) => {
   let foregroundRuns = 0;
   h.tools.register({
     name: "job_test_foreground_lock",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: true,
     jobResourceRevision: "foreground-lock-v1",
     jobResources: () => ["workspace/shared"],
@@ -448,6 +451,7 @@ test("non-cooperative jobs are quarantined without releasing conflicting locks",
   let releaseStuck;
   h.tools.register({
     name: "job_test_watchdog",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: true,
     jobResourceRevision: "watchdog-v1",
     jobResources: ({ resource }) => [`workspace/${resource}`],
@@ -505,6 +509,7 @@ test("restart hydration advances beyond each bounded replay batch", async (t) =>
   });
   h.tools.register({
     name: "job_test_replay_batch",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: false,
     handler: async ({ value }) => ({ value })
   });
@@ -635,6 +640,7 @@ test("secret-bearing inputs stay live-only and are never exposed by status", asy
   const h = harness(t);
   h.tools.register({
     name: "job_test_secret_shape",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: false,
     handler: async () => ({ accepted: true })
   });

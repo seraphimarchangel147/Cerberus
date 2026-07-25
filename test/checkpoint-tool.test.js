@@ -176,6 +176,14 @@ test("approval is resolved before checkpointing: queued calls capture nothing, c
   });
   registry.register({
     name: "code_shell",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", minLength: 1 }
+      },
+      required: ["command"],
+      additionalProperties: false
+    },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async () => {
@@ -221,6 +229,14 @@ test("non-destructive tools create no checkpoints and a disabled store stays ine
   registry.bindCheckpoints(store);
   registry.register({
     name: "code_read",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", minLength: 1 }
+      },
+      required: ["path"],
+      additionalProperties: false
+    },
     sideEffects: false,
     handler: async ({ path: filePath }) => fs.readFileSync(filePath, "utf8")
   });

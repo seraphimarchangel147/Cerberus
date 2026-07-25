@@ -838,3 +838,13 @@ MEMORY AND SKILL AWARENESS COMPLETE
 - Documented why Cerberus keeps Hermes' compact and progressive ergonomics while requiring durable provenance, caller-scoped isolation, finite skill grants, human-approved background writes, and revision-safe recovery.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1626/1627 tests with zero failures and one intentional Windows permission-mode skip.
 HERMES MEMORY AND SKILLS DEEP DIVE COMPLETE
+
+## 2026-07-25 - Unified Tool Kernel: Tool Contract V2 (Codex)
+
+- Added bounded, side-effect-free JSON Schema normalization and runtime validation for every registered tool input, with local references, composition, formats, structural limits, and secret-safe path-only errors.
+- Rejects invalid calls before project resolution, forwarding, preflight, hooks, approvals, checkpoints, leases, or handlers, so malformed mutating calls cannot consume authority or create false audit activity.
+- Added optional output contracts that turn schema-invalid handler successes into explicit `invalid_tool_result` outcomes while retaining checkpoint evidence and conservative mutation state.
+- Exposed output contracts through deferred discovery without sending them as provider input schemas, and rejected executable or accessor-bearing contracts at registration.
+- Made normalization contracts explicit where tools intentionally clamp permissive input, and updated legacy test doubles to declare their accepted fixture arguments instead of relying on implicit open inputs.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1634/1635 tests with zero failures and one intentional Windows permission-mode skip.
+TOOL CONTRACT V2 COMPLETE

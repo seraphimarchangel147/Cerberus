@@ -30,6 +30,7 @@ function registerGatedTool(store, handler) {
   tools.bindPendingActions(store);
   tools.register({
     name: "send_thing",
+    parameters: { type: "object", additionalProperties: true },
     needsConfirmation: true,
     summarize: ({ value }) => `Send ${value}`,
     handler

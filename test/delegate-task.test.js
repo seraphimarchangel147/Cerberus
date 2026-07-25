@@ -137,6 +137,7 @@ test("single delegate_task returns only the summary and keeps child turns out of
   const { memoryWrites, store, tools } = makeHarness(provider);
   tools.register({
     name: "probe_read",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: false,
     handler: async () => ({ raw: "INTERMEDIATE TOOL OUTPUT MUST STAY IN THE CHILD" })
   });

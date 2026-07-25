@@ -22,7 +22,10 @@ export function registerSessionSearchTool(runtime) {
       type: "object",
       properties: {
         query: { type: "string", description: "Text to find across your persisted conversation messages." },
-        limit: { type: "integer", minimum: 1, maximum: 20, description: "Maximum snippets to return (default 8)." },
+        limit: {
+          type: ["integer", "string"],
+          description: "Maximum snippets to return. Values are normalized and clamped to 1..20 (default 8)."
+        },
         role: { type: "string", enum: ["user", "assistant", "tool"], description: "Optional exact message-role filter." },
         sessionId: { type: "string", description: "Optional exact session id filter." },
         since: { type: "string", description: "Optional inclusive ISO timestamp lower bound." },

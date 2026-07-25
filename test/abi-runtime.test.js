@@ -1396,6 +1396,14 @@ test("ToolRegistry: needsConfirmation gate suspends until a decision", async () 
     name: "do_thing",
     description: "test",
     needsConfirmation: true,
+    parameters: {
+      type: "object",
+      properties: {
+        x: { type: "integer" }
+      },
+      required: ["x"],
+      additionalProperties: false
+    },
     summarize: (args) => `Do thing with ${args.x}`,
     handler: async (args) => { ran++; return { didIt: args.x }; }
   });

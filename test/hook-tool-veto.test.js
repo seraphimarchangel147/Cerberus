@@ -31,6 +31,7 @@ test("a plugin veto is terminal across confirmation, session allowance, and spoo
   });
   tools.register({
     name: "deploy_thing",
+    parameters: { type: "object", additionalProperties: true },
     needsConfirmation: true,
     handler: async () => { dispatched += 1; return { deployed: true }; }
   });
@@ -72,6 +73,12 @@ test("catastrophic approval replays external pre hooks once and emits one dispat
   let dispatched = 0;
   tools.register({
     name: "code_shell",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", minLength: 1 } },
+      required: ["command"],
+      additionalProperties: false
+    },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async ({ command }) => {
@@ -117,6 +124,7 @@ test("hook payload mutation cannot alter live handler arguments", async () => {
   let received;
   tools.register({
     name: "echo_value",
+    parameters: { type: "object", additionalProperties: true },
     handler: async (args) => { received = args.value; return args.value; }
   });
 

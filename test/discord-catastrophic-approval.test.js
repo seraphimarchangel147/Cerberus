@@ -22,6 +22,12 @@ function createHarness(t) {
 
   tools.register({
     name: "code_shell",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", minLength: 1 } },
+      required: ["command"],
+      additionalProperties: false
+    },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async ({ command }) => {

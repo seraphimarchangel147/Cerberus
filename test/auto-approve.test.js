@@ -13,6 +13,7 @@ function makeGatedRegistry() {
   const registry = new ToolRegistry();
   registry.register({
     name: "send_thing",
+    parameters: { type: "object", additionalProperties: true },
     needsConfirmation: true,
     handler: async () => { calls.push("send_thing"); return { sent: true }; }
   });

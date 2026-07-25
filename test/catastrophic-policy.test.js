@@ -87,6 +87,14 @@ test("catastrophic calls divert in both auto-approve lanes without pinning the e
   let executions = 0;
   registry.register({
     name: "code_shell",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", minLength: 1 }
+      },
+      required: ["command"],
+      additionalProperties: false
+    },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async () => { executions += 1; return { exitCode: 0 }; }
@@ -112,6 +120,14 @@ test("the hosted approval endpoint executes a catastrophic action after a human 
   // without ever executing the deliberately dangerous fixture command.
   runtime.tools.register({
     name: "code_shell",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", minLength: 1 }
+      },
+      required: ["command"],
+      additionalProperties: false
+    },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async ({ command }) => { calls.push(command); return { exitCode: 0, stdout: "stubbed" }; }

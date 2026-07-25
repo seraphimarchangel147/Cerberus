@@ -227,8 +227,7 @@ test("new tool-created schedules pin the post-attachment project revision and ru
     "schedule_message",
     {
       prompt: "run project work",
-      intervalSeconds: 60,
-      id: foreign.id
+      intervalSeconds: 60
     },
     {
       __projectId: "alpha",

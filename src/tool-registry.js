@@ -27,6 +27,12 @@ import {
   snapshotToolValue,
   toolFailureFingerprint
 } from "./tool-outcome.js";
+import {
+  formatToolContractIssues,
+  normalizeToolInputSchema,
+  normalizeToolOutputSchema,
+  validateToolContractValue
+} from "./tool-contract.js";
 import { createSkillCandidateFromRecipe } from "./skill-materialize.js";
 import {
   assertSafeMemoryContent,
@@ -152,7 +158,8 @@ export class ToolRegistry {
     const normalized = {
       name: tool.name,
       description: tool.description ?? "",
-      parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
+      parameters: normalizeToolInputSchema(tool.parameters, tool.name),
+      outputSchema: normalizeToolOutputSchema(tool.outputSchema, tool.name),
       source,
       handler: tool.handler,
       // Synchronous bridge unwrapping happens before activity, hooks, gates,
@@ -527,6 +534,17 @@ export class ToolRegistry {
         code: "invalid_tool_arguments",
         error: safeToolErrorMessage(error, "Tool arguments are not safe JSON.")
       });
+    }
+    if (tool) {
+      const inputValidation = validateToolContractValue(tool.parameters, args);
+      if (!inputValidation.ok) {
+        return this._finalizeInvocation(tool, name, args, context, {
+          ok: false,
+          blocked: tool.sideEffects !== false,
+          code: "invalid_tool_arguments",
+          error: `Tool ${name} arguments do not match its declared schema: ${formatToolContractIssues(inputValidation)}.`
+        });
+      }
     }
     const projectScope = validateProjectScope(
       this.projects,
@@ -1445,7 +1463,7 @@ export class ToolRegistry {
       }
       dispatched = true;
       const result = await tool.handler(args ?? {}, context);
-      const semantic = await semanticToolResult(
+      let semantic = await semanticToolResult(
         tool,
         result,
         args,
@@ -1454,6 +1472,23 @@ export class ToolRegistry {
           evidence: checkpointEvidence(checkpointCapture)
         }
       );
+      if (semantic.ok && tool.outputSchema) {
+        const outputValidation = validateToolContractValue(
+          tool.outputSchema,
+          semantic.result
+        );
+        if (!outputValidation.ok) {
+          semantic = semanticToolError(
+            tool,
+            `Tool ${name} returned a result that does not match its declared output schema: ${formatToolContractIssues(outputValidation)}.`,
+            {
+              code: "invalid_tool_result",
+              changed: tool.sideEffects === false ? false : null,
+              evidence: checkpointEvidence(checkpointCapture)
+            }
+          );
+        }
+      }
       if (semantic.ok && context?.__approval) {
         semantic.result = appendApprovalNote(semantic.result, context.__approval);
       }
