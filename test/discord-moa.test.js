@@ -217,6 +217,7 @@ test("AgentHost override uses the normal registry path without mutating its prov
   const tools = new ToolRegistry();
   tools.register({
     name: "fixture_read",
+    parameters: { type: "object", additionalProperties: true },
     source: "internal",
     sideEffects: false,
     handler: async (args, context) => {

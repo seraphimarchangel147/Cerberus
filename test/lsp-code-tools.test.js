@@ -52,7 +52,8 @@ test("code_write reports only diagnostics introduced by the new content", async 
 
   const result = await definitions.get("code_write").handler({
     path: target,
-    content: after
+    content: after,
+    expectedTag: mintTag(before)
   });
 
   assert.deepEqual(snapshots, [before, after], "the baseline must be captured before the write");
@@ -103,13 +104,16 @@ test("syntax errors suppress the post-write LSP query", async (t) => {
   const target = path.join(dataDir, "broken.js");
   fs.writeFileSync(target, "const valid = true;\n", "utf8");
 
-  const result = await definitions.get("code_write").handler({
-    path: target,
-    content: "const broken = ;\n"
-  });
+  await assert.rejects(
+    definitions.get("code_write").handler({
+      path: target,
+      content: "const broken = ;\n",
+      expectedTag: mintTag("const valid = true;\n")
+    }),
+    /Syntax validation failed.*no file was changed/s
+  );
 
-  assert.notEqual(result.lint, "ok");
-  assert.equal(result.lsp_diagnostics, null);
+  assert.equal(fs.readFileSync(target, "utf8"), "const valid = true;\n");
   assert.equal(calls, 1, "only the pre-write baseline may run when syntax validation fails");
 });
 

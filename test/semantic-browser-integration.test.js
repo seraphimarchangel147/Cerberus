@@ -176,7 +176,7 @@ test("semantic browser invocation re-authorizes scope and rejects secret smuggli
     projectContext({ __confirmed: true })
   );
   assert.equal(literal.ok, false);
-  assert.equal(literal.code, "preflight_error");
+  assert.equal(literal.code, "invalid_tool_arguments");
   assert.equal(calls.length, 1);
 
   const denied = await registry.invoke(

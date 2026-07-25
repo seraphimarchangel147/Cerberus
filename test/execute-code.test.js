@@ -53,6 +53,13 @@ test("execute_code reduces several code_read calls to only the printed summary",
 
   assert.equal(result.stdout, "3 files / 6 lines\n");
   assert.equal(result.toolCallsMade, 3);
+  assert.equal(result.receipts.length, 3);
+  assert.deepEqual(result.receipts.map((receipt) => receipt.tool), [
+    "code_read",
+    "code_read",
+    "code_read"
+  ]);
+  assert.ok(result.receipts.every((receipt) => receipt.dispatched === true));
   assert.equal(result.truncated, false);
   assert.equal(result.timedOut, false);
   assert.doesNotMatch(result.stdout, /private-/);
@@ -99,6 +106,12 @@ test("execute_code cannot carry wrapper approval past the catastrophic gate", as
   // never reach a shell, even if this regression itself fails.
   tools.register({
     name: "code_shell",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", minLength: 1 } },
+      required: ["command"],
+      additionalProperties: false
+    },
     needsConfirmation: true,
     summarize: ({ command }) => `shell: ${command}`,
     handler: async () => { executions += 1; return { exitCode: 0 }; }

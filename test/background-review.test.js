@@ -17,8 +17,10 @@ import {
 } from "../src/background-review.js";
 import { MemorySystem } from "../src/memory-system.js";
 import { TASK_PROFILES } from "../src/model-router.js";
+import { PendingActionStore, approvePendingAction } from "../src/pending-actions.js";
 import { ProjectStore } from "../src/project-store.js";
 import { SETUP_FIELDS } from "../src/setup-wizard.js";
+import { ToolRegistry, registerCoreTools } from "../src/tool-registry.js";
 
 function isolateEnv(t, key) {
   const previous = process.env[key];
@@ -66,7 +68,7 @@ test("background review is opt-in and routed to the cheapest tier", () => {
   assert.ok(SETUP_FIELDS.includes("OPENAGI_BACKGROUND_REVIEW"));
 });
 
-test("review memories use confidence tiers and merge duplicates while skills stay pending", async (t) => {
+test("review memories stage screened candidates while duplicate evidence and skills stay pending", async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-background-review-"));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const memory = new MemorySystem();
@@ -83,6 +85,7 @@ test("review memories use confidence tiers and merge duplicates while skills sta
   const runtime = {
     dataDir,
     memory,
+    pendingActions: new PendingActionStore({ dir: path.join(dataDir, "pending-actions") }),
     events: new EventEmitter(),
     proactiveObserver: {
       persist(candidate) {
@@ -138,15 +141,21 @@ test("review memories use confidence tiers and merge duplicates while skills sta
   assert.deepEqual(requests[0].context.__advertisedTools, []);
   assert.equal(result.applied.duplicatesSkipped, 1);
   assert.equal(result.applied.memories.length, 1);
-  assert.equal(result.applied.memories[0].tier, "long", "only high-confidence review learning reaches long tier");
-  assert.equal(memory.items.size, 2);
-  assert.ok(duplicate.strength > 0.7, "near-duplicate evidence reinforces instead of duplicating");
+  assert.equal(result.applied.memories[0].status, "pending");
+  assert.equal(result.applied.memories[0].kind, "environment");
+  assert.equal(memory.items.size, 1, "model review cannot write memory before approval");
+  assert.equal(duplicate.strength, 0.7, "unapproved duplicate evidence cannot silently reinforce memory");
+  const staged = runtime.pendingActions.list({ status: "pending" });
+  assert.equal(staged.length, 1);
+  assert.equal(staged[0].toolName, "apply_background_memory_proposal");
+  assert.equal(staged[0].args.proposal.content, "The release environment uses canary deployments before production.");
   assert.equal(persistedSkills.length, 1);
   assert.equal(persistedSkills[0].status, "pending");
   assert.equal(persistedSkills[0].source, "background-review");
   assert.equal(persistedSkills[0].context.projectId, "alpha");
   assert.equal(events.length, 1);
   assert.equal(events[0].skillPending, true);
+  assert.equal(events[0].memoriesStaged, 1);
 
   const lines = fs.readFileSync(path.join(dataDir, "background-review", "reviews.jsonl"), "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
@@ -546,12 +555,15 @@ test("post-session review sends the bounded digest without duplicating the last 
   assert.deepEqual(request.context.__advertisedTools, []);
 });
 
-test("a full curated projection records review memory errors without blocking skills", async () => {
+test("a full curated projection stages review candidates without blocking skills", async (t) => {
   const memory = new MemorySystem({ curatedMemoryMaxChars: 16 });
   memory.remember({ content: "12345", scope: "main" }, { tier: "medium", capacityManaged: true });
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-background-full-"));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const skills = [];
   const runtime = {
     memory,
+    pendingActions: new PendingActionStore({ dir: path.join(dataDir, "pending-actions") }),
     proactiveObserver: {
       persist(candidate) {
         skills.push(candidate);
@@ -576,8 +588,61 @@ test("a full curated projection records review memory errors without blocking sk
 
   const result = await reviewer.review({ sessionId: "full", memoryScope: "main" });
   assert.equal(result.skipped, false);
-  assert.equal(result.applied.memories.length, 0);
-  assert.equal(result.applied.memoryErrors.length, 1);
-  assert.match(result.applied.memoryErrors[0], /Nothing was saved/);
+  assert.equal(result.applied.memories.length, 1);
+  assert.equal(result.applied.memoryErrors.length, 0);
+  assert.equal(memory.items.size, 1, "capacity is checked at the human-approved mutation boundary");
   assert.equal(skills.length, 1);
+});
+
+test("a staged background memory needs an exact human approval and cannot be auto-promoted", async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-background-approval-"));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const memory = new MemorySystem();
+  const pendingActions = new PendingActionStore({ dir: path.join(dataDir, "pending-actions") });
+  const tools = new ToolRegistry();
+  const runtime = { memory, pendingActions, tools };
+  tools.bindPendingActions(pendingActions);
+  registerCoreTools(tools, runtime);
+
+  const reviewer = new BackgroundReviewer({
+    runtime,
+    dataDir,
+    modelProvider: {
+      isConfigured: () => true,
+      async generate() {
+        return {
+          text: JSON.stringify({
+            memories: [{
+              content: "The user prefers weekly rollout summaries.",
+              kind: "preference",
+              confidence: "high",
+              tags: ["rollout"]
+            }],
+            skill: null
+          })
+        };
+      }
+    }
+  });
+  const reviewed = await reviewer.review({ sessionId: "approval-session", memoryScope: "main" });
+  const action = pendingActions.get(reviewed.applied.memories[0].actionId);
+  assert.equal(memory.items.size, 0);
+  assert.equal(tools.toOpenAITools().some((tool) => tool.name === "apply_background_memory_proposal"), false);
+
+  await assert.rejects(() => tools.get("apply_background_memory_proposal").handler(action.args, {
+    sessionId: "approval-session",
+    __memoryScope: "main"
+  }), /explicit human approval/);
+  assert.equal(memory.items.size, 0);
+
+  const approved = await approvePendingAction(runtime, action.id, {
+    decidedBy: "human-reviewer",
+    approvedVia: "test"
+  });
+  assert.equal(approved.ok, true);
+  assert.equal(memory.items.size, 1);
+  const item = [...memory.items.values()][0];
+  assert.equal(item.tier, "long");
+  assert.equal(item.metadata.provenance.trust, "human-approved-model-proposal");
+  assert.equal(item.metadata.provenance.approvalActionId, action.id);
 });

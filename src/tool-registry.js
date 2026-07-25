@@ -29,13 +29,28 @@ import {
   snapshotToolValue,
   toolFailureFingerprint
 } from "./tool-outcome.js";
+import {
+  formatToolContractIssues,
+  normalizeToolInputSchema,
+  normalizeToolOutputSchema,
+  validateToolContractValue
+} from "./tool-contract.js";
 import { createSkillCandidateFromRecipe } from "./skill-materialize.js";
+import {
+  assertSafeMemoryContent,
+  backgroundMemoryProvenance,
+  normalizeMemoryTags,
+  prepareBackgroundMemoryProposal,
+  sameBackgroundMemoryProposal
+} from "./memory-intake-policy.js";
+import { isProfileMemoryScope } from "./memory-system.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
 const EXACT_CATASTROPHIC_APPROVAL = Symbol("exact-catastrophic-approval");
 const EXACT_MANUAL_APPROVAL = Symbol("exact-manual-approval");
 const SEMANTIC_OUTCOME_TRACKED = Symbol("semantic-outcome-tracked");
+const EXECUTION_RECEIPT_STATE = Symbol("execution-receipt-state");
 const REGISTRY_FAILURE_STATE = new WeakMap();
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
@@ -146,7 +161,8 @@ export class ToolRegistry {
     const normalized = {
       name: tool.name,
       description: tool.description ?? "",
-      parameters: tool.parameters ?? { type: "object", properties: {}, additionalProperties: false },
+      parameters: normalizeToolInputSchema(tool.parameters, tool.name),
+      outputSchema: normalizeToolOutputSchema(tool.outputSchema, tool.name),
       source,
       handler: tool.handler,
       // Synchronous bridge unwrapping happens before activity, hooks, gates,
@@ -363,6 +379,10 @@ export class ToolRegistry {
       options.context ?? {}
     );
     const listed = this.list({ readOnly: options.readOnly === true })
+      // Internal replay handlers are callable only by a trusted runtime path
+      // (for example, a durable approval action). They are not model tools,
+      // so an agent cannot turn an auto-approved ordinary call into a bypass.
+      .filter((tool) => tool.metadata?.internal !== true)
       .filter((tool) => !projectToolBoundaryError(tool, projectContext))
       .filter((tool) => !profileCapabilityBoundaryError(
         tool,
@@ -503,6 +523,13 @@ export class ToolRegistry {
   // agent is doing in real time. context.__onToolEvent is advisory and
   // best-effort — a throwing observer must never break a tool call.
   async invoke(name, args, context = {}, internalToken = null) {
+    const internal = normalizeInternalInvocation(internalToken);
+    const receiptState = internal.failureTracking?.receiptState
+      ?? createExecutionReceiptState(name);
+    context = {
+      ...(context ?? {}),
+      [EXECUTION_RECEIPT_STATE]: receiptState
+    };
     const tool = this.tools.get(name);
     try {
       const safeArgs = snapshotToolValue(args ?? {});
@@ -517,6 +544,17 @@ export class ToolRegistry {
         code: "invalid_tool_arguments",
         error: safeToolErrorMessage(error, "Tool arguments are not safe JSON.")
       });
+    }
+    if (tool) {
+      const inputValidation = validateToolContractValue(tool.parameters, args);
+      if (!inputValidation.ok) {
+        return this._finalizeInvocation(tool, name, args, context, {
+          ok: false,
+          blocked: tool.sideEffects !== false,
+          code: "invalid_tool_arguments",
+          error: `Tool ${name} arguments do not match its declared schema: ${formatToolContractIssues(inputValidation)}.`
+        });
+      }
     }
     const projectScope = validateProjectScope(
       this.projects,
@@ -600,10 +638,13 @@ export class ToolRegistry {
       // the internal hook token so a bridge can never smuggle a prior pass.
       return this.invoke(targetName, targetArgs, context, null);
     }
-    const internal = normalizeInternalInvocation(internalToken);
     const inheritedTracking = internal.failureTracking;
     const tracking = inheritedTracking
       ?? this._beginFailureTracking(name, args, context, tool);
+    if (tracking?.reserved && !tracking.receiptState) {
+      receiptState.id = tracking.operationReceipt;
+      tracking.receiptState = receiptState;
+    }
     const ownsTracking = !inheritedTracking && tracking?.reserved === true;
     if (tracking?.blocked) {
       return this._finalizeInvocation(
@@ -614,6 +655,18 @@ export class ToolRegistry {
         tracking.blocked,
         { tracking: null, markTracked: true }
       );
+    }
+    if (tool && invocationWasAborted(context)) {
+      const outcome = await this._finalizeInvocation(
+        tool,
+        name,
+        args,
+        context,
+        cancelledToolEnvelope(tool, { dispatched: false }),
+        { tracking, markTracked: true }
+      );
+      if (ownsTracking) this._releaseFailureTracking(tracking);
+      return outcome;
     }
     if (tool?.preflight) {
       try {
@@ -684,6 +737,7 @@ export class ToolRegistry {
           ok: outcome.ok,
           error: outcome.ok ? null : (outcome.error ?? null),
           pending: Boolean(outcome.outcome?.status === "pending"),
+          receipt: outcome.receipt ?? null,
           outcome: outcome.outcome
             ? {
                 status: outcome.outcome.status,
@@ -709,12 +763,17 @@ export class ToolRegistry {
     { tracking = null, markTracked = true } = {}
   ) {
     if (value?.[SEMANTIC_OUTCOME_TRACKED]) return value;
-    const semantic = await ensureSemanticToolEnvelope(
+    let semantic = await ensureSemanticToolEnvelope(
       tool,
       value,
       args,
       context,
       classifyLegacyToolFailure(value)
+    );
+    semantic = attachExecutionReceipt(
+      semantic,
+      name,
+      context?.[EXECUTION_RECEIPT_STATE]
     );
     if (tracking?.reserved) {
       this._recordFailureOutcome(tracking, semantic);
@@ -987,12 +1046,14 @@ export class ToolRegistry {
           ? {
               ok: false,
               error: decision.error,
-              ...(decision.outcome ? { outcome: decision.outcome } : {})
+              ...(decision.outcome ? { outcome: decision.outcome } : {}),
+              ...(decision.receipt ? { receipt: decision.receipt } : {})
             }
           : {
               ok: true,
               result: decision.result,
-              ...(decision.outcome ? { outcome: decision.outcome } : {})
+              ...(decision.outcome ? { outcome: decision.outcome } : {}),
+              ...(decision.receipt ? { receipt: decision.receipt } : {})
             };
       }
       if (
@@ -1049,6 +1110,9 @@ export class ToolRegistry {
         {
           ...(context ?? {}),
           __confirmed: true,
+          // Bind replay-only handlers to the exact durable action that a
+          // human approved. Model arguments cannot create this context field.
+          __pendingActionId: action.id,
           __approval: {
             description: action.reason ?? "flagged as dangerous",
             via: decision.approvedVia ?? "pending-action",
@@ -1065,7 +1129,8 @@ export class ToolRegistry {
       this.pendingActions.complete?.(action.id, {
         result: invokeResult.ok ? invokeResult.result : null,
         error: invokeResult.ok ? null : invokeResult.error,
-        outcome: invokeResult.outcome ?? null
+        outcome: invokeResult.outcome ?? null,
+        receipt: invokeResult.receipt ?? null
       });
       return invokeResult;
     }
@@ -1109,6 +1174,9 @@ export class ToolRegistry {
     if (!tool) {
       return { ok: false, error: `Unknown tool: ${name}` };
     }
+    if (invocationWasAborted(context)) {
+      return cancelledToolEnvelope(tool, { dispatched: false });
+    }
     if (tool.sideEffects && this.startupBarrier) {
       try {
         await this.startupBarrier;
@@ -1123,6 +1191,9 @@ export class ToolRegistry {
           }
         );
       }
+    }
+    if (invocationWasAborted(context)) {
+      return cancelledToolEnvelope(tool, { dispatched: false });
     }
     const projectScope = validateProjectScope(
       this.projects,
@@ -1224,9 +1295,21 @@ export class ToolRegistry {
           })
         ) ?? hookDecision;
       } catch (error) {
-        console.warn(
-          `[hooks] pre_tool_call registry failed open: ${safeToolErrorMessage(error, "hook callback failed")}`
-        );
+        const detail = safeToolErrorMessage(error, "hook callback failed");
+        if (tool.sideEffects !== false) {
+          console.warn(`[hooks] pre_tool_call registry failed closed: ${detail}`);
+          hookDecision = {
+            action: "block",
+            message: "Built-in security policy was unavailable; mutating tool execution was blocked.",
+            blockedBy: "builtin-security-hooks",
+            failure: "registry_error"
+          };
+        } else {
+          console.warn(`[hooks] pre_tool_call registry failed open for read-only tool: ${detail}`);
+        }
+      }
+      if (invocationWasAborted(context)) {
+        return cancelledToolEnvelope(tool, { dispatched: false });
       }
       if (hookDecision?.action === "block") {
         if (isTrustedCatastrophicBlock(hookDecision)) {
@@ -1256,14 +1339,16 @@ export class ToolRegistry {
             failureTracking
           });
         }
+        const unavailable = hookDecision.failure === "registry_error";
+        const code = unavailable ? "security_hook_unavailable" : "hook_blocked";
         const error = hookDecision.message ?? `Tool ${name} was blocked by a pre_tool_call hook.`;
         const blocked = await ensureSemanticToolEnvelope(tool, {
           ok: false,
           error,
           blocked: true,
-          code: "hook_blocked"
+          code
         }, args, context, {
-          code: "hook_blocked",
+          code,
           status: "blocked"
         });
         this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
@@ -1331,7 +1416,8 @@ export class ToolRegistry {
           decidedBy: "auto-approve",
           result: invokeResult.ok ? invokeResult.result : null,
           error: invokeResult.ok ? null : invokeResult.error,
-          outcome: invokeResult.outcome ?? null
+          outcome: invokeResult.outcome ?? null,
+          receipt: invokeResult.receipt ?? null
         });
         return invokeResult;
       }
@@ -1431,8 +1517,28 @@ export class ToolRegistry {
         );
       }
       dispatched = true;
+      const receiptState = context?.[EXECUTION_RECEIPT_STATE];
+      if (receiptState) receiptState.dispatched = true;
       const result = await tool.handler(args ?? {}, context);
-      const semantic = await semanticToolResult(
+      if (invocationWasAborted(context) && tool.sideEffects !== false) {
+        const semantic = cancelledToolEnvelope(tool, {
+          dispatched: true,
+          evidence: checkpointEvidence(checkpointCapture)
+        });
+        this._scheduleTimelineCapture({
+          name,
+          context,
+          tool,
+          dispatched
+        });
+        this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {
+          ...semantic,
+          dispatched,
+          durationMs: Date.now() - startedAt
+        });
+        return semantic;
+      }
+      let semantic = await semanticToolResult(
         tool,
         result,
         args,
@@ -1441,6 +1547,29 @@ export class ToolRegistry {
           evidence: checkpointEvidence(checkpointCapture)
         }
       );
+      if (semantic.ok && tool.outputSchema) {
+        const outputValidation = validateToolContractValue(
+          tool.outputSchema,
+          semantic.result
+        );
+        if (!outputValidation.ok) {
+          semantic = semanticToolError(
+            tool,
+            `Tool ${name} returned a result that does not match its declared output schema: ${formatToolContractIssues(outputValidation)}.`,
+            {
+              code: "invalid_tool_result",
+              changed: tool.sideEffects === false ? false : null,
+              evidence: checkpointEvidence(checkpointCapture)
+            }
+          );
+        }
+      }
+      if (invocationWasAborted(context) && tool.sideEffects !== false) {
+        semantic = cancelledToolEnvelope(tool, {
+          dispatched: true,
+          evidence: checkpointEvidence(checkpointCapture)
+        });
+      }
       if (semantic.ok && context?.__approval) {
         semantic.result = appendApprovalNote(semantic.result, context.__approval);
       }
@@ -1458,14 +1587,19 @@ export class ToolRegistry {
       return semantic;
     } catch (error) {
       const errorDetails = safeToolErrorDetails(error);
-      const semantic = semanticToolError(tool, errorDetails.message, {
-        code: errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
-          ? "checkpoint_target_ambiguous"
-          : "handler_error",
-        retryable: errorDetails.retryable,
-        changed: dispatched && tool?.sideEffects !== false ? null : false,
-        evidence: checkpointEvidence(checkpointCapture)
-      });
+      const semantic = invocationWasAborted(context)
+        ? cancelledToolEnvelope(tool, {
+            dispatched,
+            evidence: checkpointEvidence(checkpointCapture)
+          })
+        : semanticToolError(tool, errorDetails.message, {
+            code: errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
+              ? "checkpoint_target_ambiguous"
+              : "handler_error",
+            retryable: errorDetails.retryable,
+            changed: dispatched && tool?.sideEffects !== false ? null : false,
+            evidence: checkpointEvidence(checkpointCapture)
+          });
       this._scheduleTimelineCapture({
         name,
         context,
@@ -1590,6 +1724,57 @@ function createFailureScope({ turnKey = null, context = null } = {}) {
 
 function createOperationReceipt(scope, fingerprint) {
   return `${scope.operationNamespace}_${fingerprint.slice(0, 24)}`;
+}
+
+function createExecutionReceiptState(toolName) {
+  return Object.seal({
+    id: createId("receipt"),
+    tool: boundedReceiptText(toolName, "unknown_tool"),
+    startedAtMs: Date.now(),
+    dispatched: false
+  });
+}
+
+function attachExecutionReceipt(envelope, toolName, state) {
+  const safeState = state ?? createExecutionReceiptState(toolName);
+  if (
+    envelope?.receipt?.id === safeState.id
+    && envelope.receipt.tool === boundedReceiptText(toolName, safeState.tool ?? "unknown_tool")
+    && envelope.receipt.status === envelope?.outcome?.status
+    && envelope.receipt.code === envelope?.outcome?.code
+    && envelope.receipt.dispatched === (safeState.dispatched === true)
+  ) {
+    return envelope;
+  }
+  const finishedAtMs = Date.now();
+  const outcome = envelope?.outcome ?? {};
+  const receipt = Object.freeze({
+    id: boundedReceiptText(safeState.id, createId("receipt")),
+    tool: boundedReceiptText(toolName, safeState.tool ?? "unknown_tool"),
+    status: boundedReceiptText(outcome.status, envelope?.ok ? "succeeded" : "failed"),
+    code: boundedReceiptText(outcome.code, envelope?.ok ? "ok" : "tool_error"),
+    dispatched: safeState.dispatched === true,
+    changed: outcome.changed === true
+      ? true
+      : outcome.changed === false
+        ? false
+        : null,
+    startedAt: new Date(safeState.startedAtMs).toISOString(),
+    finishedAt: new Date(finishedAtMs).toISOString(),
+    durationMs: Math.max(0, finishedAtMs - safeState.startedAtMs)
+  });
+  return {
+    ...envelope,
+    receipt
+  };
+}
+
+function boundedReceiptText(value, fallback) {
+  const text = String(value ?? "").trim();
+  if (!text || text.length > 200 || !/^[A-Za-z0-9._:-]+$/u.test(text)) {
+    return fallback;
+  }
+  return text;
 }
 
 function scopeHasInFlight(scope) {
@@ -2687,6 +2872,37 @@ function checkpointEvidence(capture) {
     .map((id) => `checkpoint:${id}`);
 }
 
+function invocationWasAborted(context) {
+  try {
+    return context?.__abortSignal?.aborted === true;
+  } catch {
+    return true;
+  }
+}
+
+function cancelledToolEnvelope(tool, {
+  dispatched,
+  evidence = []
+} = {}) {
+  const uncertainChange = dispatched === true && tool?.sideEffects !== false;
+  return semanticToolError(
+    tool,
+    dispatched
+      ? "Turn ended while the tool handler was running; completion is uncertain."
+      : "Turn ended before tool dispatch.",
+    {
+      code: dispatched ? "tool_execution_cancelled" : "tool_dispatch_cancelled",
+      status: dispatched ? "failed" : "blocked",
+      retryable: false,
+      changed: uncertainChange ? null : false,
+      evidence,
+      nextSteps: uncertainChange
+        ? ["Inspect the target state before retrying this operation."]
+        : []
+    }
+  );
+}
+
 function classifyLegacyToolFailure(value) {
   if (value?.code) {
     return {
@@ -2760,6 +2976,126 @@ function externalMemoryIdentity(context = {}) {
     userId: `${prefix}${channel}:${owner}`,
     observerId: `${prefix}${identityPart(context?.agentId, "main")}`
   };
+}
+
+function memoryScopeForClass(context = {}, memoryClass = "fact") {
+  if (memoryClass === "preference") {
+    if (!isProfileMemoryScope(context?.__profileMemoryScope)) {
+      throw new Error("A user-profile memory scope is unavailable for this request.");
+    }
+    return context.__profileMemoryScope;
+  }
+  if (typeof context?.__memoryScope === "string" && context.__memoryScope) {
+    return context.__memoryScope;
+  }
+  return context?.agentId && context.agentId !== "main"
+    ? `specialist:${context.agentId}`
+    : "main";
+}
+
+function mergeMemoryHits(projectHits, profileHits, limit) {
+  const byId = new Map();
+  for (const entry of [...(projectHits ?? []), ...(profileHits ?? [])]) {
+    if (!entry?.item?.id) continue;
+    const previous = byId.get(entry.item.id);
+    if (!previous || entry.score > previous.score) byId.set(entry.item.id, entry);
+  }
+  return [...byId.values()]
+    .sort((left, right) => right.score - left.score || String(left.item.id).localeCompare(String(right.item.id)))
+    .slice(0, limit);
+}
+
+function memoryDetailsView(item) {
+  const metadata = item?.metadata ?? {};
+  const provenance = metadata?.provenance ?? {};
+  const supersededBy = boundedMemoryDetailId(metadata?.supersededBy);
+  const condensedInto = boundedMemoryDetailId(metadata?.condensedInto);
+  const status = supersededBy
+    ? "superseded"
+    : condensedInto
+      ? "condensed"
+      : "active";
+  return {
+    id: String(item.id),
+    content: String(item.content ?? ""),
+    scope: String(item.scope ?? "main"),
+    memoryClass: item.metadata?.memoryClass ?? (isProfileMemoryScope(item.scope) ? "preference" : "fact"),
+    status,
+    confidence: {
+      tier: String(item.tier ?? "short"),
+      fidelity: String(item.fidelity ?? "normal"),
+      strength: Number(Number(item.strength ?? 0).toFixed(2)),
+      locked: Boolean(item.locked)
+    },
+    provenance: {
+      sourceType: boundedMemoryDetailText(provenance?.sourceType ?? item.source ?? "runtime", 96),
+      trust: boundedMemoryDetailText(provenance?.trust ?? "unspecified", 96),
+      humanApproved: provenance?.trust === "human-approved-model-proposal"
+    },
+    relationships: {
+      supersededBy,
+      condensedInto,
+      replaces: boundedMemoryDetailIds(metadata?.replaces),
+      corrects: boundedMemoryDetailIds(metadata?.corrects)
+    },
+    createdAt: boundedMemoryDetailText(item.createdAt, 64),
+    lastAccessedAt: boundedMemoryDetailText(item.lastAccessedAt, 64)
+  };
+}
+
+function boundedMemoryDetailIds(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(boundedMemoryDetailId).filter(Boolean).slice(0, 20);
+}
+
+function boundedMemoryDetailId(value) {
+  const id = String(value ?? "").trim();
+  return /^[A-Za-z0-9._:-]{1,128}$/.test(id) ? id : null;
+}
+
+function boundedMemoryDetailText(value, maxChars) {
+  return String(sanitizeForAudit(String(value ?? ""))).slice(0, maxChars);
+}
+
+function approvedBackgroundMemoryProposal(runtime, rawProposal, context = {}) {
+  const actionId = String(context?.__pendingActionId ?? "").trim();
+  const approval = context?.__approval;
+  const decider = String(approval?.decider ?? "").trim();
+  if (!actionId || !decider || decider === "auto-approve") {
+    throw new Error("Background memory proposals require an explicit human approval.");
+  }
+  const action = runtime?.pendingActions?.get?.(actionId, {
+    projectId: context?.__projectId ?? context?.projectId
+  });
+  if (
+    !action
+    || action.status !== "approved"
+    || action.toolName !== "apply_background_memory_proposal"
+  ) {
+    throw new Error("The approved background memory action is unavailable or no longer valid.");
+  }
+  const proposal = prepareBackgroundMemoryProposal(rawProposal, {
+    runtime,
+    turn: {
+      sessionId: action.context?.sessionId ?? context?.sessionId,
+      projectId: action.context?.__projectId ?? action.context?.projectId,
+      memoryScope: action.context?.__memoryScope
+    },
+    scope: action.context?.__memoryScope
+  });
+  if (
+    !sameBackgroundMemoryProposal(action.args?.proposal, proposal)
+    || action.context?.__memoryScope !== proposal.scope
+  ) {
+    throw new Error("The background memory proposal no longer matches its approved action.");
+  }
+  return { action, proposal, decider };
+}
+
+function backgroundMemoryConfidenceProfile(confidence) {
+  if (confidence === "high") return { tier: "long", strength: 0.85 };
+  if (confidence === "medium") return { tier: "medium", strength: 0.68 };
+  return { tier: "medium", strength: 0.48 };
 }
 
 async function invokeExternalMemory(provider, method, args, upstreamSignal = null) {
@@ -3575,7 +3911,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "remember",
-    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. The built-in memory is always written first and, when configured, the fact is also mirrored to the external user model. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
+    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. Use memoryClass='preference' only for stable user preferences; facts remain project-scoped. The built-in memory is always written first and, when configured, the fact is also mirrored to the external user model. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
     parameters: {
       type: "object",
       properties: {
@@ -3590,6 +3926,11 @@ export function registerCoreTools(registry, runtime) {
           enum: ["low", "normal", "high"],
           description: "Higher importance items resist decay and may promote to long-term memory."
         },
+        memoryClass: {
+          type: "string",
+          enum: ["fact", "preference"],
+          description: "Use preference only for a stable user-specific preference; defaults to fact in the active project memory scope."
+        },
         replaceIds: {
           type: "array",
           items: { type: "string" },
@@ -3603,21 +3944,32 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       const importance = args.importance ?? "normal";
+      const memoryClass = args.memoryClass === "preference" ? "preference" : "fact";
       const replaceIds = validateReplaceIds(args.replaceIds);
       const risk = importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45;
-      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
-        ? context.__memoryScope
-        : context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const scope = memoryScopeForClass(context, memoryClass);
+      const content = assertSafeMemoryContent(args.content, { runtime });
+      const tags = normalizeMemoryTags(args.tags);
       const item = runtime.memory.remember(
         {
           source: context.channel ?? "tool",
           scope,
-          content: String(args.content ?? "").trim(),
-          tags: ["tool:remember", ...(args.tags ?? [])],
+          content,
+          tags: ["tool:remember", `memory:${memoryClass}`, ...tags],
           risk,
           repetition: 0.4,
           novelty: 0.55,
-          metadata: { agentId: context.agentId, sessionId: context.sessionId }
+          metadata: {
+            agentId: context.agentId,
+            sessionId: context.sessionId,
+            memoryClass,
+            provenance: {
+              sourceType: "explicit-memory-tool",
+              trust: "direct-tool-request",
+              sessionId: context.sessionId ?? null,
+              projectId: context.__projectId ?? context.projectId ?? null
+            }
+          }
         },
         {
           source: "remember-tool",
@@ -3637,6 +3989,7 @@ export function registerCoreTools(registry, runtime) {
             action: "remember",
             tags: item.tags ?? [],
             importance,
+            memoryClass,
             localMemoryId: item.id,
             scope,
             sessionId: context.sessionId ?? null
@@ -3648,6 +4001,7 @@ export function registerCoreTools(registry, runtime) {
         id: item.id,
         tier: item.tier,
         content: item.content,
+        memoryClass,
         replaced: item.metadata?.replaces ?? [],
         ...(external.enabled ? { externalMemory: external.status } : {})
       };
@@ -3673,7 +4027,15 @@ export function registerCoreTools(registry, runtime) {
         : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
       const effectiveScope = scope ?? "main";
       const query = String(args.query ?? "");
-      const hits = runtime.memory.retrieve(query, { limit: args.limit ?? 5, scope });
+      const limit = args.limit ?? 5;
+      const projectHits = runtime.memory.retrieve(query, { limit, scope });
+      const profileScope = isProfileMemoryScope(context?.__profileMemoryScope)
+        ? context.__profileMemoryScope
+        : null;
+      const profileHits = profileScope
+        ? runtime.memory.retrieve(query, { limit, scope: profileScope, exactScope: true })
+        : [];
+      const hits = mergeMemoryHits(projectHits, profileHits, limit);
       const external = await invokeExternalMemory(
         runtime.externalMemoryProvider,
         "queryUserModel",
@@ -3692,7 +4054,8 @@ export function registerCoreTools(registry, runtime) {
           scope: item.scope ?? "main",
           curated: item.metadata?.capacityManaged === true,
           replaceable: item.metadata?.capacityManaged === true
-            && (item.scope ?? "main") === effectiveScope,
+            && ((item.scope ?? "main") === effectiveScope || (item.scope ?? "main") === profileScope),
+          memoryClass: item.metadata?.memoryClass ?? (isProfileMemoryScope(item.scope) ? "preference" : "fact"),
           // Confidence signals: fidelity ("specific" = precise, trust details),
           // strength (decays unless reinforced), locked (a user correction).
           fidelity: item.fidelity ?? "normal",
@@ -3712,6 +4075,42 @@ export function registerCoreTools(registry, runtime) {
   });
 
   registry.register({
+    name: "memory_details",
+    sideEffects: false,
+    description: "Inspect one local memory without reinforcing it. Returns bounded provenance, confidence, correction, and replacement status so you can assess whether it is safe to rely on before taking action.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Exact memory id returned by recall." }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    handler: (args, context = {}) => {
+      if (typeof runtime.memory?.inspect !== "function") {
+        throw new Error("The active memory system does not support read-only inspection.");
+      }
+      const projectScope = typeof context.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context.agentId && context.agentId !== "main"
+          ? `specialist:${context.agentId}`
+          : "main";
+      const profileScope = isProfileMemoryScope(context.__profileMemoryScope)
+        ? context.__profileMemoryScope
+        : null;
+      const item = runtime.memory.inspect(args.id, { scope: projectScope })
+        ?? (profileScope
+          ? runtime.memory.inspect(args.id, { scope: profileScope, exactScope: true })
+          : null);
+      if (!item) return { found: false, id: String(args.id ?? "") };
+      return {
+        found: true,
+        ...memoryDetailsView(item)
+      };
+    }
+  });
+
+  registry.register({
     name: "correct_memory",
     description: "Replace a stored memory that turned out to be WRONG. The built-in correction commits first and, when configured, the corrected fact is mirrored to the external user model. Hides the stale version from all future recall and locks in the corrected fact so the mistake never repeats. Use when the user corrects something previously stored or stated (a time, name, decision, preference) - do NOT just call remember with a second conflicting fact.",
     parameters: {
@@ -3720,24 +4119,39 @@ export function registerCoreTools(registry, runtime) {
         correction: { type: "string", description: "The corrected fact, stated fully and standalone (e.g. 'The Acme review meeting is at 4pm, not 3pm')." },
         query: { type: "string", description: "What the stale memory was about — used to find it (e.g. 'Acme review meeting time')." },
         id: { type: "string", description: "Exact memory id to supersede, when known (from a recall result). Takes precedence over query." },
-        tags: { type: "array", items: { type: "string" }, description: "Optional extra tags for the correction." }
+        tags: { type: "array", items: { type: "string" }, description: "Optional extra tags for the correction." },
+        memoryClass: {
+          type: "string",
+          enum: ["fact", "preference"],
+          description: "Use preference only when correcting a user-profile memory returned by recall."
+        }
       },
       required: ["correction"],
       additionalProperties: false
     },
     handler: async (args, context) => {
       if (!runtime.memory?.correct) return { error: "memory system does not support corrections" };
-      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
-        ? context.__memoryScope
-        : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const memoryClass = args.memoryClass === "preference" ? "preference" : "fact";
+      const scope = memoryScopeForClass(context, memoryClass);
+      const content = assertSafeMemoryContent(args.correction, { runtime });
       const result = runtime.memory.correct({
         id: args.id ?? null,
         query: args.query ?? null,
-        content: String(args.correction ?? "").trim(),
-        tags: args.tags ?? [],
+        content,
+        tags: normalizeMemoryTags(args.tags),
         scope,
         source: "correct-memory-tool",
-        metadata: { agentId: context.agentId, sessionId: context.sessionId }
+        metadata: {
+          agentId: context.agentId,
+          sessionId: context.sessionId,
+          memoryClass,
+          provenance: {
+            sourceType: "explicit-memory-correction",
+            trust: "direct-tool-request",
+            sessionId: context.sessionId ?? null,
+            projectId: context.__projectId ?? context.projectId ?? null
+          }
+        }
       });
       const external = await invokeExternalMemory(
         runtime.externalMemoryProvider,
@@ -3748,6 +4162,7 @@ export function registerCoreTools(registry, runtime) {
           metadata: {
             type: "memory",
             action: "correct",
+            memoryClass,
             tags: result.item.tags ?? [],
             localMemoryId: result.item.id,
             supersededIds: result.superseded.map((item) => item.id),
@@ -3761,6 +4176,7 @@ export function registerCoreTools(registry, runtime) {
         id: result.item.id,
         tier: result.item.tier,
         content: result.item.content,
+        memoryClass,
         supersededCount: result.superseded.length,
         superseded: result.superseded.map((item) => ({ id: item.id, content: item.content.slice(0, 120) })),
         ...(external.enabled ? { externalMemory: external.status } : {})
@@ -5286,6 +5702,107 @@ export function registerCoreTools(registry, runtime) {
           ...args,
           projectId: context.__projectId ?? "default"
         })
+      };
+    }
+  });
+
+  // This replay-only handler is deliberately omitted from model catalogs. A
+  // BackgroundReviewer creates a durable pending action directly; the handler
+  // verifies its exact action identity and a human decision before any memory
+  // mutation. Ordinary auto-approval therefore cannot promote a model review
+  // into a durable fact.
+  registry.register({
+    name: "apply_background_memory_proposal",
+    metadata: { internal: true },
+    needsConfirmation: true,
+    description: "Internal durable replay handler for a human-approved background memory proposal.",
+    parameters: {
+      type: "object",
+      properties: {
+        proposal: {
+          type: "object",
+          properties: {
+            content: { type: "string" },
+            kind: { type: "string", enum: ["preference", "correction", "environment"] },
+            confidence: { type: "string", enum: ["high", "medium", "low"] },
+            scope: { type: "string" },
+            tags: { type: "array", items: { type: "string" } },
+            provenance: { type: "object" }
+          },
+          required: ["content", "kind", "confidence", "scope", "tags", "provenance"],
+          additionalProperties: false
+        }
+      },
+      required: ["proposal"],
+      additionalProperties: false
+    },
+    handler: async ({ proposal }, context) => {
+      if (!runtime.memory?.remember) throw new Error("Memory system is unavailable.");
+      const approved = approvedBackgroundMemoryProposal(runtime, proposal, context);
+      const confidence = approved.proposal.confidence;
+      const profile = backgroundMemoryConfidenceProfile(confidence);
+      const memoryClass = approved.proposal.kind === "preference"
+        && isProfileMemoryScope(approved.proposal.scope)
+        ? "preference"
+        : "fact";
+      const item = runtime.memory.remember({
+        source: "background-review-approved",
+        scope: approved.proposal.scope,
+        content: approved.proposal.content,
+        kind: approved.proposal.kind,
+        tags: [
+          "background-review",
+          "human-approved",
+          `memory:${memoryClass}`,
+          approved.proposal.kind,
+          ...approved.proposal.tags
+        ],
+        novelty: 0.55,
+        risk: approved.proposal.kind === "correction" ? 0.35 : 0.1,
+        repetition: 0.25,
+        specificity: 0.8,
+        metadata: {
+          confidence,
+          memoryClass,
+          reviewedAt: approved.action.createdAt ?? nowIso(),
+          provenance: backgroundMemoryProvenance(approved.proposal, {
+            approvedBy: approved.decider,
+            approvedAt: approved.action.decidedAt ?? nowIso(),
+            actionId: approved.action.id
+          })
+        }
+      }, {
+        source: "background-review-approved",
+        strength: profile.strength,
+        tier: profile.tier,
+        critical: false,
+        capacityManaged: true
+      });
+      const external = await invokeExternalMemory(
+        runtime.externalMemoryProvider,
+        "setUserModel",
+        {
+          ...externalMemoryIdentity(context),
+          content: item.content,
+          metadata: {
+            type: "memory",
+            action: "background-review-approved",
+            memoryClass,
+            tags: item.tags ?? [],
+            localMemoryId: item.id,
+            scope: item.scope,
+            sessionId: context.sessionId ?? null
+          }
+        },
+        context?.__abortSignal
+      );
+      return {
+        id: item.id,
+        tier: item.tier,
+        content: item.content,
+        memoryClass,
+        approvalActionId: approved.action.id,
+        ...(external.enabled ? { externalMemory: external.status } : {})
       };
     }
   });

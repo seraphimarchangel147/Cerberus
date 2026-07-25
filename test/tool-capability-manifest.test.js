@@ -243,7 +243,6 @@ test("list returns detached JSON-safe descriptors and never exposes callbacks", 
   const registry = new ToolRegistry();
   const summarize = () => "human summary";
   const metadataCallback = () => "private";
-  const parameterCallback = () => "private";
   register(registry, "safe_listing", {
     sideEffects: false,
     summarize,
@@ -255,7 +254,7 @@ test("list returns detached JSON-safe descriptors and never exposes callbacks", 
     parameters: {
       type: "object",
       properties: {},
-      executable: parameterCallback
+      additionalProperties: false
     },
     capability: {
       effect: "read",
@@ -281,6 +280,21 @@ test("list returns detached JSON-safe descriptors and never exposes callbacks", 
   assert.equal(registry.get("safe_listing").metadata.label, "fixture");
   assert.equal(registry.get("safe_listing").summarize, summarize);
   assert.equal(registry.get("safe_listing").metadata.callback, metadataCallback);
+});
+
+test("tool schemas reject executable values before registration", () => {
+  const registry = new ToolRegistry();
+  assert.throws(
+    () => register(registry, "executable_schema", {
+      parameters: {
+        type: "object",
+        properties: {},
+        executable: () => "private"
+      }
+    }),
+    /input schema\.executable must contain only JSON-safe values/
+  );
+  assert.equal(registry.list().length, 0);
 });
 
 test("provider tool schemas stay backward compatible when capabilities are present", () => {

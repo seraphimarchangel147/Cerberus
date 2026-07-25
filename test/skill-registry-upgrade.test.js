@@ -155,7 +155,7 @@ test("fixed-cost tool surface registers; per-skill tools gated by env", () => {
   delete process.env.OPENAGI_SKILLS_AS_TOOLS;
   reg.reload();
   reg.exposeAsTools(fakeRegistry);
-  for (const t of ["list_skills", "use_skill", "run_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill", "restore_skill"]) {
+  for (const t of ["list_skills", "use_skill", "run_skill", "inspect_skill_capabilities", "list_skill_revisions", "rollback_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill", "restore_skill"]) {
     assert.ok(tools.has(t), `expected ${t}`);
   }
   assert.ok(![...tools.keys()].some((n) => n.startsWith("skill_")));
@@ -165,7 +165,7 @@ test("fixed-cost tool surface registers; per-skill tools gated by env", () => {
   delete process.env.OPENAGI_SKILLS_AS_TOOLS;
 });
 
-test("run_skill enforces declared tool allowlists and exposes legacy full-registry runs", async () => {
+test("run_skill fails closed without a declared or inherited tool boundary", async () => {
   const warnings = [];
   const { reg, runtime, user } = makeRegistry({ warn: (message) => warnings.push(message) });
   writeSkill(user, "restricted-run", { extraFm: 'allowed_tools: ["read_data", "summarize"]\n' });
@@ -213,9 +213,74 @@ test("run_skill enforces declared tool allowlists and exposes legacy full-regist
   assert.equal(warnings.length, 0, "a bounded inherited scope is not a full-registry warning");
 
   await reg.run("legacy-run", { input: "go" });
-  assert.deepEqual(requests[2].tools, definitions, "absent allowlist preserves the legacy schema surface");
-  assert.equal(schemaCalls[2], undefined);
-  assert.match(warnings[0], /full tool registry.*no allowed_tools.*prefer use_skill/iu);
+  assert.deepEqual(requests[2].tools, [], "absent allowlists advertise no tool schemas");
+  assert.deepEqual(requests[2].context.__advertisedTools, []);
+  assert.deepEqual(requests[2].context.__allowedTools, [], "invoke-time access fails closed too");
+  assert.deepEqual(schemaCalls[2], { only: [] });
+  assert.match(warnings[0], /no allowed_tools.*without tools.*declare the minimum tools/iu);
+});
+
+test("skill capability reports expose missing and denied tools before execution", async () => {
+  const { reg, runtime, user } = makeRegistry();
+  writeSkill(user, "capability-check", {
+    extraFm: 'allowed_tools: ["read_data", "write_data", "missing_data"]\n'
+  });
+  writeSkill(user, "wildcard-only");
+  reg.reload();
+  runtime.tools = {
+    tools: new Map([
+      ["read_data", { name: "read_data" }],
+      ["write_data", { name: "write_data" }]
+    ]),
+    toOpenAITools({ only } = {}) {
+      return (only ?? []).map((name) => ({ name }));
+    }
+  };
+  const context = { __allowedTools: ["read_data"] };
+  const report = reg.capabilityReport("capability-check", context);
+  assert.equal(report.status, "partial");
+  assert.deepEqual(report.declaredTools, ["missing_data", "read_data", "write_data"]);
+  assert.deepEqual(report.effectiveTools, ["read_data"]);
+  assert.deepEqual(report.missingToolDefinitions, ["missing_data"]);
+  assert.deepEqual(report.deniedByBoundary, ["missing_data", "write_data"]);
+  assert.equal(report.willRunWithoutTools, false);
+
+  const inheritedWildcard = reg.capabilityReport("capability-check", { __allowedTools: ["*"] });
+  assert.deepEqual(inheritedWildcard.effectiveTools, ["read_data", "write_data"]);
+  assert.deepEqual(inheritedWildcard.missingToolDefinitions, ["missing_data"]);
+  assert.deepEqual(inheritedWildcard.deniedByBoundary, []);
+
+  const unbounded = reg.capabilityReport("wildcard-only", { __allowedTools: ["*"] });
+  assert.equal(unbounded.inheritedBoundary, "unbounded");
+  assert.equal(unbounded.willRunWithoutTools, true, "a wildcard alone is not a finite skill boundary");
+});
+
+test("skill revision rollback is head-only, hash-checked, and itself revertible", () => {
+  const { reg, user } = makeRegistry();
+  writeSkill(user, "rollbackable", { body: "first body" });
+  reg.reload();
+  reg.patchSkill("rollbackable", "first body", "second body", "tester");
+
+  const history = reg.revisionHistory("rollbackable");
+  assert.equal(history.revisions.length, 1);
+  assert.equal(history.revisions[0].rollbackEligible, true);
+  const rolledBack = reg.rollbackSkillRevision("rollbackable", history.revisions[0].id, "reviewer");
+  assert.equal(rolledBack.restoredAction, "patched");
+  assert.equal(reg.mustGet("rollbackable").body, "first body");
+
+  const afterRollback = reg.revisionHistory("rollbackable");
+  assert.equal(afterRollback.revisions[0].action, "rolled-back");
+  assert.equal(afterRollback.revisions[0].rollbackEligible, true, "the rollback creates a new recoverable head");
+  assert.throws(
+    () => reg.rollbackSkillRevision("rollbackable", history.revisions[0].id, "reviewer"),
+    /Only the current skill revision/u
+  );
+
+  fs.writeFileSync(path.join(user, "rollbackable", "SKILL.md"), "---\nname: rollbackable\ndescription: \"changed\"\n---\n\nmanual change\n");
+  assert.throws(
+    () => reg.rollbackSkillRevision("rollbackable", afterRollback.revisions[0].id, "reviewer"),
+    /changed after this revision/u
+  );
 });
 
 test("usage telemetry survives a registry reload (JSONL persistence)", () => {

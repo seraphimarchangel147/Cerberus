@@ -89,9 +89,9 @@ export class HookRegistry {
   }
 
   /**
-   * Await matching hooks inside one overall deadline. A timeout or exception
-   * is logged and treated as allow. The deadline is shared fairly so one hung
-   * hook cannot consume the entire budget before later hooks get a chance.
+   * Await matching hooks inside one overall deadline. Built-in security vetoes
+   * fail closed; extension hooks fail open. The deadline is shared fairly so
+   * one hung hook cannot consume the entire budget before later hooks run.
    */
   async runVeto(event, payload = {}, options = {}) {
     assertEventName(event, { wildcard: false });
@@ -111,6 +111,10 @@ export class HookRegistry {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         this._warn(`event ${event} exhausted its ${totalMs}ms deadline; remaining hooks skipped`);
+        const closedHook = hooks.slice(index).find((candidate) => candidate.failureMode === "closed");
+        if (closedHook) {
+          return hookFailureVerdict(closedHook, event, "deadline");
+        }
         break;
       }
       const hooksLeft = hooks.length - index;
@@ -127,9 +131,16 @@ export class HookRegistry {
           hookTimeoutMs
         );
       } catch (error) {
-        this._warn(
-          `${hookLabel(hook)} failed open for ${event}: ${safeErrorMessage(error)}`
-        );
+        const detail = safeErrorMessage(error);
+        if (hook.failureMode === "closed") {
+          this._warn(`${hookLabel(hook)} failed closed for ${event}: ${detail}`);
+          return hookFailureVerdict(
+            hook,
+            event,
+            /timed out/i.test(detail) ? "timeout" : "error"
+          );
+        }
+        this._warn(`${hookLabel(hook)} failed open for ${event}: ${detail}`);
         continue;
       }
 
@@ -137,9 +148,12 @@ export class HookRegistry {
       try {
         verdict = normalizeVerdict(raw, hook);
       } catch (error) {
-        this._warn(
-          `${hookLabel(hook)} returned an unreadable verdict for ${event}: ${safeErrorMessage(error)}`
-        );
+        const detail = safeErrorMessage(error);
+        if (hook.failureMode === "closed") {
+          this._warn(`${hookLabel(hook)} failed closed for ${event}: unreadable verdict: ${detail}`);
+          return hookFailureVerdict(hook, event, "invalid_verdict");
+        }
+        this._warn(`${hookLabel(hook)} returned an unreadable verdict for ${event}: ${detail}`);
         continue;
       }
       if (verdict.action === "block") return verdict;
@@ -255,6 +269,7 @@ export class HookRegistry {
         : boundedInteger(spec.timeoutMs, this.perHookTimeoutMs, 1, 5_000),
       builtin: builtin === true,
       immutable: builtin === true,
+      failureMode: builtin === true ? "closed" : "open",
       source,
       order: this.#nextOrder++
     });
@@ -309,6 +324,12 @@ function allowVerdict() {
 }
 
 function normalizeVerdict(raw, hook) {
+  if (
+    hook.failureMode === "closed"
+    && (!raw || typeof raw !== "object" || !["allow", "block"].includes(raw.action))
+  ) {
+    throw new TypeError("built-in security hooks must return an allow or block verdict");
+  }
   if (!raw || typeof raw !== "object" || raw.action !== "block") return allowVerdict();
   const trustedApproval = hook.builtin === true && raw.approvalRequired === true;
   const message = boundedText(raw.message, `Blocked by hook ${hook.name}.`, 1_000);
@@ -322,6 +343,21 @@ function normalizeVerdict(raw, hook) {
     blockedBy: hook.name,
     blockedTier: hook.tier,
     builtin: hook.builtin === true
+  });
+}
+
+function hookFailureVerdict(hook, event, failure) {
+  const message = `Built-in security policy ${hook.name} was unavailable; ${event} was blocked.`;
+  return Object.freeze({
+    action: "block",
+    message,
+    reason: message,
+    code: null,
+    approvalRequired: false,
+    blockedBy: hook.name,
+    blockedTier: hook.tier,
+    builtin: true,
+    failure
   });
 }
 

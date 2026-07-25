@@ -62,6 +62,49 @@ Fixes Azazel reporting "I only see ~6 tools" and "no lane to Seraphim from this 
 - **send_message returns a clear `{delivered, status}` envelope.** The Discord transport returns `{text, candidates, successfulCandidates}` where `candidates` are FILE ATTACHMENTS — a plain text message has zero, which the model misread as "nothing delivered" on the first live probe. The handler now wraps every send with an explicit `delivered` boolean + human `status` string (raw transport kept under `transport`).
 - Regression: `test/legion-siblings.test.js` (9 cases: resolve case-insensitive/unknown/env-override/malformed, chat-core send lane present, context block fires only for discord + names channel/server/sibling lane + DM path). Both lanes 1084/1084 green. Homoglyph-clean.
 - **Adjacent root-cause found + fixed (config regression, not from this change):** Azazel's model was dead — every turn 401'd because `ANTHROPIC_BASE_URL` (`https://api.kimi.com/coding/v1`, his Kimi coding endpoint) had been dropped from the secrets snapshot (`~/.openagi/secrets/secrets.json`, source of truth that projects `.env` on boot), so the AnthropicProvider defaulted to `api.anthropic.com` and his Kimi key was rejected. Restored via `POST /setup/save {ANTHROPIC_BASE_URL}` (persists to the snapshot, survives restart). Verified: Kimi online, and Azazel sent his first-ever sibling message to Seraphim's #seraphim-chat over the new lane.
+## 2026-07-25 - Checkpoint-backed autonomous coder controller (Codex)
+
+- Added a durable `coder_start` -> `coder_apply` -> `coder_status` transaction protocol that binds an objective, plan, inspected SHA-256 baselines, and mandatory checks before editing begins.
+- Persists bounded, content-free run state through authoritative JSONL events plus atomic snapshots, uses revision CAS, scopes runs to their exact project/session/workspace, and reconciles interrupted edits or verification to a blocked state.
+- Applies only declared one-operation-per-file `code_edit` and `code_write` mutations through the governed registry, retaining canonical child receipts and exact controller-owned post-edit tags.
+- Accepts completion only with complete per-check isolated evidence; failed or incomplete verification automatically restores captured baselines, while cancellation and ownership drift fail closed for explicit inspection.
+- Added human-confirmed exact-version rollback, file-resource coordination, runtime wiring, static agent guidance, nested-test-context scrubbing, and passing, failure, false-evidence, restart, conflict, persistence, and prompt regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1676/1677 tests with zero failures and one intentional Windows permission-mode skip.
+AUTONOMOUS CODER CONTROLLER COMPLETE
+
+## 2026-07-25 - Isolated deterministic code verification (Codex)
+
+- Added `code_verify`, a read-only evidence gate that combines up to 16 syntax and targeted test checks without a shell.
+- Every check runs in a separate bounded Node subprocess with single-test concurrency, cancellation, a hard timeout, capped output, project path confinement, and the existing credential-scrubbed test environment.
+- Syntax directory walks skip dependency/build/state trees, symbolic links, and out-of-project targets; verification output is secret-redacted before it reaches the model.
+- Added focused coverage for combined success, deterministic failure, redaction, traversal/symlink rejection, pre-abort behavior, registry schema, and environment scrubbing.
+ISOLATED CODE VERIFIER COMPLETE
+
+## 2026-07-25 - End-to-end tool cancellation rail (Codex)
+
+- Added abort checks before preflight, security hooks, approvals, checkpoints, and handler dispatch so a cancelled turn cannot start new work.
+- A cancellation observed after handler dispatch now returns `tool_execution_cancelled` with `changed:null` for mutations, retains checkpoint evidence, schedules workspace inspection, and never reports semantic success.
+- Read-only cancellation stays explicitly unchanged, while every pre-dispatch cancellation carries a receipt proving `dispatched:false`.
+- Resource-aware batches stop launching later waves after cancellation and mark unstarted entries as rejected instead of silently invoking them.
+- `execute_code` now terminates its worker on turn abort, reports cancellation separately from timeout, and preserves receipts already collected from nested calls.
+CANCELLATION RAIL COMPLETE
+
+## 2026-07-25 - Canonical tool execution receipts (Codex)
+
+- Added one bounded receipt to every semantic tool envelope with an opaque operation id, real tool name, status/code, dispatch fact, change certainty, and wall-clock timing; argument values and secrets never enter the receipt.
+- Preserved the same receipt through approval suspension, auto-approval, persistent pending-action completion, provider batching, lifecycle events, and duplicate-accounting recursion.
+- `execute_code` now returns a bounded list of child receipts while preserving its compact `callTool` result API, so nested work is no longer invisible.
+- Oversized model-facing tool output retains compact outcome and receipt identity alongside its durable output reference.
+- Documented receipt interpretation in the static model prompt and added direct, vetoed, failed, approved, persisted, nested, batched, and truncated-output regressions.
+EXECUTION RECEIPTS COMPLETE
+
+## 2026-07-25 - Fail-closed built-in security vetoes (Codex)
+
+- Assigned every hook an immutable failure mode: built-in gateway security vetoes fail closed, while runtime/plugin/shell extensions and asynchronous observers remain fail open.
+- Built-in exceptions, deadlines, and malformed verdicts now return terminal, non-approvable block verdicts with bounded provenance instead of silently permitting the tool call.
+- Added a registry-level defense: if the entire hook callback fails unexpectedly, mutating tools are blocked with `security_hook_unavailable`; declared read-only tools may continue.
+- Added regressions for thrown, timed-out, invalid, optional-extension, and whole-registry failure paths.
+SECURITY HOOK FAILURE MODES COMPLETE
 
 ## 2026-07-22 — Reversible cron job control from the agent loop (Seraphim)
 
@@ -867,3 +910,79 @@ block never told the model that a plain `@Name` doesn't notify — only a raw
   sibling as name → <@id> → where-they-run, and (b) advertises the off-Discord
   fallback lane (~/.legion/mailbox/<name>.jsonl, see ~/.legion/README.md).
 - Tests: test/legion-siblings.test.js +4 cases. Both lanes 1088/1088 green.
+
+## 2026-07-25 - Hermes-informed memory trust foundation (Codex)
+
+- Made the durable memory journal authoritative over its cache snapshot, with replay after snapshot failures, cross-process mutation serialization, stale-instance refresh, and fail-closed malformed-journal handling.
+- Added deterministic memory-intake screening for hidden controls, prompt-control attempts, credential-shaped values, and configured secret values; direct remember and correction writes now record explicit provenance.
+- Changed post-session model review from silent memory mutation to a screened durable pending action. Only an exact, human-approved replay can materialize it, including when ordinary auto-approval is enabled.
+- Kept proposal handlers out of model tool catalogs, preserved existing dashboard approval flows, and added provenance for pending and human-approved review memory.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1617/1618 tests with zero failures and one intentional Windows permission-mode skip.
+MEMORY TRUST FOUNDATION COMPLETE
+
+## 2026-07-25 - Hermes-informed profile memory separation (Codex)
+
+- Added opaque, stable per-user profile memory scopes with a separate 800-character curated budget; profile scopes never inherit project, specialist, global, or other-user memory.
+- Updated frozen session snapshots to include independently labeled user-profile and project-memory views, with profile identity included in snapshot and Responses-continuation isolation.
+- Extended `remember` and `correct_memory` with an explicit `memoryClass='preference'` path, while recall merges only the current caller's profile with their project view.
+- Routed post-session preference proposals to the caller's profile scope, while keeping non-preference review learning project-scoped and approval-gated.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1621/1622 tests with zero failures and one intentional Windows permission-mode skip.
+PROFILE MEMORY COMPLETE
+
+## 2026-07-25 - Hermes-informed skill safety and reversible curation (Codex)
+
+- Changed isolated `run_skill` generations to fail closed: absent both declared `allowed_tools` and an inherited boundary, they receive no tool schemas and an invoke-time empty allowlist rather than the full registry.
+- Added compact, hash-only `list_skill_revisions` and confirmation-gated `rollback_skill` tools. Rollback accepts only the exact current revision, verifies the current document hash, validates the restored document, and writes a new recoverable revision.
+- Made curator state transitions immediately auditable and reversible through the same head-only rollback path; corrupt revision journals cannot supply rollback bytes.
+- Documented the new agent-facing revision tools in the static system prompt.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1622/1623 tests with zero failures and one intentional Windows permission-mode skip.
+SKILL SAFETY AND CURATION COMPLETE
+
+## 2026-07-25 - Hermes-informed memory and skill awareness (Codex)
+
+- Added read-only `memory_details`: it exposes bounded provenance, confidence, correction, and replacement state without reinforcing a memory or exposing raw internal metadata; project and profile boundaries are enforced before inspection.
+- Added `inspect_skill_capabilities` so an agent can preflight an imported or uncertain skill and see its effective tool contract, missing registrations, and project-boundary denials before execution.
+- Skill runs now return the same compact effective tool-scope receipt and treat a wildcard-only inherited scope as unbounded rather than silently using it as a capability grant.
+- Documented both agent-facing tools and the epistemic-use guidelines in the static system prompt.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1626/1627 tests with zero failures and one intentional Windows permission-mode skip.
+MEMORY AND SKILL AWARENESS COMPLETE
+
+## 2026-07-25 - Hermes memory and skills deep dive (Codex)
+
+- Added a source-linked comparison of Hermes' official memory, skills, curator, and external-provider design with the current Cerberus implementation.
+- Recorded the original two-phase adoption work, the tool-calling and evidence-awareness improvements it delivered, and deliberately deferred follow-ups that require a separate privacy or authority design.
+- Documented why Cerberus keeps Hermes' compact and progressive ergonomics while requiring durable provenance, caller-scoped isolation, finite skill grants, human-approved background writes, and revision-safe recovery.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1626/1627 tests with zero failures and one intentional Windows permission-mode skip.
+HERMES MEMORY AND SKILLS DEEP DIVE COMPLETE
+
+## 2026-07-25 - Unified Tool Kernel: Tool Contract V2 (Codex)
+
+- Added bounded, side-effect-free JSON Schema normalization and runtime validation for every registered tool input, with local references, composition, formats, structural limits, and secret-safe path-only errors.
+- Rejects invalid calls before project resolution, forwarding, preflight, hooks, approvals, checkpoints, leases, or handlers, so malformed mutating calls cannot consume authority or create false audit activity.
+- Added optional output contracts that turn schema-invalid handler successes into explicit `invalid_tool_result` outcomes while retaining checkpoint evidence and conservative mutation state.
+- Exposed output contracts through deferred discovery without sending them as provider input schemas, and rejected executable or accessor-bearing contracts at registration.
+- Made normalization contracts explicit where tools intentionally clamp permissive input, and updated legacy test doubles to declare their accepted fixture arguments instead of relying on implicit open inputs.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1634/1635 tests with zero failures and one intentional Windows permission-mode skip.
+TOOL CONTRACT V2 COMPLETE
+
+## 2026-07-25 - Unified Tool Kernel: transactional code edits (Codex)
+
+- Replaced collision-prone four-hex edit tags with exact-byte full SHA-256 digests across reads, searches, edits, and whole-file writes.
+- Required compare-and-swap `expectedTag` authority for every existing-file `code_write`; blind overwrites, stale edits, and create races now fail without replacing the winner.
+- Syntax-checks JavaScript candidates in private temporary storage before commit, so invalid source neither replaces an existing file nor creates a new one.
+- Uses the shared atomic text writer for exact replacement, preserves existing file modes, rechecks live content after asynchronous validation, and verifies the committed digest.
+- Returns previous and committed digest receipts, rejects symbolic-link and non-regular targets, and documents all code tools plus read-before-edit discipline in the static system prompt.
+- Added race, collision-strength, stale-write, syntax rollback, writer failure, schema, mode, LSP, project-isolation, and both-policy regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1642/1643 tests with zero failures and one intentional Windows permission-mode skip.
+TRANSACTIONAL CODE EDITS COMPLETE
+
+## 2026-07-25 - Unified Tool Kernel: resource-aware provider batching (Codex)
+
+- Added an order-preserving tool batch executor with a hard concurrency cap of four and deterministic execution-wave receipts.
+- Parallelizes read-only calls, never mixes reads with mutations, and parallelizes side effects only when trusted synchronous `jobResources` resolve to finite non-overlapping resources.
+- Keeps approvals, goal controls, unknown tools, invalid resource resolvers, and unscoped mutations as exclusive sequential barriers.
+- Wired both OpenAI Responses and Anthropic tool loops to the same scheduler while retaining duplicate-call identity checks, semantic outcomes, model-visible result ordering, deadlines, and goal-loop safety.
+- Emits compact `tool-batch` progress events with call count, wave count, parallel-wave count, and maximum width for live harness awareness.
+- Added scheduler, cap, conflict, rejection, provider-ordering, mutation-barrier, duplicate-security, approval-suspension, and both-policy regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1652/1653 tests with zero failures and one intentional Windows permission-mode skip.
+RESOURCE AWARE TOOL BATCHING COMPLETE

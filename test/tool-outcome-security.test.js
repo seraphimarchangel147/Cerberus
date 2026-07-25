@@ -174,6 +174,7 @@ test("clearing a turn scope retains an in-flight non-idempotent reservation", as
   let dispatches = 0;
   registry.register({
     name: "write_once",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: true,
     capability: { idempotent: false },
     handler: async () => {
@@ -229,6 +230,7 @@ test("a provider timeout cannot release the same session operation in a new turn
   let dispatches = 0;
   registry.register({
     name: "write_once",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: true,
     capability: { idempotent: false },
     handler: async () => {
@@ -268,6 +270,7 @@ test("a post-dispatch handler failure retains its checkpoint receipt", async () 
   let dispatches = 0;
   registry.register({
     name: "mutate_then_fail",
+    parameters: { type: "object", additionalProperties: true },
     sideEffects: true,
     capability: { idempotent: false },
     handler: async () => {
@@ -453,6 +456,12 @@ test("side-effecting calls fail closed on arguments that cannot be fingerprinted
   let getterCalls = 0;
   registry.register({
     name: "write_once",
+    parameters: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+      additionalProperties: false
+    },
     sideEffects: true,
     capability: { idempotent: false },
     handler: async () => {
@@ -659,6 +668,12 @@ test("duplicate Anthropic tool-use ids dispatch and serialize one operation", as
   let observedContext = null;
   registry.register({
     name: "write_once",
+    parameters: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+      additionalProperties: false
+    },
     sideEffects: true,
     capability: { idempotent: false },
     handler: async (_args, context) => {
@@ -744,6 +759,12 @@ test("cross-hop Anthropic call-id conflicts are surfaced without redispatch", as
   const registry = new ToolRegistry();
   registry.register({
     name: "write_once",
+    parameters: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+      additionalProperties: false
+    },
     sideEffects: true,
     capability: { idempotent: false },
     handler: async () => {

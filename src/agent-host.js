@@ -21,6 +21,7 @@ import {
   projectAllows,
   projectMemoryScope
 } from "./project-store.js";
+import { profileMemoryScope } from "./memory-system.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -531,6 +532,7 @@ export class AgentHost {
           )
           ? requestedMemoryScope
           : `${projectMemoryRoot}:${requestedMemoryScope}`;
+    const profileScope = profileMemoryScope({ channel, from, sessionId });
     const turnId = String(input.__turnId ?? input.turnId ?? createId("turn"));
     let continuationSessionMetadata = null;
     if (!ephemeral && typeof this.store.ensureSessionMetadata === "function") {
@@ -548,7 +550,7 @@ export class AgentHost {
       sessionId,
       memoryScope,
       agentId,
-      { ephemeral }
+      { ephemeral, profileScope }
     );
 
     // A real inbound user message always wins over an automated goal loop.
@@ -613,7 +615,8 @@ export class AgentHost {
             from,
             metadata: {
               ...(input.metadata ?? {}),
-              projectId: project.id
+              projectId: project.id,
+              profileMemoryScope: profileScope
             }
           }]
         }
@@ -626,7 +629,8 @@ export class AgentHost {
           from,
           metadata: {
             ...(input.metadata ?? {}),
-            projectId: project.id
+            projectId: project.id,
+            profileMemoryScope: profileScope
           }
         });
     const providerHistory = providerHistoryBeforeCurrentTurn(
@@ -1030,6 +1034,7 @@ export class AgentHost {
       // Discovery and forwarding intersect it with enforced policy/scope.
       __toolRadarOmitted: toolPlan.omittedNames,
       __memoryScope: memoryScope,
+      __profileMemoryScope: profileScope,
       ...(this.runtime.projects ? {
         __projectId: project.id,
         __projectRevision: project.revision ?? 1,
@@ -1199,6 +1204,7 @@ export class AgentHost {
               backgroundReview: input.backgroundReview !== false,
               projectId: project.id,
               memoryScope,
+              profileMemoryScope: profileScope,
               toolCalls: (modelResult.toolCalls ?? []).map((call) => ({
                 name: call.name,
                 arguments: sanitizeForAudit(call.arguments),
@@ -1659,6 +1665,11 @@ export class AgentHost {
         agentId,
         memoryScope: lastAssistant?.metadata?.memoryScope
           ?? (project ? projectMemoryScope(project, specialistId) : "main"),
+        profileMemoryScope: lastAssistant?.metadata?.profileMemoryScope
+          ?? users.at(-1)?.metadata?.profileMemoryScope
+          ?? null,
+        channel: users.at(-1)?.channel ?? lastAssistant?.channel ?? null,
+        from: users.at(-1)?.from ?? null,
         ...(project ? {
           projectId: project.id,
           projectRevision: project.revision ?? 1,
@@ -1783,10 +1794,13 @@ export class AgentHost {
 
   // Capture the curated projection before processSignal can write on turn
   // one. File-backed stores persist these exact bytes in session metadata.
-  async sessionMemorySnapshotFor(sessionId, scope, agentId = "main", { ephemeral = false } = {}) {
+  async sessionMemorySnapshotFor(sessionId, scope, agentId = "main", {
+    ephemeral = false,
+    profileScope = null
+  } = {}) {
     const render = () => {
       try {
-        return String(this.runtime.memory?.renderSessionMemorySnapshot?.({ scope }) ?? "");
+        return String(this.runtime.memory?.renderSessionMemorySnapshot?.({ scope, profileScope }) ?? "");
       } catch {
         return "";
       }
@@ -1799,12 +1813,17 @@ export class AgentHost {
     }
 
     const identity = {
-      version: 1,
+      version: 2,
       sessionId: String(sessionId),
       scope: String(scope),
-      agentId: String(agentId)
+      agentId: String(agentId),
+      profileScope: typeof profileScope === "string" ? profileScope : null
     };
-    const metadataKey = frozenMemoryMetadataKey(identity.scope, identity.agentId);
+    const metadataKey = frozenMemoryMetadataKey(
+      identity.scope,
+      identity.agentId,
+      identity.profileScope
+    );
     const createFrozen = () => ({ ...identity, text: render() });
     if (typeof this.store.ensureSessionMetadata === "function") {
       let stored = await this.store.ensureSessionMetadata(sessionId, metadataKey, createFrozen);
@@ -1816,7 +1835,12 @@ export class AgentHost {
       return validFrozenMemory(stored, identity) ? stored.text : "";
     }
 
-    const cacheKey = JSON.stringify([identity.sessionId, identity.scope, identity.agentId]);
+    const cacheKey = JSON.stringify([
+      identity.sessionId,
+      identity.scope,
+      identity.agentId,
+      identity.profileScope
+    ]);
     if (!this.sessionMemorySnapshots.has(cacheKey)) {
       if (this.sessionMemorySnapshots.size >= 1000) {
         this.sessionMemorySnapshots.delete(this.sessionMemorySnapshots.keys().next().value);
@@ -1951,8 +1975,8 @@ function positiveDuration(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function frozenMemoryMetadataKey(scope, agentId) {
-  return `frozenMemoryV1:${encodeURIComponent(String(scope))}:${encodeURIComponent(String(agentId))}`;
+function frozenMemoryMetadataKey(scope, agentId, profileScope = null) {
+  return `frozenMemoryV2:${encodeURIComponent(String(scope))}:${encodeURIComponent(String(agentId))}:${encodeURIComponent(String(profileScope ?? ""))}`;
 }
 
 function validFrozenMemory(value, identity) {
@@ -1963,6 +1987,7 @@ function validFrozenMemory(value, identity) {
     && value.sessionId === identity.sessionId
     && value.scope === identity.scope
     && value.agentId === identity.agentId
+    && value.profileScope === identity.profileScope
     && typeof value.text === "string"
   );
 }

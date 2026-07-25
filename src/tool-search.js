@@ -318,6 +318,7 @@ export class ToolSearchController {
       name: safeCatalogText(tool.name, 160),
       description: safeCatalogText(tool.description, 1000),
       parameters: toolParameters(tool),
+      outputSchema: tool.outputSchema ?? null,
       requiredArguments: requiredArguments(tool),
       source: safeCatalogText(tool.source ?? "internal", 80),
       server: nullableCatalogText(tool.metadata?.server, 160),
