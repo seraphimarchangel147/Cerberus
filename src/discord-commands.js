@@ -84,6 +84,71 @@ export const COMMAND_DEFS = [
   { name: "suggestions", description: "Pending proactive-observer suggestions" },
   { name: "budget", description: "Token/cost budget status" },
   { name: "skills", description: "List installed skills" },
+  {
+    name: "skill",
+    description: "Inspect and maintain the skill library",
+    options: [
+      {
+        type: 1,
+        name: "view",
+        description: "Show a skill's full instructions",
+        options: [{ type: 3, name: "name", description: "Skill name", required: true }]
+      },
+      {
+        type: 1,
+        name: "delete",
+        description: "Soft-delete a skill (recoverable, requires confirmation)",
+        options: [{ type: 3, name: "name", description: "Skill name", required: true }]
+      },
+      {
+        type: 1,
+        name: "pin",
+        description: "Protect a skill from deletion (or unpin it)",
+        options: [
+          { type: 3, name: "name", description: "Skill name", required: true },
+          {
+            type: 3, name: "state", description: "pin / unpin (default pin)", required: false,
+            choices: [{ name: "pin", value: "pin" }, { name: "unpin", value: "unpin" }]
+          }
+        ]
+      },
+      { type: 1, name: "curate", description: "Run the curator: flag stale, archive dead skills" }
+    ]
+  },
+  {
+    name: "gateway",
+    description: "Gateway control: status, pull update, restart",
+    options: [
+      { type: 1, name: "status", description: "Uptime, pid, and whether an update is available" },
+      { type: 1, name: "update", description: "git pull + install deps (restart to apply)" },
+      { type: 1, name: "restart", description: "Restart the daemon (requires confirmation)" }
+    ]
+  },
+  {
+    name: "config",
+    description: "Show or set a runtime setting",
+    options: [
+      { type: 1, name: "show", description: "Current provider, model, caps, and toggles" },
+      {
+        type: 1,
+        name: "set",
+        description: "Change an allowlisted non-secret setting",
+        options: [
+          {
+            type: 3, name: "key", description: "Setting to change", required: true,
+            choices: [
+              { name: "chat iteration cap", value: "OPENAGI_CHAT_MAX_ITERATIONS" },
+              { name: "work iteration cap", value: "OPENAGI_MAX_ITERATIONS" },
+              { name: "goal max turns", value: "OPENAGI_GOAL_MAX_TURNS" },
+              { name: "daily USD limit", value: "OPENAGI_DAILY_USD_LIMIT" },
+              { name: "auto-approve", value: "OPENAGI_AUTO_APPROVE" }
+            ]
+          },
+          { type: 3, name: "value", description: "New value", required: true }
+        ]
+      }
+    ]
+  },
   { name: "recap", description: "Daily recap (what got done today)" },
   { name: "plan", description: "Daily plan (what should happen today)" },
   { name: "observe", description: "Force a proactive-observer pulse now" },
@@ -158,6 +223,25 @@ export const COMMAND_DEFS = [
   { name: "help", description: "List available commands" }
 ];
 
+// Non-secret operational knobs /config may write. Kept as an explicit
+// allowlist (and mirrored in the slash-command choices) so /config can never
+// be turned into a credential editor.
+const CONFIG_SETTABLE_KEYS = Object.freeze([
+  "OPENAGI_CHAT_MAX_ITERATIONS",
+  "OPENAGI_MAX_ITERATIONS",
+  "OPENAGI_GOAL_MAX_TURNS",
+  "OPENAGI_DAILY_USD_LIMIT",
+  "OPENAGI_AUTO_APPROVE"
+]);
+
+// Mirrors gatewaySupervised() in hosted-interface.js and must stay fail-closed
+// for the same reason: systemd's INVOCATION_ID is inherited by children, so
+// sniffing it would let a hand-run daemon offer a "restart" that is really a
+// shutdown. Supervision is an explicit operator declaration only.
+function gatewaySupervisedEnv(env = process.env) {
+  return String(env.OPENAGI_SUPERVISED ?? "").trim() === "1";
+}
+
 export class DiscordCommands {
   constructor(channel, options = {}) {
     this.channel = channel; // DiscordChannel — rest(), log(), agentHost, allowFrom
@@ -165,6 +249,10 @@ export class DiscordCommands {
     this.registered = false;
     this.rollbackConfirmations = new Map();
     this.rollbackConfirmationSeq = 0;
+    // Confirm-gated destructive/lifecycle actions, same pattern as rollback:
+    // the button carries an opaque id and the payload never leaves the server.
+    this.skillDeleteConfirmations = new Map();
+    this.gatewayRestartConfirmations = new Map();
   }
 
   get runtime() {
@@ -231,6 +319,9 @@ export class DiscordCommands {
       case "suggestions": return this.cmdSuggestions(interaction);
       case "budget": return this.cmdBudget(interaction);
       case "skills": return this.cmdSkills(interaction);
+      case "skill": return this.cmdSkill(interaction);
+      case "gateway": return this.cmdGateway(interaction);
+      case "config": return this.cmdConfig(interaction);
       case "recap": return this.cmdRecap(interaction);
       case "plan": return this.cmdPlan(interaction);
       case "observe": return this.cmdObserve(interaction);
@@ -256,6 +347,68 @@ export class DiscordCommands {
       const [verb, actionId] = id.split(":");
       const outcome = await this.decidePendingAction(actionId, verb === "pa-approve" ? "approve" : "deny", userId);
       return this.respond(interaction, { content: outcome, components: [] }, T.UPDATE_MESSAGE);
+    }
+    if (id.startsWith("skill-delete:")) {
+      const pending = this.skillDeleteConfirmations.get(id);
+      if (!pending) {
+        return this.respond(interaction, {
+          content: "This delete confirmation is expired or was already used.",
+          flags: EPHEMERAL
+        }, T.UPDATE_MESSAGE);
+      }
+      // Only the operator who asked may confirm — a button in a shared channel
+      // is visible to everyone who can see the message.
+      if (pending.userId && pending.userId !== userId) {
+        return this.respond(interaction, {
+          content: "Only the operator who requested this deletion can confirm it.",
+          flags: EPHEMERAL
+        }, T.UPDATE_MESSAGE);
+      }
+      this.skillDeleteConfirmations.delete(id);
+      try {
+        this.runtime?.skills?.deleteSkill(pending.name, discordDecisionActor(userId));
+        return this.respond(interaction, {
+          content: `🗑 **${pending.name}** moved to .trash — recoverable with restore.`,
+          components: []
+        }, T.UPDATE_MESSAGE);
+      } catch (error) {
+        return this.respond(interaction, {
+          content: `⚠ delete failed: ${error.message}`,
+          components: []
+        }, T.UPDATE_MESSAGE);
+      }
+    }
+    if (id.startsWith("gateway-restart:")) {
+      const pending = this.gatewayRestartConfirmations.get(id);
+      if (!pending) {
+        return this.respond(interaction, {
+          content: "This restart confirmation is expired or was already used.",
+          flags: EPHEMERAL
+        }, T.UPDATE_MESSAGE);
+      }
+      if (pending.userId && pending.userId !== userId) {
+        return this.respond(interaction, {
+          content: "Only the operator who requested this restart can confirm it.",
+          flags: EPHEMERAL
+        }, T.UPDATE_MESSAGE);
+      }
+      this.gatewayRestartConfirmations.delete(id);
+      // Re-check supervision at confirm time: the env could have changed
+      // between the prompt and the click, and exiting unsupervised is fatal.
+      if (!gatewaySupervisedEnv()) {
+        return this.respond(interaction, {
+          content: "Restart aborted — no supervisor is declared, so exiting would stop the agent.",
+          components: []
+        }, T.UPDATE_MESSAGE);
+      }
+      await this.respond(interaction, {
+        content: `♻️ Restarting (pid ${process.pid}) — back in a few seconds.`,
+        components: []
+      }, T.UPDATE_MESSAGE);
+      // Reply first, then exit, so the operator sees confirmation rather than
+      // a silently dropped interaction.
+      setTimeout(() => process.exit(0), 500).unref?.();
+      return undefined;
     }
     if (id.startsWith("rollback-confirm:")) {
       const pending = this.rollbackConfirmations.get(id);
@@ -831,6 +984,247 @@ export class DiscordCommands {
     if (skills.length === 0) return this.respond(interaction, { content: "🧪 No skills installed." });
     const lines = ["🧪 **Skills:**", ...skills.slice(0, 15).map((s) => `- **${s.name ?? s.id}** — ${String(s.description ?? "").slice(0, 100)}`)];
     return this.respond(interaction, { content: lines.join("\n").slice(0, 1900) });
+  }
+
+  // Skill maintenance from Discord. Hermes parity: the library is only useful
+  // if irrelevant skills can be pruned and good ones protected without opening
+  // the dashboard. Deletion is soft (moves to .trash) but still gated behind an
+  // owner check + explicit confirm button, matching /rollback.
+  async cmdSkill(interaction) {
+    const registry = this.runtime?.skills;
+    if (!registry) {
+      return this.respond(interaction, { content: "Skill registry is unavailable.", flags: EPHEMERAL });
+    }
+    const option = interaction.data?.options?.[0];
+    const action = option?.type === 1 ? option.name : "view";
+    const arg = (key) => String(option?.options?.find((item) => item.name === key)?.value ?? "").trim();
+    const name = arg("name");
+    const userId = discordUserId(interaction);
+    const by = discordDecisionActor(userId);
+
+    try {
+      if (action === "view") {
+        const skill = registry.view(name);
+        const body = String(skill?.body ?? skill?.content ?? "");
+        const files = Array.isArray(skill?.linkedFiles) && skill.linkedFiles.length
+          ? `\nLinked files: ${skill.linkedFiles.map((f) => (typeof f === "string" ? f : f?.path)).filter(Boolean).join(", ")}`
+          : "";
+        return this.respond(interaction, {
+          embeds: [embed({
+            title: `🧪 ${name}`,
+            description: `${String(skill?.description ?? "")}\n\n${body}${files}`.slice(0, 3900),
+            color: COLORS.info
+          })]
+        });
+      }
+
+      if (action === "pin") {
+        const pinned = arg("state") !== "unpin";
+        registry.setPinned(name, pinned, by);
+        return this.respond(interaction, {
+          content: pinned ? `📌 **${name}** pinned — protected from deletion.` : `**${name}** unpinned.`
+        });
+      }
+
+      if (action === "curate") {
+        await this.defer(interaction);
+        const report = await registry.curate({ now: new Date() });
+        const changed = Array.isArray(report?.changed) ? report.changed : [];
+        const summary = changed.length === 0
+          ? "Curator ran — no skills changed state."
+          : `Curator ran — ${changed.length} skill(s) changed state:\n${changed
+              .map((c) => `- ${c.name ?? c.skill}: ${c.from ?? "?"} → ${c.to ?? c.state ?? "?"}`)
+              .join("\n")}`;
+        return this.followUp(interaction, { content: summary.slice(0, 1900) });
+      }
+
+      if (action === "delete") {
+        if (!this.secretOwnerAllowed(userId)) {
+          return this.respond(interaction, {
+            content: "Skill deletion requires a configured Discord owner allowlist.",
+            flags: EPHEMERAL
+          });
+        }
+        // Verify the skill exists BEFORE offering a confirm button, so a typo
+        // fails now rather than after the operator clicks confirm.
+        if (!registry.has(name)) {
+          return this.respond(interaction, { content: `Unknown skill: ${name}`, flags: EPHEMERAL });
+        }
+        const confirmationId = `skill-delete:${(++this.rollbackConfirmationSeq).toString(36)}`;
+        if (this.skillDeleteConfirmations.size >= 50) {
+          const oldest = this.skillDeleteConfirmations.keys().next().value;
+          if (oldest) this.skillDeleteConfirmations.delete(oldest);
+        }
+        this.skillDeleteConfirmations.set(confirmationId, { name, userId });
+        return this.respond(interaction, {
+          content: `Delete skill **${name}**? It moves to .trash and stays recoverable.`,
+          flags: EPHEMERAL,
+          components: [{
+            type: 1,
+            components: [{ type: 2, style: 4, label: `Delete ${name}`.slice(0, 80), custom_id: confirmationId }]
+          }]
+        });
+      }
+
+      return this.respond(interaction, { content: `Unknown skill action: ${action}`, flags: EPHEMERAL });
+    } catch (error) {
+      return this.respond(interaction, { content: `⚠ ${error.message}`, flags: EPHEMERAL });
+    }
+  }
+
+  // Gateway lifecycle. Restart is deliberately gated twice: an owner check and
+  // a confirm button. It also refuses outright when no supervisor is declared,
+  // because exiting unsupervised is a shutdown, not a restart.
+  async cmdGateway(interaction) {
+    const option = interaction.data?.options?.[0];
+    const action = option?.type === 1 ? option.name : "status";
+    const userId = discordUserId(interaction);
+
+    if (action === "status") {
+      await this.defer(interaction);
+      let update = null;
+      try {
+        const { checkForUpdate } = await import("./self-update.js");
+        update = await checkForUpdate();
+      } catch (error) {
+        update = { error: error.message };
+      }
+      const updateLine = update?.error
+        ? `update check failed: ${update.error}`
+        : update?.updateAvailable
+          ? `⬆ update available (${update.behind} commit(s) behind ${update.upstream ?? "upstream"})`
+          : "✅ up to date";
+      return this.followUp(interaction, {
+        embeds: [embed({
+          title: "🛠 Gateway",
+          description: [
+            `pid \`${process.pid}\` · node \`${process.version}\``,
+            `uptime ${formatUptime(process.uptime())}`,
+            `supervised: ${gatewaySupervisedEnv() ? "yes — restart is safe" : "no — restart disabled"}`,
+            `branch \`${update?.branch ?? "?"}\` @ \`${update?.current ?? "?"}\``,
+            updateLine
+          ].join("\n"),
+          color: COLORS.info
+        })]
+      });
+    }
+
+    if (!this.secretOwnerAllowed(userId)) {
+      return this.respond(interaction, {
+        content: "Gateway update/restart requires a configured Discord owner allowlist.",
+        flags: EPHEMERAL
+      });
+    }
+
+    if (action === "update") {
+      await this.defer(interaction);
+      try {
+        const { applyUpdate } = await import("./self-update.js");
+        const result = await applyUpdate();
+        return this.followUp(interaction, {
+          content: result?.updated
+            ? `✅ Updated to \`${result.latest ?? "?"}\`. Run \`/gateway restart\` to load the new code.`
+            : `Already up to date${result?.reason ? ` (${result.reason})` : ""}.`
+        });
+      } catch (error) {
+        return this.followUp(interaction, { content: `⚠ update failed: ${error.message}` });
+      }
+    }
+
+    if (action === "restart") {
+      if (!gatewaySupervisedEnv()) {
+        return this.respond(interaction, {
+          content: "No process supervisor is declared (OPENAGI_SUPERVISED=1). Exiting now would stop the agent, not restart it.",
+          flags: EPHEMERAL
+        });
+      }
+      const confirmationId = `gateway-restart:${(++this.rollbackConfirmationSeq).toString(36)}`;
+      if (this.gatewayRestartConfirmations.size >= 20) {
+        const oldest = this.gatewayRestartConfirmations.keys().next().value;
+        if (oldest) this.gatewayRestartConfirmations.delete(oldest);
+      }
+      this.gatewayRestartConfirmations.set(confirmationId, { userId });
+      return this.respond(interaction, {
+        content: "Restart the gateway? In-flight turns will be dropped.",
+        flags: EPHEMERAL,
+        components: [{
+          type: 1,
+          components: [{ type: 2, style: 4, label: "Restart gateway", custom_id: confirmationId }]
+        }]
+      });
+    }
+
+    return this.respond(interaction, { content: `Unknown gateway action: ${action}`, flags: EPHEMERAL });
+  }
+
+  // Runtime settings. Deliberately NOT a general env editor: only the
+  // non-secret operational knobs in the choices list are writable, so this can
+  // never be used to read or overwrite a credential.
+  async cmdConfig(interaction) {
+    const option = interaction.data?.options?.[0];
+    const action = option?.type === 1 ? option.name : "show";
+    const arg = (key) => String(option?.options?.find((item) => item.name === key)?.value ?? "").trim();
+    const userId = discordUserId(interaction);
+    const provider = this.channel.agentHost?.modelProvider;
+
+    if (action === "show") {
+      const show = (key, fallback) => process.env[key]?.trim() || fallback;
+      return this.respond(interaction, {
+        embeds: [embed({
+          title: "⚙️ Config",
+          description: [
+            `provider: **${process.env.OPENAGI_PROVIDER ?? "auto"}** · model \`${provider?.model ?? "?"}\``,
+            `chat iteration cap: \`${show("OPENAGI_CHAT_MAX_ITERATIONS", "4 (default)")}\``,
+            `work iteration cap: \`${show("OPENAGI_MAX_ITERATIONS", "25 (default)")}\``,
+            `goal max turns: \`${show("OPENAGI_GOAL_MAX_TURNS", "20 (default)")}\``,
+            `daily USD limit: \`${show("OPENAGI_DAILY_USD_LIMIT", "unset")}\``,
+            `auto-approve: \`${show("OPENAGI_AUTO_APPROVE", "unset")}\``,
+            `supervised: \`${gatewaySupervisedEnv() ? "1" : "0"}\``
+          ].join("\n"),
+          color: COLORS.info
+        })]
+      });
+    }
+
+    if (action === "set") {
+      if (!this.secretOwnerAllowed(userId)) {
+        return this.respond(interaction, {
+          content: "Changing config requires a configured Discord owner allowlist.",
+          flags: EPHEMERAL
+        });
+      }
+      const key = arg("key");
+      const value = arg("value");
+      if (!CONFIG_SETTABLE_KEYS.includes(key)) {
+        return this.respond(interaction, { content: `Not a settable key: ${key}`, flags: EPHEMERAL });
+      }
+      // Numeric caps must stay positive integers; a bad value here would
+      // silently fall back to a default and look like the setting was ignored.
+      if (key.endsWith("_ITERATIONS") || key === "OPENAGI_GOAL_MAX_TURNS") {
+        const parsed = Number(value);
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          return this.respond(interaction, { content: `${key} must be a positive integer.`, flags: EPHEMERAL });
+        }
+      }
+      try {
+        const { saveEnv } = await import("./setup-wizard.js");
+        saveEnv({
+          dataDir: this.runtime?.secrets?.dataDir,
+          store: this.runtime?.secrets,
+          values: { [key]: value },
+          decidedBy: discordDecisionActor(userId)
+        });
+        // saveEnv updates process.env, so caps read per-turn take effect now.
+        // Anything read once at construction still needs /gateway restart.
+        return this.respond(interaction, {
+          content: `✅ \`${key}\` = \`${value}\`. Settings read per-turn apply immediately; others need \`/gateway restart\`.`
+        });
+      } catch (error) {
+        return this.respond(interaction, { content: `⚠ ${error.message}`, flags: EPHEMERAL });
+      }
+    }
+
+    return this.respond(interaction, { content: `Unknown config action: ${action}`, flags: EPHEMERAL });
   }
 
   async cmdRecap(interaction) {

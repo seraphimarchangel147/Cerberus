@@ -15,6 +15,12 @@ const WIZARD_FIELDS = [
   "OPENAGI_MOA_PRESET",
   "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL",
   "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
+  // Vendor keys for the OpenAI-compatible presets (see provider-presets.js).
+  // Activating a preset copies the vendor key onto the lane key, but the
+  // vendor key is stored under its own name so switching back and forth
+  // never loses a credential.
+  "XAI_API_KEY", "OPENROUTER_API_KEY", "MOONSHOT_API_KEY",
+  "GROQ_API_KEY", "NOUS_API_KEY",
   "OPENAGI_PROVIDER_ROUTING",
   "API_SERVER_ENABLED", "API_SERVER_KEY", "API_SERVER_PORT",
   "SUBSCRIPTION_PROXY_ENABLED", "SUBSCRIPTION_PROXY_PORT",
@@ -40,6 +46,9 @@ const WIZARD_FIELDS = [
   "OPENAGI_MAX_CHILDREN", "OPENAGI_MAX_SPAWN_DEPTH",
   "OPENAGI_SUBAGENT_MAX_ITERATIONS", "OPENAGI_SUBAGENT_MAX_TURN_SECONDS",
   "OPENAGI_CHAT_MAX_ITERATIONS",
+  // Declares that a process supervisor will restart the daemon if it exits.
+  // Gates the dashboard/Discord restart control — see gatewaySupervised().
+  "OPENAGI_SUPERVISED",
   "OPENAGI_GOAL_MAX_TURNS",
   "OPENAGI_CHECKPOINTS",
   "OPENAGI_LSP",

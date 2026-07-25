@@ -25,6 +25,13 @@ import { readNodeConfig } from "./cli-client.js";
 import { redactKnownValues, sanitizeForAudit } from "./redact.js";
 import { approvePendingAction } from "./pending-actions.js";
 import { isModelProviderId } from "./model-router.js";
+import {
+  listProviderPresets,
+  getProviderPreset,
+  presetIsConfigured,
+  presetActivationEnv,
+  activeProviderPreset
+} from "./provider-presets.js";
 import { projectAllows, projectMemoryScope } from "./project-store.js";
 
 const MAX_JOB_HTTP_BODY_BYTES = 256 * 1024;
@@ -3922,6 +3929,167 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
       }
 
+      // MARK: — Models & Providers
+      //
+      // The dashboard had no surface for "which model am I on and with whose
+      // key" — provider switching only existed as a Discord slash command.
+      // These routes back the Models tab. Keys are NEVER returned: only a
+      // configured boolean and a masked preview, so a shared screen or a
+      // screenshot can't leak a credential.
+      if (method === "GET" && pathname === "/providers") {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Provider administration is default-project only" });
+        }
+        const active = activeProviderPreset();
+        const provider = runtime.agentHost?.modelProvider ?? null;
+        return sendJson(res, 200, {
+          active,
+          lane: String(process.env.OPENAGI_PROVIDER ?? "auto"),
+          liveModel: provider?.model ?? null,
+          presets: listProviderPresets().map((preset) => ({
+            ...preset,
+            configured: presetIsConfigured(preset.id),
+            keyPreview: maskSecretPreview(process.env[preset.keyEnv]),
+            active: preset.id === active
+          }))
+        });
+      }
+      // Store a vendor API key under its own env name. Kept separate from
+      // activation so switching providers back and forth never loses a key.
+      if (method === "POST" && pathname === "/providers/key") {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Provider administration is default-project only" });
+        }
+        try {
+          const preset = getProviderPreset(body.id);
+          const value = String(body.apiKey ?? "").trim();
+          if (!value) return sendJson(res, 400, { error: "apiKey is required" });
+          saveEnv({
+            dataDir: runtime.secrets?.dataDir,
+            store: runtime.secrets,
+            values: { [preset.keyEnv]: value },
+            decidedBy: "dashboard:providers"
+          });
+          events.emit("providers", { op: "key-set", provider: preset.id });
+          return sendJson(res, 200, {
+            ok: true,
+            id: preset.id,
+            keyPreview: maskSecretPreview(process.env[preset.keyEnv])
+          });
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      // Point the live lane at a preset and rebuild the provider in place, so
+      // the switch takes effect without a restart.
+      if (method === "POST" && pathname === "/providers/activate") {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Provider administration is default-project only" });
+        }
+        try {
+          const preset = getProviderPreset(body.id);
+          if (!presetIsConfigured(preset.id)) {
+            return sendJson(res, 400, {
+              error: `No API key stored for ${preset.label}. Save a key first.`
+            });
+          }
+          const patch = presetActivationEnv(preset.id, { model: body.model });
+          saveEnv({
+            dataDir: runtime.secrets?.dataDir,
+            store: runtime.secrets,
+            values: patch,
+            decidedBy: "dashboard:providers"
+          });
+          const { createModelProvider } = await import("./model-provider.js");
+          const next = createModelProvider({
+            preferred: preset.lane,
+            budgetGuard: runtime.budget ?? null,
+            secrets: runtime.secrets,
+            dataDir: runtime.secrets?.dataDir
+          });
+          if (!next.isConfigured?.()) {
+            return sendJson(res, 400, {
+              error: `${preset.label} rebuilt without credentials; key may be invalid.`
+            });
+          }
+          if (runtime.agentHost) runtime.agentHost.modelProvider = next;
+          events.emit("providers", { op: "activated", provider: preset.id, model: next.model });
+          return sendJson(res, 200, {
+            ok: true,
+            active: preset.id,
+            model: next.model ?? null,
+            lane: preset.lane
+          });
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+
+      // MARK: — Gateway control (update / restart)
+      //
+      // Restart depends on a process supervisor (systemd Restart=always here):
+      // we exit non-zero and let the supervisor bring us back. If nothing is
+      // supervising this process, that would be a shutdown, not a restart — so
+      // the route refuses unless a supervisor is declared.
+      if (method === "GET" && pathname === "/gateway/status") {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Gateway administration is default-project only" });
+        }
+        let update = null;
+        try {
+          const { checkForUpdate } = await import("./self-update.js");
+          update = await checkForUpdate();
+        } catch (error) {
+          update = { error: error.message };
+        }
+        return sendJson(res, 200, {
+          pid: process.pid,
+          uptimeSeconds: Math.round(process.uptime()),
+          nodeVersion: process.version,
+          supervised: gatewaySupervised(),
+          update
+        });
+      }
+      if (method === "POST" && pathname === "/gateway/update") {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Gateway administration is default-project only" });
+        }
+        try {
+          const { applyUpdate } = await import("./self-update.js");
+          const result = await applyUpdate();
+          events.emit("gateway", { op: "updated", ...result });
+          return sendJson(res, 200, { ...result, restartRequired: true });
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname === "/gateway/restart") {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Gateway administration is default-project only" });
+        }
+        if (!gatewaySupervised()) {
+          return sendJson(res, 409, {
+            error: "No process supervisor detected. Exiting now would stop the agent, not restart it. Set OPENAGI_SUPERVISED=1 if a supervisor will bring it back."
+          });
+        }
+        events.emit("gateway", { op: "restarting", pid: process.pid });
+        // Respond BEFORE exiting, otherwise the caller sees a dropped socket
+        // and can't tell a restart from a crash.
+        sendJson(res, 200, { ok: true, restarting: true, pid: process.pid });
+        setTimeout(() => process.exit(0), 250).unref?.();
+        return undefined;
+      }
+
       if (method === "GET" && pathname === "/mcp") {
         const project = requireRequestProject(runtime, req, url);
         const servers = runtime.mcp.listServers()
@@ -4277,6 +4445,30 @@ ${reason ? `<div class="err">${escapeHtmlForLogin(reason)}</div>` : ""}
 
 function escapeHtmlForLogin(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
+}
+
+// Never return a raw credential to a browser. Enough tail to recognize WHICH
+// key is stored, not enough to use it. Short values are fully masked rather
+// than partially revealed.
+function maskSecretPreview(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  if (text.length <= 12) return "•".repeat(8);
+  return `${"•".repeat(8)}${text.slice(-4)}`;
+}
+
+// Is something going to bring this process back if it exits?
+//
+// This MUST fail closed. Sniffing systemd's INVOCATION_ID/NOTIFY_SOCKET looks
+// clever but is wrong: those are inherited by any child of a systemd-managed
+// shell, so a hand-run `node bin/openagi.js` from a supervised terminal would
+// report "supervised" and the Restart button would SHUT THE AGENT DOWN instead
+// of restarting it. Nothing in the environment reliably distinguishes "I am
+// the service" from "my grandparent was". So supervision is an explicit
+// operator declaration: set OPENAGI_SUPERVISED=1 in the unit file that owns
+// the Restart= policy. Default is no restart, which is the recoverable error.
+function gatewaySupervised(env = process.env) {
+  return String(env.OPENAGI_SUPERVISED ?? "").trim() === "1";
 }
 
 function sendJson(res, status, value) {
@@ -5173,6 +5365,7 @@ const HUD_ICONS = {
   integrations: '<path d="M9 2v6"/><path d="M15 2v6"/><path d="M7 8h10v3a5 5 0 0 1-10 0z"/><path d="M12 16v6"/>',
   projects: '<path d="M3 7.5 A1.5 1.5 0 0 1 4.5 6h4l2 2.5h9A1.5 1.5 0 0 1 21 10v7.5A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="M3 11h18"/>',
   mcp: '<path d="M12 2l8 4.5v9L12 20l-8-4.5v-9z"/><path d="M12 11l8-4.5M12 11L4 6.5M12 11v9"/>',
+  models: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/>',
   skills: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.7 2.1 2.1.7-2.1.7L19 20.6l-.7-2.1-2.1-.7 2.1-.7z"/>',
   cron: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
   kanban: '<path d="M4 4h4v16H4z"/><path d="M10 4h4v12h-4z"/><path d="M16 4h4v8h-4z"/>',
@@ -5992,6 +6185,7 @@ function renderApp() {
       <div class="nav-group-label">Build</div>
       <button data-tab="projects" title="Isolated workspaces, policies, skills, MCP grants, sessions, and artifacts."><span class="nav-ico">${hudIcon("projects")}</span><span>Projects</span></button>
       <button data-tab="mcp" title="Register custom MCP servers or manage already-registered ones."><span class="nav-ico">${hudIcon("mcp")}</span><span>MCP</span></button>
+      <button data-tab="models" title="Which model provider is live, API keys for Anthropic / OpenAI / xAI / OpenRouter / Kimi, and gateway update + restart."><span class="nav-ico">${hudIcon("models")}</span><span>Models</span></button>
       <button data-tab="skills" title="Reusable named prompts. Mined from your activity, or hand-authored."><span class="nav-ico">${hudIcon("skills")}</span><span>Skills</span></button>
       <button data-tab="cron" title="Scheduled prompts + the agent's autopilot pulse cron jobs."><span class="nav-ico">${hudIcon("cron")}</span><span>Cron</span></button>
       <button data-tab="kanban" title="Local multi-agent coordination board with blockers, runs, and handoffs."><span class="nav-ico">${hudIcon("kanban")}</span><span>Kanban</span></button>
@@ -6355,6 +6549,9 @@ async function switchTab(tab) {
     sidebarTitle.textContent = "MCP Servers";
     newBtn.textContent = "+ Register";
     await refreshMcp();
+  } else if (tab === "models") {
+    showSidebar(false);
+    await renderModels();
   } else if (tab === "agents") {
     showSidebar(false);
     await renderAgents();
@@ -8295,6 +8492,133 @@ function openMcpComposer() {
       f.requestSubmit();
     } else {
       submitForm(e);
+    }
+  });
+}
+
+async function renderModels() {
+  const [data, gateway] = await Promise.all([
+    fetchJson("/providers", { projectScoped: false }),
+    fetchJson("/gateway/status", { projectScoped: false }).catch((e) => ({ error: e.message }))
+  ]);
+  const presets = Array.isArray(data.presets) ? data.presets : [];
+
+  const cards = presets.map((p) => {
+    const modelOptions = (p.models || [])
+      .map((m) => '<option value="' + escapeHtml(m) + '"' + (m === p.defaultModel ? " selected" : "") + ">" + escapeHtml(m) + "</option>")
+      .join("");
+    const keyState = p.keyPreview
+      ? '<span class="badge ok">key ' + escapeHtml(p.keyPreview) + "</span>"
+      : '<span class="badge warn">no key</span>';
+    const activeBadge = p.active ? '<span class="badge ok">LIVE</span>' : "";
+    const oauthNote = p.oauth
+      ? '<a href="' + escapeHtml(p.keyUrl) + '" target="_blank" rel="noopener">Sign in / get key ↗</a>'
+      : '<a href="' + escapeHtml(p.keyUrl) + '" target="_blank" rel="noopener">Get API key ↗</a> <span class="sub">(API key only — no OAuth)</span>';
+    return '<div class="card" data-provider="' + escapeHtml(p.id) + '">'
+      + '<div class="row between"><span class="name">' + escapeHtml(p.label) + "</span>"
+      + '<span class="row" style="gap:6px;">' + activeBadge + keyState + "</span></div>"
+      + '<div class="desc">' + escapeHtml(p.note) + "</div>"
+      + '<div class="desc sub">' + escapeHtml(p.baseUrl) + " · key env <code>" + escapeHtml(p.keyEnv) + "</code></div>"
+      + '<div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap;">'
+      + '<input type="password" class="prov-key" placeholder="Paste ' + escapeHtml(p.keyEnv) + '" autocomplete="off" style="flex:1;min-width:180px;">'
+      + '<button class="prov-save">Save key</button></div>'
+      + '<div class="row" style="gap:6px;margin-top:6px;flex-wrap:wrap;">'
+      + '<select class="prov-model" style="flex:1;min-width:180px;">' + modelOptions + "</select>"
+      + '<button class="prov-activate"' + (p.configured ? "" : " disabled") + ">Make active</button></div>"
+      + '<div class="desc" style="margin-top:6px;">' + oauthNote + "</div>"
+      + "</div>";
+  }).join("");
+
+  const upd = gateway.update ?? {};
+  const updateLine = gateway.error
+    ? "Gateway status unavailable: " + escapeHtml(gateway.error)
+    : upd.error
+      ? "Update check failed: " + escapeHtml(String(upd.error))
+      : upd.updateAvailable
+        ? "Update available — " + escapeHtml(String(upd.behind ?? "?")) + " commit(s) behind."
+        : "Up to date.";
+  const supervisedNote = gateway.supervised
+    ? "Supervised — restart is safe; the service manager brings the gateway back."
+    : "No supervisor detected. Restart is disabled: exiting would stop the agent, not restart it.";
+
+  main.innerHTML = '<div class="pane">'
+    + "<h2>Models &amp; Providers</h2>"
+    + '<div class="desc">Live lane: <strong>' + escapeHtml(String(data.lane || "auto")) + "</strong>"
+    + " · active preset: <strong>" + escapeHtml(String(data.active || "none")) + "</strong>"
+    + " · model: <code>" + escapeHtml(String(data.liveModel || "?")) + "</code></div>"
+    + '<div class="desc sub">Keys are stored in the secrets vault and never sent back to this page — only a masked preview. Saving a key does not switch providers; press <em>Make active</em> to point the live lane at it.</div>'
+    + '<div class="grid" id="providerGrid" style="margin-top:12px;">' + cards + "</div>"
+    + "<h3>Gateway</h3>"
+    + '<div class="card"><div class="row between"><span class="name">openAGI daemon</span>'
+    + '<span class="badge">pid ' + escapeHtml(String(gateway.pid ?? "?")) + "</span></div>"
+    + '<div class="desc">uptime ' + escapeHtml(String(gateway.uptimeSeconds ?? "?")) + "s · node " + escapeHtml(String(gateway.nodeVersion ?? "?")) + "</div>"
+    + '<div class="desc">' + updateLine + "</div>"
+    + '<div class="desc sub">' + escapeHtml(supervisedNote) + "</div>"
+    + '<div class="row" style="gap:6px;margin-top:8px;">'
+    + '<button id="gwUpdate">Pull update</button>'
+    + '<button id="gwRestart"' + (gateway.supervised ? "" : " disabled") + ">Restart gateway</button></div>"
+    + '<div class="desc" id="gwResult"></div></div>'
+    + "</div>";
+
+  const grid = document.getElementById("providerGrid");
+  grid.querySelectorAll(".card").forEach((card) => {
+    const id = card.getAttribute("data-provider");
+    card.querySelector(".prov-save").addEventListener("click", async () => {
+      const input = card.querySelector(".prov-key");
+      const apiKey = input.value.trim();
+      if (!apiKey) return;
+      try {
+        await postJson("/providers/key", { id, apiKey });
+        // Clear immediately: the key must not linger in the DOM.
+        input.value = "";
+        await renderModels();
+      } catch (e) {
+        alert("Could not save key: " + e.message);
+      }
+    });
+    card.querySelector(".prov-activate").addEventListener("click", async () => {
+      const model = card.querySelector(".prov-model").value;
+      try {
+        const result = await postJson("/providers/activate", { id, model });
+        await renderModels();
+        alert("Now running " + result.active + " on " + (result.model || "?"));
+      } catch (e) {
+        alert("Could not activate: " + e.message);
+      }
+    });
+  });
+
+  const gwResult = document.getElementById("gwResult");
+  document.getElementById("gwUpdate").addEventListener("click", async () => {
+    gwResult.textContent = "Pulling…";
+    try {
+      const r = await postJson("/gateway/update", {});
+      gwResult.textContent = r.updated
+        ? "Updated. Restart the gateway to run the new code."
+        : "Already up to date.";
+    } catch (e) {
+      gwResult.textContent = "Update failed: " + e.message;
+    }
+  });
+  document.getElementById("gwRestart").addEventListener("click", async () => {
+    if (!confirm("Restart the gateway? In-flight turns will be dropped.")) return;
+    gwResult.textContent = "Restarting…";
+    try {
+      await postJson("/gateway/restart", {});
+      // The process exits; poll until the new one answers.
+      const waitForBoot = async (attempt) => {
+        if (attempt > 40) { gwResult.textContent = "Gateway did not come back — check the service."; return; }
+        try {
+          const s = await fetchJson("/gateway/status", { projectScoped: false });
+          gwResult.textContent = "Back up — pid " + s.pid + ".";
+          await renderModels();
+        } catch {
+          setTimeout(() => waitForBoot(attempt + 1), 500);
+        }
+      };
+      setTimeout(() => waitForBoot(0), 1200);
+    } catch (e) {
+      gwResult.textContent = "Restart refused: " + e.message;
     }
   });
 }
