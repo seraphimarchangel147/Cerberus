@@ -8,6 +8,7 @@ import { FileBackedAgentStore, InMemoryAgentStore } from "../src/agent-store.js"
 import { AgentHost } from "../src/agent-host.js";
 import { applyBackgroundReviewProposal } from "../src/background-review.js";
 import { FileBackedMemorySystem } from "../src/file-backed-memory-system.js";
+import { writeJsonAtomic } from "../src/file-utils.js";
 import { MemoryCapacityError, MemorySystem } from "../src/memory-system.js";
 import { AnthropicProvider, OpenAIResponsesProvider } from "../src/model-provider.js";
 import { ToolRegistry, registerCoreTools } from "../src/tool-registry.js";
@@ -66,6 +67,65 @@ test("a rejected file-backed write leaves JSONL and the atomic snapshot byte-ide
   assert.deepEqual(fs.readFileSync(eventPath), beforeEvents);
   assert.deepEqual(fs.readFileSync(snapshotPath), beforeSnapshot);
   assert.equal(memory.items.has("rejected"), false);
+});
+
+test("file-backed memory replays a committed event when its snapshot refresh fails", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-memory-journal-replay-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let snapshotWrites = 0;
+  const memory = new FileBackedMemorySystem({
+    dir,
+    writeSnapshot(file, state) {
+      snapshotWrites += 1;
+      if (snapshotWrites === 2) throw new Error("simulated snapshot cache failure");
+      writeJsonAtomic(file, state);
+    }
+  });
+
+  const first = memory.remember({ content: "The first durable fact." }, { id: "journal-first", tier: "medium" });
+  const second = memory.remember({ content: "The second durable fact." }, { id: "journal-second", tier: "medium" });
+
+  const snapshot = JSON.parse(fs.readFileSync(path.join(dir, "memory-state.json"), "utf8"));
+  assert.equal(snapshot.sequence, 1, "the snapshot intentionally lags the committed event");
+  const events = fs.readFileSync(path.join(dir, "memory-events.jsonl"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(events.map((event) => event.sequence), [1, 2]);
+  assert.ok(events.every((event) => event.version === 2 && event.state.sequence === event.sequence));
+
+  const reloaded = new FileBackedMemorySystem({ dir });
+  assert.equal(reloaded.sequence, 2);
+  assert.equal(reloaded.items.get(first.id).content, "The first durable fact.");
+  assert.equal(reloaded.items.get(second.id).content, "The second durable fact.");
+});
+
+test("file-backed memory refreshes the authority state before a stale instance mutates", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-memory-journal-race-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const first = new FileBackedMemorySystem({ dir });
+  const stale = new FileBackedMemorySystem({ dir });
+
+  const firstItem = first.remember({ content: "First writer fact." }, { id: "first-writer", tier: "medium" });
+  const secondItem = stale.remember({ content: "Second writer fact." }, { id: "second-writer", tier: "medium" });
+
+  const reloaded = new FileBackedMemorySystem({ dir });
+  assert.equal(reloaded.sequence, 2);
+  assert.ok(reloaded.items.has(firstItem.id));
+  assert.ok(reloaded.items.has(secondItem.id));
+});
+
+test("file-backed memory fails closed after a malformed v2 authority event", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-memory-journal-invalid-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const memory = new FileBackedMemorySystem({ dir });
+  memory.remember({ id: "valid", content: "Valid durable fact." }, { tier: "medium" });
+  fs.appendFileSync(path.join(dir, "memory-events.jsonl"), "{not-json}\n");
+
+  const reloaded = new FileBackedMemorySystem({ dir });
+  assert.equal(reloaded.journalHealthy, false);
+  assert.throws(
+    () => reloaded.remember({ id: "blocked", content: "Must not write through a corrupt journal." }, { tier: "medium" }),
+    /journal is unhealthy/i
+  );
 });
 
 test("usage header is deterministic and atomic replacement creates room", async () => {
