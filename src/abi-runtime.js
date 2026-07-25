@@ -93,6 +93,11 @@ import {
   ToolRegistry
 } from "./tool-registry.js";
 import { registerCodeTools } from "./code-tools.js";
+import { createIsolatedCodeVerifier } from "./coder-verifier.js";
+import {
+  CoderController,
+  registerCoderTools
+} from "./coder-controller.js";
 import { registerDefaultWorkflows, WorkflowRegistry } from "./workflow-registry.js";
 import { applyPersona } from "./persona.js";
 import { createId, nowIso } from "./utils.js";
@@ -449,6 +454,8 @@ export class AbiRuntime {
       ...(options.pendingActionStoreOptions ?? {})
     });
     this.tools.bindPendingActions(this.pendingActions);
+    this.codeVerifier = options.codeVerifier ?? createIsolatedCodeVerifier();
+    this.coder = options.coderController ?? null;
     this.toolOutputs = options.toolOutputs ?? new ToolOutputStore({
       dir: options.dataDir ? path.join(options.dataDir, "tool-outputs") : undefined
     });
@@ -831,6 +838,13 @@ export class AbiRuntime {
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
       // tests, and gated shell. Governed delegation registers separately.
       registerCodeTools(this.tools, this);
+      this.coder = this.coder ?? new CoderController({
+        runtime: this,
+        dataDir: secretsDataDir,
+        workspaceDir: options.workspaceDir ?? process.cwd(),
+        checkpoints: this.checkpoints ?? undefined
+      });
+      registerCoderTools(this.tools, this);
       // A VM script can compact multi-step tool work, but every nested call
       // re-enters this same registry so scrutiny and catastrophic gates hold.
       registerExecuteCodeTool(this);

@@ -5356,6 +5356,9 @@ Tools available to you (call them when useful):
 - code_write(path, content, expectedTag?, summary?) - atomically create a file, or replace an existing file only with its latest SHA-256 expectedTag
 - code_lint(path?) / code_test(file?) - syntax-check source or run the isolated test lane
 - code_verify(checks) - run a bounded secret-scrubbed evidence gate of syntax and targeted tests in isolated no-shell Node subprocesses
+- coder_start(objective, files, plan, checks) - bind inspected SHA-256 baselines, a concrete plan, mandatory verification, and rollback checkpoints into a durable coding transaction
+- coder_apply(runId, expectedRevision, operations) / coder_status(runId) - apply exact CAS edits, inspect durable state, and accept completion only when isolated checks pass
+- coder_rollback(runId, expectedRevision) - human-confirmed recovery that refuses to overwrite files no longer matching controller-owned post-edit tags
 - code_shell(command, cwd?) - run a bounded shell command through the normal approval, secret, project, and catastrophic-policy gates
 - browser_open(url?) / browser_navigate(url) - open or navigate an isolated semantic browser; domain access requires approval
 - browser_inspect(query?, maxNodes?) - read a compact untrusted page snapshot with generation-scoped element refs
@@ -5398,6 +5401,7 @@ Guidelines:
 - Call inspect_skill_capabilities before running an imported or uncertain skill; if it reports a partial or text-only scope, do not assume omitted tools are available.
 - Use checkpoints as the fast pre-mutation safety gate. Use timeline_preview before any slower post-mutation timeline recovery.
 - Read before editing. Reuse a code_read/code_search tag only for the exact file version it describes; after any successful write, use the returned tag or read again.
+- For multi-file coding work, use coder_start only after inspection, then coder_apply. Treat only state=passed as complete; a blocked run requires coder_status and explicit recovery.
 - Treat each tool's receipt and semantic outcome as authoritative: dispatched=false means its handler did not run, and changed=null after dispatch requires inspection before retrying.
 
 The latest user message may begin with a [context] block assembled by the runtime (scrutiny decision, memory hits). Treat it as trusted background — the user did not type it.`;

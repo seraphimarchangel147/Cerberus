@@ -239,6 +239,10 @@ export function scrubTestEnvironment(source = process.env, {
   const namesToScrub = managedNames
     ?? secretNameSets(secretStore, { decidedBy }).managedNames;
   for (const name of namesToScrub) delete env[name];
+  // A verifier may itself run under `node --test`. Forwarding this private
+  // marker makes a nested test process skip its targets as a recursive run,
+  // which can turn an unexecuted check into a false pass.
+  delete env.NODE_TEST_CONTEXT;
   if (scrubCredentialShaped) {
     for (const name of Object.keys(env)) {
       if (isCredentialEnvName(name)) delete env[name];
@@ -612,7 +616,9 @@ export function registerCodeTools(registry, runtime, options = {}) {
     ?? runtime?.lspClient
     ?? createLspClient({ dataDir: safetyOptions.dataDir });
   const atomicWriter = options.writeTextAtomic ?? writeTextAtomic;
-  const codeVerifier = options.codeVerifier ?? createIsolatedCodeVerifier();
+  const codeVerifier = options.codeVerifier
+    ?? runtime?.codeVerifier
+    ?? createIsolatedCodeVerifier();
   registry.register({
     name: "code_read",
     description: "Read a file with line numbers. Returns a full SHA-256 content tag required by code_edit and by code_write when overwriting an existing file. Re-read after any edit to get the fresh tag.",

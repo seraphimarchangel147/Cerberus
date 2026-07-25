@@ -41,5 +41,6 @@ test("code_verify is agent-visible and forwards scrubbed bounded context", async
   assert.equal(received.workspaceDir, process.cwd());
   assert.equal(received.checks[0].path, "src");
   assert.equal(received.env.OPENAGI_TEST, "1");
+  assert.equal(received.env.NODE_TEST_CONTEXT, undefined);
   assert.equal(received.env.OPENAI_API_KEY, undefined);
 });

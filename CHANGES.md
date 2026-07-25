@@ -2,6 +2,16 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Checkpoint-backed autonomous coder controller (Codex)
+
+- Added a durable `coder_start` -> `coder_apply` -> `coder_status` transaction protocol that binds an objective, plan, inspected SHA-256 baselines, and mandatory checks before editing begins.
+- Persists bounded, content-free run state through authoritative JSONL events plus atomic snapshots, uses revision CAS, scopes runs to their exact project/session/workspace, and reconciles interrupted edits or verification to a blocked state.
+- Applies only declared one-operation-per-file `code_edit` and `code_write` mutations through the governed registry, retaining canonical child receipts and exact controller-owned post-edit tags.
+- Accepts completion only with complete per-check isolated evidence; failed or incomplete verification automatically restores captured baselines, while cancellation and ownership drift fail closed for explicit inspection.
+- Added human-confirmed exact-version rollback, file-resource coordination, runtime wiring, static agent guidance, nested-test-context scrubbing, and passing, failure, false-evidence, restart, conflict, persistence, and prompt regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1676/1677 tests with zero failures and one intentional Windows permission-mode skip.
+AUTONOMOUS CODER CONTROLLER COMPLETE
+
 ## 2026-07-25 - Isolated deterministic code verification (Codex)
 
 - Added `code_verify`, a read-only evidence gate that combines up to 16 syntax and targeted test checks without a shell.
