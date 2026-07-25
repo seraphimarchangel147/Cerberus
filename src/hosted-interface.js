@@ -7048,6 +7048,7 @@ function renderChat() {
     sendBtn.disabled = true;
     // The avatar reacts to the harness working — spin it up while we wait.
     if (window.cerbHoloReact) window.cerbHoloReact("thinking");
+    if (window.cerbPetReact) window.cerbPetReact("thinking");
     try {
       const result = await postJson("/message", {
         text,
@@ -7059,8 +7060,10 @@ function renderChat() {
       state.sessionId = result.session.id;
       appendMessage({ role: "assistant", content: result.reply, from: "openagi", channel: state.channel, createdAt: result.createdAt, metadata: result.model });
       refreshSessions();
+      if (window.cerbPetSetState) window.cerbPetSetState("jumping");   // happy hop on reply
     } catch (err) {
       appendMessage({ role: "assistant", content: "[error] " + err.message });
+      if (window.cerbPetReact) window.cerbPetReact("offline");          // sad droop on error
     } finally {
       sendBtn.disabled = false;
     }
@@ -7378,11 +7381,17 @@ window.cerbHoloReact = function (mode) {
 
 /* Poll the daemon's public /health so the avatar tracks agent liveness. */
 (function cerbHoloHealthWatch() {
+  let petWasOffline = false;
   const check = () => {
     fetch("/health").then((r) => r.json()).then((h) => {
       const up = Boolean(h && h.ok);
       if (up && cerbHoloState.mode === "offline") window.cerbHoloReact("idle");
       else if (!up && cerbHoloState.mode !== "offline") window.cerbHoloReact("offline");
+      // The pet mirrors daemon liveness too — droop when down, recover when up.
+      if (window.cerbPetReact) {
+        if (!up) { window.cerbPetReact("offline"); petWasOffline = true; }
+        else if (petWasOffline) { window.cerbPetReact("online"); petWasOffline = false; }
+      }
     }).catch(() => { if (cerbHoloState.mode !== "offline") window.cerbHoloReact("offline"); });
   };
   check();
@@ -10850,6 +10859,587 @@ switchTab(initialTab);
     if (!paused) lastTime = 0;
   });
 })();
+
+/* ─── Cerberus pixel pet — reactive dashboard companion ─────────────────
+   A 16-bit three-headed hellhound that lives on the dashboard, follows the
+   mouse, and reacts to what the harness is doing. Parts-based pixel rig
+   rendered on a low-res canvas and nearest-neighbour upscaled. States mirror
+   the petdex contract: idle / running / review / failed / waving / jumping /
+   waiting. cerbPetReact(mode) is the single reactivity entry point (same
+   pattern as cerbHoloReact). Honours prefers-reduced-motion.
+
+   Views: a FRONT-facing pose when stationary (three heads fanned, tail
+   wagging) and a SIDE pose when walking/running. Animation is sampled at
+   15 fps (frame advances 4 "60fps-ticks" per drawn frame so real-time speed
+   is unchanged). Three easter-egg idles fire roughly every 5 minutes while
+   idle: nuzzle-the-pack, breath-fire, and howl. */
+(function () {
+  "use strict";
+  if (window.__cerbPetLoaded) return;
+  window.__cerbPetLoaded = true;
+
+  var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var W = 64, H = 52;
+  var FPS = 15, FRAME_MS = 1000 / FPS;
+  var TICKS_PER_FRAME = Math.round(60 / FPS);   // keep real-time speed
+
+  var PAL = {
+    outline:  "#12101a",
+    furDeep:  "#14141c",
+    furDark:  "#222838",
+    furMid:   "#2e3a4a",
+    furLight: "#46586b",
+    rim:      "#d9a441",
+    rimHot:   "#f0c060",
+    flameCore:"#fff4d0",
+    flameYel: "#ffd24a",
+    flameOrg: "#ff8a1e",
+    flameRed: "#e0451a",
+    eye:      "#ff9a1e",
+    eyeCore:  "#fff0b0",
+    fang:     "#f0e8d0",
+    claw:     "#c9c0aa",
+    mouth:    "#5a1620",
+    tongue:   "#c24a62",
+    nose:     "#0e0c14",
+    earIn:    "#7a3222"
+  };
+
+  var off = document.createElement("canvas");
+  off.width = W; off.height = H;
+  var octx = off.getContext("2d", { willReadFrequently: true });
+
+  function pxEllipse(ctx, cx, cy, rx, ry, color) {
+    ctx.fillStyle = color;
+    for (var y = -ry; y <= ry; y++) {
+      var w = Math.floor(rx * Math.sqrt(Math.max(0, 1 - (y*y)/(ry*ry+0.001))));
+      ctx.fillRect(Math.round(cx-w), Math.round(cy+y), w*2+1, 1);
+    }
+  }
+  function pxRect(ctx, x, y, w, h, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+  }
+  function pxLine(ctx, x0, y0, x1, y1, thick, color) {
+    ctx.fillStyle = color;
+    var steps = Math.max(Math.abs(x1-x0), Math.abs(y1-y0)) * 2 + 1;
+    var r = Math.floor(thick/2);
+    for (var i = 0; i <= steps; i++) {
+      var t = i/steps;
+      ctx.fillRect(Math.round(x0+(x1-x0)*t)-r, Math.round(y0+(y1-y0)*t)-r, thick, thick);
+    }
+  }
+  function pxTri(ctx, x0,y0, x1,y1, x2,y2, color) {
+    ctx.fillStyle = color;
+    var minx=Math.floor(Math.min(x0,x1,x2)), maxx=Math.ceil(Math.max(x0,x1,x2));
+    var miny=Math.floor(Math.min(y0,y1,y2)), maxy=Math.ceil(Math.max(y0,y1,y2));
+    function sign(a,b,c,d,e,f){return (c-a)*(f-b)-(d-b)*(e-a);}
+    for (var y=miny;y<=maxy;y++) for (var x=minx;x<=maxx;x++) {
+      var d1=sign(x,y,x0,y0,x1,y1), d2=sign(x,y,x1,y1,x2,y2), d3=sign(x,y,x2,y2,x0,y0);
+      var neg=(d1<0)||(d2<0)||(d3<0), pos=(d1>0)||(d2>0)||(d3>0);
+      if (!(neg&&pos)) ctx.fillRect(x,y,1,1);
+    }
+  }
+
+  function flameTongue(ctx, bx, by, h, w, sway, seed) {
+    for (var i = 0; i < h; i++) {
+      var t = i/h;
+      var y = Math.round(by - i);
+      var x = Math.round(bx + sway * t * t);
+      var half = Math.max(0, Math.round((w/2) * (1 - t*0.7)));
+      if (t > 0.75 && ((i + seed) % 3 === 0)) half = Math.max(0, half-1);
+      var color;
+      if (t < 0.18) color = PAL.flameCore;
+      else if (t < 0.42) color = PAL.flameYel;
+      else if (t < 0.72) color = PAL.flameOrg;
+      else color = PAL.flameRed;
+      ctx.fillStyle = color;
+      ctx.fillRect(x-half, y, half*2+1, 1);
+    }
+  }
+
+  function drawHead(ctx, cx, cy, o) {
+    var dir = o.dir||0, s = o.size||1, roar = o.roar||false, blink = o.blink||0;
+    var gx = o.gazeX||0, gy = o.gazeY||0;
+    var hw = Math.round(6*s), hh = Math.round(5*s);
+    var snoutX = dir * Math.round(3*s);
+
+    pxEllipse(ctx, cx, cy, hw+1, hh+1, PAL.outline);
+
+    var earH = Math.round(4*s);
+    pxTri(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, cx-hw+4, cy-hh, PAL.furDark);
+    pxTri(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, cx+hw-4, cy-hh, PAL.furDark);
+    pxRect(ctx, cx-hw, cy-hh-1, 1, 2, PAL.earIn);
+    pxRect(ctx, cx+hw-1, cy-hh-1, 1, 2, PAL.earIn);
+
+    pxEllipse(ctx, cx, cy, hw, hh, PAL.furMid);
+    pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, PAL.furLight);
+
+    pxEllipse(ctx, cx+snoutX, cy+2, 3, 2, PAL.furLight);
+    pxRect(ctx, cx+snoutX + dir*2 - 1, cy+1, 2, 2, PAL.nose);
+
+    var ey = cy-2;
+    var exL = cx-4 + (dir<0?1:0), exR = cx+2 + (dir>0?-1:0);
+    if (blink > 0.9) {
+      pxRect(ctx, exL, ey+1, 2, 1, PAL.outline);
+      pxRect(ctx, exR, ey+1, 2, 1, PAL.outline);
+    } else {
+      pxRect(ctx, exL+gx, ey+gy, 2, 2, PAL.eye);
+      pxRect(ctx, exL+gx, ey+gy, 1, 1, PAL.eyeCore);
+      pxRect(ctx, exR+gx, ey+gy, 2, 2, PAL.eye);
+      pxRect(ctx, exR+1+gx, ey+gy, 1, 1, PAL.eyeCore);
+    }
+
+    var mx = cx + snoutX;
+    if (roar) {
+      var mw = Math.round(6*s), mh = Math.round(4*s), my = cy+2;
+      pxEllipse(ctx, mx, my+mh/2, mw/2, mh/2, PAL.mouth);
+      pxEllipse(ctx, mx, my+mh/2+1, Math.max(1,mw/2-2), Math.max(1,mh/2-1), PAL.tongue);
+      pxTri(ctx, mx-mw/2+1, my, mx-mw/2+2, my+3, mx-mw/2+3, my, PAL.fang);
+      pxTri(ctx, mx+mw/2-3, my, mx+mw/2-2, my+3, mx+mw/2-1, my, PAL.fang);
+      pxRect(ctx, mx-mw/2+2, my+mh-1, mw-4, 1, PAL.fang);
+    } else {
+      pxRect(ctx, mx-3, cy+3, 6, 1, PAL.outline);
+      pxTri(ctx, mx+dir*2-1, cy+3, mx+dir*2, cy+5, mx+dir*2+1, cy+3, PAL.fang);
+    }
+  }
+
+  /* ── SIDE view — used while walking / running ── */
+  function drawPupSide(ctx, P) {
+    ctx.clearRect(0,0,W,H);
+    var bob = P.bob||0;
+    var walk = P.walk||0;
+    var flameI = P.flameI==null?1:P.flameI;
+    var flick = P.flick||0;
+    var gx = P.gazeX||0, gy = P.gazeY||0;
+    var squash = P.squash||1;
+    var sad = P.sad||0;
+    var lean = P.lean||0;
+
+    var x;
+    for (x = 14; x <= 50; x += 4) {
+      var hgt = (13 + Math.round(3*Math.sin(x*0.3))) * flameI;
+      var sway = Math.sin(flick*0.18 + x*0.5) * 1.2 + lean*0.6;
+      var hMod = hgt + Math.round(Math.sin(flick*0.28 + x) * 2);
+      flameTongue(ctx, x, 27+bob*0.4, Math.max(4,hMod), 6, sway, x);
+    }
+    var headFlames = [{x:9,h:16,l:-2},{x:14,h:20,l:-1},{x:19,h:23,l:0},{x:24,h:24,l:0},{x:29,h:22,l:1},{x:34,h:18,l:1}];
+    for (var fi=0; fi<headFlames.length; fi++) {
+      var tg = headFlames[fi];
+      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.2 + tg.l + lean*0.6;
+      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
+      flameTongue(ctx, tg.x, 26+bob*0.4, Math.max(5,hMod2), 6, sw2, fi);
+    }
+
+    var legAmp = walk ? 5 : 0;
+    function legSwing(ph){ return Math.round(Math.sin(walk + ph) * legAmp); }
+
+    pxLine(ctx, 14+legSwing(0), 35, 13+legSwing(0), 45, 4, PAL.furDark);
+    pxRect(ctx, 10+legSwing(0), 44, 6, 3, PAL.furDark);
+    pxRect(ctx, 10+legSwing(0), 46, 1, 2, PAL.claw); pxRect(ctx, 13+legSwing(0), 46, 1, 2, PAL.claw);
+    pxLine(ctx, 39+legSwing(Math.PI), 35, 41+legSwing(Math.PI), 45, 4, PAL.furDark);
+    pxRect(ctx, 38+legSwing(Math.PI), 44, 6, 3, PAL.furDark);
+    pxRect(ctx, 38+legSwing(Math.PI), 46, 1, 2, PAL.claw); pxRect(ctx, 41+legSwing(Math.PI), 46, 1, 2, PAL.claw);
+
+    var wag = Math.sin((P.tailWag||0))*2;
+    pxLine(ctx, 47, 31, 54+wag*0.4, 27, 3, PAL.furDark);
+    pxLine(ctx, 54+wag*0.4, 27, 57+wag, 21, 3, PAL.furDark);
+    flameTongue(ctx, 57+wag, 22, 7*flameI, 4, wag, 9);
+
+    var bw = 17*squash, bh = 7/squash;
+    pxEllipse(ctx, 31, 33+bob*0.3, bw, bh, PAL.furDark);
+    pxEllipse(ctx, 17, 32+bob*0.3, 8*squash, 7/squash, PAL.furMid);
+    pxEllipse(ctx, 43, 32+bob*0.3, 7*squash, 7/squash, PAL.furDark);
+    pxEllipse(ctx, 29, 27+bob*0.3, 12, 2, PAL.furLight);
+    pxEllipse(ctx, 15, 30+bob*0.3, 3, 3, PAL.furLight);
+    pxEllipse(ctx, 31, 38+bob*0.3, 12, 2, PAL.furDeep);
+
+    pxLine(ctx, 20+legSwing(Math.PI), 36, 20+legSwing(Math.PI), 47, 4, PAL.furMid);
+    pxRect(ctx, 17+legSwing(Math.PI), 46, 6, 3, PAL.furMid);
+    pxRect(ctx, 17+legSwing(Math.PI), 48, 1, 2, PAL.claw); pxRect(ctx, 20+legSwing(Math.PI), 48, 1, 2, PAL.claw); pxRect(ctx, 22+legSwing(Math.PI), 48, 1, 2, PAL.claw);
+    pxLine(ctx, 44+legSwing(0), 35, 46+legSwing(0), 41, 4, PAL.furMid);
+    pxLine(ctx, 46+legSwing(0), 41, 45+legSwing(0), 47, 3, PAL.furMid);
+    pxRect(ctx, 42+legSwing(0), 46, 6, 3, PAL.furMid);
+    pxRect(ctx, 42+legSwing(0), 48, 1, 2, PAL.claw); pxRect(ctx, 45+legSwing(0), 48, 1, 2, PAL.claw); pxRect(ctx, 47+legSwing(0), 48, 1, 2, PAL.claw);
+
+    var droop = sad*3;
+    var nl = -lean;
+    pxLine(ctx, 11+nl, 18+bob*0.8+droop, 11, 28+bob*0.3, 4, PAL.furDark);
+    pxLine(ctx, 22+nl, 14+bob+droop*0.5, 22, 28+bob*0.3, 5, PAL.furDark);
+    pxLine(ctx, 33+nl, 18+bob*0.8+droop, 33, 28+bob*0.3, 4, PAL.furDark);
+
+    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
+    drawHead(ctx, 11+nl, 14+bob*0.8+droop+(lean?1:0), {dir:-1, size:0.9, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
+    drawHead(ctx, 22+nl, 10+bob+droop*0.5+(lean?1:0),  {dir:0,  size:1.15, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy});
+    drawHead(ctx, 33+nl, 14+bob*0.8+droop+(lean?1:0), {dir:1,  size:0.9, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
+
+    if (walk) {
+      ctx.fillStyle = "#5a5a5a";
+      var dp = Math.floor(flick/4) % 3;
+      ctx.fillRect(46+dp*2, 46-dp, 2, 1);
+      ctx.fillRect(50+dp*2, 44-dp, 1, 1);
+      for (var ei=0; ei<3; ei++) {
+        var ex = 48 + ((flick*0.8 + ei*9) % 14);
+        var ey = 22 + ((ei*7 + flick*0.3) % 16);
+        ctx.fillStyle = ei%2 ? PAL.flameOrg : PAL.flameYel;
+        ctx.globalAlpha = 0.8 - (ex-48)/20;
+        ctx.fillRect(Math.round(ex), Math.round(ey), 1, 1);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  /* ── FRONT view — stationary idle / review / waiting (three heads fanned,
+        tail wagging). Also hosts the easter-egg animations. ── */
+  function drawPupFront(ctx, P) {
+    ctx.clearRect(0,0,W,H);
+    var bob = P.bob||0;
+    var flameI = P.flameI==null?1:P.flameI;
+    var flick = P.flick||0;
+    var gx = P.gazeX||0, gy = P.gazeY||0;
+    var sad = P.sad||0;
+    var droop = sad*3;
+    var howl = P.howl||0;
+
+    /* easter-egg head offsets */
+    var hl = P.headL||0, hr = P.headR||0, hc = P.headC||0;
+    var headLift = howl*4;                 /* howl throws heads back/up */
+
+    /* flame mane — symmetric arc behind the three heads */
+    var headFlames = [{x:10,h:15,l:-2},{x:16,h:19,l:-1},{x:22,h:22,l:0},{x:27,h:23,l:0},{x:32,h:23,l:0},{x:37,h:22,l:0},{x:42,h:19,l:1},{x:48,h:15,l:2}];
+    for (var fi=0; fi<headFlames.length; fi++) {
+      var tg = headFlames[fi];
+      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.2 + tg.l;
+      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
+      flameTongue(ctx, tg.x, 28+bob*0.4, Math.max(5,hMod2), 6, sw2, fi);
+    }
+
+    /* haunches + chest (front-facing, centered) */
+    pxEllipse(ctx, 32, 36+bob*0.3, 16, 8, PAL.furDark);
+    pxEllipse(ctx, 32, 33+bob*0.3, 10, 9, PAL.furMid);
+    pxEllipse(ctx, 32, 28+bob*0.3, 6, 3, PAL.furLight);
+    pxEllipse(ctx, 32, 41+bob*0.3, 12, 2, PAL.furDeep);
+
+    /* tail — curls up on the right, flame tip, always wagging when idle */
+    var wag = Math.sin((P.tailWag||0))*3;
+    pxLine(ctx, 45, 35, 52+wag*0.4, 30, 3, PAL.furDark);
+    pxLine(ctx, 52+wag*0.4, 30, 55+wag, 23, 3, PAL.furDark);
+    flameTongue(ctx, 55+wag, 24, 8*flameI, 4, wag, 9);
+
+    /* front legs */
+    if (P.wave) {
+      /* left planted, right raised + waving */
+      pxLine(ctx, 26, 37, 25, 47, 4, PAL.furMid);
+      pxRect(ctx, 22, 46, 6, 3, PAL.furMid);
+      pxRect(ctx, 22, 48, 1, 2, PAL.claw); pxRect(ctx, 25, 48, 1, 2, PAL.claw);
+      var wv = Math.sin(flick*0.5)*3;
+      pxLine(ctx, 38, 34, 42+wv, 26, 4, PAL.furMid);
+      pxRect(ctx, 40+wv, 23, 5, 3, PAL.furMid);
+      pxRect(ctx, 41+wv, 22, 1, 2, PAL.claw); pxRect(ctx, 44+wv, 22, 1, 2, PAL.claw);
+    } else {
+      pxLine(ctx, 26, 37, 25, 47, 4, PAL.furMid);
+      pxRect(ctx, 22, 46, 6, 3, PAL.furMid);
+      pxRect(ctx, 22, 48, 1, 2, PAL.claw); pxRect(ctx, 25, 48, 1, 2, PAL.claw);
+      pxLine(ctx, 38, 37, 39, 47, 4, PAL.furMid);
+      pxRect(ctx, 36, 46, 6, 3, PAL.furMid);
+      pxRect(ctx, 37, 48, 1, 2, PAL.claw); pxRect(ctx, 40, 48, 1, 2, PAL.claw);
+    }
+
+    /* necks — three, fanned, symmetric */
+    pxLine(ctx, 16+hl, 20+bob*0.8+droop-headLift, 24, 30+bob*0.3, 4, PAL.furDark);
+    pxLine(ctx, 32+hc, 15+bob+droop*0.5-headLift, 32, 30+bob*0.3, 5, PAL.furDark);
+    pxLine(ctx, 48+hr, 20+bob*0.8+droop-headLift, 40, 30+bob*0.3, 4, PAL.furDark);
+
+    /* heads — three fanned; gaze can be overridden per-head for easter eggs */
+    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
+    var glx = P.gazeLOverride!=null ? P.gazeLOverride : hgx;
+    var grx = P.gazeROverride!=null ? P.gazeROverride : hgx;
+    drawHead(ctx, 16+hl, 15+bob*0.8+droop-headLift, {dir:-1, size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:glx, gazeY:hgy});
+    drawHead(ctx, 32+hc, 11+bob+droop*0.5-headLift,  {dir:0,  size:1.15, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy});
+    drawHead(ctx, 48+hr, 15+bob*0.8+droop-headLift, {dir:1,  size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:grx, gazeY:hgy});
+
+    /* easter egg: breath fire — a bold solid cone pouring from the center
+       mouth down over the chest, white-hot at the source fading to red */
+    if (P.fireBreath) {
+      var fb = P.fireBreath;
+      var topY = 17, botY = 44;
+      for (var by = topY; by <= botY; by++) {
+        var bt = (by - topY) / (botY - topY);      /* 0 at mouth, 1 at ground */
+        var halfW = (1 + bt * 7) * fb;             /* widens as it falls */
+        var wob = Math.sin(flick*0.4 + by*0.7) * bt * 1.5;  /* flicker */
+        var color;
+        if (bt < 0.25) color = PAL.flameCore;
+        else if (bt < 0.5) color = PAL.flameYel;
+        else if (bt < 0.78) color = PAL.flameOrg;
+        else color = PAL.flameRed;
+        ctx.fillStyle = color;
+        ctx.globalAlpha = fb * (0.85 + 0.15*Math.sin(flick*0.5+by));
+        ctx.fillRect(Math.round(32 - halfW + wob), by, Math.round(halfW*2), 1);
+        ctx.globalAlpha = 1;
+      }
+      /* stray sparks popping off the cone */
+      for (var si=0; si<4; si++) {
+        var st = ((flick*0.6 + si*5) % 10)/10;
+        var sx = 32 + Math.sin(si*9.1) * (2+st*8) * fb;
+        var sy = 17 + st*26*fb;
+        ctx.fillStyle = si%2 ? PAL.flameYel : PAL.flameOrg;
+        ctx.globalAlpha = (1-st)*fb;
+        ctx.fillRect(Math.round(sx), Math.round(sy), 1, 1);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function applyRim(ctx) {
+    var img = ctx.getImageData(0,0,W,H);
+    var d = img.data;
+    function isSolid(x,y){ return x>=0&&y>=0&&x<W&&y<H && d[(y*W+x)*4+3]>0; }
+    for (var y=0;y<H;y++) for (var x=0;x<W;x++) {
+      var i=(y*W+x)*4;
+      if (d[i+3]===0) continue;
+      var edge = !isSolid(x+1,y)||!isSolid(x-1,y)||!isSolid(x,y+1)||!isSolid(x,y-1);
+      if (!edge) continue;
+      var r=d[i],g=d[i+1],b=d[i+2];
+      if (r<110 && g<110 && b<130) {
+        if (!isSolid(x,y-1)) { d[i]=0xf0; d[i+1]=0xc0; d[i+2]=0x60; }
+        else { d[i]=0xd9; d[i+1]=0xa4; d[i+2]=0x41; }
+      }
+    }
+    ctx.putImageData(img,0,0);
+  }
+  function applyOutline(ctx, color) {
+    var img = ctx.getImageData(0,0,W,H);
+    var d = img.data;
+    function isSolid(x,y){ return x>=0&&y>=0&&x<W&&y<H && d[(y*W+x)*4+3]>0; }
+    var out = new Uint8ClampedArray(d);
+    var or=parseInt(color.slice(1,3),16), og=parseInt(color.slice(3,5),16), ob=parseInt(color.slice(5,7),16);
+    for (var y=0;y<H;y++) for (var x=0;x<W;x++) {
+      var i=(y*W+x)*4;
+      if (d[i+3]===0) {
+        var near=false;
+        for (var dy=-1;dy<=1&&!near;dy++) for (var dx=-1;dx<=1;dx++) if (isSolid(x+dx,y+dy)){near=true;break;}
+        if (near){out[i]=or;out[i+1]=og;out[i+2]=ob;out[i+3]=255;}
+      }
+    }
+    img.data.set(out);
+    ctx.putImageData(img,0,0);
+  }
+
+  var embers = [];
+  for (var ei2=0; ei2<5; ei2++) embers.push({x:6+Math.random()*52, y:8+Math.random()*38, vy:0.12+Math.random()*0.2, c:Math.random()});
+  function drawEmbers(ctx, t) {
+    for (var i=0;i<embers.length;i++) {
+      var e = embers[i];
+      e.y -= e.vy;
+      e.x += Math.sin(t.flick*0.1 + e.c*10)*0.18;
+      if (e.y < 3) { e.y = 48; e.x = 6+Math.random()*52; }
+      var a = Math.min(1, (e.y-3)/16);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = e.c>0.5 ? PAL.flameYel : PAL.flameOrg;
+      ctx.fillRect(Math.round(e.x), Math.round(e.y), 1, 1);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /* ── canvas element, fixed to viewport bottom ── */
+  var SCALE = 3;
+  var canvas = document.createElement("canvas");
+  canvas.id = "cerbPet";
+  canvas.width = W; canvas.height = H;
+  /* drop-shadow seats the sprite in the crimson scene with a soft ember glow
+     (no white sticker look); pointer-events:none so it never blocks the UI. */
+  canvas.style.cssText = "position:fixed;z-index:9999;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;filter:drop-shadow(0 0 6px rgba(224,69,26,0.45)) drop-shadow(0 4px 8px rgba(0,0,0,0.6));width:"+(W*SCALE)+"px;height:"+(H*SCALE)+"px;";
+  document.body.appendChild(canvas);
+  var nctx = canvas.getContext("2d");
+
+  var STATES = {
+    idle:    { flameI:1.0, walk:0, bobAmp:1,   roarCenter:true,  roarSide:false, tailSpeed:0.10, sad:0 },
+    running: { flameI:1.5, walk:1, bobAmp:1.5, roarCenter:true,  roarSide:true,  tailSpeed:0.30, sad:0 },
+    review:  { flameI:0.8, walk:0, bobAmp:0.6, roarCenter:false, roarSide:false, tailSpeed:0.06, sad:0 },
+    failed:  { flameI:0.4, walk:0, bobAmp:0.4, roarCenter:false, roarSide:false, tailSpeed:0.03, sad:1 },
+    waving:  { flameI:1.2, walk:0, bobAmp:1.2, roarCenter:true,  roarSide:false, tailSpeed:0.35, sad:0 },
+    jumping: { flameI:1.6, walk:0, bobAmp:0,   roarCenter:true,  roarSide:true,  tailSpeed:0.25, sad:0 },
+    waiting: { flameI:0.7, walk:0, bobAmp:0.8, roarCenter:false, roarSide:false, tailSpeed:0.05, sad:0.3 }
+  };
+
+  var state = "idle";
+  var frame = 0;             /* advances TICKS_PER_FRAME per drawn frame */
+  var petX = window.innerWidth - 150, petY = window.innerHeight - 120;
+  var mouseX = petX, mouseY = petY - 100;
+  var facing = -1;
+  var jumpT = -1;
+  var paused = false;
+
+  /* ── easter-egg idles ── */
+  var egg = null;            /* null | 'play' | 'fire' | 'howl' */
+  var eggFrame = 0;          /* drawn-frame counter for egg timing */
+  var eggT = 0;              /* 0..1 progress within the egg */
+  var EGG_INTERVAL = 5 * 60 * FPS;   /* ~5 min at 15fps */
+  var EGG_DURATION = 4 * FPS;        /* each egg lasts ~4s */
+  var nextEggIn = EGG_INTERVAL;
+
+  window.addEventListener("mousemove", function (e) {
+    mouseX = e.clientX; mouseY = e.clientY;
+  });
+
+  function setState(s) {
+    if (!STATES[s]) return;
+    state = s;
+    if (s === "jumping") jumpT = 0;
+    if (s !== "idle") { egg = null; eggT = 0; }   /* leave the egg behind */
+  }
+
+  /* console / test trigger for the easter eggs */
+  window.cerbPetEgg = function (name) {
+    if (name === "play" || name === "fire" || name === "howl") {
+      setState("idle");
+      egg = name; eggT = 0;
+    }
+  };
+
+  /* harness reactivity — same contract as cerbHoloReact */
+  window.cerbPetReact = function (mode) {
+    if (mode === "thinking" || mode === "processing") setState("review");
+    else if (mode === "offline") setState("failed");
+    else if (mode === "online") setState("idle");
+  };
+  window.cerbPetSetState = setState;
+
+  document.addEventListener("visibilitychange", function () {
+    paused = document.hidden;
+  });
+
+  var lastDraw = 0;
+  function tick(now) {
+    requestAnimationFrame(tick);
+    if (paused) return;
+    if (now - lastDraw < FRAME_MS - 1) return;   /* 15 fps gate */
+    lastDraw = now;
+    frame += TICKS_PER_FRAME;
+    eggFrame++;
+
+    var S = STATES[state];
+
+    /* ── easter-egg scheduling (idle only) ── */
+    if (state === "idle" && !egg) {
+      nextEggIn--;
+      if (nextEggIn <= 0) {
+        var roll = Math.random();
+        egg = roll < 0.34 ? "play" : (roll < 0.67 ? "fire" : "howl");
+        eggT = 0;
+        nextEggIn = EGG_INTERVAL + Math.floor(Math.random()*900);
+      }
+    }
+    var eggEnv = 0;
+    if (egg) {
+      eggT += 1/EGG_DURATION;
+      eggEnv = eggT < 0.2 ? eggT/0.2 : (eggT > 0.8 ? (1-eggT)/0.2 : 1);
+      eggEnv = Math.max(0, Math.min(1, eggEnv));
+      if (eggT >= 1) { egg = null; eggT = 0; eggEnv = 0; }
+    }
+
+    /* ── movement ── */
+    var walkPhase = 0;
+    var moving = false;
+    if (state === "running") {
+      var dx = mouseX - petX;
+      if (Math.abs(dx) > 6) {
+        walkPhase = frame * 0.35;
+        petX += (dx>0?1:-1) * Math.min(Math.abs(dx), 2.2);
+        facing = dx > 0 ? 1 : -1;
+        moving = true;
+      }
+    } else if ((state === "idle" || state === "waiting") && !egg) {
+      var dx2 = mouseX - petX, dy2 = mouseY - petY;
+      var dist = Math.sqrt(dx2*dx2 + dy2*dy2);
+      if (dist > 160) {
+        walkPhase = frame * 0.25;
+        petX += (dx2/dist) * 1.4;
+        petY += (dy2/dist) * 1.0;
+        if (Math.abs(dx2) > 4) facing = dx2 > 0 ? 1 : -1;
+        moving = true;
+      }
+      /* keep on screen (and above the composer zone) */
+      petY = Math.max(window.innerHeight*0.4, Math.min(window.innerHeight - 120, petY));
+      petX = Math.max(40, Math.min(window.innerWidth - 40, petX));
+    }
+    var viewFront = !moving;
+
+    /* ── gaze ── */
+    var gdx = mouseX - petX, gdy = mouseY - petY;
+    var gazeX = Math.max(-1, Math.min(1, Math.round(gdx/60)));
+    var gazeY = Math.max(-1, Math.min(1, Math.round(gdy/80)));
+    if (state === "review") {                    /* thinking: eyes scan side to side */
+      gazeX = Math.max(-1, Math.min(1, Math.round(Math.sin(frame*0.15)*1.4)));
+      gazeY = 0;
+    } else if (state === "failed") {             /* error: look down, dejected */
+      gazeX = 0; gazeY = 1;
+    }
+
+    var bob = reduced ? 0 : Math.sin(frame*0.07) * S.bobAmp;
+    var squash = 1;
+    var yOff = 0;
+    if (state === "jumping") {
+      jumpT += 0.06 * TICKS_PER_FRAME;
+      var arc = Math.sin(Math.min(1, jumpT) * Math.PI);
+      yOff = -arc * 26;
+      squash = 1 + arc*0.25 - (jumpT<0.15?0.2:0);
+      if (jumpT >= 1.15) setState("idle");
+    }
+
+    var flameI = S.flameI;
+    var tailSpeed = S.tailSpeed;
+
+    var P = {
+      bob:bob, walk:walkPhase, flameI:flameI, flick:frame,
+      gazeX:gazeX, gazeY:gazeY, squash:squash, sad:S.sad,
+      lean:(state==="running")?3:0,
+      tailWag:frame * tailSpeed * 2,
+      roarCenter:S.roarCenter, roarSide:S.roarSide,
+      blink:(frame % 110 < 4) ? 1 : 0,
+      view:viewFront ? "front" : "side",
+      wave:(state==="waving")?1:0
+    };
+
+    /* ── apply easter-egg pose overrides (front view only) ── */
+    if (egg === "play") {
+      P.headL = eggEnv*6;  P.headR = -eggEnv*6;      /* heads nudge together */
+      P.gazeLOverride = 1; P.gazeROverride = -1;      /* look at each other */
+      P.roarCenter = false; P.roarSide = false;
+      if (eggEnv > 0.5) P.blink = 1;                  /* happy squint */
+      P.tailWag = frame * 0.3 * 2;                    /* excited wag */
+    } else if (egg === "fire") {
+      P.fireBreath = eggEnv;
+      P.roarCenter = true;
+      P.flameI = flameI + eggEnv*0.5;
+    } else if (egg === "howl") {
+      P.howl = eggEnv;
+      P.roarCenter = true; P.roarSide = true;
+      P.flameI = flameI + eggEnv*0.8;                 /* mane flares */
+      if (eggEnv > 0.4) P.blink = 1;                  /* eyes shut, head back */
+    }
+
+    if (P.view === "front") drawPupFront(octx, P);
+    else drawPupSide(octx, P);
+    applyRim(octx);
+    applyOutline(octx, PAL.outline);
+
+    nctx.clearRect(0,0,W,H);
+    pxEllipse(nctx, 32, 50, 22, 2, "rgba(0,0,0,0.5)");
+    nctx.save();
+    /* art faces left; flip when travelling right so movement isn't reversed */
+    if (P.view === "side" && facing > 0) { nctx.translate(W, 0); nctx.scale(-1, 1); }
+    nctx.drawImage(off, 0, 0);
+    nctx.restore();
+    drawEmbers(nctx, P);
+
+    canvas.style.left = (petX - W*SCALE/2) + "px";
+    canvas.style.top  = (petY - H*SCALE + yOff*SCALE) + "px";
+  }
+  requestAnimationFrame(tick);
+})();
+
 </script>
 </body>
 </html>`;
