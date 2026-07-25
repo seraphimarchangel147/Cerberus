@@ -155,7 +155,7 @@ test("fixed-cost tool surface registers; per-skill tools gated by env", () => {
   delete process.env.OPENAGI_SKILLS_AS_TOOLS;
   reg.reload();
   reg.exposeAsTools(fakeRegistry);
-  for (const t of ["list_skills", "use_skill", "run_skill", "list_skill_revisions", "rollback_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill", "restore_skill"]) {
+  for (const t of ["list_skills", "use_skill", "run_skill", "inspect_skill_capabilities", "list_skill_revisions", "rollback_skill", "create_skill", "edit_skill", "delete_skill", "pin_skill", "restore_skill"]) {
     assert.ok(tools.has(t), `expected ${t}`);
   }
   assert.ok(![...tools.keys()].some((n) => n.startsWith("skill_")));
@@ -218,6 +218,41 @@ test("run_skill fails closed without a declared or inherited tool boundary", asy
   assert.deepEqual(requests[2].context.__allowedTools, [], "invoke-time access fails closed too");
   assert.deepEqual(schemaCalls[2], { only: [] });
   assert.match(warnings[0], /no allowed_tools.*without tools.*declare the minimum tools/iu);
+});
+
+test("skill capability reports expose missing and denied tools before execution", async () => {
+  const { reg, runtime, user } = makeRegistry();
+  writeSkill(user, "capability-check", {
+    extraFm: 'allowed_tools: ["read_data", "write_data", "missing_data"]\n'
+  });
+  writeSkill(user, "wildcard-only");
+  reg.reload();
+  runtime.tools = {
+    tools: new Map([
+      ["read_data", { name: "read_data" }],
+      ["write_data", { name: "write_data" }]
+    ]),
+    toOpenAITools({ only } = {}) {
+      return (only ?? []).map((name) => ({ name }));
+    }
+  };
+  const context = { __allowedTools: ["read_data"] };
+  const report = reg.capabilityReport("capability-check", context);
+  assert.equal(report.status, "partial");
+  assert.deepEqual(report.declaredTools, ["missing_data", "read_data", "write_data"]);
+  assert.deepEqual(report.effectiveTools, ["read_data"]);
+  assert.deepEqual(report.missingToolDefinitions, ["missing_data"]);
+  assert.deepEqual(report.deniedByBoundary, ["missing_data", "write_data"]);
+  assert.equal(report.willRunWithoutTools, false);
+
+  const inheritedWildcard = reg.capabilityReport("capability-check", { __allowedTools: ["*"] });
+  assert.deepEqual(inheritedWildcard.effectiveTools, ["read_data", "write_data"]);
+  assert.deepEqual(inheritedWildcard.missingToolDefinitions, ["missing_data"]);
+  assert.deepEqual(inheritedWildcard.deniedByBoundary, []);
+
+  const unbounded = reg.capabilityReport("wildcard-only", { __allowedTools: ["*"] });
+  assert.equal(unbounded.inheritedBoundary, "unbounded");
+  assert.equal(unbounded.willRunWithoutTools, true, "a wildcard alone is not a finite skill boundary");
 });
 
 test("skill revision rollback is head-only, hash-checked, and itself revertible", () => {

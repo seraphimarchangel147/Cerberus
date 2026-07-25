@@ -2802,6 +2802,58 @@ function mergeMemoryHits(projectHits, profileHits, limit) {
     .slice(0, limit);
 }
 
+function memoryDetailsView(item) {
+  const metadata = item?.metadata ?? {};
+  const provenance = metadata?.provenance ?? {};
+  const supersededBy = boundedMemoryDetailId(metadata?.supersededBy);
+  const condensedInto = boundedMemoryDetailId(metadata?.condensedInto);
+  const status = supersededBy
+    ? "superseded"
+    : condensedInto
+      ? "condensed"
+      : "active";
+  return {
+    id: String(item.id),
+    content: String(item.content ?? ""),
+    scope: String(item.scope ?? "main"),
+    memoryClass: item.metadata?.memoryClass ?? (isProfileMemoryScope(item.scope) ? "preference" : "fact"),
+    status,
+    confidence: {
+      tier: String(item.tier ?? "short"),
+      fidelity: String(item.fidelity ?? "normal"),
+      strength: Number(Number(item.strength ?? 0).toFixed(2)),
+      locked: Boolean(item.locked)
+    },
+    provenance: {
+      sourceType: boundedMemoryDetailText(provenance?.sourceType ?? item.source ?? "runtime", 96),
+      trust: boundedMemoryDetailText(provenance?.trust ?? "unspecified", 96),
+      humanApproved: provenance?.trust === "human-approved-model-proposal"
+    },
+    relationships: {
+      supersededBy,
+      condensedInto,
+      replaces: boundedMemoryDetailIds(metadata?.replaces),
+      corrects: boundedMemoryDetailIds(metadata?.corrects)
+    },
+    createdAt: boundedMemoryDetailText(item.createdAt, 64),
+    lastAccessedAt: boundedMemoryDetailText(item.lastAccessedAt, 64)
+  };
+}
+
+function boundedMemoryDetailIds(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(boundedMemoryDetailId).filter(Boolean).slice(0, 20);
+}
+
+function boundedMemoryDetailId(value) {
+  const id = String(value ?? "").trim();
+  return /^[A-Za-z0-9._:-]{1,128}$/.test(id) ? id : null;
+}
+
+function boundedMemoryDetailText(value, maxChars) {
+  return String(sanitizeForAudit(String(value ?? ""))).slice(0, maxChars);
+}
+
 function approvedBackgroundMemoryProposal(runtime, rawProposal, context = {}) {
   const actionId = String(context?.__pendingActionId ?? "").trim();
   const approval = context?.__approval;
@@ -3815,6 +3867,42 @@ export function registerCoreTools(registry, runtime) {
           ? externalUserModelValue(external.value)
           : null,
         externalMemory: external.status
+      };
+    }
+  });
+
+  registry.register({
+    name: "memory_details",
+    sideEffects: false,
+    description: "Inspect one local memory without reinforcing it. Returns bounded provenance, confidence, correction, and replacement status so you can assess whether it is safe to rely on before taking action.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Exact memory id returned by recall." }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    handler: (args, context = {}) => {
+      if (typeof runtime.memory?.inspect !== "function") {
+        throw new Error("The active memory system does not support read-only inspection.");
+      }
+      const projectScope = typeof context.__memoryScope === "string" && context.__memoryScope
+        ? context.__memoryScope
+        : context.agentId && context.agentId !== "main"
+          ? `specialist:${context.agentId}`
+          : "main";
+      const profileScope = isProfileMemoryScope(context.__profileMemoryScope)
+        ? context.__profileMemoryScope
+        : null;
+      const item = runtime.memory.inspect(args.id, { scope: projectScope })
+        ?? (profileScope
+          ? runtime.memory.inspect(args.id, { scope: profileScope, exactScope: true })
+          : null);
+      if (!item) return { found: false, id: String(args.id ?? "") };
+      return {
+        found: true,
+        ...memoryDetailsView(item)
       };
     }
   });

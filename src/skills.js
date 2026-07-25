@@ -216,6 +216,26 @@ export class SkillRegistry {
     };
   }
 
+  capabilityReport(name, context = {}) {
+    const skill = this.mustGet(name);
+    const scope = resolveSkillToolScope(skill, context, this.runtime?.tools);
+    return {
+      skill: skill.name,
+      state: skill.state,
+      declaredTools: scope.declaredTools,
+      effectiveTools: scope.advertisedTools,
+      missingToolDefinitions: scope.missingToolDefinitions,
+      deniedByBoundary: scope.deniedByBoundary,
+      inheritedBoundary: scope.inheritedBoundary,
+      willRunWithoutTools: scope.advertisedTools.length === 0,
+      status: scope.missingToolDefinitions.length > 0 || scope.deniedByBoundary.length > 0
+        ? "partial"
+        : scope.advertisedTools.length > 0
+          ? "ready"
+          : "text-only"
+    };
+  }
+
   rollbackSkillRevision(name, revisionId, by = "agent") {
     const skill = this.mustGet(name);
     const requestedId = String(revisionId ?? "").trim();
@@ -636,6 +656,25 @@ export class SkillRegistry {
     });
 
     toolRegistry.register({
+      name: "inspect_skill_capabilities",
+      sideEffects: false,
+      source: "skill",
+      description: "Check a skill's declared tool contract against the current project boundary and registered tools before running it. Reports usable, denied, and missing tool names without executing the skill.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Skill name from list_skills." }
+        },
+        required: ["name"],
+        additionalProperties: false
+      },
+      handler: (args, context) => {
+        assertProjectSkill(context, args.name);
+        return this.capabilityReport(args.name, context);
+      }
+    });
+
+    toolRegistry.register({
       name: "list_skill_revisions",
       sideEffects: false,
       source: "skill",
@@ -797,17 +836,18 @@ export class SkillRegistry {
     const agentName = `skill:${skill.name}`;
     const instructions = skill.systemPrompt ||
       `You are executing the "${skill.name}" skill. ${skill.description}\nReturn only the user-visible output. Use tools when helpful.`;
-    const inheritedAllowed = Array.isArray(context?.__allowedTools) ? context.__allowedTools : null;
-    const declaredAllowed = Array.isArray(skill.allowedTools) ? skill.allowedTools : null;
-    const effectiveAllowed = declaredAllowed && inheritedAllowed
-      ? declaredAllowed.filter((toolName) => inheritedAllowed.includes(toolName))
-      : declaredAllowed ?? inheritedAllowed ?? [];
-    if (!declaredAllowed && !inheritedAllowed) {
+    const toolScope = resolveSkillToolScope(skill, context, this.runtime?.tools);
+    if (toolScope.unboundedInheritedBoundary || (!toolScope.hasDeclaration && toolScope.inheritedBoundary === "none")) {
       try {
         this.warn(`[openagi] skill '${skill.name}' has no allowed_tools frontmatter or inherited tool boundary; it will run without tools. Prefer use_skill or declare the minimum tools.`);
       } catch { /* visibility must not break execution */ }
     }
-    const advertisedTools = this.runtime.tools?.toOpenAITools?.({ only: effectiveAllowed }) ?? [];
+    if (toolScope.missingToolDefinitions.length > 0) {
+      try {
+        this.warn(`[openagi] skill '${skill.name}' declares unavailable tools; only its available bounded tools will be advertised.`);
+      } catch { /* visibility must not break execution */ }
+    }
+    const advertisedTools = this.runtime.tools?.toOpenAITools?.({ only: toolScope.advertisedTools }) ?? [];
     // Story 2: record outcome lineage for the skill run. If the skill
     // was materialized from a proactive-suggestion, the outcome carries
     // that suggestion id forward so /proactive/suggestions/:id/outcome
@@ -842,8 +882,8 @@ export class SkillRegistry {
         context: {
           ...nestedContext,
           skill: skill.name,
-          __advertisedTools: effectiveAllowed,
-          __allowedTools: effectiveAllowed
+          __advertisedTools: toolScope.advertisedTools,
+          __allowedTools: toolScope.advertisedTools
         }
       });
       // Tool-using skill completions are graded by their per-call results.
@@ -853,7 +893,12 @@ export class SkillRegistry {
         const completionScore = calls.length > 0 ? scoreFromToolCalls(calls) : 0.7;
         this.runtime.outcomes.resolve(outcome.id, completionScore, "skill-completed");
       }
-      return { skill: skill.name, output: result.text, toolCalls: result.toolCalls ?? [] };
+      return {
+        skill: skill.name,
+        output: result.text,
+        toolCalls: result.toolCalls ?? [],
+        toolScope: publicSkillToolScope(toolScope)
+      };
     } catch (error) {
       if (outcome) this.runtime.outcomes.resolve(outcome.id, 0.1, "skill-failed", error.message);
       throw error;
@@ -1160,6 +1205,69 @@ function renderTemplate(template, vars) {
     if (cursor == null) return "";
     return typeof cursor === "string" ? cursor : JSON.stringify(cursor);
   });
+}
+
+function resolveSkillToolScope(skill, context, toolRegistry) {
+  const declaredTools = Array.isArray(skill?.allowedTools)
+    ? normalizeToolNameList(skill.allowedTools)
+    : [];
+  const hasDeclaration = Array.isArray(skill?.allowedTools);
+  const rawInherited = Array.isArray(context?.__allowedTools)
+    ? normalizeToolNameList(context.__allowedTools, { keepWildcard: true })
+    : null;
+  const inheritedBoundary = rawInherited === null
+    ? "none"
+    : rawInherited.includes("*")
+      ? "unbounded"
+      : "finite";
+  const inheritedTools = inheritedBoundary === "finite" ? rawInherited : null;
+  const boundedTools = hasDeclaration
+    ? (inheritedTools
+      ? declaredTools.filter((name) => inheritedTools.includes(name))
+      : declaredTools)
+    : inheritedTools ?? [];
+  const knownTools = availableSkillToolNames(toolRegistry);
+  const advertisedTools = knownTools === null
+    ? boundedTools
+    : boundedTools.filter((name) => knownTools.has(name));
+  return {
+    hasDeclaration,
+    declaredTools,
+    inheritedBoundary,
+    unboundedInheritedBoundary: !hasDeclaration && inheritedBoundary === "unbounded",
+    advertisedTools,
+    missingToolDefinitions: knownTools === null
+      ? []
+      : declaredTools.filter((name) => !knownTools.has(name)),
+    deniedByBoundary: hasDeclaration && inheritedTools
+      ? declaredTools.filter((name) => !inheritedTools.includes(name))
+      : []
+  };
+}
+
+function publicSkillToolScope(scope) {
+  return {
+    declaredTools: [...scope.declaredTools],
+    effectiveTools: [...scope.advertisedTools],
+    missingToolDefinitions: [...scope.missingToolDefinitions],
+    deniedByBoundary: [...scope.deniedByBoundary],
+    inheritedBoundary: scope.inheritedBoundary,
+    willRunWithoutTools: scope.advertisedTools.length === 0
+  };
+}
+
+function normalizeToolNameList(value, { keepWildcard = false } = {}) {
+  const values = Array.isArray(value) ? value : [];
+  const names = values
+    .filter((raw) => typeof raw === "string")
+    .map((raw) => raw.trim())
+    .filter((name) => name && (keepWildcard || name !== "*"));
+  return [...new Set(names)].sort();
+}
+
+function availableSkillToolNames(toolRegistry) {
+  if (!(toolRegistry?.tools instanceof Map)) return null;
+  return new Set(toolRegistry.tools.keys());
 }
 
 function loadUsage(filePath) {

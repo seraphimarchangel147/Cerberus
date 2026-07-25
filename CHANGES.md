@@ -821,3 +821,12 @@ PROFILE MEMORY COMPLETE
 - Documented the new agent-facing revision tools in the static system prompt.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1622/1623 tests with zero failures and one intentional Windows permission-mode skip.
 SKILL SAFETY AND CURATION COMPLETE
+
+## 2026-07-25 - Hermes-informed memory and skill awareness (Codex)
+
+- Added read-only `memory_details`: it exposes bounded provenance, confidence, correction, and replacement state without reinforcing a memory or exposing raw internal metadata; project and profile boundaries are enforced before inspection.
+- Added `inspect_skill_capabilities` so an agent can preflight an imported or uncertain skill and see its effective tool contract, missing registrations, and project-boundary denials before execution.
+- Skill runs now return the same compact effective tool-scope receipt and treat a wildcard-only inherited scope as unbounded rather than silently using it as a capability grant.
+- Documented both agent-facing tools and the epistemic-use guidelines in the static system prompt.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1626/1627 tests with zero failures and one intentional Windows permission-mode skip.
+MEMORY AND SKILL AWARENESS COMPLETE

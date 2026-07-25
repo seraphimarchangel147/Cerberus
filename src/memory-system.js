@@ -210,6 +210,22 @@ export class MemorySystem {
     return scored.slice(0, limit);
   }
 
+  // Inspection is deliberately read-only: unlike retrieve(), it neither
+  // reinforces a memory nor changes its last-access timestamp. This lets an
+  // agent check provenance before relying on a fact in an action plan.
+  inspect(id, { scope = null, exactScope = false } = {}) {
+    const memoryId = String(id ?? "").trim();
+    if (!memoryId || memoryId.length > 256 || memoryId.includes("\0")) {
+      throw new Error("inspect() requires a valid memory id.");
+    }
+    const item = this.items.get(memoryId);
+    if (!item) return null;
+    if (scope && !canReadMemoryScope(scope, item.scope, { exactScope })) {
+      return null;
+    }
+    return structuredClone(item);
+  }
+
   reinforce(id, amount = 0.1) {
     const item = this.items.get(id);
     if (!item) return null;
