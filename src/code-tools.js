@@ -1003,6 +1003,11 @@ export function registerCodeTools(registry, runtime, options = {}) {
           items: {
             type: "object",
             properties: {
+              id: {
+                type: "string",
+                pattern: "^[a-z][a-z0-9_-]{0,63}$",
+                description: "Optional stable ASCII identity for evidence mapping."
+              },
               type: { type: "string", enum: ["syntax", "test"] },
               path: { type: "string", description: "Workspace-relative file or directory. Required for syntax; optional for a full test run." },
               timeoutMs: {

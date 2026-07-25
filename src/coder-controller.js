@@ -10,6 +10,15 @@ import {
 } from "./file-utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { createId, nowIso } from "./utils.js";
+import {
+  acceptancePassed,
+  createAcceptanceGraph,
+  criteriaEqual,
+  normalizeCheckIdentities,
+  normalizeStoredGraph,
+  recordVerificationEvidence,
+  sourceRevisionForRun
+} from "./acceptance-evidence.js";
 
 const RUN_STATES = new Set([
   "planned",
@@ -27,6 +36,7 @@ const MAX_FILES = 16;
 const MAX_PLAN_STEPS = 24;
 const MAX_OPERATIONS = 16;
 const MAX_CHECKS = 16;
+const MAX_CRITERIA = 32;
 const MAX_TEXT = 2_000;
 const MAX_TAIL = 2_000;
 const RUN_ID_RE = /^coder_[a-f0-9]{16}$/;
@@ -68,6 +78,12 @@ export class CoderRunStore {
       plan: input.plan,
       files: input.files,
       checks: input.checks,
+      acceptance: input.acceptance ?? createAcceptanceGraph({
+        objective: input.objective,
+        criteria: input.criteria,
+        checks: input.checks,
+        allowLegacy: input.criteria == null
+      }),
       edits: [],
       verification: null,
       rollback: null,
@@ -88,6 +104,15 @@ export class CoderRunStore {
       throw new Error(
         `Coder run revision conflict: expected ${expectedRevision}, found ${current.revision}.`
       );
+    }
+    if (
+      patch?.acceptance?.criteria
+      && !criteriaEqual(
+        patch.acceptance.criteria,
+        current.acceptance?.criteria
+      )
+    ) {
+      throw new Error("Coder acceptance criteria are immutable after planning.");
     }
     const run = normalizeRun({
       ...clone(current),
@@ -223,6 +248,11 @@ export class CoderController {
     const objective = boundedText(args?.objective, "Coder objective", MAX_TEXT);
     const plan = normalizePlan(args?.plan);
     const checks = normalizeChecks(args?.checks);
+    const acceptance = createAcceptanceGraph({
+      objective,
+      criteria: args?.criteria,
+      checks
+    });
     const requestedFiles = normalizeStartFiles(args?.files, workspaceRoot);
     const id = createId("coder");
     const files = [];
@@ -276,7 +306,8 @@ export class CoderController {
       objective,
       plan,
       files,
-      checks
+      checks,
+      acceptance
     });
     return publicRun(run);
   }
@@ -358,12 +389,25 @@ export class CoderController {
     );
     const verification = compactVerification(
       verificationInvocation.result,
-      verificationInvocation.receipt
+      verificationInvocation.receipt,
+      run.checks
     );
-    run = this.store.update(run.id, run.revision, { verification });
+    const sourceRevision = sourceRevisionForRun(run.files, run.edits);
+    const acceptance = recordVerificationEvidence({
+      graph: run.acceptance,
+      checks: run.checks,
+      verification,
+      sourceRevision,
+      at: nowIso()
+    });
+    run = this.store.update(run.id, run.revision, {
+      verification,
+      acceptance
+    });
     if (
       verificationInvocation.ok
       && completeVerificationEvidence(verification, run.checks)
+      && acceptancePassed(acceptance, sourceRevision)
     ) {
       run = this.store.update(run.id, run.revision, {
         state: "passed",
@@ -639,9 +683,10 @@ export function registerCoderTools(registry, runtime) {
           maxItems: MAX_PLAN_STEPS,
           items: { type: "string", minLength: 1, maxLength: MAX_TEXT }
         },
-        checks: verificationChecksSchema()
+        checks: verificationChecksSchema(),
+        criteria: acceptanceCriteriaSchema()
       },
-      required: ["objective", "files", "plan", "checks"],
+      required: ["objective", "files", "plan", "checks", "criteria"],
       additionalProperties: false
     },
     jobResources: (args, context) => controller.jobResources(args, context),
@@ -753,7 +798,17 @@ function normalizeRun(value) {
     return null;
   }
   try {
-    return clone(value);
+    const checks = normalizeCheckIdentities(value.checks);
+    const acceptance = normalizeStoredGraph(value.acceptance, {
+      objective: value.objective,
+      checks
+    });
+    if (!acceptance) return null;
+    return {
+      ...clone(value),
+      checks,
+      acceptance
+    };
   } catch {
     return null;
   }
@@ -774,7 +829,8 @@ function normalizeChecks(value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_CHECKS) {
     throw new TypeError(`Coder verification requires 1-${MAX_CHECKS} checks.`);
   }
-  return value.map((check, index) => {
+  const identified = normalizeCheckIdentities(value);
+  return identified.map((check, index) => {
     const type = String(check?.type ?? "").trim().toLowerCase();
     if (!["syntax", "test"].includes(type)) {
       throw new TypeError(`Coder check ${index + 1} has an invalid type.`);
@@ -791,6 +847,7 @@ function normalizeChecks(value) {
       throw new TypeError(`Coder check ${index + 1} has an invalid timeout.`);
     }
     return {
+      id: check.id,
       type,
       ...(target ? { path: target } : {}),
       ...(timeoutMs === null ? {} : { timeoutMs })
@@ -903,11 +960,75 @@ function verificationChecksSchema() {
     items: {
       type: "object",
       properties: {
+        id: {
+          type: "string",
+          pattern: "^[a-z][a-z0-9_-]{0,63}$"
+        },
         type: { type: "string", enum: ["syntax", "test"] },
         path: { type: "string" },
         timeoutMs: { type: "integer", minimum: 1, maximum: 300_000 }
       },
-      required: ["type"],
+      required: ["id", "type"],
+      additionalProperties: false
+    }
+  };
+}
+
+function acceptanceCriteriaSchema() {
+  return {
+    type: "array",
+    minItems: 1,
+    maxItems: MAX_CRITERIA,
+    items: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          pattern: "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        statement: { type: "string", minLength: 1, maxLength: 1_000 },
+        kind: {
+          type: "string",
+          enum: [
+            "accessibility",
+            "behavior",
+            "compatibility",
+            "performance",
+            "security",
+            "visual"
+          ]
+        },
+        oracle: {
+          type: "string",
+          enum: [
+            "accessibility",
+            "browser",
+            "human",
+            "performance",
+            "screenshot",
+            "test"
+          ]
+        },
+        required: { type: "boolean" },
+        checkIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_CHECKS,
+          items: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_-]{0,63}$"
+          }
+        },
+        target: { type: "string", minLength: 1, maxLength: 500 },
+        threshold: {
+          anyOf: [
+            { type: "string", minLength: 1, maxLength: 500 },
+            { type: "number" },
+            { type: "boolean" }
+          ]
+        }
+      },
+      required: ["id", "statement", "kind", "oracle", "checkIds"],
       additionalProperties: false
     }
   };
@@ -998,7 +1119,7 @@ function compactReceipt(value) {
   };
 }
 
-function compactVerification(value, receipt) {
+function compactVerification(value, receipt, checks = []) {
   if (!value || typeof value !== "object") {
     return {
       status: "failed",
@@ -1016,7 +1137,12 @@ function compactVerification(value, receipt) {
     checksCompleted: Number.isSafeInteger(value.checksCompleted) ? value.checksCompleted : 0,
     durationMs: Number.isSafeInteger(value.durationMs) ? value.durationMs : 0,
     results: Array.isArray(value.results)
-      ? value.results.slice(0, MAX_CHECKS).map((result) => ({
+      ? value.results.slice(0, MAX_CHECKS).map((result, index) => ({
+          id: String(
+            result?.id
+            ?? checks[index]?.id
+            ?? `check_${index + 1}`
+          ).slice(0, 64),
           type: String(result?.type ?? "").slice(0, 32),
           path: result?.path == null ? null : String(result.path).slice(0, 500),
           ok: result?.ok === true,
@@ -1035,7 +1161,9 @@ function completeVerificationEvidence(verification, checks) {
     && verification.checksCompleted === checks.length
     && verification.results.length === checks.length
     && verification.results.every(
-      (result, index) => result.ok === true && result.type === checks[index].type
+      (result, index) => result.ok === true
+        && result.id === checks[index].id
+        && result.type === checks[index].type
     );
 }
 
@@ -1069,5 +1197,6 @@ export const CODER_CONTROLLER_LIMITS = Object.freeze({
   maxFiles: MAX_FILES,
   maxPlanSteps: MAX_PLAN_STEPS,
   maxOperations: MAX_OPERATIONS,
-  maxChecks: MAX_CHECKS
+  maxChecks: MAX_CHECKS,
+  maxCriteria: MAX_CRITERIA
 });

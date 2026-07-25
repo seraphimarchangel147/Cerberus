@@ -2,6 +2,15 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Revision-bound acceptance evidence graph (Codex)
+
+- Extended durable coder transactions with immutable acceptance criteria that carry stable ASCII identities, intent statements, evidence oracles, and exact proving check identities.
+- Bound every accepted criterion to the exact post-edit source digest and canonical verification receipt; stale evidence, incomplete evidence, non-test claims, objective drift, and deterministic failures all fail closed.
+- Added stable check identities throughout the isolated verifier and agent-facing schemas while preserving legacy stored runs through explicit compatibility criteria.
+- Added regressions for exact-revision proof, deterministic failure precedence, homoglyph rejection, intent tampering, unprovable criteria, visual self-certification, persistence, and criterion immutability.
+- Validation: both full policy lanes pass 1683/1684 tests with zero failures and one intentional platform skip.
+ACCEPTANCE EVIDENCE COMPLETE
+
 ## 2026-07-25 - Checkpoint-backed autonomous coder controller (Codex)
 
 - Added a durable `coder_start` -> `coder_apply` -> `coder_status` transaction protocol that binds an objective, plan, inspected SHA-256 baselines, and mandatory checks before editing begins.
