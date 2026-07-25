@@ -13,6 +13,8 @@ const DEFAULT_TTL_MS = {
 };
 
 export const DEFAULT_CURATED_MEMORY_MAX_CHARS = 2200;
+export const DEFAULT_PROFILE_MEMORY_MAX_CHARS = 800;
+const PROFILE_MEMORY_SCOPE_PREFIX = "profile:";
 
 export class MemoryCapacityError extends Error {
   constructor({ scope, usedChars, requestedChars, reclaimedChars = 0, maxChars }) {
@@ -43,6 +45,10 @@ export class MemorySystem {
     this.curatedMemoryMaxChars = positiveMemoryInteger(
       options.curatedMemoryMaxChars ?? options.memoryCharLimit,
       DEFAULT_CURATED_MEMORY_MAX_CHARS
+    );
+    this.profileMemoryMaxChars = positiveMemoryInteger(
+      options.profileMemoryMaxChars,
+      DEFAULT_PROFILE_MEMORY_MAX_CHARS
     );
     this.vectors = null;
   }
@@ -344,24 +350,26 @@ export class MemorySystem {
     };
   }
 
-  curatedUsage({ scope = "main" } = {}) {
-    const items = this.curatedItems({ scope });
+  curatedUsage({ scope = "main", exactScope = false } = {}) {
+    const items = this.curatedItems({ scope, exactScope });
     // The cap applies to the exact body injected into the prompt. Formatting
     // characters and separators consume context just as memory prose does.
     const body = this.renderCuratedBody(items);
     const usedChars = body.length;
-    const maxChars = this.curatedMemoryMaxChars;
+    const maxChars = isProfileMemoryScope(scope)
+      ? this.profileMemoryMaxChars
+      : this.curatedMemoryMaxChars;
     const percent = maxChars > 0 ? Math.min(100, Math.round((usedChars / maxChars) * 100)) : 100;
     return { scope, usedChars, maxChars, percent, items, body };
   }
 
-  curatedItems({ scope = "main" } = {}) {
+  curatedItems({ scope = "main", exactScope = false } = {}) {
     return [...this.items.values()]
       .filter((item) => item?.metadata?.capacityManaged === true)
       // Specialist retrieval already inherits main-scope memory. Freeze the
       // same effective view so inherited facts do not become volatile
       // mid-session. Project children inherit their project root, never main.
-      .filter((item) => canReadMemoryScope(scope, item.scope))
+      .filter((item) => canReadMemoryScope(scope, item.scope, { exactScope }))
       .filter((item) => !item.metadata?.supersededBy && !item.metadata?.condensedInto)
       .sort(compareCuratedItems);
   }
@@ -370,10 +378,20 @@ export class MemorySystem {
     return items.map((item) => `- [${item.tier}] ${item.content}`).join("\n");
   }
 
-  renderSessionMemorySnapshot({ scope = "main" } = {}) {
-    const usage = this.curatedUsage({ scope });
-    const header = `[${usage.percent}% \u2014 ${formatMemoryChars(usage.usedChars)}/${formatMemoryChars(usage.maxChars)} chars]`;
-    return usage.body ? `${header}\n${usage.body}` : `${header}\n(no curated memory yet)`;
+  renderSessionMemorySnapshot({ scope = "main", profileScope = null } = {}) {
+    if (typeof profileScope !== "string" || !isProfileMemoryScope(profileScope)) {
+      const usage = this.curatedUsage({ scope });
+      const header = `[${usage.percent}% \u2014 ${formatMemoryChars(usage.usedChars)}/${formatMemoryChars(usage.maxChars)} chars]`;
+      return usage.body ? `${header}\n${usage.body}` : `${header}\n(no curated memory yet)`;
+    }
+    const profileUsage = this.curatedUsage({ scope: profileScope, exactScope: true });
+    const projectUsage = this.curatedUsage({ scope });
+    const profileHeader = `[User profile: ${profileUsage.percent}% \u2014 ${formatMemoryChars(profileUsage.usedChars)}/${formatMemoryChars(profileUsage.maxChars)} chars]`;
+    const projectHeader = `[Project memory: ${projectUsage.percent}% \u2014 ${formatMemoryChars(projectUsage.usedChars)}/${formatMemoryChars(projectUsage.maxChars)} chars]`;
+    return [
+      profileUsage.body ? `${profileHeader}\n${profileUsage.body}` : `${profileHeader}\n(no user profile memory yet)`,
+      projectUsage.body ? `${projectHeader}\n${projectUsage.body}` : `${projectHeader}\n(no project memory yet)`
+    ].join("\n\n");
   }
 
   byTier(tier) {
@@ -565,11 +583,30 @@ export function canReadMemoryScope(requestedScope, itemScope, { exactScope = fal
   if (candidate === requested) return true;
   if (exactScope) return false;
 
+  // User-profile memory must never inherit the global or project view, and a
+  // project/specialist request must never absorb somebody else's profile.
+  if (isProfileMemoryScope(requested) || isProfileMemoryScope(candidate)) {
+    return false;
+  }
+
   const projectRoot = projectMemoryRoot(requested);
   if (projectRoot) {
     return requested !== projectRoot && candidate === projectRoot;
   }
   return requested !== "main" && candidate === "main";
+}
+
+export function profileMemoryScope({ channel, from, sessionId } = {}) {
+  const source = [
+    String(channel ?? "local").trim() || "local",
+    String(from ?? sessionId ?? "anonymous").trim() || "anonymous"
+  ].join(":");
+  return `${PROFILE_MEMORY_SCOPE_PREFIX}${stableHash(source).slice(0, 24)}`;
+}
+
+export function isProfileMemoryScope(scope) {
+  return new RegExp(`^${PROFILE_MEMORY_SCOPE_PREFIX}[a-f0-9]{24}$`, "u")
+    .test(String(scope ?? ""));
 }
 
 function projectMemoryRoot(scope) {

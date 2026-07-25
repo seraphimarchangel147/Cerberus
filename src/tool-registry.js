@@ -35,6 +35,7 @@ import {
   prepareBackgroundMemoryProposal,
   sameBackgroundMemoryProposal
 } from "./memory-intake-policy.js";
+import { isProfileMemoryScope } from "./memory-system.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
@@ -2774,6 +2775,33 @@ function externalMemoryIdentity(context = {}) {
   };
 }
 
+function memoryScopeForClass(context = {}, memoryClass = "fact") {
+  if (memoryClass === "preference") {
+    if (!isProfileMemoryScope(context?.__profileMemoryScope)) {
+      throw new Error("A user-profile memory scope is unavailable for this request.");
+    }
+    return context.__profileMemoryScope;
+  }
+  if (typeof context?.__memoryScope === "string" && context.__memoryScope) {
+    return context.__memoryScope;
+  }
+  return context?.agentId && context.agentId !== "main"
+    ? `specialist:${context.agentId}`
+    : "main";
+}
+
+function mergeMemoryHits(projectHits, profileHits, limit) {
+  const byId = new Map();
+  for (const entry of [...(projectHits ?? []), ...(profileHits ?? [])]) {
+    if (!entry?.item?.id) continue;
+    const previous = byId.get(entry.item.id);
+    if (!previous || entry.score > previous.score) byId.set(entry.item.id, entry);
+  }
+  return [...byId.values()]
+    .sort((left, right) => right.score - left.score || String(left.item.id).localeCompare(String(right.item.id)))
+    .slice(0, limit);
+}
+
 function approvedBackgroundMemoryProposal(runtime, rawProposal, context = {}) {
   const actionId = String(context?.__pendingActionId ?? "").trim();
   const approval = context?.__approval;
@@ -3628,7 +3656,7 @@ export function registerCoreTools(registry, runtime) {
 
   registry.register({
     name: "remember",
-    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. The built-in memory is always written first and, when configured, the fact is also mirrored to the external user model. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
+    description: "Save a piece of information to capacity-managed long-lived memory so it can be recalled in future turns. Use memoryClass='preference' only for stable user preferences; facts remain project-scoped. The built-in memory is always written first and, when configured, the fact is also mirrored to the external user model. If memory is full, use recall and retry with replaceIds from results marked replaceable to atomically replace overlapping items with one consolidated note.",
     parameters: {
       type: "object",
       properties: {
@@ -3643,6 +3671,11 @@ export function registerCoreTools(registry, runtime) {
           enum: ["low", "normal", "high"],
           description: "Higher importance items resist decay and may promote to long-term memory."
         },
+        memoryClass: {
+          type: "string",
+          enum: ["fact", "preference"],
+          description: "Use preference only for a stable user-specific preference; defaults to fact in the active project memory scope."
+        },
         replaceIds: {
           type: "array",
           items: { type: "string" },
@@ -3656,11 +3689,10 @@ export function registerCoreTools(registry, runtime) {
     },
     handler: async (args, context) => {
       const importance = args.importance ?? "normal";
+      const memoryClass = args.memoryClass === "preference" ? "preference" : "fact";
       const replaceIds = validateReplaceIds(args.replaceIds);
       const risk = importance === "high" ? 0.8 : importance === "low" ? 0.2 : 0.45;
-      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
-        ? context.__memoryScope
-        : context.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const scope = memoryScopeForClass(context, memoryClass);
       const content = assertSafeMemoryContent(args.content, { runtime });
       const tags = normalizeMemoryTags(args.tags);
       const item = runtime.memory.remember(
@@ -3668,13 +3700,14 @@ export function registerCoreTools(registry, runtime) {
           source: context.channel ?? "tool",
           scope,
           content,
-          tags: ["tool:remember", ...tags],
+          tags: ["tool:remember", `memory:${memoryClass}`, ...tags],
           risk,
           repetition: 0.4,
           novelty: 0.55,
           metadata: {
             agentId: context.agentId,
             sessionId: context.sessionId,
+            memoryClass,
             provenance: {
               sourceType: "explicit-memory-tool",
               trust: "direct-tool-request",
@@ -3701,6 +3734,7 @@ export function registerCoreTools(registry, runtime) {
             action: "remember",
             tags: item.tags ?? [],
             importance,
+            memoryClass,
             localMemoryId: item.id,
             scope,
             sessionId: context.sessionId ?? null
@@ -3712,6 +3746,7 @@ export function registerCoreTools(registry, runtime) {
         id: item.id,
         tier: item.tier,
         content: item.content,
+        memoryClass,
         replaced: item.metadata?.replaces ?? [],
         ...(external.enabled ? { externalMemory: external.status } : {})
       };
@@ -3737,7 +3772,15 @@ export function registerCoreTools(registry, runtime) {
         : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : null;
       const effectiveScope = scope ?? "main";
       const query = String(args.query ?? "");
-      const hits = runtime.memory.retrieve(query, { limit: args.limit ?? 5, scope });
+      const limit = args.limit ?? 5;
+      const projectHits = runtime.memory.retrieve(query, { limit, scope });
+      const profileScope = isProfileMemoryScope(context?.__profileMemoryScope)
+        ? context.__profileMemoryScope
+        : null;
+      const profileHits = profileScope
+        ? runtime.memory.retrieve(query, { limit, scope: profileScope, exactScope: true })
+        : [];
+      const hits = mergeMemoryHits(projectHits, profileHits, limit);
       const external = await invokeExternalMemory(
         runtime.externalMemoryProvider,
         "queryUserModel",
@@ -3756,7 +3799,8 @@ export function registerCoreTools(registry, runtime) {
           scope: item.scope ?? "main",
           curated: item.metadata?.capacityManaged === true,
           replaceable: item.metadata?.capacityManaged === true
-            && (item.scope ?? "main") === effectiveScope,
+            && ((item.scope ?? "main") === effectiveScope || (item.scope ?? "main") === profileScope),
+          memoryClass: item.metadata?.memoryClass ?? (isProfileMemoryScope(item.scope) ? "preference" : "fact"),
           // Confidence signals: fidelity ("specific" = precise, trust details),
           // strength (decays unless reinforced), locked (a user correction).
           fidelity: item.fidelity ?? "normal",
@@ -3784,16 +3828,20 @@ export function registerCoreTools(registry, runtime) {
         correction: { type: "string", description: "The corrected fact, stated fully and standalone (e.g. 'The Acme review meeting is at 4pm, not 3pm')." },
         query: { type: "string", description: "What the stale memory was about — used to find it (e.g. 'Acme review meeting time')." },
         id: { type: "string", description: "Exact memory id to supersede, when known (from a recall result). Takes precedence over query." },
-        tags: { type: "array", items: { type: "string" }, description: "Optional extra tags for the correction." }
+        tags: { type: "array", items: { type: "string" }, description: "Optional extra tags for the correction." },
+        memoryClass: {
+          type: "string",
+          enum: ["fact", "preference"],
+          description: "Use preference only when correcting a user-profile memory returned by recall."
+        }
       },
       required: ["correction"],
       additionalProperties: false
     },
     handler: async (args, context) => {
       if (!runtime.memory?.correct) return { error: "memory system does not support corrections" };
-      const scope = typeof context?.__memoryScope === "string" && context.__memoryScope
-        ? context.__memoryScope
-        : context?.agentId && context.agentId !== "main" ? `specialist:${context.agentId}` : "main";
+      const memoryClass = args.memoryClass === "preference" ? "preference" : "fact";
+      const scope = memoryScopeForClass(context, memoryClass);
       const content = assertSafeMemoryContent(args.correction, { runtime });
       const result = runtime.memory.correct({
         id: args.id ?? null,
@@ -3805,6 +3853,7 @@ export function registerCoreTools(registry, runtime) {
         metadata: {
           agentId: context.agentId,
           sessionId: context.sessionId,
+          memoryClass,
           provenance: {
             sourceType: "explicit-memory-correction",
             trust: "direct-tool-request",
@@ -3822,6 +3871,7 @@ export function registerCoreTools(registry, runtime) {
           metadata: {
             type: "memory",
             action: "correct",
+            memoryClass,
             tags: result.item.tags ?? [],
             localMemoryId: result.item.id,
             supersededIds: result.superseded.map((item) => item.id),
@@ -3835,6 +3885,7 @@ export function registerCoreTools(registry, runtime) {
         id: result.item.id,
         tier: result.item.tier,
         content: result.item.content,
+        memoryClass,
         supersededCount: result.superseded.length,
         superseded: result.superseded.map((item) => ({ id: item.id, content: item.content.slice(0, 120) })),
         ...(external.enabled ? { externalMemory: external.status } : {})
@@ -5339,6 +5390,10 @@ export function registerCoreTools(registry, runtime) {
       const approved = approvedBackgroundMemoryProposal(runtime, proposal, context);
       const confidence = approved.proposal.confidence;
       const profile = backgroundMemoryConfidenceProfile(confidence);
+      const memoryClass = approved.proposal.kind === "preference"
+        && isProfileMemoryScope(approved.proposal.scope)
+        ? "preference"
+        : "fact";
       const item = runtime.memory.remember({
         source: "background-review-approved",
         scope: approved.proposal.scope,
@@ -5347,6 +5402,7 @@ export function registerCoreTools(registry, runtime) {
         tags: [
           "background-review",
           "human-approved",
+          `memory:${memoryClass}`,
           approved.proposal.kind,
           ...approved.proposal.tags
         ],
@@ -5356,6 +5412,7 @@ export function registerCoreTools(registry, runtime) {
         specificity: 0.8,
         metadata: {
           confidence,
+          memoryClass,
           reviewedAt: approved.action.createdAt ?? nowIso(),
           provenance: backgroundMemoryProvenance(approved.proposal, {
             approvedBy: approved.decider,
@@ -5379,6 +5436,7 @@ export function registerCoreTools(registry, runtime) {
           metadata: {
             type: "memory",
             action: "background-review-approved",
+            memoryClass,
             tags: item.tags ?? [],
             localMemoryId: item.id,
             scope: item.scope,
@@ -5391,6 +5449,7 @@ export function registerCoreTools(registry, runtime) {
         id: item.id,
         tier: item.tier,
         content: item.content,
+        memoryClass,
         approvalActionId: approved.action.id,
         ...(external.enabled ? { externalMemory: external.status } : {})
       };

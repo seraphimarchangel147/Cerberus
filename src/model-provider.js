@@ -2478,6 +2478,7 @@ function openAIContinuationIdentity(provider, {
     credentialIdentity: openAICredentialIdentity(provider, lease),
     projectId: context?.projectId ?? context?.__projectId ?? null,
     memoryScope: context?.__memoryScope ?? context?.memoryScope ?? null,
+    profileMemoryScope: context?.__profileMemoryScope ?? context?.profileMemoryScope ?? null,
     promptIdentity,
     toolIdentity,
     routingIdentity: createRoutingIdentity(
@@ -5217,9 +5218,9 @@ Tools available to you (call them when useful):
 - profile_list / profile_get / profile_create / profile_update / profile_activate / profile_revoke - manage named project/session personas, model choices, active skills, and exact tool grants; activation and revocation require a human
 - capability_bundle_list / capability_bundle_create / capability_bundle_update / capability_bundle_enable / capability_bundle_revoke / capability_audit - manage disabled-by-default, project-scoped, revocable capability bundles with explicit filesystem, network, secret, subprocess, API, UI, and hook declarations
 - skill_import_list / skill_import_stage / skill_import_review / skill_import_approve / skill_import_reject - quarantine, inspect, and explicitly approve bounded ZIP or local-Git skill packages; staging never runs imported code
-- remember(content, tags?, importance?, replaceIds?) - save a durable note and mirror it to the optional external user model; after a capacity error, consolidate overlapping recall results marked replaceable
+- remember(content, tags?, importance?, memoryClass?, replaceIds?) - save a durable note and mirror it to the optional external user model; use memoryClass='preference' only for stable user-specific preferences, otherwise keep the default project fact scope; after a capacity error, consolidate overlapping recall results marked replaceable
 - recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope
-- correct_memory(correction, query? | id?, tags?) - supersede a wrong memory with the corrected fact and mirror the correction to the optional external user model
+- correct_memory(correction, query? | id?, tags?, memoryClass?) - supersede a wrong memory with the corrected fact and mirror the correction to the optional external user model; use memoryClass='preference' only when correcting a recalled user-profile preference
 - Post-session review memories are only proposals: they are screened, shown as pending actions, and require an explicit human approval before they can become durable memory.
 - recipe_search(query?, statuses?, limit?) / recipe_get(id) - inspect procedural recipe metadata or load one full recipe; factual memory stays separate
 - recipe_recall(query, limit?) - retrieve only active verified procedures; candidates, failures, superseded recipes, and deleted recipes are excluded
@@ -5283,6 +5284,7 @@ Guidelines:
 - Use tools without asking permission for safe actions (remember, recall, schedule).
 - If asked to be reminded of something, call schedule_message.
 - If asked to remember something, call remember.
+- For an enduring preference explicitly stated by the user, call remember with memoryClass='preference'; do not use profile memory for project facts or temporary instructions.
 - When the user references past info, call recall before answering.
 - When the user asks how to repeat a proven procedure, call recipe_recall; use recall only for facts.
 - Never present a candidate or failed recipe as verified, and never verify one without durable evidence and explicit human approval.

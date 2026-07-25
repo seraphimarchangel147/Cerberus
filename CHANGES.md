@@ -803,3 +803,12 @@ AGENT WORKSPACE PHASE 2 COMPLETE
 - Kept proposal handlers out of model tool catalogs, preserved existing dashboard approval flows, and added provenance for pending and human-approved review memory.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1617/1618 tests with zero failures and one intentional Windows permission-mode skip.
 MEMORY TRUST FOUNDATION COMPLETE
+
+## 2026-07-25 - Hermes-informed profile memory separation (Codex)
+
+- Added opaque, stable per-user profile memory scopes with a separate 800-character curated budget; profile scopes never inherit project, specialist, global, or other-user memory.
+- Updated frozen session snapshots to include independently labeled user-profile and project-memory views, with profile identity included in snapshot and Responses-continuation isolation.
+- Extended `remember` and `correct_memory` with an explicit `memoryClass='preference'` path, while recall merges only the current caller's profile with their project view.
+- Routed post-session preference proposals to the caller's profile scope, while keeping non-preference review learning project-scoped and approval-gated.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1621/1622 tests with zero failures and one intentional Windows permission-mode skip.
+PROFILE MEMORY COMPLETE

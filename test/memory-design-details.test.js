@@ -420,11 +420,12 @@ test("session memory snapshot survives later writes and a host restart", async (
   assert.match(captures[2], /Beta was written/);
   const frozenMetadata = restartedHost.store.getSession("frozen").metadata;
   const persisted = Object.entries(frozenMetadata)
-    .find(([key]) => key.startsWith("frozenMemoryV1:"))?.[1];
+    .find(([key]) => key.startsWith("frozenMemoryV2:"))?.[1];
   assert.equal(persisted.text, captures[0]);
   assert.equal(persisted.sessionId, "frozen");
   assert.equal(persisted.scope, "main");
   assert.equal(persisted.agentId, "main");
+  assert.match(persisted.profileScope, /^profile:[a-f0-9]{24}$/);
 });
 
 test("frozen snapshot metadata isolates and validates session scope plus agent", async () => {
@@ -452,7 +453,9 @@ test("frozen snapshot metadata isolates and validates session scope plus agent",
   assert.deepEqual(renders, ["main", "specialist:s1"]);
 
   const metadata = store.getSession("shared").metadata;
-  const mainKey = Object.keys(metadata).find((key) => key.endsWith(":main:main"));
+  const mainKey = Object.keys(metadata).find((key) => (
+    key.startsWith("frozenMemoryV2:") && key.includes(":main:main:")
+  ));
   metadata[mainKey] = { ...metadata[mainKey], sessionId: "wrong-session" };
   const repaired = await host.sessionMemorySnapshotFor("shared", "main", "main");
   assert.notEqual(repaired, main);

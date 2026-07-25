@@ -121,10 +121,13 @@ export function applyBackgroundReviewProposal({ runtime, proposal, turn = {} }) 
   for (const raw of Array.isArray(proposal?.memories) ? proposal.memories.slice(0, 3) : []) {
     const kind = String(raw?.kind ?? "").toLowerCase();
     if (!ALLOWED_MEMORY_KINDS.has(kind) || !memory?.remember) continue;
+    const candidateScope = kind === "preference" && typeof turn.profileMemoryScope === "string"
+      ? turn.profileMemoryScope
+      : scope;
 
     let candidate;
     try {
-      candidate = prepareBackgroundMemoryProposal(raw, { runtime, turn, scope });
+      candidate = prepareBackgroundMemoryProposal(raw, { runtime, turn, scope: candidateScope });
     } catch (error) {
       if (error instanceof MemoryIntakeError) {
         memoryErrors.push(error.message);
@@ -184,8 +187,8 @@ export function stageBackgroundMemoryProposal({ runtime, candidate, turn = {} })
     throw new Error("Background memory review requires the durable approval queue.");
   }
   const context = {
-    channel: "background-review",
-    from: "background-review",
+    channel: turn.channel ?? "background-review",
+    from: turn.from ?? "background-review",
     sessionId: turn.sessionId ?? null,
     agentId: turn.agentId ?? "main",
     __memoryScope: candidate.scope,

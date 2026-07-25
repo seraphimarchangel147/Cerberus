@@ -34,6 +34,7 @@ const CONTEXT_SCALAR_LIMITS = Object.freeze({
   target: 1024,
   __projectWorkspaceDir: 4096,
   __memoryScope: 256,
+  __profileMemoryScope: 256,
   __projectKanbanBoardId: 128,
   __jobId: 128,
   __turnId: 128
@@ -1210,6 +1211,7 @@ function serializableContext(ctx) {
       ? { __projectWorkspaceDir: String(ctx.__projectWorkspaceDir) }
       : {}),
     ...(ctx.__memoryScope ? { __memoryScope: String(ctx.__memoryScope) } : {}),
+    ...(ctx.__profileMemoryScope ? { __profileMemoryScope: String(ctx.__profileMemoryScope) } : {}),
     ...(ctx.__projectKanbanBoardId
       ? { __projectKanbanBoardId: String(ctx.__projectKanbanBoardId) }
       : {}),
