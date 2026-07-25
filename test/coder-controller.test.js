@@ -186,7 +186,7 @@ test("incomplete passing evidence fails closed and restores the baseline", async
 
   assert.equal(applied.ok, false);
   assert.equal(applied.result.run.state, "rolled_back");
-  assert.equal(applied.result.run.verification.status, "passed");
+  assert.equal(applied.result.run.verification.status, "failed");
   assert.equal(applied.result.run.verification.results.length, 0);
   assert.equal(fs.readFileSync(source, "utf8"), initial);
 });
@@ -395,4 +395,199 @@ test("acceptance criteria remain immutable after planning", (t) => {
     }),
     /immutable/
   );
+});
+
+test("coder completion accepts browser, visual, keyboard, screenshot, and accessibility proof from exact QA revision", async (t) => {
+  const { context, tools, workspaceDir } = harness(t);
+  const { source } = writeFixture(workspaceDir, 2);
+  const qaCalls = [];
+  const screenshotRef = `qaart_${"b".repeat(64)}`;
+  tools.register({
+    name: "qa_run",
+    sideEffects: false,
+    parameters: {
+      type: "object",
+      properties: {
+        manifestPath: { type: "string" },
+        mode: { type: "string" },
+        sourceRevision: { type: "string" }
+      },
+      required: ["manifestPath", "mode", "sourceRevision"],
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      qaCalls.push(args);
+      return {
+        ok: true,
+        status: "passed",
+        run: {
+          id: "qa_0123456789abcdef",
+          state: "passed",
+          sourceRevision: args.sourceRevision,
+          artifacts: [screenshotRef],
+          results: [{
+            status: "passed",
+            screenshotRef,
+            accessibility: {
+              supported: true,
+              violations: 0,
+              incomplete: 0
+            },
+            keyboard: {
+              supported: true,
+              missing: 0,
+              focusVisibleFailures: 0,
+              trapped: false
+            },
+            visual: {
+              status: "matched"
+            }
+          }],
+          summary: { failed: 0 },
+          error: null
+        }
+      };
+    }
+  });
+  const content = fs.readFileSync(source, "utf8");
+  const started = await tools.invoke("coder_start", {
+    objective: "Update the visible value and prove the rendered behavior.",
+    files: [{ path: "value.mjs", tag: mintTag(content) }],
+    plan: ["Update the export.", "Run the exact UI evidence contract."],
+    checks: [{
+      id: "ui_contract",
+      type: "qa",
+      manifestPath: "qa-manifest.json",
+      mode: "full"
+    }],
+    criteria: [
+      {
+        id: "browser_behavior",
+        statement: "The browser behavior passes.",
+        kind: "behavior",
+        oracle: "browser",
+        checkIds: ["ui_contract"]
+      },
+      {
+        id: "visual_capture",
+        statement: "The requested state has screenshot evidence.",
+        kind: "visual",
+        oracle: "screenshot",
+        checkIds: ["ui_contract"]
+      },
+      {
+        id: "accessible_state",
+        statement: "The requested state passes accessibility checks.",
+        kind: "accessibility",
+        oracle: "accessibility",
+        checkIds: ["ui_contract"]
+      },
+      {
+        id: "keyboard_state",
+        statement: "Every control is keyboard reachable with visible focus.",
+        kind: "accessibility",
+        oracle: "keyboard",
+        checkIds: ["ui_contract"]
+      },
+      {
+        id: "visual_match",
+        statement: "The requested state matches its approved visual baseline.",
+        kind: "visual",
+        oracle: "visual",
+        checkIds: ["ui_contract"]
+      }
+    ]
+  }, context);
+  assert.equal(started.ok, true, started.error);
+
+  const applied = await tools.invoke("coder_apply", {
+    runId: started.result.id,
+    expectedRevision: started.result.revision,
+    operations: [{
+      kind: "edit",
+      path: "value.mjs",
+      tag: started.result.files[0].tag,
+      edits: [{ start: 1, end: 1, replace: "export const value = 2;" }]
+    }]
+  }, context);
+
+  assert.equal(applied.ok, true, applied.error);
+  assert.equal(applied.result.run.state, "passed");
+  assert.equal(applied.result.run.acceptance.status, "passed");
+  assert.equal(applied.result.run.acceptance.summary.requiredPassed, 5);
+  assert.equal(qaCalls.length, 1);
+  assert.match(qaCalls[0].sourceRevision, /^[a-f0-9]{64}$/);
+  assert.equal(
+    applied.result.run.verification.results[0].evidence.screenshotRefs[0],
+    screenshotRef
+  );
+});
+
+test("failed QA evidence rolls coder-owned edits back", async (t) => {
+  const { context, tools, workspaceDir } = harness(t);
+  const { source, initial } = writeFixture(workspaceDir, 2);
+  tools.register({
+    name: "qa_run",
+    sideEffects: false,
+    handler: async (args) => ({
+      ok: false,
+      status: "failed",
+      run: {
+        id: "qa_fedcba9876543210",
+        state: "failed",
+        sourceRevision: args.sourceRevision,
+        artifacts: [],
+        results: [{
+          status: "failed",
+          screenshotRef: null,
+          accessibility: {
+            supported: true,
+            violations: 1,
+            incomplete: 0
+          }
+        }],
+        summary: { failed: 1 },
+        error: {
+          code: "qa_evidence_failed",
+          message: "Button behavior failed."
+        }
+      }
+    })
+  });
+  const content = fs.readFileSync(source, "utf8");
+  const started = await tools.invoke("coder_start", {
+    objective: "Reject an unproven interface change.",
+    files: [{ path: "value.mjs", tag: mintTag(content) }],
+    plan: ["Update.", "Verify UI."],
+    checks: [{
+      id: "ui_contract",
+      type: "qa",
+      manifestPath: "qa-manifest.json",
+      mode: "full"
+    }],
+    criteria: [{
+      id: "browser_behavior",
+      statement: "The browser behavior passes.",
+      kind: "behavior",
+      oracle: "browser",
+      checkIds: ["ui_contract"]
+    }]
+  }, context);
+  assert.equal(started.ok, true, started.error);
+
+  const applied = await tools.invoke("coder_apply", {
+    runId: started.result.id,
+    expectedRevision: started.result.revision,
+    operations: [{
+      kind: "edit",
+      path: "value.mjs",
+      tag: started.result.files[0].tag,
+      edits: [{ start: 1, end: 1, replace: "export const value = 2;" }]
+    }]
+  }, context);
+
+  assert.equal(applied.ok, false);
+  assert.equal(applied.result.run.state, "rolled_back");
+  assert.equal(applied.result.run.acceptance.status, "failed");
+  assert.equal(fs.readFileSync(source, "utf8"), initial);
 });

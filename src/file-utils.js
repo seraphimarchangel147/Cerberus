@@ -28,11 +28,15 @@ export function writeJsonAtomic(filePath, value, mode = 0o600) {
 }
 
 export function writeTextAtomic(filePath, data, mode = 0o600) {
+  writeBufferAtomic(filePath, Buffer.from(String(data), "utf8"), mode);
+}
+
+export function writeBufferAtomic(filePath, data, mode = 0o600) {
   ensureDir(path.dirname(filePath));
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   let committed = false;
   try {
-    fs.writeFileSync(tempPath, data, { mode });
+    fs.writeFileSync(tempPath, Buffer.from(data), { mode });
     // Windows requires a writable handle for FlushFileBuffers, which is what
     // fsyncSync uses. The temporary file is ours and was just written.
     const fd = fs.openSync(tempPath, "r+");

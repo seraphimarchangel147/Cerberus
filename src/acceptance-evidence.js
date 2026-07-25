@@ -7,6 +7,7 @@ const MAX_TARGET = 500;
 const CRITERION_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const SOURCE_REVISION_RE = /^[a-f0-9]{64}$/;
+const QA_RUN_ID_RE = /^qa_[a-f0-9]{16}$/;
 const KINDS = new Set([
   "accessibility",
   "behavior",
@@ -19,9 +20,11 @@ const ORACLES = new Set([
   "accessibility",
   "browser",
   "human",
+  "keyboard",
   "performance",
   "screenshot",
-  "test"
+  "test",
+  "visual"
 ]);
 
 export function normalizeAcceptanceCriteria(value, checks, {
@@ -185,22 +188,30 @@ export function recordVerificationEvidence({
   const evidence = [];
 
   for (const criterion of normalized.criteria) {
-    if (criterion.oracle !== "test") continue;
     for (const checkId of criterion.checkIds) {
       const check = checkById.get(checkId);
       const result = resultById.get(checkId);
       if (!check || !result) continue;
-      const status = result.ok === true ? "passed" : "failed";
+      const oracleStatus = evidenceStatusForOracle(
+        criterion.oracle,
+        check,
+        result
+      );
+      if (oracleStatus === null) continue;
+      const status = oracleStatus;
       const record = {
         criterionId: criterion.id,
         checkId,
         oracle: criterion.oracle,
-        deterministic: true,
+        deterministic: criterion.oracle !== "human",
         status,
         sourceRevision,
         at: String(at ?? new Date().toISOString()),
-        receiptId: verification?.receipt?.id
-          ? String(verification.receipt.id).slice(0, 200)
+        receiptId: result?.receiptId ?? verification?.receipt?.id
+          ? String(
+              result?.receiptId
+              ?? verification.receipt.id
+            ).slice(0, 200)
           : null,
         result: {
           type: String(result.type ?? check.type ?? "").slice(0, 32),
@@ -208,7 +219,13 @@ export function recordVerificationEvidence({
           code: String(result.code ?? "").slice(0, 80),
           durationMs: Number.isSafeInteger(result.durationMs)
             ? result.durationMs
-            : 0
+            : 0,
+          qaRunId: QA_RUN_ID_RE.test(String(result?.evidence?.qaRunId ?? ""))
+            ? result.evidence.qaRunId
+            : null,
+          artifactRefs: normalizeArtifactRefs(
+            result?.evidence?.artifactRefs
+          )
         }
       };
       evidence.push(Object.freeze({
@@ -230,6 +247,42 @@ export function recordVerificationEvidence({
       ? "passed"
       : "pending";
   return next;
+}
+
+function evidenceStatusForOracle(oracle, check, result) {
+  if (result.ok !== true) return "failed";
+  if (oracle === "test") {
+    return ["syntax", "test"].includes(check.type) ? "passed" : null;
+  }
+  if (check.type !== "qa") return null;
+  if (oracle === "browser") {
+    return result?.evidence?.browserPassed === true ? "passed" : null;
+  }
+  if (oracle === "screenshot") {
+    return normalizeArtifactRefs(result?.evidence?.screenshotRefs).length > 0
+      ? "passed"
+      : null;
+  }
+  if (oracle === "accessibility") {
+    return result?.evidence?.accessibilityPassed === true ? "passed" : null;
+  }
+  if (oracle === "keyboard") {
+    return result?.evidence?.keyboardPassed === true ? "passed" : null;
+  }
+  if (oracle === "performance") {
+    return result?.evidence?.performancePassed === true ? "passed" : null;
+  }
+  if (oracle === "visual") {
+    return result?.evidence?.visualPassed === true ? "passed" : null;
+  }
+  return null;
+}
+
+function normalizeArtifactRefs(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((ref) => /^qaart_[a-f0-9]{64}$/.test(String(ref ?? "")))
+    .slice(0, 100);
 }
 
 export function acceptancePassed(graph, sourceRevision) {

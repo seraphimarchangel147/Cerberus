@@ -274,8 +274,22 @@ export {
   isPrivateAddress,
   semanticBrowserEnabled,
   validateCdpUrl,
+  validateQaNavigationUrl,
   validateNavigationUrl
 } from "./semantic-browser.js";
+export {
+  registerWebQaTools,
+  WebQaController,
+  webQaEnabled,
+  WEB_QA_INTERNALS,
+  WEB_QA_LIMITS
+} from "./web-qa.js";
+export {
+  QaArtifactStore,
+  QaBaselineStore,
+  QaRunStore,
+  QA_STORE_LIMITS
+} from "./qa-store.js";
 export { createHostedInterface } from "./hosted-interface.js";
 export {
   DEFAULT_API_SERVER_PORT,

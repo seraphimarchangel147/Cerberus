@@ -25,6 +25,7 @@
     "test": "node scripts/run-tests.mjs 0",
     "test:prod-policy": "node scripts/run-tests.mjs 1",
     "test:all": "npm test && npm run test:prod-policy",
+    "browser:install": "playwright install chromium",
     "cli": "node bin/openagi.js"
   },
   "engines": {
@@ -32,5 +33,11 @@
   },
   "bin": {
     "openagi": "bin/openagi.js"
+  },
+  "dependencies": {
+    "axe-core": "^4.12.1",
+    "pixelmatch": "^7.2.0",
+    "playwright": "^1.62.0",
+    "pngjs": "^7.0.0"
   }
 }

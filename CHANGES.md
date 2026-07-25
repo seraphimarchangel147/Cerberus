@@ -2,6 +2,17 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Proof-carrying web QA and visual evidence (Codex)
+
+- Added an opt-in, project-scoped Playwright QA controller that loads bounded version-1 manifests, inventories every interactive control, executes fixture-safe declared behavior in fresh sessions, and rejects unclassified, missing, disabled, expired-exemption, stuck-loading, console, page, and network failures.
+- Added strict axe accessibility and keyboard reachability/focus audits, exact-origin loopback protection for local development servers, fresh-session action isolation, real Chromium coverage, and failure-only Playwright traces.
+- Added content-addressed screenshot, diagnostic, diff, and trace artifacts with project/run authorization, SHA-256 integrity checks, authoritative JSONL bindings, atomic snapshots, 24-hour success retention, 30-day failure retention, and non-expiring approved baselines.
+- Added deterministic PNG comparison with bounded decoded pixels, configurable diff thresholds, capture and strict modes, visual diff artifacts, and a manual-only baseline approval tool that ordinary confirmation and auto-approve cannot satisfy.
+- Extended coder transactions with revision-bound browser, screenshot, accessibility, keyboard, and approved-visual evidence oracles so web failures roll back controller-owned edits rather than being described as success.
+- Wired `qa_run`, `qa_status`, `qa_artifact`, and `qa_approve_baseline` through the governed registry, runtime opt-in, setup allowlist, public exports, and static model guidance. Added Playwright, axe-core, pixelmatch, and pngjs with zero audit findings.
+- Validation: both full policy lanes pass 1700/1701 tests with zero failures and one intentional platform skip; added-line ASCII scan and `npm audit --audit-level=high` are clean.
+PROOF CARRYING WEB QA COMPLETE
+
 ## 2026-07-25 - Revision-bound acceptance evidence graph (Codex)
 
 - Extended durable coder transactions with immutable acceptance criteria that carry stable ASCII identities, intent statements, evidence oracles, and exact proving check identities.

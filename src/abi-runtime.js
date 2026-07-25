@@ -98,6 +98,11 @@ import {
   CoderController,
   registerCoderTools
 } from "./coder-controller.js";
+import {
+  registerWebQaTools,
+  WebQaController,
+  webQaEnabled
+} from "./web-qa.js";
 import { registerDefaultWorkflows, WorkflowRegistry } from "./workflow-registry.js";
 import { applyPersona } from "./persona.js";
 import { createId, nowIso } from "./utils.js";
@@ -369,6 +374,32 @@ function resolveSemanticBrowser(runtime, options, {
   return created;
 }
 
+function resolveWebQa(runtime, options, {
+  dataDir,
+  workspaceDir
+} = {}) {
+  if (Object.hasOwn(options, "webQa")) {
+    if (options.webQa === false || options.webQa === null) return null;
+    if (!options.webQa || typeof options.webQa !== "object") {
+      throw new TypeError("webQa must be a controller object, false, or null.");
+    }
+    return options.webQa;
+  }
+  if (!webQaEnabled(options.env ?? process.env)) return null;
+  return new WebQaController({
+    runtime,
+    dataDir,
+    workspaceDir,
+    projects: runtime.projects,
+    secrets: runtime.secrets,
+    env: options.env ?? process.env,
+    browser: runtime.semanticBrowser ?? undefined,
+    adapter: options.webQaAdapter,
+    adapterFactory: options.webQaAdapterFactory,
+    ...(options.webQaOptions ?? {})
+  });
+}
+
 export class AbiRuntime {
   constructor(options = {}) {
     this.context = {
@@ -596,6 +627,10 @@ export class AbiRuntime {
     }
     this.skillReplay = options.skillReplay ?? new SkillReplay({ runtime: this, dataDir: options.dataDir, ...(options.skillReplayOptions ?? {}) });
     this.semanticBrowser = resolveSemanticBrowser(this, options, {
+      dataDir: secretsDataDir,
+      workspaceDir: options.workspaceDir ?? process.cwd()
+    });
+    this.webQa = resolveWebQa(this, options, {
       dataDir: secretsDataDir,
       workspaceDir: options.workspaceDir ?? process.cwd()
     });
@@ -833,6 +868,7 @@ export class AbiRuntime {
       registerCapabilityProfileTools(this.tools, this);
       registerSolutionRecipeTools(this.tools, this);
       registerSemanticBrowserTools(this.tools, this);
+      registerWebQaTools(this.tools, this);
       registerWorkspaceTimelineTools(this.tools, this);
       registerTerminalSessionTools(this.tools, this);
       // Inline IDE lane (hashline-lite): anchored code edits, search, lint,
@@ -1684,6 +1720,7 @@ export class AbiRuntime {
         this.kanban?.close?.(),
         this.artifacts?.close?.(),
         Promise.resolve().then(() => this.timeline?.close?.()),
+        this.webQa?.close?.(),
         this.semanticBrowser?.closeAll?.(),
         this.observations?.close?.(),
         this.sessionIndex?.close?.()

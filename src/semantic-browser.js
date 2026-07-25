@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { projectAllows } from "./project-store.js";
 
@@ -11,6 +12,7 @@ const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_NODES = 120;
 const MAX_NODES = 500;
 const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
+const MAX_TRACE_BYTES = 100 * 1024 * 1024;
 const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 const MAX_TEXT = 100_000;
@@ -105,7 +107,8 @@ export class SemanticBrowserService {
       refs: new Map(),
       secretValues: new Set(),
       url: null,
-      openedAt: new Date().toISOString()
+      openedAt: new Date().toISOString(),
+      qa: null
     };
     this.sessions.set(key, session);
     try {
@@ -126,6 +129,236 @@ export class SemanticBrowserService {
       await safeAdapterClose(adapter);
       throw normalizeBrowserError(error, "browser_open_failed");
     }
+  }
+
+  async openForQa(args = {}, context = {}) {
+    const input = plainRecord(args, "QA browser open arguments");
+    const scope = this._authorizeContext(context);
+    assertSensitiveApproval(scope, "Opening a QA browser");
+    const qaRunId = requiredQaRunId(
+      scope.__qaRunId ?? scope.qaRunId
+    );
+    const url = await validateQaNavigationUrl(input.url, {
+      dnsLookup: this.dnsLookup
+    });
+    const key = sessionKey(scope);
+    const previous = this.sessions.get(key);
+    if (previous) {
+      await safeAdapterClose(previous.adapter);
+      this.sessions.delete(key);
+    }
+    if (this.sessions.size >= this.maxSessions) {
+      throw new SemanticBrowserError(
+        `Semantic browser session limit reached (${this.maxSessions}).`,
+        "browser_session_limit"
+      );
+    }
+
+    const adapter = await this._createAdapter(scope);
+    assertSessionAdapter(adapter);
+    const allowedOrigin = safeOrigin(url);
+    let traceActive = false;
+    try {
+      if (typeof adapter.configureQa === "function") {
+        await callAdapter("QA browser configuration", () => (
+          adapter.configureQa({ allowedOrigin })
+        ));
+      }
+      if (input.viewport != null && typeof adapter.setViewport === "function") {
+        const viewport = normalizeQaViewport(input.viewport);
+        await callAdapter("QA viewport configuration", () => (
+          adapter.setViewport(viewport)
+        ));
+      }
+      if (input.trace !== false && typeof adapter.startTrace === "function") {
+        await callAdapter("QA trace start", () => adapter.startTrace());
+        traceActive = true;
+      }
+    } catch (error) {
+      await safeAdapterClose(adapter);
+      throw error;
+    }
+    const session = {
+      key,
+      projectId: scope.projectId,
+      projectRevision: scope.projectRevision,
+      sessionId: scope.sessionId,
+      workspaceRoot: scope.workspaceRoot,
+      adapter,
+      generation: null,
+      refs: new Map(),
+      secretValues: new Set(),
+      url: null,
+      openedAt: new Date().toISOString(),
+      qa: {
+        runId: qaRunId,
+        allowedOrigin,
+        traceActive
+      }
+    };
+    this.sessions.set(key, session);
+    try {
+      await callAdapter("QA browser open", () => (
+        adapter.open({ url }, adapterContext(scope, this))
+      ));
+      session.url = await this._validateSessionUrl(
+        session,
+        await this._adapterUrl(adapter, url)
+      );
+      return await this._snapshot(session, {}, scope, {
+        opened: true,
+        qaRunId
+      });
+    } catch (error) {
+      this.sessions.delete(key);
+      await safeAdapterClose(adapter);
+      throw normalizeBrowserError(error, "browser_qa_open_failed");
+    }
+  }
+
+  async qaDiagnostics(_args = {}, context = {}) {
+    const scope = this._authorizeContext(context);
+    const session = this._requireQaSession(scope);
+    if (typeof session.adapter.diagnostics !== "function") {
+      return { supported: false, events: [] };
+    }
+    const result = await callAdapter("QA diagnostics", () => (
+      session.adapter.diagnostics()
+    ));
+    return {
+      supported: true,
+      events: Array.isArray(result?.events)
+        ? structuredClone(result.events.slice(0, 500))
+        : []
+    };
+  }
+
+  async qaAccessibility(_args = {}, context = {}) {
+    const scope = this._authorizeContext(context);
+    const session = this._requireQaSession(scope);
+    if (typeof session.adapter.auditAccessibility !== "function") {
+      return { supported: false, violations: [], incomplete: [] };
+    }
+    const result = await callAdapter("QA accessibility audit", () => (
+      session.adapter.auditAccessibility()
+    ));
+    return {
+      supported: result?.supported !== false,
+      violations: Array.isArray(result?.violations)
+        ? structuredClone(result.violations.slice(0, 100))
+        : [],
+      incomplete: Array.isArray(result?.incomplete)
+        ? structuredClone(result.incomplete.slice(0, 100))
+        : []
+    };
+  }
+
+  async qaKeyboardAudit(args = {}, context = {}) {
+    const input = plainRecord(args, "QA keyboard audit arguments");
+    const scope = this._authorizeContext(context);
+    const session = this._requireQaSession(scope);
+    if (typeof session.adapter.auditKeyboard !== "function") {
+      return {
+        supported: false,
+        total: 0,
+        visited: 0,
+        missing: [],
+        focusVisibleFailures: [],
+        trapped: false
+      };
+    }
+    const result = plainRecord(
+      await callAdapter("QA keyboard audit", () => (
+        session.adapter.auditKeyboard({
+          maxTabs: boundedInteger(input.maxTabs, 1, 500, 250)
+        })
+      )),
+      "QA keyboard audit"
+    );
+    return {
+      supported: result.supported !== false,
+      total: boundedInteger(result.total, 0, 500, 0),
+      visited: boundedInteger(result.visited, 0, 500, 0),
+      missing: normalizeKeyboardFindings(result.missing),
+      focusVisibleFailures: normalizeKeyboardFindings(
+        result.focusVisibleFailures
+      ),
+      trapped: result.trapped === true
+    };
+  }
+
+  async qaPageState(_args = {}, context = {}) {
+    const scope = this._authorizeContext(context);
+    const session = this._requireQaSession(scope);
+    if (typeof session.adapter.pageState !== "function") {
+      const snapshot = await this._snapshot(
+        session,
+        { maxNodes: MAX_NODES },
+        scope
+      );
+      return {
+        url: snapshot.url,
+        title: snapshot.title,
+        bodyText: snapshot.nodes
+          .map((node) => node.name ?? node.value ?? "")
+          .filter(Boolean)
+          .join("\n")
+          .slice(0, MAX_TEXT),
+        readyState: "unknown",
+        busyCount: 0,
+        active: null
+      };
+    }
+    const raw = plainRecord(
+      await callAdapter("QA page state", () => session.adapter.pageState()),
+      "QA page state"
+    );
+    const url = await this._validateSessionUrl(
+      session,
+      raw.url ?? session.url
+    );
+    return {
+      url,
+      title: optionalBoundedText(raw.title, 1_000, "title"),
+      bodyText: optionalBoundedText(raw.bodyText, MAX_TEXT, "bodyText") ?? "",
+      readyState: ["loading", "interactive", "complete"].includes(raw.readyState)
+        ? raw.readyState
+        : "unknown",
+      busyCount: boundedInteger(raw.busyCount, 0, 10_000, 0),
+      active: raw.active && typeof raw.active === "object"
+        ? {
+            role: optionalBoundedText(raw.active.role, 128, "active.role"),
+            name: optionalBoundedText(raw.active.name, 500, "active.name")
+          }
+        : null
+    };
+  }
+
+  async waitForQaSettled(args = {}, context = {}) {
+    const input = plainRecord(args, "QA settle arguments");
+    const scope = this._authorizeContext(context);
+    const session = this._requireQaSession(scope);
+    const timeoutMs = boundedInteger(input.timeoutMs, 100, 30_000, 5_000);
+    if (typeof session.adapter.waitForSettled === "function") {
+      await callAdapter("QA page settle", () => (
+        session.adapter.waitForSettled({ timeoutMs })
+      ));
+    }
+    return this.qaPageState({}, context);
+  }
+
+  async stopQaTrace(args = {}, context = {}) {
+    const input = plainRecord(args, "QA trace stop arguments");
+    const scope = this._authorizeContext(context, { allowArchived: true });
+    const session = this._requireQaSession(scope);
+    if (!session.qa.traceActive || typeof session.adapter.stopTrace !== "function") {
+      return null;
+    }
+    const result = await callAdapter("QA trace stop", () => (
+      session.adapter.stopTrace({ retain: input.retain === true })
+    ));
+    session.qa.traceActive = false;
+    return result == null ? null : structuredClone(result);
   }
 
   async navigate(args = {}, context = {}) {
@@ -173,7 +406,10 @@ export class SemanticBrowserService {
         submit: input.submit === true
       }, adapterContext(scope, this))
     ));
-    const finalUrl = await this._assertAdapterUrl(session.adapter, session.url);
+    const finalUrl = await this._validateSessionUrl(
+      session,
+      await this._adapterUrl(session.adapter, session.url)
+    );
     const result = await this._afterAction(session, scope);
     return {
       ...result,
@@ -416,6 +652,7 @@ export class SemanticBrowserService {
     const image = normalizeScreenshot(captured);
     await this._refreshGeneration(session);
     session.url = await this._adapterUrl(session.adapter, session.url);
+    session.url = await this._validateSessionUrl(session, session.url);
     return {
       untrusted: true,
       trust: UNTRUSTED_LABEL,
@@ -587,6 +824,18 @@ export class SemanticBrowserService {
     return session;
   }
 
+  _requireQaSession(scope) {
+    const session = this._requireSession(scope);
+    const qaRunId = requiredQaRunId(scope.__qaRunId ?? scope.qaRunId);
+    if (!session.qa || session.qa.runId !== qaRunId) {
+      throw new SemanticBrowserError(
+        "The active browser session does not belong to this QA run.",
+        "browser_qa_session_mismatch"
+      );
+    }
+    return session;
+  }
+
   async _snapshot(session, options, scope, extra = {}) {
     const raw = plainRecord(
       await callAdapter("inspection", () => (
@@ -612,12 +861,7 @@ export class SemanticBrowserService {
       session.adapter,
       raw.url ?? session.url
     );
-    if (session.url) {
-      session.url = await validateNavigationUrl(session.url, {
-        dnsLookup: this.dnsLookup,
-        fromAdapter: true
-      });
-    }
+    session.url = await this._validateSessionUrl(session, session.url);
     const nodes = normalizeSnapshotNodes(
       raw.nodes,
       options.maxNodes ?? DEFAULT_MAX_NODES,
@@ -685,12 +929,7 @@ export class SemanticBrowserService {
     // require a fresh semantic inspection after every mutating action.
     session.refs.clear();
     session.url = await this._adapterUrl(session.adapter, session.url);
-    if (session.url) {
-      session.url = await validateNavigationUrl(session.url, {
-        dnsLookup: this.dnsLookup,
-        fromAdapter: true
-      });
-    }
+    session.url = await this._validateSessionUrl(session, session.url);
     return {
       untrusted: true,
       trust: UNTRUSTED_LABEL,
@@ -734,6 +973,22 @@ export class SemanticBrowserService {
       return validated;
     }
     return null;
+  }
+
+  async _validateSessionUrl(session, value) {
+    const text = String(value ?? "").trim();
+    if (!text || text === "about:blank") return null;
+    if (session.qa) {
+      return validateQaNavigationUrl(text, {
+        dnsLookup: this.dnsLookup,
+        allowedOrigin: session.qa.allowedOrigin,
+        fromAdapter: true
+      });
+    }
+    return validateNavigationUrl(text, {
+      dnsLookup: this.dnsLookup,
+      fromAdapter: true
+    });
   }
 
   async _adapterUrl(adapter, fallback = null) {
@@ -813,6 +1068,7 @@ export function createPlaywrightAdapterFactory(options = {}) {
       chromium,
       cdpUrl: endpoint,
       dnsLookup,
+      importer,
       headless: options.headless !== false,
       context
     });
@@ -820,7 +1076,7 @@ export function createPlaywrightAdapterFactory(options = {}) {
 }
 
 class PlaywrightSessionAdapter {
-  static async create({ chromium, cdpUrl, dnsLookup, headless }) {
+  static async create({ chromium, cdpUrl, dnsLookup, importer, headless }) {
     let browser;
     let browserContext;
     let ownsBrowser = false;
@@ -841,7 +1097,8 @@ class PlaywrightSessionAdapter {
         browserContext,
         page,
         ownsBrowser,
-        dnsLookup
+        dnsLookup,
+        importer
       });
       await adapter._installGuards();
       return adapter;
@@ -852,15 +1109,342 @@ class PlaywrightSessionAdapter {
     }
   }
 
-  constructor({ browser, browserContext, page, ownsBrowser, dnsLookup }) {
+  constructor({
+    browser,
+    browserContext,
+    page,
+    ownsBrowser,
+    dnsLookup,
+    importer
+  }) {
     this.browser = browser;
     this.browserContext = browserContext;
     this.page = page;
     this.ownsBrowser = ownsBrowser;
     this.dnsLookup = dnsLookup;
+    this.importer = importer;
     this.allowTopLevelNavigation = false;
     this.allowedTopLevelOrigins = null;
+    this.qaAllowedOrigin = null;
+    this.traceActive = false;
+    this.diagnosticEvents = [];
     this.closed = false;
+    this._installDiagnostics();
+  }
+
+  configureQa({ allowedOrigin }) {
+    this.qaAllowedOrigin = String(allowedOrigin ?? "");
+  }
+
+  async setViewport(viewport) {
+    await this.page.setViewportSize(viewport);
+  }
+
+  async startTrace() {
+    if (!this.browserContext.tracing?.start) return;
+    await this.browserContext.tracing.start({
+      screenshots: true,
+      snapshots: true,
+      sources: true
+    });
+    this.traceActive = true;
+  }
+
+  async stopTrace({ retain = true } = {}) {
+    if (!this.traceActive || !this.browserContext.tracing?.stop) return null;
+    if (!retain) {
+      await this.browserContext.tracing.stop();
+      this.traceActive = false;
+      return null;
+    }
+    const traceDir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-qa-trace-"));
+    const tracePath = path.join(traceDir, "trace.zip");
+    try {
+      await this.browserContext.tracing.stop({ path: tracePath });
+      this.traceActive = false;
+      const stat = fs.statSync(tracePath);
+      if (!stat.isFile() || stat.size > MAX_TRACE_BYTES) {
+        throw new SemanticBrowserError(
+          "QA trace exceeds the 100 MiB artifact limit.",
+          "browser_qa_trace_too_large"
+        );
+      }
+      return {
+        mediaType: "application/zip",
+        data: fs.readFileSync(tracePath).toString("base64"),
+        bytes: stat.size
+      };
+    } finally {
+      fs.rmSync(traceDir, { recursive: true, force: true });
+    }
+  }
+
+  diagnostics() {
+    return {
+      events: structuredClone(this.diagnosticEvents)
+    };
+  }
+
+  async auditAccessibility() {
+    let module;
+    try {
+      module = await this.importer("axe-core");
+    } catch {
+      return { supported: false, violations: [], incomplete: [] };
+    }
+    const source = module?.source ?? module?.default?.source;
+    if (typeof source !== "string" || source.length < 1) {
+      return { supported: false, violations: [], incomplete: [] };
+    }
+    await this.page.addScriptTag({ content: source });
+    const result = await this.page.evaluate(async () => (
+      globalThis.axe.run(document, {
+        resultTypes: ["violations", "incomplete"]
+      })
+    ));
+    return {
+      supported: true,
+      violations: normalizeAxeFindings(result?.violations),
+      incomplete: normalizeAxeFindings(result?.incomplete)
+    };
+  }
+
+  async auditKeyboard({ maxTabs = 250 } = {}) {
+    const inventory = await this.page.evaluate(() => {
+      const selector = [
+        "a[href]",
+        "button",
+        "input",
+        "select",
+        "textarea",
+        "[contenteditable='true']",
+        "[tabindex]"
+      ].join(",");
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none"
+          && style.visibility !== "hidden"
+          && Number(style.opacity) !== 0
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const roleFor = (element) => {
+        const explicit = element.getAttribute("role");
+        if (explicit) return explicit;
+        const tag = element.tagName.toLowerCase();
+        if (tag === "a") return "link";
+        if (tag === "button") return "button";
+        if (tag === "select") return "combobox";
+        if (tag === "textarea") return "textbox";
+        if (tag === "input") {
+          const type = String(element.getAttribute("type") ?? "text")
+            .toLowerCase();
+          if (type === "checkbox") return "checkbox";
+          if (type === "radio") return "radio";
+          if (["button", "submit", "reset"].includes(type)) return "button";
+          return "textbox";
+        }
+        return tag;
+      };
+      const nameFor = (element) => {
+        const labelledBy = String(
+          element.getAttribute("aria-labelledby") ?? ""
+        ).split(/\s+/).filter(Boolean).map(
+          (id) => document.getElementById(id)?.textContent ?? ""
+        ).join(" ");
+        const labels = "labels" in element && element.labels
+          ? [...element.labels].map((label) => label.textContent ?? "").join(" ")
+          : "";
+        const candidate = [
+          element.getAttribute("aria-label"),
+          labelledBy,
+          labels,
+          element.getAttribute("title"),
+          element.textContent
+        ].find((value) => String(value ?? "").trim());
+        return String(candidate ?? "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 500);
+      };
+      const elements = [...document.querySelectorAll(selector)].filter(
+        (element) => (
+          visible(element)
+          && !element.disabled
+          && element.getAttribute("aria-disabled") !== "true"
+          && Number(element.getAttribute("tabindex") ?? 0) >= 0
+          && String(element.getAttribute("type") ?? "").toLowerCase() !== "hidden"
+        )
+      ).slice(0, 500);
+      return elements.map((element, index) => {
+        const id = `focus_${index}`;
+        element.setAttribute("data-openagi-qa-focus-id", id);
+        return {
+          id,
+          role: roleFor(element),
+          name: nameFor(element)
+        };
+      });
+    });
+    const expected = new Map(inventory.map((item) => [item.id, item]));
+    const visited = new Set();
+    const invisible = new Map();
+    let repeated = 0;
+    let previous = null;
+    const limit = Math.min(
+      Math.max(inventory.length + 2, 1),
+      boundedInteger(maxTabs, 1, 500, 250)
+    );
+    try {
+      for (let index = 0; index < limit; index += 1) {
+        await this.page.keyboard.press("Tab");
+        const focused = await this.page.evaluate(() => {
+          const element = document.activeElement;
+          if (!element || element === document.body) return null;
+          const style = getComputedStyle(element);
+          const outlineWidth = Number.parseFloat(style.outlineWidth || "0");
+          const focusVisible = (
+            style.outlineStyle !== "none"
+            && outlineWidth > 0
+          ) || style.boxShadow !== "none";
+          return {
+            id: element.getAttribute("data-openagi-qa-focus-id"),
+            focusVisible
+          };
+        });
+        const id = focused?.id;
+        if (id && expected.has(id)) {
+          visited.add(id);
+          if (focused.focusVisible !== true) {
+            invisible.set(id, expected.get(id));
+          }
+        }
+        repeated = id && id === previous ? repeated + 1 : 0;
+        previous = id;
+        if (visited.size === expected.size) break;
+        if (repeated >= 2) break;
+      }
+    } finally {
+      await this.page.evaluate(() => {
+        for (const element of document.querySelectorAll(
+          "[data-openagi-qa-focus-id]"
+        )) {
+          element.removeAttribute("data-openagi-qa-focus-id");
+        }
+      });
+    }
+    return {
+      supported: true,
+      total: expected.size,
+      visited: visited.size,
+      missing: [...expected.entries()]
+        .filter(([id]) => !visited.has(id))
+        .map(([, item]) => ({ role: item.role, name: item.name })),
+      focusVisibleFailures: [...invisible.values()].map(
+        (item) => ({ role: item.role, name: item.name })
+      ),
+      trapped: repeated >= 2
+    };
+  }
+
+  async pageState() {
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      const roleFor = (element) => {
+        if (!element) return null;
+        const explicit = element.getAttribute?.("role");
+        if (explicit) return explicit;
+        const tag = String(element.tagName ?? "").toLowerCase();
+        if (tag === "a") return "link";
+        if (tag === "button") return "button";
+        if (["input", "textarea"].includes(tag)) return "textbox";
+        if (tag === "select") return "combobox";
+        return tag || null;
+      };
+      const nameFor = (element) => {
+        if (!element) return null;
+        return String(
+          element.getAttribute?.("aria-label")
+          ?? element.textContent
+          ?? element.value
+          ?? ""
+        ).replace(/\s+/g, " ").trim().slice(0, 500) || null;
+      };
+      return {
+        url: location.href,
+        title: document.title,
+        bodyText: String(document.body?.innerText ?? "").slice(0, 100_000),
+        readyState: document.readyState,
+        busyCount: document.querySelectorAll(
+          '[aria-busy="true"], [data-loading="true"], .loading, .spinner'
+        ).length,
+        active: active
+          ? { role: roleFor(active), name: nameFor(active) }
+          : null
+      };
+    });
+  }
+
+  async waitForSettled({ timeoutMs }) {
+    await this.page.waitForLoadState("domcontentloaded", {
+      timeout: timeoutMs
+    }).catch(() => {});
+    await this.page.waitForFunction(() => (
+      document.readyState !== "loading"
+      && document.querySelectorAll(
+        '[aria-busy="true"], [data-loading="true"], .loading, .spinner'
+      ).length === 0
+    ), null, { timeout: timeoutMs }).catch(() => {});
+  }
+
+  _installDiagnostics() {
+    if (typeof this.page.on !== "function") return;
+    this.page.on("console", (message) => {
+      const type = String(message?.type?.() ?? "log");
+      if (!["error", "warning"].includes(type)) return;
+      this._recordDiagnostic({
+        kind: "console",
+        severity: type === "error" ? "error" : "warning",
+        message: String(message?.text?.() ?? "").slice(0, 2_000)
+      });
+    });
+    this.page.on("pageerror", (error) => {
+      this._recordDiagnostic({
+        kind: "pageerror",
+        severity: "error",
+        message: String(error?.message ?? error ?? "").slice(0, 2_000)
+      });
+    });
+    this.page.on("requestfailed", (request) => {
+      this._recordDiagnostic({
+        kind: "requestfailed",
+        severity: "error",
+        url: safeDiagnosticUrl(request?.url?.()),
+        method: String(request?.method?.() ?? "").slice(0, 16),
+        message: String(request?.failure?.()?.errorText ?? "").slice(0, 500)
+      });
+    });
+    this.page.on("response", (response) => {
+      const status = Number(response?.status?.());
+      if (!Number.isInteger(status) || status < 400) return;
+      this._recordDiagnostic({
+        kind: "response",
+        severity: "error",
+        url: safeDiagnosticUrl(response?.url?.()),
+        status
+      });
+    });
+  }
+
+  _recordDiagnostic(event) {
+    this.diagnosticEvents.push({
+      at: new Date().toISOString(),
+      ...event
+    });
+    if (this.diagnosticEvents.length > 500) {
+      this.diagnosticEvents.splice(0, this.diagnosticEvents.length - 500);
+    }
   }
 
   async _installGuards() {
@@ -872,6 +1456,13 @@ class PlaywrightSessionAdapter {
       }
       try {
         const request = route.request();
+        if (
+          this.qaAllowedOrigin
+          && safeOrigin(requestUrl) !== this.qaAllowedOrigin
+        ) {
+          await route.abort("blockedbyclient");
+          return;
+        }
         const isTopLevelNavigation = request.isNavigationRequest()
           && request.frame() === this.page.mainFrame();
         if (isTopLevelNavigation && !this.allowTopLevelNavigation) {
@@ -886,9 +1477,14 @@ class PlaywrightSessionAdapter {
           await route.abort("blockedbyclient");
           return;
         }
-        await validateNavigationUrl(requestUrl, {
-          dnsLookup: this.dnsLookup
-        });
+        if (
+          !this.qaAllowedOrigin
+          || !isLiteralLoopbackOrigin(this.qaAllowedOrigin)
+        ) {
+          await validateNavigationUrl(requestUrl, {
+            dnsLookup: this.dnsLookup
+          });
+        }
         await route.continue();
       } catch {
         await route.abort("blockedbyclient");
@@ -1037,10 +1633,14 @@ class PlaywrightSessionAdapter {
         const labelled = labelledBy
           ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" ")
           : "";
+        const explicitLabels = "labels" in element && element.labels
+          ? [...element.labels].map((label) => label.textContent ?? "").join(" ")
+          : "";
         const enclosing = element.closest("label")?.textContent ?? "";
         return [
           element.getAttribute("aria-label"),
           labelled,
+          explicitLabels,
           enclosing,
           element.getAttribute("alt"),
           element.getAttribute("title"),
@@ -1160,6 +1760,10 @@ class PlaywrightSessionAdapter {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    if (this.traceActive) {
+      await this.browserContext.tracing?.stop?.().catch(() => {});
+      this.traceActive = false;
+    }
     await this.page.close().catch(() => {});
     await this.browserContext.close().catch(() => {});
     if (this.ownsBrowser) {
@@ -1250,6 +1854,32 @@ export async function validateNavigationUrl(value, options = {}) {
   }
   parsed.hash = "";
   return parsed.href;
+}
+
+export async function validateQaNavigationUrl(value, options = {}) {
+  const parsed = parseSafeBrowserUrl(value, {
+    fromAdapter: options.fromAdapter === true
+  });
+  const expectedOrigin = options.allowedOrigin == null
+    ? null
+    : String(options.allowedOrigin);
+  if (expectedOrigin && parsed.origin !== expectedOrigin) {
+    throw new SemanticBrowserError(
+      "QA browser navigation left its exact approved origin.",
+      "browser_qa_origin_blocked"
+    );
+  }
+  const hostname = parsed.hostname
+    .replace(/^\[|\]$/g, "")
+    .toLowerCase();
+  if (hostname === "127.0.0.1" || hostname === "::1") {
+    parsed.hash = "";
+    return parsed.href;
+  }
+  return validateNavigationUrl(parsed.href, {
+    dnsLookup: options.dnsLookup,
+    fromAdapter: options.fromAdapter === true
+  });
 }
 
 export function assertSafeBrowserUrlShape(value, { optional = false } = {}) {
@@ -1811,6 +2441,91 @@ function safeOrigin(value) {
   } catch {
     return null;
   }
+}
+
+function isLiteralLoopbackOrigin(value) {
+  try {
+    const hostname = new URL(String(value ?? ""))
+      .hostname
+      .replace(/^\[|\]$/g, "")
+      .toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function safeDiagnosticUrl(value) {
+  try {
+    const parsed = new URL(String(value ?? ""));
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.href.slice(0, 2_000);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAxeFindings(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 100).map((finding) => ({
+    id: String(finding?.id ?? "").slice(0, 128),
+    impact: String(finding?.impact ?? "unknown").slice(0, 32),
+    description: String(finding?.description ?? "").slice(0, 1_000),
+    help: String(finding?.help ?? "").slice(0, 1_000),
+    helpUrl: safeDiagnosticUrl(finding?.helpUrl),
+    nodes: Array.isArray(finding?.nodes)
+      ? finding.nodes.slice(0, 20).map((node) => ({
+          target: Array.isArray(node?.target)
+            ? node.target.slice(0, 5).map((target) => (
+                String(target ?? "").slice(0, 500)
+              ))
+            : [],
+          failureSummary: String(node?.failureSummary ?? "").slice(0, 1_000)
+        }))
+      : []
+  }));
+}
+
+function normalizeKeyboardFindings(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 500).map((finding) => ({
+    role: String(finding?.role ?? "unknown").slice(0, 128),
+    name: String(finding?.name ?? "").slice(0, 500)
+  }));
+}
+
+function normalizeQaViewport(value) {
+  const source = plainRecord(value, "QA viewport");
+  const width = Number(source.width);
+  const height = Number(source.height);
+  if (
+    !Number.isSafeInteger(width)
+    || width < 320
+    || width > 3840
+    || !Number.isSafeInteger(height)
+    || height < 200
+    || height > 2160
+  ) {
+    throw new SemanticBrowserError(
+      "QA viewport must be between 320x200 and 3840x2160.",
+      "browser_qa_viewport_invalid"
+    );
+  }
+  return { width, height };
+}
+
+function requiredQaRunId(value) {
+  const text = String(value ?? "");
+  if (!/^qa_[a-f0-9]{16}$/.test(text)) {
+    throw new SemanticBrowserError(
+      "QA browser operations require an exact run identity.",
+      "browser_qa_run_invalid"
+    );
+  }
+  return text;
 }
 
 function requiredSecretRef(value) {
