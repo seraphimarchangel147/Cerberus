@@ -134,6 +134,42 @@ test("hook payload mutation cannot alter live handler arguments", async () => {
   assert.match(warnings.join("\n"), /attempted-mutator/);
 });
 
+test("a broken hook registry blocks mutations but does not disable reads", async () => {
+  const hooks = {
+    async beforeToolCall() {
+      throw new Error("registry unavailable");
+    }
+  };
+  const tools = new ToolRegistry({ hooks });
+  let writes = 0;
+  tools.register({
+    name: "mutating_tool",
+    sideEffects: true,
+    handler: async () => { writes += 1; return "changed"; }
+  });
+  tools.register({
+    name: "read_only_tool",
+    sideEffects: false,
+    handler: async () => "visible"
+  });
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const blocked = await tools.invoke("mutating_tool", {});
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.outcome.status, "blocked");
+    assert.equal(blocked.outcome.code, "security_hook_unavailable");
+    assert.equal(writes, 0);
+
+    const allowed = await tools.invoke("read_only_tool", {});
+    assert.equal(allowed.ok, true);
+    assert.equal(allowed.result, "visible");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("generic veto and handler failures are observable with semantic outcomes", async () => {
   const hooks = new HookRegistry({ loadConfig: false, log: () => {} });
   const posts = [];

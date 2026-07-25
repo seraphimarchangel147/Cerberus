@@ -1255,9 +1255,18 @@ export class ToolRegistry {
           })
         ) ?? hookDecision;
       } catch (error) {
-        console.warn(
-          `[hooks] pre_tool_call registry failed open: ${safeToolErrorMessage(error, "hook callback failed")}`
-        );
+        const detail = safeToolErrorMessage(error, "hook callback failed");
+        if (tool.sideEffects !== false) {
+          console.warn(`[hooks] pre_tool_call registry failed closed: ${detail}`);
+          hookDecision = {
+            action: "block",
+            message: "Built-in security policy was unavailable; mutating tool execution was blocked.",
+            blockedBy: "builtin-security-hooks",
+            failure: "registry_error"
+          };
+        } else {
+          console.warn(`[hooks] pre_tool_call registry failed open for read-only tool: ${detail}`);
+        }
       }
       if (hookDecision?.action === "block") {
         if (isTrustedCatastrophicBlock(hookDecision)) {
@@ -1287,14 +1296,16 @@ export class ToolRegistry {
             failureTracking
           });
         }
+        const unavailable = hookDecision.failure === "registry_error";
+        const code = unavailable ? "security_hook_unavailable" : "hook_blocked";
         const error = hookDecision.message ?? `Tool ${name} was blocked by a pre_tool_call hook.`;
         const blocked = await ensureSemanticToolEnvelope(tool, {
           ok: false,
           error,
           blocked: true,
-          code: "hook_blocked"
+          code
         }, args, context, {
-          code: "hook_blocked",
+          code,
           status: "blocked"
         });
         this._notifyPostToolCall({ name, args, context, tool, sessionAllowed }, {

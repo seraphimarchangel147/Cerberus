@@ -240,6 +240,58 @@ test("plugin verdicts cannot spoof catastrophic provenance or bypass confirmatio
   assert.equal(verdict.builtin, false);
 });
 
+test("built-in veto failures fail closed without an approval bypass", async () => {
+  for (const [name, handler, failure] of [
+    ["throwing-security", () => { throw new Error("offline"); }, "error"],
+    ["invalid-security", () => undefined, "invalid_verdict"],
+    ["timed-out-security", () => new Promise(() => {}), "timeout"]
+  ]) {
+    const warnings = [];
+    const registry = new HookRegistry({
+      loadConfig: false,
+      timeoutMs: 100,
+      perHookTimeoutMs: 10,
+      log: (message) => warnings.push(message)
+    });
+    registry._register({
+      name,
+      event: "security_probe",
+      tier: "gateway",
+      timeoutMs: 5,
+      handler
+    }, { builtin: true, source: "builtin" });
+
+    const verdict = await registry.runVeto("security_probe", {});
+    assert.equal(verdict.action, "block");
+    assert.equal(verdict.blockedBy, name);
+    assert.equal(verdict.builtin, true);
+    assert.equal(verdict.approvalRequired, false);
+    assert.equal(verdict.code, null);
+    assert.equal(verdict.failure, failure);
+    assert.match(verdict.message, /security policy/);
+    assert.match(warnings.at(-1), /failed closed/);
+  }
+});
+
+test("extension veto failures remain fail open", async () => {
+  const warnings = [];
+  const registry = new HookRegistry({
+    loadConfig: false,
+    log: (message) => warnings.push(message)
+  });
+  registry.register({
+    name: "optional-policy",
+    event: "pre_tool_call",
+    handler: () => { throw new Error("optional hook failed"); }
+  });
+
+  assert.deepEqual(
+    await registry.beforeToolCall({ toolName: "read_file", args: {} }),
+    { action: "allow" }
+  );
+  assert.match(warnings.at(-1), /failed open/);
+});
+
 test("shell hooks use JSON stdio, literal args, bounded safe env, and shell=false", async (t) => {
   const dataDir = tempDir();
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));

@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Fail-closed built-in security vetoes (Codex)
+
+- Assigned every hook an immutable failure mode: built-in gateway security vetoes fail closed, while runtime/plugin/shell extensions and asynchronous observers remain fail open.
+- Built-in exceptions, deadlines, and malformed verdicts now return terminal, non-approvable block verdicts with bounded provenance instead of silently permitting the tool call.
+- Added a registry-level defense: if the entire hook callback fails unexpectedly, mutating tools are blocked with `security_hook_unavailable`; declared read-only tools may continue.
+- Added regressions for thrown, timed-out, invalid, optional-extension, and whole-registry failure paths.
+SECURITY HOOK FAILURE MODES COMPLETE
+
 ## 2026-07-22 — Reversible cron job control from the agent loop (Seraphim)
 
 - Added `set_cron_job_enabled(id, enabled)` tool: turns a scheduled cron job OFF (pause, reversible — preserved with `nextRunAt=null`) or ON (resume, recomputes `nextRunAt`) via the existing `runtime.cron.enableJob()`. This closes the gap where the only in-loop control was the destructive `cancel_cron_job` — "turn it off" now means pause, not delete.
