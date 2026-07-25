@@ -30,6 +30,10 @@ import {
   formatLspDiagnostics
 } from "./lsp-client.js";
 import { writeTextAtomic } from "./file-utils.js";
+import {
+  CODE_VERIFIER_LIMITS,
+  createIsolatedCodeVerifier
+} from "./coder-verifier.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "..");
@@ -608,6 +612,7 @@ export function registerCodeTools(registry, runtime, options = {}) {
     ?? runtime?.lspClient
     ?? createLspClient({ dataDir: safetyOptions.dataDir });
   const atomicWriter = options.writeTextAtomic ?? writeTextAtomic;
+  const codeVerifier = options.codeVerifier ?? createIsolatedCodeVerifier();
   registry.register({
     name: "code_read",
     description: "Read a file with line numbers. Returns a full SHA-256 content tag required by code_edit and by code_write when overwriting an existing file. Re-read after any edit to get the fresh tag.",
@@ -975,6 +980,53 @@ export function registerCodeTools(registry, runtime, options = {}) {
         fail: fail != null ? Number(fail) : null,
         tail: out.slice(-2500)
       };
+    }
+  });
+
+  registry.register({
+    name: "code_verify",
+    description: "Run 1-16 syntax and targeted test checks in isolated, no-shell Node subprocesses with a scrubbed secret environment, bounded output, and cancellation. Use this as the final evidence gate after code edits.",
+    sideEffects: false,
+    parameters: {
+      type: "object",
+      properties: {
+        checks: {
+          type: "array",
+          minItems: 1,
+          maxItems: CODE_VERIFIER_LIMITS.maxChecks,
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["syntax", "test"] },
+              path: { type: "string", description: "Workspace-relative file or directory. Required for syntax; optional for a full test run." },
+              timeoutMs: {
+                type: "integer",
+                minimum: 1,
+                maximum: CODE_VERIFIER_LIMITS.maxTimeoutMs
+              }
+            },
+            required: ["type"],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ["checks"],
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      const scope = codeExecutionScope(context, safetyOptions);
+      const execution = buildTestExecution(runtime, {
+        decidedBy: decisionActor(context, "tool:code_verify"),
+        projectScoped: scope.projectScoped
+      });
+      return codeVerifier.verify({
+        workspaceDir: scope.workspaceDir,
+        checks: args.checks,
+        signal: context?.__abortSignal,
+        env: execution.env,
+        redactValues: execution.redactValues,
+        projectScoped: scope.projectScoped
+      });
     }
   });
 

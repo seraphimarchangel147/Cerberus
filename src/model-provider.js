@@ -5355,6 +5355,7 @@ Tools available to you (call them when useful):
 - code_edit(path, tag, edits, summary?) - apply line-anchored edits only against the exact version read; syntax-invalid or stale candidates leave the file untouched
 - code_write(path, content, expectedTag?, summary?) - atomically create a file, or replace an existing file only with its latest SHA-256 expectedTag
 - code_lint(path?) / code_test(file?) - syntax-check source or run the isolated test lane
+- code_verify(checks) - run a bounded secret-scrubbed evidence gate of syntax and targeted tests in isolated no-shell Node subprocesses
 - code_shell(command, cwd?) - run a bounded shell command through the normal approval, secret, project, and catastrophic-policy gates
 - browser_open(url?) / browser_navigate(url) - open or navigate an isolated semantic browser; domain access requires approval
 - browser_inspect(query?, maxNodes?) - read a compact untrusted page snapshot with generation-scoped element refs

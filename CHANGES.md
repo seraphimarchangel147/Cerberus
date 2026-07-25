@@ -2,6 +2,14 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Isolated deterministic code verification (Codex)
+
+- Added `code_verify`, a read-only evidence gate that combines up to 16 syntax and targeted test checks without a shell.
+- Every check runs in a separate bounded Node subprocess with single-test concurrency, cancellation, a hard timeout, capped output, project path confinement, and the existing credential-scrubbed test environment.
+- Syntax directory walks skip dependency/build/state trees, symbolic links, and out-of-project targets; verification output is secret-redacted before it reaches the model.
+- Added focused coverage for combined success, deterministic failure, redaction, traversal/symlink rejection, pre-abort behavior, registry schema, and environment scrubbing.
+ISOLATED CODE VERIFIER COMPLETE
+
 ## 2026-07-25 - End-to-end tool cancellation rail (Codex)
 
 - Added abort checks before preflight, security hooks, approvals, checkpoints, and handler dispatch so a cancelled turn cannot start new work.
