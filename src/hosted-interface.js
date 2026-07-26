@@ -7807,7 +7807,7 @@ async function refreshKanban() {
   const boards = Array.isArray(data.boards) ? data.boards : [];
   const columns = Array.isArray(data.columns)
     ? data.columns
-    : ["backlog", "in-progress", "blocked", "review", "done"];
+    : ["backlog", "in-progress", "blocked", "on-hold", "review", "done"];
   sidebarList.innerHTML = "";
 
   if (tasks.length === 0) {

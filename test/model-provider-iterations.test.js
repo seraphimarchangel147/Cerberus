@@ -15,7 +15,8 @@ const ITERATION_ENV = [
   "OPENAGI_MAX_ITERATIONS",
   "OPENAGI_MAX_TOOL_HOPS",
   "OPENAGI_MAX_TURN_SECONDS",
-  "OPENAGI_MAX_TURN_USD"
+  "OPENAGI_MAX_TURN_USD",
+  "OPENAGI_WALL_CLOCK_CHECKPOINTS"
 ];
 
 function isolateIterationEnv(t) {
@@ -52,6 +53,7 @@ test("providers default to 25 iterations and a 900-second turn guard", (t) => {
     assert.equal(provider.maxIterations, 25);
     assert.equal(provider.maxTurnSeconds, 900);
     assert.equal(provider.maxTurnUsd, null);
+    assert.equal(provider.wallClockCheckpoints, 3);
   }
 });
 
@@ -67,6 +69,14 @@ test("OPENAGI_MAX_ITERATIONS overrides the deprecated tool-hop alias", (t) => {
     assert.equal(provider.maxIterations, 9);
     assert.equal(provider.maxTurnSeconds, 45);
   }
+});
+
+test("OPENAGI_WALL_CLOCK_CHECKPOINTS honors env, constructor option wins", (t) => {
+  isolateIterationEnv(t);
+  process.env.OPENAGI_WALL_CLOCK_CHECKPOINTS = "1";
+  assert.equal(new OpenAIResponsesProvider({ apiKey: "test" }).wallClockCheckpoints, 1);
+  assert.equal(new AnthropicProvider({ apiKey: "test" }).wallClockCheckpoints, 1);
+  assert.equal(new OpenAIResponsesProvider({ apiKey: "test", wallClockCheckpoints: 0 }).wallClockCheckpoints, 0);
 });
 
 test("OPENAGI_MAX_TOOL_HOPS remains a fallback when iterations is unset or blank", (t) => {
@@ -984,7 +994,7 @@ for (const spec of [
 for (const spec of [
   {
     name: "OpenAI",
-    make: () => new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 5, maxTurnSeconds: 0.01 }),
+    make: () => new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 5, maxTurnSeconds: 0.01, wallClockCheckpoints: 0 }),
     stub(provider) {
       provider.postResponses = async () => new Promise((resolve) => {
         setTimeout(() => resolve({ id: "late", output_text: "too late", output: [] }), 50);
@@ -993,7 +1003,7 @@ for (const spec of [
   },
   {
     name: "Anthropic",
-    make: () => new AnthropicProvider({ apiKey: "test-key", maxIterations: 5, maxTurnSeconds: 0.01 }),
+    make: () => new AnthropicProvider({ apiKey: "test-key", maxIterations: 5, maxTurnSeconds: 0.01, wallClockCheckpoints: 0 }),
     stub(provider) {
       provider.postMessages = async () => new Promise((resolve) => {
         setTimeout(() => resolve({ id: "late", stop_reason: "end_turn", content: [{ type: "text", text: "too late" }] }), 50);
@@ -1002,6 +1012,8 @@ for (const spec of [
   }
 ]) {
   test(`${spec.name} wall-clock guard forces an answer or a graceful summary`, async () => {
+    // wallClockCheckpoints: 0 pins the legacy hard-stop path: the first
+    // deadline breach cuts the turn and forces a final answer.
     const provider = spec.make();
     spec.stub(provider);
     const events = [];
@@ -1023,6 +1035,61 @@ for (const spec of [
     assert.deepEqual(events, [{ phase: "iteration", n: 1, max: 5 }]);
   });
 }
+
+// Soft wall-clock checkpoints: when the turn budget is reached the guard pings
+// the model with a status check and EXTENDS the deadline instead of stopping.
+// A model that still has work keeps working; the turn ends normally.
+test("a wall-clock checkpoint pings, extends, and the turn finishes normally", async () => {
+  const provider = new OpenAIResponsesProvider({
+    apiKey: "test-key",
+    maxIterations: 5,
+    maxTurnSeconds: 0.01,
+    wallClockCheckpoints: 1
+  });
+  let calls = 0;
+  provider.postResponses = async () => {
+    calls += 1;
+    if (calls === 1) {
+      // Slow first hop: blows past the 10ms deadline and trips the guard.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { id: "tool", output: [{ type: "function_call", call_id: "c1", name: "step", arguments: "{}" }] };
+    }
+    return { id: "done", output_text: "finished after checkpoint", output: [] };
+  };
+  const events = [];
+  const result = await provider.generate({
+    input: "slow then fast",
+    agent,
+    toolRegistry: openAIToolRegistry(),
+    context: { __onToolEvent: (event) => events.push(event) }
+  });
+  assert.notEqual(result.stopReason, "turn-timeout");
+  assert.match(result.text, /finished after checkpoint/);
+  assert.ok(
+    events.some((e) => e.phase === "wall-clock-checkpoint" && e.extensionsLeft === 0),
+    `expected a wall-clock-checkpoint event, got: ${JSON.stringify(events)}`
+  );
+});
+
+test("checkpoint budget exhaustion still hard-stops with turn-timeout", async () => {
+  const provider = new OpenAIResponsesProvider({
+    apiKey: "test-key",
+    maxIterations: 5,
+    maxTurnSeconds: 0.01,
+    wallClockCheckpoints: 1
+  });
+  provider.postResponses = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { id: "late", output_text: "too late", output: [] };
+  };
+  const result = await provider.generate({ input: "always slow", agent });
+  assert.equal(result.stopReason, "turn-timeout");
+  assert.equal(result.iterations, 2, "one checkpoint extension, then the hard stop");
+  assert.ok(
+    /too late/.test(result.text) || /OPENAGI_MAX_TURN_SECONDS|wall-clock/i.test(result.text),
+    `expected a forced answer or a wall-clock summary, got: ${result.text}`
+  );
+});
 
 // REGRESSION: a single slow model request (fetch exceeds the per-request
 // timeout) must NOT kill the whole turn with a raw undici "This operation was
@@ -1176,7 +1243,8 @@ test("the wall-clock guard also bounds a tool invocation that never settles", as
   const provider = new OpenAIResponsesProvider({
     apiKey: "test-key",
     maxIterations: 5,
-    maxTurnSeconds: 0.01
+    maxTurnSeconds: 0.01,
+    wallClockCheckpoints: 0
   });
   provider.postResponses = async () => ({
     id: "tool",

@@ -5081,7 +5081,7 @@ export function registerCoreTools(registry, runtime) {
         board: { type: "string", description: "Optional board id." },
         status: {
           type: "string",
-          enum: ["backlog", "in-progress", "blocked", "review", "done"]
+          enum: ["backlog", "in-progress", "blocked", "on-hold", "review", "done"]
         },
         assignee: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 500 }
@@ -5112,7 +5112,7 @@ export function registerCoreTools(registry, runtime) {
         assignee: { type: "string", description: "Agent or worker name." },
         status: {
           type: "string",
-          enum: ["backlog", "in-progress", "blocked", "review", "done"]
+          enum: ["backlog", "in-progress", "blocked", "on-hold", "review", "done"]
         },
         blockedBy: {
           type: "array",
@@ -5210,6 +5210,35 @@ export function registerCoreTools(registry, runtime) {
       await requireProjectKanbanTask(runtime, taskId, context);
       if (blockerId) await requireProjectKanbanTask(runtime, blockerId, context);
       return runtime.kanban.unblockTask(taskId, { blockerId }, context);
+    }
+  });
+
+  registry.register({
+    name: "kanban_move",
+    domainResultStatuses: KANBAN_DOMAIN_STATUSES,
+    description:
+      "Move a Kanban task to a different column. Use this to start work ('in-progress'), park work a human decided to postpone ('on-hold'), send finished work for checking ('review'), or return something to 'backlog'. Finishing a task uses kanban_complete and blocking uses kanban_block — those carry extra semantics this tool deliberately will not bypass.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Kanban task id." },
+        status: {
+          type: "string",
+          enum: ["backlog", "in-progress", "on-hold", "review"],
+          description: "Target column."
+        },
+        reason: {
+          type: "string",
+          description: "Why it moved. Recorded as a comment on the task."
+        }
+      },
+      required: ["taskId", "status"],
+      additionalProperties: false
+    },
+    handler: async ({ taskId, status, reason }, context) => {
+      if (!runtime.kanban?.moveTask) throw new Error("Kanban store is unavailable.");
+      await requireProjectKanbanTask(runtime, taskId, context);
+      return runtime.kanban.moveTask(taskId, status, context, { reason });
     }
   });
 

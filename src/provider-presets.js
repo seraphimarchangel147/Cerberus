@@ -232,3 +232,46 @@ export function activeProviderPreset(env = process.env) {
   if (!laneBase && (lane === "anthropic" || lane === "openai")) return lane;
   return null;
 }
+
+
+/**
+ * Validate a vendor key with a lightweight, read-only ping so the UI can say
+ * "this key works" at save time instead of at the first failed turn.
+ *
+ * Anthropic lane: GET {baseUrl}/models with x-api-key + anthropic-version.
+ * OpenAI lane:    GET {baseUrl}/models with Authorization: Bearer.
+ *
+ * Fail-soft by design — validation is advisory, never a save gate:
+ *   200           -> "valid"
+ *   401/403       -> "invalid"  (the vendor rejected THIS key)
+ *   other status, network error, timeout -> "unverified"
+ *
+ * Never throws on network failure, never includes the key or vendor error
+ * bodies in the result. fetchImpl is injectable for tests.
+ */
+export async function validatePresetKey(id, apiKey, { timeoutMs = 6000, fetchImpl } = {}) {
+  const preset = getProviderPreset(id);
+  const key = String(apiKey ?? "").trim();
+  if (!key) return { status: "invalid", detail: "empty key" };
+  const doFetch = fetchImpl ?? (typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : null);
+  if (!doFetch) return { status: "unverified", detail: "no fetch available on this runtime" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(250, timeoutMs));
+  try {
+    const headers = preset.lane === "anthropic"
+      ? { "x-api-key": key, "anthropic-version": "2023-06-01" }
+      : { authorization: `Bearer ${key}` };
+    const url = `${preset.baseUrl.replace(/\/+$/u, "")}/models`;
+    const res = await doFetch(url, { method: "GET", headers, signal: controller.signal });
+    if (res.status === 200) return { status: "valid", detail: `${preset.label} accepted the key` };
+    if (res.status === 401 || res.status === 403) {
+      return { status: "invalid", detail: `${preset.label} rejected the key (HTTP ${res.status})` };
+    }
+    return { status: "unverified", detail: `${preset.label} answered HTTP ${res.status} on /models` };
+  } catch (error) {
+    if (error?.name === "AbortError") return { status: "unverified", detail: `validation timed out after ${timeoutMs}ms` };
+    return { status: "unverified", detail: "validation request failed" };
+  } finally {
+    clearTimeout(timer);
+  }
+}

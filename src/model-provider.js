@@ -52,6 +52,10 @@ import {
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
 const DEFAULT_MAX_TURN_SECONDS = 900;
+// Soft wall-clock checkpoints: how many times a turn may extend its own
+// deadline (by maxTurnSeconds each time) with a synthetic status ping before
+// the guard hard-stops it. 0 restores the original hard-stop behaviour.
+const DEFAULT_WALL_CLOCK_CHECKPOINTS = 3;
 // Max silence (no streamed tokens/events) before a single request is treated
 // as stalled. A model that keeps producing output — even slowly, like Kimi —
 // resets this on every event and is never aborted for being slow. 0 disables
@@ -312,6 +316,10 @@ function applyIterationSettings(provider, options) {
   provider.maxTurnSeconds = positiveNumber(
     options.maxTurnSeconds ?? process.env.OPENAGI_MAX_TURN_SECONDS,
     DEFAULT_MAX_TURN_SECONDS
+  );
+  provider.wallClockCheckpoints = nonNegativeInteger(
+    options.wallClockCheckpoints ?? process.env.OPENAGI_WALL_CLOCK_CHECKPOINTS,
+    DEFAULT_WALL_CLOCK_CHECKPOINTS
   );
   provider.maxTurnUsd = optionalPositiveNumber(
     options.maxTurnUsd ?? process.env.OPENAGI_MAX_TURN_USD
@@ -663,6 +671,56 @@ function resolveTurnDeadline(provider, context, maxTurnSeconds) {
     : ownDeadline;
   try { context.__turnDeadline = deadline; } catch { /* optional inheritance */ }
   return deadline;
+}
+
+// Soft wall-clock checkpoint: extend the whole-turn deadline by another
+// maxTurnSeconds and propagate the extension to inherited context so nested
+// work observes the same deadline.
+function extendTurnDeadline(provider, context, maxTurnSeconds) {
+  const next = provider.now() + (maxTurnSeconds * 1000);
+  try { context.__turnDeadline = next; } catch { /* optional inheritance */ }
+  return next;
+}
+
+function emitWallClockCheckpoint(context, extensionsLeft) {
+  try {
+    context?.__onToolEvent?.({ phase: "wall-clock-checkpoint", extensionsLeft });
+  } catch {
+    // Progress observers are advisory and must never break a turn.
+  }
+}
+
+// The synthetic ping injected when the wall-clock guard fires but checkpoint
+// extensions remain: a status check, not a stop order. The model answers if
+// the work is done, keeps working if it is not, or says plainly that it is
+// stuck -- the turn continues autonomously either way.
+function wallClockCheckpointPrompt(extensionsLeft, maxTurnSeconds) {
+  return "[system] Wall-clock checkpoint: the turn's time budget was reached, so the deadline was extended "
+    + `by ~${Math.round(maxTurnSeconds)}s (${extensionsLeft} extension${extensionsLeft === 1 ? "" : "s"} left before a hard stop). `
+    + "Status check: if the user's request is already answered, give the final answer now. "
+    + "If work remains, keep working -- do not stop or summarise yet. "
+    + "If you are stuck or looping, say so plainly and name what is blocking you.";
+}
+
+// Returns the extended deadline after injecting the checkpoint ping, or null
+// when the checkpoint budget is exhausted (the caller then hard-stops with
+// "turn-timeout" exactly as before). Orphaned tool calls are reconciled first
+// so the next request never carries an unanswered call.
+function maybeWallClockCheckpoint(provider, context, conversation, format, state, maxTurnSeconds) {
+  if (!state || state.left <= 0) return null;
+  state.left -= 1;
+  const next = extendTurnDeadline(provider, context, maxTurnSeconds);
+  emitWallClockCheckpoint(context, state.left);
+  const prompt = wallClockCheckpointPrompt(state.left, maxTurnSeconds);
+  if (format === "openai") {
+    reconcileOrphanedToolCalls(conversation, "openai");
+    appendOpenAIContinue(conversation);
+    conversation.at(-1).content[0].text = prompt;
+  } else {
+    reconcileOrphanedToolCalls(conversation, "anthropic");
+    appendAnthropicUserText(conversation, prompt);
+  }
+  return next;
 }
 
 function claimTurnIteration(turnBudget) {
@@ -3465,7 +3523,7 @@ function forceAnswerPrompt(reason, iterations, maxIterations) {
     return `${base} The provider stayed unavailable after bounded retries; summarise completed work and give your best current answer.`;
   }
   // turn-timeout
-  return `${base} The overall time budget is nearly spent; be concise and note OPENAGI_MAX_TURN_SECONDS can be raised.`;
+  return `${base} The overall time budget is nearly spent; be concise and note OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS can be raised.`;
 }
 
 function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText }) {
@@ -3476,7 +3534,7 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
     : "No tool calls completed.";
   const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
   if (reason === "turn-timeout") {
-    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached. ${detail} Raise OPENAGI_MAX_TURN_SECONDS if this task needs more time.${prior}`;
+    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached. ${detail} Raise OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS if this task needs more time.${prior}`;
   }
   if (reason === "stalled") {
     return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model went silent (no output for the stall window) and could not be revived. ${detail} This usually means a transient provider hiccup — retry the request. OPENAGI_STALL_TIMEOUT_MS tunes how long silence is tolerated.${prior}`;
@@ -3758,7 +3816,7 @@ export class OpenAIResponsesProvider {
       }
     }
 
-    const deadline = resolveTurnDeadline(this, context, maxTurnSeconds);
+    let deadline = resolveTurnDeadline(this, context, maxTurnSeconds);
     const turnBudget = resolveTurnBudget(context, this.maxTurnUsd, maxIterations);
     let response;
     let iterations = 0;
@@ -3767,6 +3825,7 @@ export class OpenAIResponsesProvider {
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
+    const wallClockCheckpointState = { left: this.wallClockCheckpoints };
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -3774,6 +3833,11 @@ export class OpenAIResponsesProvider {
         break;
       }
       if (this.now() >= deadline) {
+        const extended = maybeWallClockCheckpoint(this, context, conversationInput, "openai", wallClockCheckpointState, maxTurnSeconds);
+        if (extended !== null) {
+          deadline = extended;
+          continue;
+        }
         stopReason = "turn-timeout";
         break;
       }
@@ -3939,6 +4003,11 @@ export class OpenAIResponsesProvider {
         } else if (!deadlineExpired(this, deadline, requestError)) {
           throw requestError;
         } else {
+          const extended = maybeWallClockCheckpoint(this, context, conversationInput, "openai", wallClockCheckpointState, maxTurnSeconds);
+          if (extended !== null) {
+            deadline = extended;
+            continue;
+          }
           stopReason = "turn-timeout";
           break;
         }
@@ -4074,6 +4143,11 @@ export class OpenAIResponsesProvider {
               break iterationLoop;
             }
             if (!deadlineExpired(this, deadline, error)) throw error;
+            const extended = maybeWallClockCheckpoint(this, context, conversationInput, "openai", wallClockCheckpointState, maxTurnSeconds);
+            if (extended !== null) {
+              deadline = extended;
+              continue iterationLoop;
+            }
             stopReason = "turn-timeout";
             break iterationLoop;
           }
@@ -4091,6 +4165,11 @@ export class OpenAIResponsesProvider {
           } catch (error) {
             if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
             if (!deadlineExpired(this, deadline, error)) throw error;
+            const extended = maybeWallClockCheckpoint(this, context, conversationInput, "openai", wallClockCheckpointState, maxTurnSeconds);
+            if (extended !== null) {
+              deadline = extended;
+              continue iterationLoop;
+            }
             stopReason = "turn-timeout";
             break iterationLoop;
           }
@@ -4643,7 +4722,7 @@ export class AnthropicProvider {
 
     const toolCalls = [];
     const completedToolCallIds = new Map();
-    const deadline = resolveTurnDeadline(this, context, maxTurnSeconds);
+    let deadline = resolveTurnDeadline(this, context, maxTurnSeconds);
     const turnBudget = resolveTurnBudget(context, this.maxTurnUsd, maxIterations);
     let response;
     let iterations = 0;
@@ -4652,6 +4731,7 @@ export class AnthropicProvider {
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
+    const wallClockCheckpointState = { left: this.wallClockCheckpoints };
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -4659,6 +4739,11 @@ export class AnthropicProvider {
         break;
       }
       if (this.now() >= deadline) {
+        const extended = maybeWallClockCheckpoint(this, context, convo, "anthropic", wallClockCheckpointState, maxTurnSeconds);
+        if (extended !== null) {
+          deadline = extended;
+          continue;
+        }
         stopReason = "turn-timeout";
         break;
       }
@@ -4733,6 +4818,11 @@ export class AnthropicProvider {
         if (requestTimedOut(error)) { stopReason = error instanceof ModelStallError ? "stalled" : "request-timeout"; break; }
         if (providerUnavailable(error)) { stopReason = "provider-error"; break; }
         if (!deadlineExpired(this, deadline, error)) throw error;
+        const extended = maybeWallClockCheckpoint(this, context, convo, "anthropic", wallClockCheckpointState, maxTurnSeconds);
+        if (extended !== null) {
+          deadline = extended;
+          continue;
+        }
         stopReason = "turn-timeout";
         break;
       }
@@ -4842,6 +4932,11 @@ export class AnthropicProvider {
               break iterationLoop;
             }
             if (!deadlineExpired(this, deadline, error)) throw error;
+            const extended = maybeWallClockCheckpoint(this, context, convo, "anthropic", wallClockCheckpointState, maxTurnSeconds);
+            if (extended !== null) {
+              deadline = extended;
+              continue iterationLoop;
+            }
             stopReason = "turn-timeout";
             break iterationLoop;
           }
@@ -4859,6 +4954,11 @@ export class AnthropicProvider {
           } catch (error) {
             if (requestTimedOut(error)) { stopReason = "request-timeout"; break iterationLoop; }
             if (!deadlineExpired(this, deadline, error)) throw error;
+            const extended = maybeWallClockCheckpoint(this, context, convo, "anthropic", wallClockCheckpointState, maxTurnSeconds);
+            if (extended !== null) {
+              deadline = extended;
+              continue iterationLoop;
+            }
             stopReason = "turn-timeout";
             break iterationLoop;
           }
@@ -5346,6 +5446,7 @@ Tools available to you (call them when useful):
 - kanban_block(taskId, blockedBy?, reason?) / kanban_unblock(taskId, blockerId?) - control blocking state
 - kanban_comment(taskId, body) - add an identity-attributed task comment
 - kanban_heartbeat(taskId, runId?, state?, assignee?, detail?) - claim work and update or append run attempts
+- kanban_move(taskId, status, reason?) - move work between columns: start it ('in-progress'), park a human-postponed task ('on-hold'), send it for checking ('review'), or return it to 'backlog'; finishing uses kanban_complete and blocking uses kanban_block
 - kanban_link(parentId, childId) - make a child depend on a parent task
 - job_start(kind, tool?/arguments? | goal?/context?/role?, resourceLocks?) - start one bounded durable direct-tool or subagent job; mutating work must declare disjoint locks
 - job_status(jobId) / job_wait(jobId, timeoutMs?) - inspect or briefly wait for durable background work

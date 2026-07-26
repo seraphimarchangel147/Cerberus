@@ -18,6 +18,11 @@ export class DirectionalAdaptiveScrutiny {
       watch: 0.28,
       ...(options.thresholds ?? {})
     };
+    // Cautious-fallback hedge bar: uncertainty at or above this in the
+    // ask..act band returns 'ask'; below it the cautious judge defers to the
+    // signal default. Tunable per deployment.
+    this.askUncertaintyThreshold =
+      typeof options.askUncertaintyThreshold === "number" ? options.askUncertaintyThreshold : 0.5;
   }
 
   evaluate({ signal, workflow, memories = [], context = {}, overrides = {} }) {
@@ -124,9 +129,16 @@ export class DirectionalAdaptiveScrutiny {
       // skipped so the override cannot be bypassed by an aggressive style
       // or a signal-supplied defaultAction.
       if (actThresholdOverride !== null) return "ask";
-      // Style-differentiated fallback when score is between ask and act:
-      // cautious hedges ('ask'), aggressive presses ahead ('act'), pragmatic uses signal default.
-      if (this.style === "cautious") return "ask";
+      // Style-differentiated fallback when score is between ask and act.
+      if (this.style === "cautious") {
+        // Cautious hedges to 'ask' only when the signal is genuinely
+        // ambiguous or evidence-poor. On clearly-specified, low-uncertainty
+        // work it defers to the signal default instead of dissenting by
+        // reflex — the hedge exists for ambiguity, not as a standing veto.
+        const hedgeUncertainty = this.uncertainty(signal, memories ?? []);
+        if (hedgeUncertainty >= this.askUncertaintyThreshold) return "ask";
+        return signal.defaultAction ?? "act";
+      }
       if (this.style === "aggressive") return "act";
       return signal.defaultAction ?? "act";
     }

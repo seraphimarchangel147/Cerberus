@@ -149,6 +149,13 @@ test("an interrupted OpenAI tool batch reaches a real forced answer", async () =
     maxIterations: 3,
     maxTurnSeconds: 1,
     forceAnswerMs: 100,
+    // These two tests pin the LEGACY hard-stop salvage contract: when the
+    // wall-clock guard fires mid tool-batch, completed results are preserved,
+    // the unfinished call is reconciled with an abort marker, and the turn ends
+    // as "turn-timeout" with a forced answer. Soft checkpoints (default 3)
+    // deliberately extend past that deadline instead, so the salvage path is
+    // unreachable unless the checkpoint budget is pinned off here.
+    wallClockCheckpoints: 0,
     now: () => now
   });
   provider.postResponses = async (body) => {
@@ -196,6 +203,9 @@ test("an interrupted Anthropic tool batch preserves completed results before sal
     maxTurnSeconds: 1,
     forceAnswerMs: 100,
     stallTimeoutMs: 0,
+    // See the OpenAI counterpart above: pinned to the legacy hard-stop path so
+    // the mid-batch salvage contract stays covered under soft checkpoints.
+    wallClockCheckpoints: 0,
     now: () => now
   });
   provider.postMessages = async (body) => {

@@ -21,13 +21,27 @@ import { resolveDataDir } from "./data-dir.js";
 import { readOrCreateIdentity } from "./node-registry.js";
 import { createId, nowIso } from "./utils.js";
 
+// Column order is the board's left-to-right reading order AND the sort order
+// used by boardView(). "on-hold" sits after "blocked" because both are paused
+// states, but they mean different things and must not be conflated:
+//   blocked  — cannot proceed; something else must finish first (has blockers)
+//   on-hold  — could proceed, but deliberately parked by a human decision
+// Keeping them separate is what lets the sweep auto-resume blocked work when
+// its blocker clears while never touching something a human parked on purpose.
 export const KANBAN_COLUMNS = [
   "backlog",
   "in-progress",
   "blocked",
+  "on-hold",
   "review",
   "done"
 ];
+
+// Terminal states never re-enter the working set. Completed work is moved out
+// of the active board into the Completed section rather than deleted, so the
+// history stays queryable.
+export const KANBAN_TERMINAL_STATUSES = new Set(["done"]);
+
 
 const RUN_STATES = new Set(["running", "heartbeat", "review", "succeeded", "failed"]);
 const LINK_RELATIONS = new Set(["related", "blocked_by"]);
@@ -285,7 +299,8 @@ export class KanbanStore {
           WHEN 'blocked' THEN 1
           WHEN 'review' THEN 2
           WHEN 'backlog' THEN 3
-          ELSE 4
+          WHEN 'on-hold' THEN 4
+          ELSE 5
         END,
         updated_at DESC,
         created_at ASC
@@ -304,11 +319,114 @@ export class KanbanStore {
       this.listBoards(),
       this.listTasks(options)
     ]);
+    // Completed work is surfaced separately from the live working set so an
+    // agent asking "what is on my plate" does not have to filter finished
+    // tasks out of every column, while `completed` keeps the history one field
+    // away instead of behind a second query.
+    //
+    // The partition is NOT applied when the caller filtered by status: asking
+    // for `status: "done"` and receiving an empty `tasks` array is a silent
+    // lie, and it broke the HTTP route and the CLI client. An explicit status
+    // filter means the caller already said which slice it wants, so `tasks`
+    // must honour that request verbatim.
+    // Mirrors listTasks()'s own truthiness check so the two can never disagree
+    // about whether a status filter was supplied.
+    const partition = !options.status;
+    const active = [];
+    const completed = [];
+    for (const task of tasks) {
+      const terminal = KANBAN_TERMINAL_STATUSES.has(task.status);
+      if (terminal) completed.push(task);
+      if (!partition || !terminal) active.push(task);
+    }
+    const counts = {};
+    for (const column of KANBAN_COLUMNS) counts[column] = 0;
+    for (const task of tasks) {
+      if (counts[task.status] !== undefined) counts[task.status] += 1;
+    }
     return {
+      // `columns` stays the FULL board order. It is a published contract — the
+      // HTTP /kanban route, the CLI client, the dashboard renderer and the
+      // durable snapshot all read it, and silently dropping a column from it
+      // made "the set of statuses that exist" disagree with the set the store
+      // will actually accept. The active/terminal split is expressed by the
+      // separate `activeColumns` field instead, so new callers can render a
+      // working board without old callers losing the vocabulary.
       columns: [...KANBAN_COLUMNS],
+      allColumns: [...KANBAN_COLUMNS],
+      activeColumns: KANBAN_COLUMNS.filter((c) => !KANBAN_TERMINAL_STATUSES.has(c)),
       boards,
-      tasks
+      counts,
+      // `tasks` stays the ACTIVE set so every existing caller that renders
+      // "the board" silently stops showing finished work in the columns.
+      tasks: active,
+      completed
     };
+  }
+
+  // Explicit column move. The specialised verbs (complete/block/unblock) carry
+  // extra semantics — handoffs, blocker checks, cascade — and remain the right
+  // call for those transitions. This exists for the ones that had no verb at
+  // all: parking work on hold, pulling something back to backlog, or sending
+  // it to review. Without it an agent could enter `blocked` but never `on-hold`
+  // and could never walk a task backwards, so boards drifted out of date.
+  async moveTask(id, status, context = {}, options = {}) {
+    await this._requireReady();
+    const taskId = normalizeTaskId(id);
+    const nextStatus = normalizeStatus(status);
+    const reason = optionalText(options.reason, "Kanban move reason", 2000);
+    let previousStatus;
+    let task;
+
+    if (KANBAN_TERMINAL_STATUSES.has(nextStatus)) {
+      // Completion writes a structured handoff and enforces the blocker gate.
+      // Routing around that via a generic move would silently skip both.
+      throw new Error("Use kanban_complete to finish a task; 'done' is not a plain move.");
+    }
+    // `blocked` means "has unresolved blockers" and is owned by block/unblock
+    // so the status and the blocker rows can never disagree.
+    if (nextStatus === "blocked") {
+      throw new Error("Use kanban_block to block a task so the reason and blockers stay consistent.");
+    }
+
+    this._transaction(() => {
+      const current = this._requireTaskRow(taskId);
+      if (current.status === "done") {
+        throw new Error("A completed Kanban task cannot be moved; create a follow-up task instead.");
+      }
+      previousStatus = current.status;
+      const remaining = this._blockedBy(taskId);
+      if (remaining.length > 0) {
+        throw new Error(
+          `Task still has ${remaining.length} unresolved blocker(s); use kanban_unblock first.`
+        );
+      }
+      const at = nowIso();
+      this.db.prepare(`
+        UPDATE tasks
+        SET status = ?, block_reason = NULL, updated_at = ?
+        WHERE id = ?
+      `).run(nextStatus, at, taskId);
+      // The move itself is the audit trail — an operator reading the task
+      // later can see who parked it and why without diffing timestamps.
+      this._insertComment(
+        taskId,
+        reason
+          ? `moved ${previousStatus} → ${nextStatus}: ${reason}`
+          : `moved ${previousStatus} → ${nextStatus}`,
+        context.worker ?? context.assignee ?? "system",
+        at
+      );
+      task = this._taskDetail(taskId);
+    });
+
+    this._afterMutation({
+      op: "move",
+      task,
+      previousStatus,
+      context
+    });
+    return task;
   }
 
   async getTask(id) {

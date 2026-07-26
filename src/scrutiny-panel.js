@@ -8,7 +8,12 @@ const JUDGE_CONFIGS = {
   cautious: {
     style: "cautious",
     weights: { environment: 0.18, company: 0.22, evidence: 0.32, memory: 0.13, uncertainty: 0.15 },
-    thresholds: { act: 0.78, ask: 0.40, propagate: 0.78, watch: 0.30 }
+    thresholds: { act: 0.78, ask: 0.40, propagate: 0.78, watch: 0.30 },
+    // Raise the hedge bar: cautious was dissenting 'ask' on nearly every
+    // explicit, sanctioned work order because citation-free chat signals
+    // land at ~0.5 uncertainty. 0.6 keeps the hedge for genuinely murky
+    // signals without making it a standing veto on clear instructions.
+    askUncertaintyThreshold: 0.6
   },
   pragmatic: {
     style: "pragmatic",

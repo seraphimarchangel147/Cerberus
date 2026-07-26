@@ -11,6 +11,7 @@ const KANBAN_TOOL_NAMES = [
   "kanban_show",
   "kanban_list",
   "kanban_create",
+  "kanban_move",
   "kanban_complete",
   "kanban_block",
   "kanban_unblock",

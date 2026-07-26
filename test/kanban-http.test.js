@@ -96,7 +96,7 @@ test("Kanban tools, HTTP routes, CLI client, and dashboard form one safe surface
     assert.equal(listed.response.status, 200);
     assert.deepEqual(
       listed.json.columns,
-      ["backlog", "in-progress", "blocked", "review", "done"]
+      ["backlog", "in-progress", "blocked", "on-hold", "review", "done"]
     );
     assert.equal(listed.json.tasks.length, 1);
     assert.equal(listed.json.tasks[0].id, toolTask.id);
