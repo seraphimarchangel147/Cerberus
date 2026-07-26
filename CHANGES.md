@@ -2,6 +2,25 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-26 — GitHub access for Azazel: gh CLI now on the daemon PATH (Seraphim)
+
+Azazel had `git` but **no `gh`**. The systemd user unit inherited the bare default
+`PATH=/usr/local/sbin:...:/snap/bin`, which omits `/home/linuxbrew/.linuxbrew/bin` — where `gh`
+(and brew's `node`) live. So every `gh` invocation from his shell tool died with
+`command not found`, and he could push over HTTPS but could not open PRs, read issues, or touch
+the GitHub API.
+
+- **Fix (env only, no code):** added an explicit
+  `Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:<defaults>`
+  to `~/.config/systemd/user/openagi-azazel.service`, then `daemon-reload` + restart.
+- **No token was copied or duplicated.** `gh` reads `~/.config/gh/hosts.yml` and git reads
+  `~/.git-credentials` — both already present in the shared home the daemon runs as. Azazel
+  inherits the same `seraphimarchangel147` credential; there is exactly one token on the box.
+- **Verified from the daemon's own environment** (`/proc/<mainpid>/environ` replayed into a
+  subprocess): `gh api user` → `seraphimarchangel147`, `repos/.../Cerberus .permissions.push` →
+  `true`, `git ls-remote origin` → resolves. Daemon `active`, `GET /` → 200, authed
+  `GET /pending-actions` → 200.
+
 ## 2026-07-25 — Provider OAuth: subscription sign-in for Anthropic + OpenAI (Azazel)
 
 Closes the last gap in the Models & Providers lane: real OAuth login flows, requested by the
