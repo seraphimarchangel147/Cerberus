@@ -13,6 +13,10 @@ import {
   QaBaselineStore,
   QaRunStore
 } from "./qa-store.js";
+import {
+  normalizeExplorationPolicy,
+  UiStateExplorer
+} from "./ui-state-explorer.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const RUN_ID_RE = /^qa_[a-f0-9]{16}$/;
@@ -74,6 +78,10 @@ export class WebQaController {
     this.artifacts = options.artifacts ?? new QaArtifactStore({
       dataDir: options.dataDir
     });
+    this.explorer = options.explorer ?? new UiStateExplorer({
+      browser: this.browser,
+      artifacts: this.artifacts
+    });
     this.baselines = options.baselines ?? new QaBaselineStore({
       dir: path.join(this.store.dir, "baselines")
     });
@@ -97,19 +105,21 @@ export class WebQaController {
           loaded.digest
         )
       : requiredSha256(args.sourceRevision, "QA source revision");
-    const mode = args.mode === "impacted" ? "impacted" : "full";
+    const mode = normalizeQaMode(args.mode);
     const selectedRoutes = selectRoutes(
       loaded.manifest.routes,
       args.routeIds,
       mode
     );
-    const totalResults = loaded.manifest.viewports.length
-      * selectedRoutes.reduce(
-        (total, route) => total + 1 + route.controls.filter(
-          (control) => control.action !== "inspect"
-        ).length,
-        0
-      );
+    const totalResults = mode === "explore"
+      ? loaded.manifest.viewports.length * selectedRoutes.length * 2
+      : loaded.manifest.viewports.length
+        * selectedRoutes.reduce(
+          (total, route) => total + 1 + route.controls.filter(
+            (control) => control.action !== "inspect"
+          ).length,
+          0
+        );
     let run = this.store.create({
       projectId: scope.projectId,
       sessionId: scope.sessionId,
@@ -121,7 +131,8 @@ export class WebQaController {
         digest: loaded.digest,
         title: loaded.manifest.title,
         routeIds: selectedRoutes.map((route) => route.id),
-        viewports: loaded.manifest.viewports
+        viewports: loaded.manifest.viewports,
+        exploration: loaded.manifest.exploration
       },
       mode
     });
@@ -162,6 +173,43 @@ export class WebQaController {
           results.push(baseline);
           for (const ref of baseline.artifacts) artifactRefs.add(ref);
           this._emitProgress(run, baseline, results.length, totalResults);
+
+          if (mode === "explore") {
+            const exploration = await this.explorer.explore({
+              run,
+              qaContext: qaBrowserContext(scope, run.id),
+              route,
+              viewport,
+              url: routeUrl(loaded.manifest.baseUrl, route.path),
+              policy: loaded.manifest.exploration,
+              fixture: loaded.manifest.fixture,
+              rootScreenshotRef: baseline.screenshotRef,
+              abortSignal: scope.abortSignal
+            });
+            results.push(exploration);
+            for (const ref of exploration.artifacts) artifactRefs.add(ref);
+            this._emitProgress(
+              run,
+              exploration,
+              results.length,
+              totalResults
+            );
+            if (scope.abortSignal?.aborted) {
+              run = this.store.update(run.id, run.revision, {
+                state: "cancelled",
+                results,
+                artifacts: [...artifactRefs],
+                summary: summarizeResults(results),
+                error: {
+                  code: "qa_cancelled",
+                  message: "QA was cancelled during state exploration."
+                }
+              });
+              this._emit(run);
+              return qaRunResult(run);
+            }
+            continue;
+          }
 
           for (const control of route.controls) {
             if (control.action === "inspect") continue;
@@ -725,7 +773,8 @@ export class WebQaController {
         routeId: result.routeId,
         controlId: result.controlId ?? null,
         viewport: result.viewport,
-        status: result.status
+        status: result.status,
+        exploration: result.exploration ?? null
       },
       updatedAt: new Date().toISOString()
     };
@@ -749,7 +798,7 @@ export function registerWebQaTools(registry, runtime) {
 
   register({
     name: "qa_run",
-    description: "Run a project QA manifest in an isolated browser. Inventories every interactive control, executes declared fixture-safe actions, checks expected state, accessibility, console/network failures, loading states, and screenshots, and retains traces for failures.",
+    description: "Run a project QA manifest in an isolated browser. Full and impacted modes prove declared controls; explore mode performs bounded breadth-first semantic state exploration. Every mode checks deterministic expectations, accessibility, keyboard use, diagnostics, loading state, and screenshots, with replay and trace evidence for failures.",
     sideEffects: true,
     needsConfirmation: true,
     parameters: {
@@ -761,7 +810,7 @@ export function registerWebQaTools(registry, runtime) {
         },
         mode: {
           type: "string",
-          enum: ["full", "impacted"]
+          enum: ["full", "impacted", "explore"]
         },
         routeIds: {
           type: "array",
@@ -885,6 +934,9 @@ function normalizeManifest(value) {
   const baseUrl = boundedText(value.baseUrl, "manifest baseUrl", 4_096);
   const sourceFiles = normalizeSourceFiles(value.sourceFiles);
   const fixture = value.fixture === true;
+  const exploration = normalizeExplorationPolicy(value.exploration, {
+    fixture
+  });
   const viewports = normalizeViewports(value.viewports);
   if (
     !Array.isArray(value.routes)
@@ -926,6 +978,7 @@ function normalizeManifest(value) {
     title,
     baseUrl,
     fixture,
+    exploration,
     sourceFiles,
     viewports,
     routes
@@ -1468,6 +1521,9 @@ function diagnosticMessage(event) {
 }
 
 function summarizeResults(results) {
+  const explorations = results.filter(
+    (result) => result.kind === "exploration"
+  );
   const summary = {
     routes: results.filter((result) => result.kind === "route").length,
     controls: results.filter((result) => result.kind === "control").length,
@@ -1499,6 +1555,25 @@ function summarizeResults(results) {
         + (result.keyboard?.focusVisibleFailures ?? 0)
         + (result.keyboard?.trapped ? 1 : 0),
       0
+    ),
+    exploredStates: explorations.reduce(
+      (sum, result) => sum + (result.exploration?.states ?? 0),
+      0
+    ),
+    exploredTransitions: explorations.reduce(
+      (sum, result) => sum + (result.exploration?.transitions ?? 0),
+      0
+    ),
+    explorationActions: explorations.reduce(
+      (sum, result) => sum + (result.exploration?.actions ?? 0),
+      0
+    ),
+    failedTransitions: explorations.reduce(
+      (sum, result) => sum + (result.exploration?.failedTransitions ?? 0),
+      0
+    ),
+    explorationTruncated: explorations.some(
+      (result) => result.exploration?.truncated === true
     )
   };
   return summary;
@@ -1650,15 +1725,26 @@ function baselineEligibleRun(run) {
 
 function selectRoutes(routes, value, mode) {
   if (mode === "full") return routes;
+  if (mode === "explore" && value == null) return routes;
   if (!Array.isArray(value) || value.length < 1) {
-    throw new TypeError("Impacted QA mode requires routeIds.");
+    throw new TypeError(`${mode === "explore" ? "Explore" : "Impacted"} QA mode requires routeIds.`);
   }
   const ids = new Set(value.map((id) => requiredId(id, "route id")));
   const selected = routes.filter((route) => ids.has(route.id));
   if (selected.length !== ids.size) {
-    throw new TypeError("Impacted QA routeIds include an unknown route.");
+    throw new TypeError(
+      `${mode === "explore" ? "Explore" : "Impacted"} QA routeIds include an unknown route.`
+    );
   }
   return selected;
+}
+
+function normalizeQaMode(value) {
+  const mode = String(value ?? "full").trim().toLowerCase();
+  if (!["full", "impacted", "explore"].includes(mode)) {
+    throw new TypeError("QA mode must be full, impacted, or explore.");
+  }
+  return mode;
 }
 
 function routeUrl(baseUrl, routePath) {
@@ -1800,6 +1886,7 @@ export const WEB_QA_LIMITS = Object.freeze({
 
 export const WEB_QA_INTERNALS = Object.freeze({
   normalizeManifest,
+  normalizeQaMode,
   evaluateControlCoverage,
   interactiveInventory,
   workspaceSourceRevision

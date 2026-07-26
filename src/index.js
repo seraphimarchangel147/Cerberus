@@ -298,6 +298,10 @@ export {
   WEB_QA_LIMITS
 } from "./web-qa.js";
 export {
+  normalizeExplorationPolicy,
+  UiStateExplorer
+} from "./ui-state-explorer.js";
+export {
   QaArtifactStore,
   QaBaselineStore,
   QaRunStore,

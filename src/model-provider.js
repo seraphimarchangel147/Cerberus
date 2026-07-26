@@ -5557,7 +5557,7 @@ Tools available to you (call them when useful):
 - computer_act(action, observationRevision, expectedGeneration, reasoning, ...) - perform one preconditioned semantic-first action and collect automatic post-action evidence; visual coordinates require exact fresh screenshot evidence
 - computer_screenshot(fullPage?, reasoning?) - capture sensitive pixels with a SHA-256 evidence receipt; a full-page capture cannot authorize coordinate actions
 - end_computer_use_session(reason?, aborted?) - close the current project/session control session
-- qa_run(manifestPath?, mode?, routeIds?, sourceRevision?) - execute a confirmed project QA manifest with strict control coverage, fixture-safe actions, accessibility, keyboard navigation, console/network diagnostics, human-approved visual comparisons, screenshots, and failure traces
+- qa_run(manifestPath?, mode?, routeIds?, sourceRevision?) - execute a confirmed project QA manifest with strict control coverage, fixture-safe actions, accessibility, keyboard navigation, console/network diagnostics, human-approved visual comparisons, screenshots, and failure traces; use mode='explore' for bounded breadth-first semantic state exploration with deterministic oracles and minimized replay evidence
 - qa_status(runId) / qa_artifact(runId, ref, includeData?) - inspect revision-bound QA evidence or retrieve a bounded project-owned screenshot, visual diff, or diagnostic artifact
 - qa_approve_baseline(runId, resultIds?) - request exact manual human approval of screenshots from an otherwise-passing run as durable visual baselines; the agent and auto-approve cannot approve them
 - artifact_create(kind, title, content) - create a versioned Markdown or data artifact in the current project's Canvas

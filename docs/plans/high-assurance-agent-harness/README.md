@@ -80,6 +80,8 @@ discovery to the Phase 1 evidence kernel.
 
 ### F1 - Unified semantic-first computer use
 
+Status: complete.
+
 One project/session-scoped control plane serves isolated browser control and an
 optional remote desktop node.
 
@@ -101,6 +103,8 @@ Required properties:
 
 ### F2 - Bounded UI state-space explorer
 
+Status: complete.
+
 Extend Web QA with deterministic state-graph exploration rather than an
 unbounded screenshot-click loop.
 
@@ -108,8 +112,9 @@ Required properties:
 
 - Normalize route, DOM generation, visible control state, URL, focus, and
   application signals into a bounded state identity.
-- Explore with configurable maximum states, depth, actions, wall time, and
-  concurrency.
+- Explore with configurable maximum states, depth, actions, and wall time.
+  Replay is deliberately single-lane until independently isolated fixture
+  contexts can be proven not to race shared application state.
 - Prefer fixture-safe semantic actions and require explicit exemptions for
   destructive, outbound, credential, payment, or publish controls.
 - Capture transition receipts with source state, action, target state, and
@@ -121,7 +126,33 @@ Required properties:
   iteration.
 - Minimize a failing path and emit a replayable trace.
 
+Delivered:
+
+- `qa_run` accepts `mode='explore'` and runs the ordinary route proof before
+  bounded breadth-first exploration.
+- Each branch starts from a fresh page and replays the shortest known semantic
+  control path, so sibling actions cannot accidentally inherit browser state.
+- Randomly salted state identities include URL target, page readiness, busy
+  state, body signal, and accessible control state without persisting those
+  raw values.
+- The stored graph contains only opaque state IDs, control IDs, action kinds,
+  structural counts, transition status, and owned evidence refs. Raw page
+  text, control values, and typed input are absent.
+- Deterministic postconditions, route assertions, diagnostics, accessibility,
+  keyboard navigation, loading state, disabled controls, dead controls, and
+  action discrimination are checked on transitions.
+- Destructive controls are excluded by default and can run only when both the
+  manifest declares a fixture and its exploration policy explicitly opts in.
+- Material states receive screenshots; failed transitions receive screenshots,
+  traces, failure codes, and a replay artifact using the shortest known BFS
+  path.
+- Exhausted state, depth, action, or wall-time budgets fail closed as
+  incomplete evidence. Run Inspector exposes only structural progress and
+  owned artifact refs.
+
 ### F3 - Intent and differential oracle
+
+Status: next.
 
 Compare observed behavior against immutable acceptance criteria and, when
 available, a human-approved visual baseline or reference revision.

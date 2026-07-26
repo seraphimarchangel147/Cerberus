@@ -125,4 +125,23 @@ test("real Playwright QA clicks controls, audits accessibility, and captures scr
   assert.ok(result.run.results.every(
     (entry) => /^qaart_[a-f0-9]{64}$/.test(entry.screenshotRef)
   ));
+
+  const exploration = await controller.run({ mode: "explore" }, {
+    __projectId: "alpha",
+    sessionId: "real-browser-session",
+    __projectWorkspaceDir: workspaceRoot,
+    approved: true
+  });
+  assert.equal(exploration.ok, true, JSON.stringify({
+    error: exploration.run.error,
+    results: exploration.run.results
+  }));
+  assert.equal(exploration.run.summary.exploredStates, 4);
+  assert.equal(exploration.run.summary.exploredTransitions, 4);
+  assert.equal(exploration.run.summary.failedTransitions, 0);
+  assert.equal(exploration.run.summary.explorationTruncated, false);
+  assert.ok(exploration.run.results.some(
+    (entry) => entry.kind === "exploration"
+      && /^qaart_[a-f0-9]{64}$/.test(entry.exploration.graphRef)
+  ));
 });

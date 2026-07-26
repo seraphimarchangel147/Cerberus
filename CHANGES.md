@@ -2,6 +2,20 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Bounded semantic UI state exploration (Codex)
+
+- Extended `qa_run` with an `explore` mode that first proves the route and then builds a bounded breadth-first semantic state graph from fresh-page shortest-path replays.
+- Added configurable state, depth, action, and wall-time budgets; exhausted budgets fail closed as incomplete evidence, cancellation remains explicit, and exploration never presents partial coverage as a pass.
+- Added randomly salted state identities over page and accessible-control signals while persisting only opaque state IDs, control IDs, action kinds, structural counts, status, and owned evidence refs; graph and replay artifacts omit raw page text, input values, and typed content.
+- Added deterministic transition oracles for declared postconditions, route intent, diagnostics, accessibility, keyboard navigation, readiness, busy state, disabled controls, dead controls, unexpected navigation, and expectations that cannot discriminate an action.
+- Excluded destructive controls by default and required both a declared fixture and an explicit exploration opt-in before executing them.
+- Captured screenshots only for material states and failures, retained traces only for failures, and emitted replay artifacts with the shortest known BFS path and exact failure codes.
+- Extended durable QA summaries, public exports, tool schema, static model guidance, and content-free Run Inspector progress with explored states, transitions, actions, failed transitions, truncation, depth, and graph evidence.
+- Added fake-browser and real Chromium coverage for successful graphs, raw-content omission, inert controls, minimized replay, trace retention, destructive-action gating, budget exhaustion, non-discriminating expectations, prompt visibility, and inspector redaction.
+- Stabilized the slow-active OpenAI stream regression under full-suite load while preserving its proof that repeated stream activity resets a shorter stall watchdog.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1731/1732 tests with zero failures and one intentional platform skip.
+STATE SPACE QA COMPLETE
+
 ## 2026-07-25 - Unified governed computer use (Codex)
 
 - Added one project/session-scoped computer-use controller over the semantic browser and optional remote desktop node, with approved goals, explicit surfaces, hard mutation budgets, exact observation revisions, generation preconditions, and automatic post-action observations.

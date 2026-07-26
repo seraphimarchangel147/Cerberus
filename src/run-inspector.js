@@ -44,6 +44,7 @@ const STRING_METADATA = new Map([
   ["resultId", 256],
   ["rollbackState", 32],
   ["routeId", 64],
+  ["explorationTruncationReason", 32],
   ["sourceRevision", 64],
   ["stopReason", 80],
   ["toolStrategy", 80],
@@ -61,11 +62,16 @@ const INTEGER_METADATA = new Set([
   "durationMs",
   "editCount",
   "evidenceNudges",
+  "explorationActions",
+  "exploredStates",
+  "exploredTransitions",
   "failed",
+  "failedTransitions",
   "inputTokens",
   "iteration",
   "keyboardFailures",
   "maxAttempts",
+  "maxExplorationDepth",
   "maxIterations",
   "outputTokens",
   "passed",
@@ -83,6 +89,7 @@ const NUMBER_METADATA = new Set(["scrutinyScore"]);
 const BOOLEAN_METADATA = new Set([
   "changed",
   "dispatched",
+  "explorationTruncated",
   "ok",
   "pending"
 ]);
@@ -439,6 +446,7 @@ export class RunInspector {
         completed: event.completed,
         total: event.total,
         resultId: event.result?.id,
+        evidenceKind: event.result?.kind,
         routeId: event.result?.routeId,
         controlId: event.result?.controlId,
         viewportId: event.result?.viewport?.id,
@@ -450,6 +458,21 @@ export class RunInspector {
         warnings: summary.warnings,
         visualChanges: summary.visualChanges,
         keyboardFailures: summary.keyboardFailures,
+        exploredStates: event.result?.exploration?.states
+          ?? summary.exploredStates,
+        exploredTransitions: event.result?.exploration?.transitions
+          ?? summary.exploredTransitions,
+        explorationActions: event.result?.exploration?.actions
+          ?? summary.explorationActions,
+        failedTransitions: event.result?.exploration?.failedTransitions
+          ?? summary.failedTransitions,
+        maxExplorationDepth: event.result?.exploration?.maxDepthReached,
+        explorationTruncated: event.result?.exploration?.truncated
+          ?? summary.explorationTruncated,
+        explorationTruncationReason:
+          event.result?.exploration?.truncationReason,
+        artifactRefs: [event.result?.exploration?.graphRef].filter(Boolean),
+        verificationStatus: event.result?.status,
         errorCode: event.error?.code ?? null
       }
     });

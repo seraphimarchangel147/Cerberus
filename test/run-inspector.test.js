@@ -288,6 +288,60 @@ test("Run Inspector exposes content-free computer-use evidence", () => {
   assert.equal(JSON.stringify(inspected).includes("private rationale"), false);
 });
 
+test("Run Inspector exposes structural state-exploration progress only", (t) => {
+  const dir = tempDir(t, "openagi-run-inspector-exploration-");
+  const inspector = new RunInspector({ dir });
+  const canary = "private-page-content-must-not-persist";
+  const recorded = inspector.recordQa({
+    id: "qa_0123456789abcdef",
+    revision: 2,
+    state: "running",
+    projectId: "alpha",
+    sessionId: "alpha-session",
+    sourceRevision: "b".repeat(64),
+    completed: 2,
+    total: 2,
+    result: {
+      id: "editor_desktop_explore",
+      kind: "exploration",
+      routeId: "editor",
+      viewport: { id: "desktop" },
+      status: "failed",
+      bodyText: canary,
+      exploration: {
+        states: 7,
+        transitions: 11,
+        actions: 11,
+        failedTransitions: 2,
+        maxDepthReached: 3,
+        truncated: true,
+        truncationReason: "depth_budget",
+        graphRef: ARTIFACT_REF,
+        privateState: canary
+      }
+    },
+    updatedAt: "2026-01-01T00:01:00.000Z"
+  });
+
+  assert.equal(recorded.latest.evidenceKind, "exploration");
+  assert.equal(recorded.latest.exploredStates, 7);
+  assert.equal(recorded.latest.exploredTransitions, 11);
+  assert.equal(recorded.latest.explorationActions, 11);
+  assert.equal(recorded.latest.failedTransitions, 2);
+  assert.equal(recorded.latest.maxExplorationDepth, 3);
+  assert.equal(recorded.latest.explorationTruncated, true);
+  assert.equal(
+    recorded.latest.explorationTruncationReason,
+    "depth_budget"
+  );
+  assert.deepEqual(recorded.latest.artifactRefs, [ARTIFACT_REF]);
+  const persisted = fs.readFileSync(
+    path.join(dir, "events.jsonl"),
+    "utf8"
+  ) + fs.readFileSync(path.join(dir, "snapshot.json"), "utf8");
+  assert.equal(persisted.includes(canary), false);
+});
+
 test("Run Inspector journal outranks snapshots and replays a valid suffix", (t) => {
   const dir = tempDir(t, "openagi-run-inspector-replay-");
   const canary = "snapshot-content-canary";

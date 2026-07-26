@@ -747,7 +747,7 @@ function normalizeRun(value) {
     || !value.manifest
     || typeof value.manifest !== "object"
     || !SHA256_RE.test(String(value.manifest.digest ?? ""))
-    || !["full", "impacted"].includes(value.mode)
+    || !["full", "impacted", "explore"].includes(value.mode)
     || !Array.isArray(value.results)
     || value.results.length > MAX_RESULTS
     || !Array.isArray(value.artifacts)

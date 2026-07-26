@@ -18,6 +18,7 @@ import {
   WebQaController,
   WEB_QA_INTERNALS
 } from "../src/web-qa.js";
+import { normalizeExplorationPolicy } from "../src/ui-state-explorer.js";
 
 function harness(t, browser = new FakeQaBrowser()) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-web-qa-"));
@@ -68,12 +69,15 @@ class FakeQaBrowser {
   constructor({
     extraControl = false,
     diagnosticError = false,
-    accessibilityViolation = false
+    accessibilityViolation = false,
+    deadSave = false
   } = {}) {
     this.dnsLookup = async () => [];
     this.extraControl = extraControl;
     this.diagnosticError = diagnosticError;
     this.accessibilityViolation = accessibilityViolation;
+    this.deadSave = deadSave;
+    this.activations = 0;
     this.visualVariant = "";
     this.opened = false;
     this.traceActive = false;
@@ -142,7 +146,10 @@ class FakeQaBrowser {
   }
 
   async activate({ ref }) {
-    if (ref === "ref_save") this.bodyText = "Editor\nSaved";
+    this.activations += 1;
+    if (ref === "ref_save" && !this.deadSave) {
+      this.bodyText = "Editor\nSaved";
+    }
   }
 
   async input({ ref, text }) {
@@ -327,6 +334,199 @@ test("web QA proves routes, all declared controls, and screenshots", async (t) =
   );
 });
 
+test("state exploration builds a bounded semantic graph without page content", async (t) => {
+  const { context, controller } = harness(t);
+  const result = await controller.run({ mode: "explore" }, context);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.run.state, "passed");
+  assert.equal(result.run.results.length, 2);
+  assert.equal(result.run.summary.exploredStates, 4);
+  assert.equal(result.run.summary.exploredTransitions, 4);
+  assert.equal(result.run.summary.explorationActions, 4);
+  assert.equal(result.run.summary.failedTransitions, 0);
+  assert.equal(result.run.summary.explorationTruncated, false);
+
+  const exploration = result.run.results.find(
+    (entry) => entry.kind === "exploration"
+  );
+  assert.equal(exploration.status, "passed");
+  assert.equal(exploration.exploration.maxDepthReached, 2);
+  const graphArtifact = controller.artifact({
+    runId: result.run.id,
+    ref: exploration.exploration.graphRef,
+    includeData: true
+  }, context);
+  const graph = JSON.parse(graphArtifact.data);
+  assert.equal(graph.states.length, 4);
+  assert.equal(graph.transitions.length, 4);
+  assert.equal(graph.rootStateId, graph.states[0].id);
+  assert.doesNotMatch(graphArtifact.data, /Ada|Saved|Name:/);
+  assert.ok(graph.states.every((state) => (
+    state.id.startsWith("state_")
+    && Array.isArray(state.path)
+    && !Object.hasOwn(state, "bodyText")
+  )));
+});
+
+test("state exploration retains deterministic failure replay and trace evidence", async (t) => {
+  const browser = new FakeQaBrowser({ deadSave: true });
+  const { context, controller } = harness(t, browser);
+  const result = await controller.run({ mode: "explore" }, context);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.run.state, "failed");
+  const exploration = result.run.results.find(
+    (entry) => entry.kind === "exploration"
+  );
+  assert.equal(exploration.status, "failed");
+  assert.ok(exploration.exploration.failedTransitions >= 1);
+  assert.ok(exploration.failures.some(
+    (failure) => failure.code === "expected_text_missing"
+  ));
+  assert.ok(exploration.traceRef);
+  assert.ok(exploration.exploration.replayRefs.length >= 1);
+
+  const replays = exploration.exploration.replayRefs.map((ref) => {
+    const artifact = controller.artifact({
+      runId: result.run.id,
+      ref,
+      includeData: true
+    }, context);
+    return JSON.parse(artifact.data);
+  });
+  replays.sort((left, right) => left.steps.length - right.steps.length);
+  assert.equal(replays[0].method, "breadth_first_shortest_known_path");
+  assert.deepEqual(replays[0].steps, [{
+    controlId: "save_button",
+    action: "activate"
+  }]);
+  assert.ok(replays[0].failureCodes.includes("expected_text_missing"));
+});
+
+test("state exploration excludes destructive actions unless fixture policy opts in", async (t) => {
+  const browser = new FakeQaBrowser();
+  const { context, controller, workspaceRoot } = harness(t, browser);
+  const controls = [{
+    id: "save_button",
+    role: "button",
+    name: "Save",
+    action: "activate",
+    destructive: true,
+    expect: { text: ["Saved"] }
+  }, {
+    id: "name_input",
+    role: "textbox",
+    name: "Name",
+    action: "input",
+    value: "Ada",
+    expect: {
+      nodes: [{
+        role: "textbox",
+        name: "Name",
+        value: "Ada"
+      }]
+    }
+  }];
+  writeManifest(workspaceRoot, {
+    routes: [{
+      id: "editor",
+      path: "/editor",
+      assertions: { text: ["Editor"], urlPath: "/editor" },
+      controls
+    }]
+  });
+
+  const safe = await controller.run({ mode: "explore" }, context);
+  assert.equal(safe.ok, true);
+  assert.equal(browser.activations, 0);
+  assert.equal(safe.run.summary.exploredTransitions, 1);
+
+  writeManifest(workspaceRoot, {
+    exploration: { includeDestructive: true },
+    routes: [{
+      id: "editor",
+      path: "/editor",
+      assertions: { text: ["Editor"], urlPath: "/editor" },
+      controls
+    }]
+  });
+  const optedIn = await controller.run({ mode: "explore" }, context);
+  assert.equal(optedIn.ok, true);
+  assert.ok(browser.activations > 0);
+  assert.throws(
+    () => normalizeExplorationPolicy(
+      { includeDestructive: true },
+      { fixture: false }
+    ),
+    /only when fixture=true/
+  );
+});
+
+test("state exploration fails closed when a declared exploration budget is exhausted", async (t) => {
+  const { context, controller, workspaceRoot } = harness(t);
+  writeManifest(workspaceRoot, {
+    exploration: {
+      maxActions: 1,
+      maxStates: 16,
+      maxDepth: 3,
+      timeoutMs: 60_000
+    }
+  });
+  const result = await controller.run({ mode: "explore" }, context);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.run.summary.explorationTruncated, true);
+  const exploration = result.run.results.find(
+    (entry) => entry.kind === "exploration"
+  );
+  assert.equal(exploration.exploration.truncationReason, "action_budget");
+  assert.ok(exploration.failures.some(
+    (failure) => failure.code === "exploration_incomplete"
+  ));
+});
+
+test("state exploration rejects action expectations already satisfied before use", async (t) => {
+  const { context, controller, workspaceRoot } = harness(t);
+  writeManifest(workspaceRoot, {
+    routes: [{
+      id: "editor",
+      path: "/editor",
+      assertions: { text: ["Editor"], urlPath: "/editor" },
+      controls: [{
+        id: "save_button",
+        role: "button",
+        name: "Save",
+        action: "activate",
+        expect: { text: ["Editor"] }
+      }, {
+        id: "name_input",
+        role: "textbox",
+        name: "Name",
+        action: "input",
+        value: "Ada",
+        expect: {
+          nodes: [{
+            role: "textbox",
+            name: "Name",
+            value: "Ada"
+          }]
+        }
+      }]
+    }]
+  });
+  const result = await controller.run({ mode: "explore" }, context);
+
+  assert.equal(result.ok, false);
+  const exploration = result.run.results.find(
+    (entry) => entry.kind === "exploration"
+  );
+  assert.ok(exploration.failures.some(
+    (failure) => failure.code === "exploration_control_unexercised"
+      && failure.controlId === "save_button"
+  ));
+});
+
 test("unclassified controls, browser errors, and accessibility failures retain traces", async (t) => {
   const browser = new FakeQaBrowser({
     extraControl: true,
@@ -414,11 +614,16 @@ test("QA tools are gated, prompt-visible, and setup-allowlisted", () => {
   );
   assert.equal(specs[0].needsConfirmation, true);
   assert.equal(specs[0].sideEffects, true);
+  assert.deepEqual(
+    specs[0].parameters.properties.mode.enum,
+    ["full", "impacted", "explore"]
+  );
   assert.equal(specs[1].sideEffects, false);
   assert.equal(specs[3].manualApproval, true);
   assert.ok(SETUP_FIELDS.includes("OPENAGI_WEB_QA"));
   const prompt = buildDefaultInstructions({ agent: { name: "QA" } });
   assert.match(prompt, /qa_run\(manifestPath\?/);
+  assert.match(prompt, /bounded breadth-first semantic state exploration/);
   assert.match(prompt, /qa_approve_baseline\(runId/);
   assert.match(prompt, /classify every interactive control/);
 });
