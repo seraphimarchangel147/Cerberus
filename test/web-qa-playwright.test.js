@@ -32,6 +32,10 @@ function playwrightUnavailableReason(run) {
         entry?.code === "page_execution_failed"
         || entry?.code === "browser_adapter_unavailable"
         || entry?.code === "visual_comparator_unavailable"
+        // axe-core is optional too. When it is absent the browser itself works
+        // fine, so the run gets far enough to fail strict accessibility rather
+        // than to fail navigation — a different code, same root cause.
+        || entry?.code === "accessibility_unavailable"
       ) {
         if (BROWSER_UNAVAILABLE_RE.test(message)) return message;
       }
