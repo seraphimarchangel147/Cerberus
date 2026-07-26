@@ -11008,7 +11008,7 @@ switchTab(initialTab);
   });
 })();
 
-/* ─── Cerberus pixel pet — reactive dashboard companion ─────────────────
+/* ─── Cerberus pixel pet — reactive dashboard companion (v4: 4-tier evolution) ──
    A 16-bit three-headed hellhound that lives on the dashboard, follows the
    mouse, and reacts to what the harness is doing. Parts-based pixel rig
    rendered on a low-res canvas and nearest-neighbour upscaled. States mirror
@@ -11018,17 +11018,26 @@ switchTab(initialTab);
 
    Views: a FRONT-facing pose when stationary (three heads fanned, tail
    wagging) and a SIDE pose when walking/running. Animation is sampled at
-   15 fps (frame advances 4 "60fps-ticks" per drawn frame so real-time speed
-   is unchanged). Three easter-egg idles fire roughly every 5 minutes while
-   idle: nuzzle-the-pack, breath-fire, and howl.
+   15 fps. Easter-egg idles fire roughly every 5 minutes while idle.
 
-   EVOLUTION — the pup can evolve into PRIME CERBERUS, a larger 24-bit form
-   with a richer palette, chest rune, gold armor plating, horns and a heavier
-   flame mane. Evolution triggers after ~20 minutes of uptime, or randomly as
-   the pet gains XP from harness activity (thinking / working / done). The
-   evolved form has its own idle / thinking / working animations. A settings
-   panel (gear button) toggles the pet on/off and customises size, glow, and
-   auto-evolution; stage + XP persist across reloads via localStorage. */
+   EVOLUTION LADDER — four forms, each a step up in size, palette depth and
+   detail, each with its own idle / thinking / working animations and its own
+   set of easter-egg idles:
+
+     0 PUP            64x52   16-bit, 3 eggs (play / fire / howl)
+     1 PRIME CERBERUS 80x64   24-bit, chest rune + gold pauldrons + horns
+     2 ULTRA CERBERUS 96x76   lava-cracked obsidian, gold crown crest,
+                              starburst chest gem, spiked bracers, dual tails
+                              (spade + barbed), 4 gold talons, 5 eggs
+     3 OMEGA CERBERUS 112x88  polished obsidian + gold inlay, V-chevron chest
+                              + 2 diamond studs, 4-barb tail, CRT scanline
+                              aura, 5 eggs — the apex form
+
+   XP accrues from harness activity (thinking / working / done) and from the
+   specific tool-call type the harness reports. Thresholds: PUP->PRIME 100,
+   PRIME->ULTRA 300, ULTRA->OMEGA 700. A settings panel (gear button) toggles
+   the pet on/off, customises size/glow/auto-evolve, and lets you switch form
+   manually. Stage + XP persist across reloads via localStorage. */
 (function () {
   "use strict";
   if (window.__cerbPetLoaded) return;
@@ -11036,75 +11045,66 @@ switchTab(initialTab);
 
   var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  /* ── geometry: base form 64x52, prime form 80x64 ── */
-  var BW = 64, BH = 52;
-  var PW = 80, PH = 64;
+  /* ── geometry per form ── */
+  var FORMS = [
+    { key:"pup",   name:"PUP",            w:64,  h:52, xpMax:100, flame:1.00, pal:0 },
+    { key:"prime", name:"PRIME CERBERUS", w:80,  h:64, xpMax:300, flame:1.18, pal:1 },
+    { key:"ultra", name:"ULTRA CERBERUS", w:96,  h:76, xpMax:700, flame:1.40, pal:2 },
+    { key:"omega", name:"OMEGA CERBERUS", w:112, h:88, xpMax:0,   flame:1.65, pal:3 }
+  ];
   var FPS = 15, FRAME_MS = 1000 / FPS;
-  var TICKS_PER_FRAME = Math.round(60 / FPS);   // keep real-time speed
+  var TICKS_PER_FRAME = Math.round(60 / FPS);
+  var MAXW = 112, MAXH = 88;   /* biggest buffer; smaller forms centered */
 
-  var PAL = {
-    outline:  "#12101a",
-    furDeep:  "#14141c",
-    furDark:  "#222838",
-    furMid:   "#2e3a4a",
-    furLight: "#46586b",
-    rim:      "#d9a441",
-    rimHot:   "#f0c060",
-    flameCore:"#fff4d0",
-    flameYel: "#ffd24a",
-    flameOrg: "#ff8a1e",
-    flameRed: "#e0451a",
-    eye:      "#ff9a1e",
-    eyeCore:  "#fff0b0",
-    fang:     "#f0e8d0",
-    claw:     "#c9c0aa",
-    mouth:    "#5a1620",
-    tongue:   "#c24a62",
-    nose:     "#0e0c14",
-    earIn:    "#7a3222"
+  /* ── palettes ── */
+  var PAL = {   /* PUP — 16-bit */
+    outline:"#12101a", furDeep:"#14141c", furDark:"#222838", furMid:"#2e3a4a",
+    furLight:"#46586b", rim:"#d9a441", rimHot:"#f0c060",
+    flameCore:"#fff4d0", flameYel:"#ffd24a", flameOrg:"#ff8a1e", flameRed:"#e0451a",
+    eye:"#ff9a1e", eyeCore:"#fff0b0", fang:"#f0e8d0", claw:"#c9c0aa",
+    mouth:"#5a1620", tongue:"#c24a62", nose:"#0e0c14", earIn:"#7a3222"
   };
-
-  /* richer 24-bit palette for the prime form — more fur stops, gold armor,
-     ember rune, hotter flame gradient */
-  var PAL2 = {
-    outline:  "#16101c",
-    furDeep:  "#12121c",
-    furDark:  "#1c2230",
-    furMid:   "#283244",
-    furLight: "#3a4a60",
-    furHi:    "#54687f",
-    rim:      "#e8b84a",
-    rimHot:   "#ffd97a",
-    armor:    "#8a6420",
-    armorHi:  "#d4a844",
-    armorDk:  "#5a4214",
-    rune:     "#ff3a2a",
-    runeCore: "#ffb08a",
-    flameCore:"#fffbe8",
-    flameYel: "#ffd94a",
-    flameOrg: "#ff9a2a",
-    flameRed: "#f04a1e",
-    flameMag: "#c02a5a",
-    eye:      "#ffb02a",
-    eyeCore:  "#fff4c8",
-    fang:     "#f4ecd8",
-    claw:     "#d8cfb8",
-    mouth:    "#6a1824",
-    tongue:   "#d05a72",
-    nose:     "#0e0c16",
-    earIn:    "#8a3a28",
-    horn:     "#e8dcc0",
-    hornDk:   "#a89878"
+  var PAL2 = {  /* PRIME — 24-bit */
+    outline:"#16101c", furDeep:"#12121c", furDark:"#1c2230", furMid:"#283244",
+    furLight:"#3a4a60", furHi:"#54687f", rim:"#e8b84a", rimHot:"#ffd97a",
+    armor:"#8a6420", armorHi:"#d4a844", armorDk:"#5a4214",
+    rune:"#ff3a2a", runeCore:"#ffb08a",
+    flameCore:"#fffbe8", flameYel:"#ffd94a", flameOrg:"#ff9a2a", flameRed:"#f04a1e", flameMag:"#c02a5a",
+    eye:"#ffb02a", eyeCore:"#fff4c8", fang:"#f4ecd8", claw:"#d8cfb8",
+    mouth:"#6a1824", tongue:"#d05a72", nose:"#0e0c16", earIn:"#8a3a28",
+    horn:"#e8dcc0", hornDk:"#a89878"
   };
+  var PAL3 = {  /* ULTRA — lava-cracked obsidian + gold regalia */
+    outline:"#0c0c12", furDeep:"#141418", furDark:"#232329", furMid:"#3a3a42",
+    furLight:"#4c4c55", furHi:"#5c5c66", rim:"#7a3410", rimHot:"#ff7a2a",
+    lava1:"#7a1400", lava2:"#c83000", lava3:"#ff5a14", lava4:"#ffd24a", lava5:"#ffe680",
+    gold:"#e8b038", goldHi:"#ffe080", goldDk:"#a86c18",
+    gem:"#ff3a1a", gemCore:"#ffe080", gemHalo:"#c01800",
+    flameCore:"#fff0b0", flameYel:"#ffd84a", flameOrg:"#ff7a1a", flameRed:"#ff5a00", flameDeep:"#5a0d00",
+    eye:"#ff5a1e", eyeCore:"#ffe680", fang:"#f4ecd8", claw:"#e0982a", clawHi:"#ffd24a",
+    mouth:"#5a1210", tongue:"#c24a3a", nose:"#0a0a10", earIn:"#7a2010"
+  };
+  var PAL4 = {  /* OMEGA — polished obsidian + gold inlay (cool body, no cracks) */
+    outline:"#0e1116", furDeep:"#14171b", furDark:"#1b1f24", furMid:"#2e343b",
+    furLight:"#4b535c", furHi:"#6a727b", rim:"#c8862e", rimHot:"#ffd878",
+    gold:"#d99a3a", goldHi:"#ffd878", goldDk:"#8a5a1e",
+    gem:"#e0461a", gemCore:"#ffd24a", gemHalo:"#7a1400",
+    flameCore:"#fff0b0", flameYel:"#ffd84a", flameOrg:"#ff7a1a", flameRed:"#e0451a", flameDeep:"#5a0d00",
+    eye:"#ff5a1e", eyeCore:"#fff0a0", fang:"#f4ecd8", claw:"#d99a3a", clawHi:"#ffd878",
+    mouth:"#3a1018", tongue:"#a83a4a", nose:"#0a0c10", earIn:"#1b1f24",
+    aura:"#ff5a1e"
+  };
+  var PALS = [PAL, PAL2, PAL3, PAL4];
 
-  var off = document.createElement("canvas");
-  off.width = BW; off.height = BH;
-  var octx = off.getContext("2d", { willReadFrequently: true });
+  /* ── off-screen buffers, one per form ── */
+  var bufs = [];
+  for (var bi=0; bi<FORMS.length; bi++) {
+    var c = document.createElement("canvas");
+    c.width = FORMS[bi].w; c.height = FORMS[bi].h;
+    bufs.push({ canvas:c, ctx:c.getContext("2d", { willReadFrequently:true }) });
+  }
 
-  var off2 = document.createElement("canvas");
-  off2.width = PW; off2.height = PH;
-  var octx2 = off2.getContext("2d", { willReadFrequently: true });
-
+  /* ── pixel primitives ── */
   function pxEllipse(ctx, cx, cy, rx, ry, color) {
     ctx.fillStyle = color;
     for (var y = -ry; y <= ry; y++) {
@@ -11136,6 +11136,14 @@ switchTab(initialTab);
       if (!(neg&&pos)) ctx.fillRect(x,y,1,1);
     }
   }
+  /* diamond / rhombus (vertical lozenge) */
+  function pxDiamond(ctx, cx, cy, rw, rh, color) {
+    ctx.fillStyle = color;
+    for (var y = -rh; y <= rh; y++) {
+      var w = Math.round(rw * (1 - Math.abs(y)/rh));
+      ctx.fillRect(Math.round(cx-w), Math.round(cy+y), w*2+1, 1);
+    }
+  }
 
   function flameTongue(ctx, bx, by, h, w, sway, seed, pal) {
     pal = pal || PAL;
@@ -11154,28 +11162,42 @@ switchTab(initialTab);
       ctx.fillRect(x-half, y, half*2+1, 1);
     }
   }
+  /* hotter 5-band flame for ULTRA/OMEGA (adds a deep-red base band) */
+  function flameTongue5(ctx, bx, by, h, w, sway, seed, pal) {
+    for (var i = 0; i < h; i++) {
+      var t = i/h;
+      var y = Math.round(by - i);
+      var x = Math.round(bx + sway * t * t);
+      var half = Math.max(0, Math.round((w/2) * (1 - t*0.72)));
+      if (t > 0.8 && ((i + seed) % 3 === 0)) half = Math.max(0, half-1);
+      var color;
+      if (t < 0.14) color = pal.flameCore;
+      else if (t < 0.34) color = pal.flameYel;
+      else if (t < 0.58) color = pal.flameOrg;
+      else if (t < 0.82) color = pal.flameRed;
+      else color = pal.flameDeep;
+      ctx.fillStyle = color;
+      ctx.fillRect(x-half, y, half*2+1, 1);
+    }
+  }
 
+  /* ── generic head (PUP / PRIME share this with palette + size) ── */
   function drawHead(ctx, cx, cy, o, pal) {
     pal = pal || PAL;
     var dir = o.dir||0, s = o.size||1, roar = o.roar||false, blink = o.blink||0;
     var gx = o.gazeX||0, gy = o.gazeY||0;
     var hw = Math.round(6*s), hh = Math.round(5*s);
     var snoutX = dir * Math.round(3*s);
-
     pxEllipse(ctx, cx, cy, hw+1, hh+1, pal.outline);
-
     var earH = Math.round(4*s);
     pxTri(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, cx-hw+4, cy-hh, pal.furDark);
     pxTri(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, cx+hw-4, cy-hh, pal.furDark);
     pxRect(ctx, cx-hw, cy-hh-1, 1, 2, pal.earIn);
     pxRect(ctx, cx+hw-1, cy-hh-1, 1, 2, pal.earIn);
-
     pxEllipse(ctx, cx, cy, hw, hh, pal.furMid);
     pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, pal.furLight);
-
     pxEllipse(ctx, cx+snoutX, cy+2, 3, 2, pal.furLight);
     pxRect(ctx, cx+snoutX + dir*2 - 1, cy+1, 2, 2, pal.nose);
-
     var ey = cy-2;
     var exL = cx-4 + (dir<0?1:0), exR = cx+2 + (dir>0?-1:0);
     if (blink > 0.9) {
@@ -11187,7 +11209,6 @@ switchTab(initialTab);
       pxRect(ctx, exR+gx, ey+gy, 2, 2, pal.eye);
       pxRect(ctx, exR+1+gx, ey+gy, 1, 1, pal.eyeCore);
     }
-
     var mx = cx + snoutX;
     if (roar) {
       var mw = Math.round(6*s), mh = Math.round(4*s), my = cy+2;
@@ -11202,7 +11223,7 @@ switchTab(initialTab);
     }
   }
 
-  /* prime head — larger, with horns on the center head and richer shading */
+  /* prime head — larger, horns on center head, richer shading */
   function drawHead2(ctx, cx, cy, o) {
     var pal = PAL2;
     var dir = o.dir||0, s = o.size||1, roar = o.roar||false, blink = o.blink||0;
@@ -11210,33 +11231,27 @@ switchTab(initialTab);
     var horn = o.horn||false;
     var hw = Math.round(7*s), hh = Math.round(6*s);
     var snoutX = dir * Math.round(4*s);
-
     pxEllipse(ctx, cx, cy, hw+1, hh+1, pal.outline);
-
     var earH = Math.round(5*s);
     pxTri(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, cx-hw+4, cy-hh, pal.furDark);
     pxTri(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, cx+hw-4, cy-hh, pal.furDark);
     pxRect(ctx, cx-hw, cy-hh-1, 1, 2, pal.earIn);
     pxRect(ctx, cx+hw-1, cy-hh-1, 1, 2, pal.earIn);
-
     if (horn) {
       var hornH = Math.round(7*s), hornW = Math.round(3*s);
       pxTri(ctx, cx-hornW, cy-hh+1, cx-hornW-2, cy-hh-hornH, cx-1, cy-hh, pal.horn);
       pxTri(ctx, cx+hornW, cy-hh+1, cx+hornW+2, cy-hh-hornH, cx+1, cy-hh, pal.horn);
       pxRect(ctx, cx-hornW-1, cy-hh-hornH+2, 1, 3, pal.hornDk);
       pxRect(ctx, cx+hornW+1, cy-hh-hornH+2, 1, 3, pal.hornDk);
-      pxRect(ctx, cx-hornW-2, cy-hh-hornH, 1, 2, pal.rune);   /* ember tip */
+      pxRect(ctx, cx-hornW-2, cy-hh-hornH, 1, 2, pal.rune);
       pxRect(ctx, cx+hornW+2, cy-hh-hornH, 1, 2, pal.rune);
     }
-
     pxEllipse(ctx, cx, cy, hw, hh, pal.furMid);
     pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, pal.furLight);
     pxEllipse(ctx, cx-2, cy-hh+3, hw-5, 1, pal.furHi);
-
     pxEllipse(ctx, cx+snoutX, cy+2, 4, 3, pal.furLight);
     pxEllipse(ctx, cx+snoutX, cy+1, 3, 1, pal.furHi);
     pxRect(ctx, cx+snoutX + dir*3 - 1, cy+1, 2, 2, pal.nose);
-
     var ey = cy-2;
     var exL = cx-5 + (dir<0?1:0), exR = cx+2 + (dir>0?-1:0);
     if (blink > 0.9) {
@@ -11248,7 +11263,6 @@ switchTab(initialTab);
       pxRect(ctx, exR+gx, ey+gy, 3, 2, pal.eye);
       pxRect(ctx, exR+2+gx, ey+gy, 1, 1, pal.eyeCore);
     }
-
     var mx = cx + snoutX;
     if (roar) {
       var mw = Math.round(7*s), mh = Math.round(5*s), my = cy+2;
@@ -11263,416 +11277,585 @@ switchTab(initialTab);
     }
   }
 
-  /* ── BASE SIDE view — used while walking / running ── */
+  /* ── ULTRA / OMEGA head — gold-rimmed, crown-ready, glowing eyes ──
+     crown: 0 none, 1 gold crown crest (ULTRA center), 2 gold ear-inlay + crest (OMEGA) */
+  function drawHeadRegal(ctx, cx, cy, o, pal, crown) {
+    var dir = o.dir||0, s = o.size||1, roar = o.roar||false, blink = o.blink||0;
+    var gx = o.gazeX||0, gy = o.gazeY||0;
+    var hw = Math.round(8*s), hh = Math.round(7*s);
+    var snoutX = dir * Math.round(4*s);
+    pxEllipse(ctx, cx, cy, hw+1, hh+1, pal.outline);
+    /* ears — tall pointed, gold-rimmed */
+    var earH = Math.round(6*s);
+    pxTri(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, cx-hw+5, cy-hh, pal.furDark);
+    pxTri(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, cx+hw-5, cy-hh, pal.furDark);
+    if (crown >= 2) {   /* OMEGA: gold inlay on both ear edges */
+      pxLine(ctx, cx-hw+1, cy-hh+2, cx-hw-2, cy-hh-earH, 1, pal.gold);
+      pxLine(ctx, cx+hw-1, cy-hh+2, cx+hw+2, cy-hh-earH, 1, pal.gold);
+    }
+    pxRect(ctx, cx-hw, cy-hh-1, 1, 2, pal.earIn);
+    pxRect(ctx, cx+hw-1, cy-hh-1, 1, 2, pal.earIn);
+    /* skull */
+    pxEllipse(ctx, cx, cy, hw, hh, pal.furMid);
+    pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, pal.furLight);
+    pxEllipse(ctx, cx-2, cy-hh+3, hw-5, 1, pal.furHi);
+    /* gold jaw/cheek spikes — two per side, bright-tipped so they read at scale */
+    pxTri(ctx, cx-hw, cy, cx-hw-4, cy+2, cx-hw, cy+4, pal.gold);
+    pxTri(ctx, cx-hw+1, cy+3, cx-hw-3, cy+5, cx-hw+1, cy+6, pal.gold);
+    pxTri(ctx, cx+hw, cy, cx+hw+4, cy+2, cx+hw, cy+4, pal.gold);
+    pxTri(ctx, cx+hw-1, cy+3, cx+hw+3, cy+5, cx+hw-1, cy+6, pal.gold);
+    pxRect(ctx, cx-hw-4, cy+2, 1, 1, pal.goldHi);
+    pxRect(ctx, cx+hw+4, cy+2, 1, 1, pal.goldHi);
+    pxRect(ctx, cx-hw-3, cy+5, 1, 1, pal.goldHi);
+    pxRect(ctx, cx+hw+3, cy+5, 1, 1, pal.goldHi);
+    /* snout + nose */
+    pxEllipse(ctx, cx+snoutX, cy+2, 4, 3, pal.furLight);
+    pxEllipse(ctx, cx+snoutX, cy+1, 3, 1, pal.furHi);
+    pxRect(ctx, cx+snoutX + dir*3 - 1, cy+1, 2, 2, pal.nose);
+    /* crown crest between the ears */
+    if (crown === 1) {  /* ULTRA: 3 golden spikes + forehead diamond, dark-rimmed to pop from flames */
+      var ch = Math.round(7*s);
+      pxEllipse(ctx, cx, cy-hh+1, 7, 2, pal.outline);
+      pxTri(ctx, cx, cy-hh-ch, cx-4, cy-hh+1, cx+4, cy-hh+1, pal.gold);
+      pxTri(ctx, cx-5, cy-hh-ch+3, cx-8, cy-hh+1, cx-2, cy-hh+1, pal.gold);
+      pxTri(ctx, cx+5, cy-hh-ch+3, cx+2, cy-hh+1, cx+8, cy-hh+1, pal.gold);
+      pxRect(ctx, cx-1, cy-hh-ch, 2, 3, pal.goldHi);
+      pxRect(ctx, cx-6, cy-hh-ch+3, 1, 2, pal.goldHi);
+      pxRect(ctx, cx+6, cy-hh-ch+3, 1, 2, pal.goldHi);
+      pxDiamond(ctx, cx, cy-hh+3, 3, 4, pal.gem);
+      pxRect(ctx, cx, cy-hh+2, 1, 2, pal.gemCore);
+    } else if (crown === 2) {  /* OMEGA: upright gold diamond + inverted-V notch */
+      var oh = Math.round(5*s);
+      pxDiamond(ctx, cx, cy-hh-oh+3, 3, oh, pal.gold);
+      pxRect(ctx, cx-1, cy-hh-oh*2+4, 2, 2, pal.goldHi);
+      pxTri(ctx, cx-2, cy-hh+2, cx, cy-hh+5, cx+2, cy-hh+2, pal.gold);
+    }
+    /* eyes — glowing with hot core */
+    var ey = cy-2;
+    var exL = cx-5 + (dir<0?1:0), exR = cx+2 + (dir>0?-1:0);
+    if (blink > 0.9) {
+      pxRect(ctx, exL, ey+1, 3, 1, pal.outline);
+      pxRect(ctx, exR, ey+1, 3, 1, pal.outline);
+    } else {
+      pxRect(ctx, exL+gx-1, ey+gy-1, 4, 3, pal.eye);
+      pxRect(ctx, exL+gx, ey+gy, 2, 1, pal.eyeCore);
+      pxRect(ctx, exR+gx-1, ey+gy-1, 4, 3, pal.eye);
+      pxRect(ctx, exR+gx+1, ey+gy, 2, 1, pal.eyeCore);
+    }
+    /* mouth */
+    var mx = cx + snoutX;
+    if (roar) {
+      var mw = Math.round(8*s), mh = Math.round(6*s), my = cy+2;
+      pxEllipse(ctx, mx, my+mh/2, mw/2, mh/2, pal.mouth);
+      pxEllipse(ctx, mx, my+mh/2+1, Math.max(1,mw/2-2), Math.max(1,mh/2-1), pal.tongue);
+      pxTri(ctx, mx-mw/2+1, my, mx-mw/2+2, my+4, mx-mw/2+3, my, pal.fang);
+      pxTri(ctx, mx+mw/2-3, my, mx+mw/2-2, my+4, mx+mw/2-1, my, pal.fang);
+      pxRect(ctx, mx-mw/2+2, my+mh-1, mw-4, 1, pal.fang);
+    } else {
+      pxRect(ctx, mx-4, cy+4, 8, 1, pal.outline);
+      pxTri(ctx, mx+dir*3-1, cy+4, mx+dir*3, cy+7, mx+dir*3+1, cy+4, pal.fang);
+    }
+  }
+
+  /* ══════════════════════ PUP ══════════════════════ */
   function drawPupSide(ctx, P) {
-    ctx.clearRect(0,0,BW,BH);
-    var bob = P.bob||0;
-    var walk = P.walk||0;
-    var flameI = P.flameI==null?1:P.flameI;
-    var flick = P.flick||0;
-    var gx = P.gazeX||0, gy = P.gazeY||0;
-    var squash = P.squash||1;
-    var sad = P.sad||0;
-    var lean = P.lean||0;
-
+    var W=64,H=52; ctx.clearRect(0,0,W,H);
+    var bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
+    var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
     var x;
-    for (x = 14; x <= 50; x += 4) {
-      var hgt = (13 + Math.round(3*Math.sin(x*0.3))) * flameI;
-      var sway = Math.sin(flick*0.18 + x*0.5) * 1.2 + lean*0.6;
-      var hMod = hgt + Math.round(Math.sin(flick*0.28 + x) * 2);
-      flameTongue(ctx, x, 27+bob*0.4, Math.max(4,hMod), 6, sway, x);
+    for (x=14; x<=50; x+=4) {
+      var hgt=(13+Math.round(3*Math.sin(x*0.3)))*flameI;
+      var sway=Math.sin(flick*0.18+x*0.5)*1.2+lean*0.6;
+      flameTongue(ctx, x, 27+bob*0.4, Math.max(4,hgt+Math.round(Math.sin(flick*0.28+x)*2)), 6, sway, x);
     }
-    var headFlames = [{x:9,h:16,l:-2},{x:14,h:20,l:-1},{x:19,h:23,l:0},{x:24,h:24,l:0},{x:29,h:22,l:1},{x:34,h:18,l:1}];
-    for (var fi=0; fi<headFlames.length; fi++) {
-      var tg = headFlames[fi];
-      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.2 + tg.l + lean*0.6;
-      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
-      flameTongue(ctx, tg.x, 26+bob*0.4, Math.max(5,hMod2), 6, sw2, fi);
-    }
-
-    var legAmp = walk ? 5 : 0;
-    function legSwing(ph){ return Math.round(Math.sin(walk + ph) * legAmp); }
-
-    pxLine(ctx, 14+legSwing(0), 35, 13+legSwing(0), 45, 4, PAL.furDark);
-    pxRect(ctx, 10+legSwing(0), 44, 6, 3, PAL.furDark);
-    pxRect(ctx, 10+legSwing(0), 46, 1, 2, PAL.claw); pxRect(ctx, 13+legSwing(0), 46, 1, 2, PAL.claw);
-    pxLine(ctx, 39+legSwing(Math.PI), 35, 41+legSwing(Math.PI), 45, 4, PAL.furDark);
-    pxRect(ctx, 38+legSwing(Math.PI), 44, 6, 3, PAL.furDark);
-    pxRect(ctx, 38+legSwing(Math.PI), 46, 1, 2, PAL.claw); pxRect(ctx, 41+legSwing(Math.PI), 46, 1, 2, PAL.claw);
-
-    var wag = Math.sin((P.tailWag||0))*2;
-    pxLine(ctx, 47, 31, 54+wag*0.4, 27, 3, PAL.furDark);
-    pxLine(ctx, 54+wag*0.4, 27, 57+wag, 21, 3, PAL.furDark);
-    flameTongue(ctx, 57+wag, 22, 7*flameI, 4, wag, 9);
-
-    var bw = 17*squash, bh = 7/squash;
-    pxEllipse(ctx, 31, 33+bob*0.3, bw, bh, PAL.furDark);
-    pxEllipse(ctx, 17, 32+bob*0.3, 8*squash, 7/squash, PAL.furMid);
-    pxEllipse(ctx, 43, 32+bob*0.3, 7*squash, 7/squash, PAL.furDark);
-    pxEllipse(ctx, 29, 27+bob*0.3, 12, 2, PAL.furLight);
-    pxEllipse(ctx, 15, 30+bob*0.3, 3, 3, PAL.furLight);
-    pxEllipse(ctx, 31, 38+bob*0.3, 12, 2, PAL.furDeep);
-
-    pxLine(ctx, 20+legSwing(Math.PI), 36, 20+legSwing(Math.PI), 47, 4, PAL.furMid);
-    pxRect(ctx, 17+legSwing(Math.PI), 46, 6, 3, PAL.furMid);
-    pxRect(ctx, 17+legSwing(Math.PI), 48, 1, 2, PAL.claw); pxRect(ctx, 20+legSwing(Math.PI), 48, 1, 2, PAL.claw); pxRect(ctx, 22+legSwing(Math.PI), 48, 1, 2, PAL.claw);
-    pxLine(ctx, 44+legSwing(0), 35, 46+legSwing(0), 41, 4, PAL.furMid);
-    pxLine(ctx, 46+legSwing(0), 41, 45+legSwing(0), 47, 3, PAL.furMid);
-    pxRect(ctx, 42+legSwing(0), 46, 6, 3, PAL.furMid);
-    pxRect(ctx, 42+legSwing(0), 48, 1, 2, PAL.claw); pxRect(ctx, 45+legSwing(0), 48, 1, 2, PAL.claw); pxRect(ctx, 47+legSwing(0), 48, 1, 2, PAL.claw);
-
-    var droop = sad*3;
-    var nl = -lean;
-    pxLine(ctx, 11+nl, 18+bob*0.8+droop, 11, 28+bob*0.3, 4, PAL.furDark);
-    pxLine(ctx, 22+nl, 14+bob+droop*0.5, 22, 28+bob*0.3, 5, PAL.furDark);
-    pxLine(ctx, 33+nl, 18+bob*0.8+droop, 33, 28+bob*0.3, 4, PAL.furDark);
-
-    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
-    drawHead(ctx, 11+nl, 14+bob*0.8+droop+(lean?1:0), {dir:-1, size:0.9, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
-    drawHead(ctx, 22+nl, 10+bob+droop*0.5+(lean?1:0),  {dir:0,  size:1.15, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy});
-    drawHead(ctx, 33+nl, 14+bob*0.8+droop+(lean?1:0), {dir:1,  size:0.9, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
-
-    if (walk) {
-      ctx.fillStyle = "#5a5a5a";
-      var dp = Math.floor(flick/4) % 3;
-      ctx.fillRect(46+dp*2, 46-dp, 2, 1);
-      ctx.fillRect(50+dp*2, 44-dp, 1, 1);
-      for (var ei=0; ei<3; ei++) {
-        var ex = 48 + ((flick*0.8 + ei*9) % 14);
-        var ey = 22 + ((ei*7 + flick*0.3) % 16);
-        ctx.fillStyle = ei%2 ? PAL.flameOrg : PAL.flameYel;
-        ctx.globalAlpha = 0.8 - (ex-48)/20;
-        ctx.fillRect(Math.round(ex), Math.round(ey), 1, 1);
-        ctx.globalAlpha = 1;
-      }
-    }
+    var hf=[{x:9,h:16,l:-2},{x:14,h:20,l:-1},{x:19,h:23,l:0},{x:24,h:24,l:0},{x:29,h:22,l:1},{x:34,h:18,l:1}];
+    for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue(ctx,tg.x,26+bob*0.4,Math.max(5,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*2)),6,Math.sin(flick*0.18+fi*1.7)*1.2+tg.l+lean*0.6,fi);}
+    var legAmp=walk?5:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
+    pxLine(ctx,14+legSwing(0),35,13+legSwing(0),45,4,PAL.furDark); pxRect(ctx,10+legSwing(0),44,6,3,PAL.furDark);
+    pxRect(ctx,10+legSwing(0),46,1,2,PAL.claw); pxRect(ctx,13+legSwing(0),46,1,2,PAL.claw);
+    pxLine(ctx,39+legSwing(Math.PI),35,41+legSwing(Math.PI),45,4,PAL.furDark); pxRect(ctx,38+legSwing(Math.PI),44,6,3,PAL.furDark);
+    pxRect(ctx,38+legSwing(Math.PI),46,1,2,PAL.claw); pxRect(ctx,41+legSwing(Math.PI),46,1,2,PAL.claw);
+    var wag=Math.sin((P.tailWag||0))*2;
+    pxLine(ctx,47,31,54+wag*0.4,27,3,PAL.furDark); pxLine(ctx,54+wag*0.4,27,57+wag,21,3,PAL.furDark);
+    flameTongue(ctx,57+wag,22,7*flameI,4,wag,9);
+    pxEllipse(ctx,31,33+bob*0.3,17*squash,7/squash,PAL.furDark);
+    pxEllipse(ctx,17,32+bob*0.3,8*squash,7/squash,PAL.furMid);
+    pxEllipse(ctx,43,32+bob*0.3,7*squash,7/squash,PAL.furDark);
+    pxEllipse(ctx,29,27+bob*0.3,12,2,PAL.furLight);
+    pxEllipse(ctx,15,30+bob*0.3,3,3,PAL.furLight);
+    pxEllipse(ctx,31,38+bob*0.3,12,2,PAL.furDeep);
+    pxLine(ctx,20+legSwing(Math.PI),36,20+legSwing(Math.PI),47,4,PAL.furMid); pxRect(ctx,17+legSwing(Math.PI),46,6,3,PAL.furMid);
+    pxRect(ctx,17+legSwing(Math.PI),48,1,2,PAL.claw); pxRect(ctx,20+legSwing(Math.PI),48,1,2,PAL.claw); pxRect(ctx,22+legSwing(Math.PI),48,1,2,PAL.claw);
+    pxLine(ctx,44+legSwing(0),35,46+legSwing(0),41,4,PAL.furMid); pxLine(ctx,46+legSwing(0),41,45+legSwing(0),47,3,PAL.furMid);
+    pxRect(ctx,42+legSwing(0),46,6,3,PAL.furMid);
+    pxRect(ctx,42+legSwing(0),48,1,2,PAL.claw); pxRect(ctx,45+legSwing(0),48,1,2,PAL.claw); pxRect(ctx,47+legSwing(0),48,1,2,PAL.claw);
+    var droop=sad*3, nl=-lean;
+    pxLine(ctx,11+nl,18+bob*0.8+droop,11,28+bob*0.3,4,PAL.furDark);
+    pxLine(ctx,22+nl,14+bob+droop*0.5,22,28+bob*0.3,5,PAL.furDark);
+    pxLine(ctx,33+nl,18+bob*0.8+droop,33,28+bob*0.3,4,PAL.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    drawHead(ctx,11+nl,14+bob*0.8+droop+(lean?1:0),{dir:-1,size:0.9,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy});
+    drawHead(ctx,22+nl,10+bob+droop*0.5+(lean?1:0),{dir:0,size:1.15,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy});
+    drawHead(ctx,33+nl,14+bob*0.8+droop+(lean?1:0),{dir:1,size:0.9,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy});
+    if (walk) for (var ei=0;ei<3;ei++){var ex=48+((flick*0.8+ei*9)%14),ey=22+((ei*7+flick*0.3)%16);ctx.fillStyle=ei%2?PAL.flameOrg:PAL.flameYel;ctx.globalAlpha=0.8-(ex-48)/20;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
   }
-
-  /* ── BASE FRONT view — stationary idle / review / waiting ── */
   function drawPupFront(ctx, P) {
-    ctx.clearRect(0,0,BW,BH);
-    var bob = P.bob||0;
-    var flameI = P.flameI==null?1:P.flameI;
-    var flick = P.flick||0;
-    var gx = P.gazeX||0, gy = P.gazeY||0;
-    var sad = P.sad||0;
-    var droop = sad*3;
-    var howl = P.howl||0;
-
-    var hl = P.headL||0, hr = P.headR||0, hc = P.headC||0;
-    var headLift = howl*4;
-
-    var headFlames = [{x:10,h:15,l:-2},{x:16,h:19,l:-1},{x:22,h:22,l:0},{x:27,h:23,l:0},{x:32,h:23,l:0},{x:37,h:22,l:0},{x:42,h:19,l:1},{x:48,h:15,l:2}];
-    for (var fi=0; fi<headFlames.length; fi++) {
-      var tg = headFlames[fi];
-      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.2 + tg.l;
-      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
-      flameTongue(ctx, tg.x, 28+bob*0.4, Math.max(5,hMod2), 6, sw2, fi);
-    }
-
-    pxEllipse(ctx, 32, 36+bob*0.3, 16, 8, PAL.furDark);
-    pxEllipse(ctx, 32, 33+bob*0.3, 10, 9, PAL.furMid);
-    pxEllipse(ctx, 32, 28+bob*0.3, 6, 3, PAL.furLight);
-    pxEllipse(ctx, 32, 41+bob*0.3, 12, 2, PAL.furDeep);
-
-    var wag = Math.sin((P.tailWag||0))*3;
-    pxLine(ctx, 45, 35, 52+wag*0.4, 30, 3, PAL.furDark);
-    pxLine(ctx, 52+wag*0.4, 30, 55+wag, 23, 3, PAL.furDark);
-    flameTongue(ctx, 55+wag, 24, 8*flameI, 4, wag, 9);
-
+    var W=64,H=52; ctx.clearRect(0,0,W,H);
+    var bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0, gx=P.gazeX||0, gy=P.gazeY||0;
+    var sad=P.sad||0, droop=sad*3, howl=P.howl||0;
+    var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*4;
+    var hf=[{x:10,h:15,l:-2},{x:16,h:19,l:-1},{x:22,h:22,l:0},{x:27,h:23,l:0},{x:32,h:23,l:0},{x:37,h:22,l:0},{x:42,h:19,l:1},{x:48,h:15,l:2}];
+    for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue(ctx,tg.x,28+bob*0.4,Math.max(5,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*2)),6,Math.sin(flick*0.18+fi*1.7)*1.2+tg.l,fi);}
+    pxEllipse(ctx,32,36+bob*0.3,16,8,PAL.furDark); pxEllipse(ctx,32,33+bob*0.3,10,9,PAL.furMid);
+    pxEllipse(ctx,32,28+bob*0.3,6,3,PAL.furLight); pxEllipse(ctx,32,41+bob*0.3,12,2,PAL.furDeep);
+    var wag=Math.sin((P.tailWag||0))*3;
+    pxLine(ctx,45,35,52+wag*0.4,30,3,PAL.furDark); pxLine(ctx,52+wag*0.4,30,55+wag,23,3,PAL.furDark);
+    flameTongue(ctx,55+wag,24,8*flameI,4,wag,9);
     if (P.wave) {
-      pxLine(ctx, 26, 37, 25, 47, 4, PAL.furMid);
-      pxRect(ctx, 22, 46, 6, 3, PAL.furMid);
-      pxRect(ctx, 22, 48, 1, 2, PAL.claw); pxRect(ctx, 25, 48, 1, 2, PAL.claw);
-      var wv = Math.sin(flick*0.5)*3;
-      pxLine(ctx, 38, 34, 42+wv, 26, 4, PAL.furMid);
-      pxRect(ctx, 40+wv, 23, 5, 3, PAL.furMid);
-      pxRect(ctx, 41+wv, 22, 1, 2, PAL.claw); pxRect(ctx, 44+wv, 22, 1, 2, PAL.claw);
+      pxLine(ctx,26,37,25,47,4,PAL.furMid); pxRect(ctx,22,46,6,3,PAL.furMid);
+      pxRect(ctx,22,48,1,2,PAL.claw); pxRect(ctx,25,48,1,2,PAL.claw);
+      var wv=Math.sin(flick*0.5)*3;
+      pxLine(ctx,38,34,42+wv,26,4,PAL.furMid); pxRect(ctx,40+wv,23,5,3,PAL.furMid);
+      pxRect(ctx,41+wv,22,1,2,PAL.claw); pxRect(ctx,44+wv,22,1,2,PAL.claw);
     } else {
-      pxLine(ctx, 26, 37, 25, 47, 4, PAL.furMid);
-      pxRect(ctx, 22, 46, 6, 3, PAL.furMid);
-      pxRect(ctx, 22, 48, 1, 2, PAL.claw); pxRect(ctx, 25, 48, 1, 2, PAL.claw);
-      pxLine(ctx, 38, 37, 39, 47, 4, PAL.furMid);
-      pxRect(ctx, 36, 46, 6, 3, PAL.furMid);
-      pxRect(ctx, 37, 48, 1, 2, PAL.claw); pxRect(ctx, 40, 48, 1, 2, PAL.claw);
+      pxLine(ctx,26,37,25,47,4,PAL.furMid); pxRect(ctx,22,46,6,3,PAL.furMid);
+      pxRect(ctx,22,48,1,2,PAL.claw); pxRect(ctx,25,48,1,2,PAL.claw);
+      pxLine(ctx,38,37,39,47,4,PAL.furMid); pxRect(ctx,36,46,6,3,PAL.furMid);
+      pxRect(ctx,37,48,1,2,PAL.claw); pxRect(ctx,40,48,1,2,PAL.claw);
     }
-
-    pxLine(ctx, 16+hl, 20+bob*0.8+droop-headLift, 24, 30+bob*0.3, 4, PAL.furDark);
-    pxLine(ctx, 32+hc, 15+bob+droop*0.5-headLift, 32, 30+bob*0.3, 5, PAL.furDark);
-    pxLine(ctx, 48+hr, 20+bob*0.8+droop-headLift, 40, 30+bob*0.3, 4, PAL.furDark);
-
-    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
-    var glx = P.gazeLOverride!=null ? P.gazeLOverride : hgx;
-    var grx = P.gazeROverride!=null ? P.gazeROverride : hgx;
-    drawHead(ctx, 16+hl, 15+bob*0.8+droop-headLift, {dir:-1, size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:glx, gazeY:hgy});
-    drawHead(ctx, 32+hc, 11+bob+droop*0.5-headLift,  {dir:0,  size:1.15, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy});
-    drawHead(ctx, 48+hr, 15+bob*0.8+droop-headLift, {dir:1,  size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:grx, gazeY:hgy});
-
-    if (P.fireBreath) {
-      var fb = P.fireBreath;
-      var topY = 17, botY = 44;
-      for (var by = topY; by <= botY; by++) {
-        var bt = (by - topY) / (botY - topY);
-        var halfW = (1 + bt * 7) * fb;
-        var wob = Math.sin(flick*0.4 + by*0.7) * bt * 1.5;
-        var color;
-        if (bt < 0.25) color = PAL.flameCore;
-        else if (bt < 0.5) color = PAL.flameYel;
-        else if (bt < 0.78) color = PAL.flameOrg;
-        else color = PAL.flameRed;
-        ctx.fillStyle = color;
-        ctx.globalAlpha = fb * (0.85 + 0.15*Math.sin(flick*0.5+by));
-        ctx.fillRect(Math.round(32 - halfW + wob), by, Math.round(halfW*2), 1);
-        ctx.globalAlpha = 1;
-      }
-      for (var si=0; si<4; si++) {
-        var st = ((flick*0.6 + si*5) % 10)/10;
-        var sx = 32 + Math.sin(si*9.1) * (2+st*8) * fb;
-        var sy = 17 + st*26*fb;
-        ctx.fillStyle = si%2 ? PAL.flameYel : PAL.flameOrg;
-        ctx.globalAlpha = (1-st)*fb;
-        ctx.fillRect(Math.round(sx), Math.round(sy), 1, 1);
-        ctx.globalAlpha = 1;
-      }
-    }
+    pxLine(ctx,16+hl,20+bob*0.8+droop-headLift,24,30+bob*0.3,4,PAL.furDark);
+    pxLine(ctx,32+hc,15+bob+droop*0.5-headLift,32,30+bob*0.3,5,PAL.furDark);
+    pxLine(ctx,48+hr,20+bob*0.8+droop-headLift,40,30+bob*0.3,4,PAL.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    var glx=P.gazeLOverride!=null?P.gazeLOverride:hgx, grx=P.gazeROverride!=null?P.gazeROverride:hgx;
+    drawHead(ctx,16+hl,15+bob*0.8+droop-headLift,{dir:-1,size:0.95,roar:P.roarSide||false,blink:P.blink,gazeX:glx,gazeY:hgy});
+    drawHead(ctx,32+hc,11+bob+droop*0.5-headLift,{dir:0,size:1.15,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy});
+    drawHead(ctx,48+hr,15+bob*0.8+droop-headLift,{dir:1,size:0.95,roar:P.roarSide||false,blink:P.blink,gazeX:grx,gazeY:hgy});
+    if (P.fireBreath) drawFireBreath(ctx, 32, 17, 44, 7, P.fireBreath, flick, PAL);
   }
 
-  /* ── PRIME SIDE view — larger, armored, heavier mane ── */
+  /* shared fire-breath cone (scales per form) */
+  function drawFireBreath(ctx, cx, topY, botY, spread, fb, flick, pal) {
+    for (var by=topY; by<=botY; by++) {
+      var bt=(by-topY)/(botY-topY);
+      var halfW=(1+bt*spread)*fb;
+      var wob=Math.sin(flick*0.4+by*0.7)*bt*1.8;
+      var color;
+      if (bt<0.25) color=pal.flameCore; else if (bt<0.5) color=pal.flameYel;
+      else if (bt<0.78) color=pal.flameOrg; else color=pal.flameRed;
+      ctx.fillStyle=color; ctx.globalAlpha=fb*(0.85+0.15*Math.sin(flick*0.5+by));
+      ctx.fillRect(Math.round(cx-halfW+wob), by, Math.round(halfW*2), 1); ctx.globalAlpha=1;
+    }
+    for (var si=0;si<5;si++){var st=((flick*0.6+si*5)%10)/10;var sx=cx+Math.sin(si*9.1)*(2+st*spread*1.3)*fb;var sy=topY+st*(botY-topY)*fb;ctx.fillStyle=si%2?pal.flameYel:pal.flameOrg;ctx.globalAlpha=(1-st)*fb;ctx.fillRect(Math.round(sx),Math.round(sy),1,1);ctx.globalAlpha=1;}
+  }
+
+  /* ══════════════════════ PRIME ══════════════════════ */
   function drawPrimeSide(ctx, P) {
-    ctx.clearRect(0,0,PW,PH);
-    var pal = PAL2;
-    var bob = P.bob||0;
-    var walk = P.walk||0;
-    var flameI = P.flameI==null?1:P.flameI;
-    var flick = P.flick||0;
-    var gx = P.gazeX||0, gy = P.gazeY||0;
-    var squash = P.squash||1;
-    var sad = P.sad||0;
-    var lean = P.lean||0;
-
-    /* heavy mane — two rows of flames */
+    var W=80,H=64; ctx.clearRect(0,0,W,H);
+    var pal=PAL2, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
+    var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
     var x;
-    for (x = 16; x <= 64; x += 4) {
-      var hgt = (17 + Math.round(4*Math.sin(x*0.28))) * flameI;
-      var sway = Math.sin(flick*0.18 + x*0.5) * 1.4 + lean*0.6;
-      var hMod = hgt + Math.round(Math.sin(flick*0.28 + x) * 2);
-      flameTongue(ctx, x, 34+bob*0.4, Math.max(5,hMod), 7, sway, x, pal);
-    }
-    var headFlames = [{x:11,h:20,l:-2},{x:17,h:25,l:-1},{x:23,h:29,l:0},{x:30,h:30,l:0},{x:36,h:28,l:1},{x:42,h:23,l:1}];
-    for (var fi=0; fi<headFlames.length; fi++) {
-      var tg = headFlames[fi];
-      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.4 + tg.l + lean*0.6;
-      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
-      flameTongue(ctx, tg.x, 33+bob*0.4, Math.max(6,hMod2), 7, sw2, fi, pal);
-    }
-
-    var legAmp = walk ? 6 : 0;
-    function legSwing(ph){ return Math.round(Math.sin(walk + ph) * legAmp); }
-
-    pxLine(ctx, 18+legSwing(0), 44, 17+legSwing(0), 56, 5, pal.furDark);
-    pxRect(ctx, 13+legSwing(0), 55, 7, 3, pal.furDark);
-    pxRect(ctx, 13+legSwing(0), 57, 1, 2, pal.claw); pxRect(ctx, 17+legSwing(0), 57, 1, 2, pal.claw);
-    pxLine(ctx, 49+legSwing(Math.PI), 44, 51+legSwing(Math.PI), 56, 5, pal.furDark);
-    pxRect(ctx, 47+legSwing(Math.PI), 55, 7, 3, pal.furDark);
-    pxRect(ctx, 47+legSwing(Math.PI), 57, 1, 2, pal.claw); pxRect(ctx, 51+legSwing(Math.PI), 57, 1, 2, pal.claw);
-
-    var wag = Math.sin((P.tailWag||0))*2.5;
-    pxLine(ctx, 59, 39, 68+wag*0.4, 34, 4, pal.furDark);
-    pxLine(ctx, 68+wag*0.4, 34, 72+wag, 26, 4, pal.furDark);
-    flameTongue(ctx, 72+wag, 27, 9*flameI, 5, wag, 9, pal);
-    flameTongue(ctx, 70+wag, 30, 6*flameI, 4, wag, 5, pal);
-
-    var bw = 21*squash, bh = 9/squash;
-    pxEllipse(ctx, 39, 42+bob*0.3, bw, bh, pal.furDark);
-    pxEllipse(ctx, 21, 40+bob*0.3, 10*squash, 9/squash, pal.furMid);
-    pxEllipse(ctx, 54, 40+bob*0.3, 9*squash, 9/squash, pal.furDark);
-    pxEllipse(ctx, 36, 34+bob*0.3, 15, 3, pal.furLight);
-    pxEllipse(ctx, 19, 38+bob*0.3, 4, 3, pal.furLight);
-    pxEllipse(ctx, 39, 48+bob*0.3, 15, 2, pal.furDeep);
-
-    /* gold armor plate on the shoulder */
-    pxEllipse(ctx, 21, 36+bob*0.3, 6, 4, pal.armor);
-    pxEllipse(ctx, 20, 35+bob*0.3, 4, 2, pal.armorHi);
-    pxRect(ctx, 24, 37+bob*0.3, 2, 2, pal.armorDk);
-
-    pxLine(ctx, 25+legSwing(Math.PI), 45, 25+legSwing(Math.PI), 58, 5, pal.furMid);
-    pxRect(ctx, 21+legSwing(Math.PI), 57, 7, 3, pal.furMid);
-    pxRect(ctx, 21+legSwing(Math.PI), 59, 1, 2, pal.claw); pxRect(ctx, 25+legSwing(Math.PI), 59, 1, 2, pal.claw); pxRect(ctx, 27+legSwing(Math.PI), 59, 1, 2, pal.claw);
-    pxLine(ctx, 55+legSwing(0), 44, 57+legSwing(0), 51, 5, pal.furMid);
-    pxLine(ctx, 57+legSwing(0), 51, 56+legSwing(0), 58, 4, pal.furMid);
-    pxRect(ctx, 52+legSwing(0), 57, 7, 3, pal.furMid);
-    pxRect(ctx, 52+legSwing(0), 59, 1, 2, pal.claw); pxRect(ctx, 56+legSwing(0), 59, 1, 2, pal.claw); pxRect(ctx, 58+legSwing(0), 59, 1, 2, pal.claw);
-
-    var droop = sad*3;
-    var nl = -lean;
-    pxLine(ctx, 14+nl, 23+bob*0.8+droop, 14, 36+bob*0.3, 5, pal.furDark);
-    pxLine(ctx, 27+nl, 18+bob+droop*0.5, 27, 36+bob*0.3, 6, pal.furDark);
-    pxLine(ctx, 41+nl, 23+bob*0.8+droop, 41, 36+bob*0.3, 5, pal.furDark);
-
-    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
-    drawHead2(ctx, 14+nl, 18+bob*0.8+droop+(lean?1:0), {dir:-1, size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
-    drawHead2(ctx, 27+nl, 13+bob+droop*0.5+(lean?1:0),  {dir:0,  size:1.2, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy, horn:true});
-    drawHead2(ctx, 41+nl, 18+bob*0.8+droop+(lean?1:0), {dir:1,  size:0.95, roar:P.roarSide||false, blink:P.blink, gazeX:hgx, gazeY:hgy});
-
-    if (walk) {
-      for (var ei=0; ei<4; ei++) {
-        var ex = 60 + ((flick*0.8 + ei*9) % 16);
-        var ey = 28 + ((ei*7 + flick*0.3) % 18);
-        ctx.fillStyle = ei%2 ? pal.flameOrg : pal.flameYel;
-        ctx.globalAlpha = 0.8 - (ex-60)/22;
-        ctx.fillRect(Math.round(ex), Math.round(ey), 1, 1);
-        ctx.globalAlpha = 1;
-      }
-    }
+    for (x=16;x<=64;x+=4){var hgt=(17+Math.round(4*Math.sin(x*0.28)))*flameI;flameTongue(ctx,x,34+bob*0.4,Math.max(5,hgt+Math.round(Math.sin(flick*0.28+x)*2)),7,Math.sin(flick*0.18+x*0.5)*1.4+lean*0.6,x,pal);}
+    var hf=[{x:11,h:20,l:-2},{x:17,h:25,l:-1},{x:23,h:29,l:0},{x:30,h:30,l:0},{x:36,h:28,l:1},{x:42,h:23,l:1}];
+    for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue(ctx,tg.x,33+bob*0.4,Math.max(6,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*2)),7,Math.sin(flick*0.18+fi*1.7)*1.4+tg.l+lean*0.6,fi,pal);}
+    var legAmp=walk?6:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
+    pxLine(ctx,18+legSwing(0),44,17+legSwing(0),56,5,pal.furDark); pxRect(ctx,13+legSwing(0),55,7,3,pal.furDark);
+    pxRect(ctx,13+legSwing(0),57,1,2,pal.claw); pxRect(ctx,17+legSwing(0),57,1,2,pal.claw);
+    pxLine(ctx,49+legSwing(Math.PI),44,51+legSwing(Math.PI),56,5,pal.furDark); pxRect(ctx,47+legSwing(Math.PI),55,7,3,pal.furDark);
+    pxRect(ctx,47+legSwing(Math.PI),57,1,2,pal.claw); pxRect(ctx,51+legSwing(Math.PI),57,1,2,pal.claw);
+    var wag=Math.sin((P.tailWag||0))*2.5;
+    pxLine(ctx,59,39,68+wag*0.4,34,4,pal.furDark); pxLine(ctx,68+wag*0.4,34,72+wag,26,4,pal.furDark);
+    flameTongue(ctx,72+wag,27,9*flameI,5,wag,9,pal); flameTongue(ctx,70+wag,30,6*flameI,4,wag,5,pal);
+    pxEllipse(ctx,39,42+bob*0.3,21*squash,9/squash,pal.furDark);
+    pxEllipse(ctx,21,40+bob*0.3,10*squash,9/squash,pal.furMid);
+    pxEllipse(ctx,54,40+bob*0.3,9*squash,9/squash,pal.furDark);
+    pxEllipse(ctx,36,34+bob*0.3,15,3,pal.furLight); pxEllipse(ctx,19,38+bob*0.3,4,3,pal.furLight);
+    pxEllipse(ctx,39,48+bob*0.3,15,2,pal.furDeep);
+    pxEllipse(ctx,21,36+bob*0.3,6,4,pal.armor); pxEllipse(ctx,20,35+bob*0.3,4,2,pal.armorHi); pxRect(ctx,24,37+bob*0.3,2,2,pal.armorDk);
+    pxLine(ctx,25+legSwing(Math.PI),45,25+legSwing(Math.PI),58,5,pal.furMid); pxRect(ctx,21+legSwing(Math.PI),57,7,3,pal.furMid);
+    pxRect(ctx,21+legSwing(Math.PI),59,1,2,pal.claw); pxRect(ctx,25+legSwing(Math.PI),59,1,2,pal.claw); pxRect(ctx,27+legSwing(Math.PI),59,1,2,pal.claw);
+    pxLine(ctx,55+legSwing(0),44,57+legSwing(0),51,5,pal.furMid); pxLine(ctx,57+legSwing(0),51,56+legSwing(0),58,4,pal.furMid);
+    pxRect(ctx,52+legSwing(0),57,7,3,pal.furMid);
+    pxRect(ctx,52+legSwing(0),59,1,2,pal.claw); pxRect(ctx,56+legSwing(0),59,1,2,pal.claw); pxRect(ctx,58+legSwing(0),59,1,2,pal.claw);
+    var droop=sad*3, nl=-lean;
+    pxLine(ctx,14+nl,23+bob*0.8+droop,14,36+bob*0.3,5,pal.furDark);
+    pxLine(ctx,27+nl,18+bob+droop*0.5,27,36+bob*0.3,6,pal.furDark);
+    pxLine(ctx,41+nl,23+bob*0.8+droop,41,36+bob*0.3,5,pal.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    drawHead2(ctx,14+nl,18+bob*0.8+droop+(lean?1:0),{dir:-1,size:0.95,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy});
+    drawHead2(ctx,27+nl,13+bob+droop*0.5+(lean?1:0),{dir:0,size:1.2,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy,horn:true});
+    drawHead2(ctx,41+nl,18+bob*0.8+droop+(lean?1:0),{dir:1,size:0.95,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy});
+    if (walk) for (var ei=0;ei<4;ei++){var ex=60+((flick*0.8+ei*9)%16),ey=28+((ei*7+flick*0.3)%18);ctx.fillStyle=ei%2?pal.flameOrg:pal.flameYel;ctx.globalAlpha=0.8-(ex-60)/22;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
   }
-
-  /* ── PRIME FRONT view — armored, horned, glowing chest rune ── */
   function drawPrimeFront(ctx, P) {
-    ctx.clearRect(0,0,PW,PH);
-    var pal = PAL2;
-    var bob = P.bob||0;
-    var flameI = P.flameI==null?1:P.flameI;
-    var flick = P.flick||0;
-    var gx = P.gazeX||0, gy = P.gazeY||0;
-    var sad = P.sad||0;
-    var droop = sad*3;
-    var howl = P.howl||0;
-
-    var hl = P.headL||0, hr = P.headR||0, hc = P.headC||0;
-    var headLift = howl*5;
-
-    var headFlames = [{x:12,h:19,l:-2},{x:20,h:24,l:-1},{x:27,h:28,l:0},{x:34,h:29,l:0},{x:40,h:29,l:0},{x:46,h:28,l:0},{x:53,h:24,l:1},{x:60,h:19,l:2}];
-    for (var fi=0; fi<headFlames.length; fi++) {
-      var tg = headFlames[fi];
-      var sw2 = Math.sin(flick*0.18 + fi*1.7)*1.4 + tg.l;
-      var hMod2 = tg.h*flameI + Math.round(Math.sin(flick*0.28 + fi*2.3)*2);
-      flameTongue(ctx, tg.x, 36+bob*0.4, Math.max(6,hMod2), 7, sw2, fi, pal);
-    }
-
-    pxEllipse(ctx, 40, 45+bob*0.3, 20, 10, pal.furDark);
-    pxEllipse(ctx, 40, 41+bob*0.3, 13, 11, pal.furMid);
-    pxEllipse(ctx, 40, 35+bob*0.3, 8, 4, pal.furLight);
-    pxEllipse(ctx, 40, 33+bob*0.3, 5, 2, pal.furHi);
-    pxEllipse(ctx, 40, 52+bob*0.3, 15, 2, pal.furDeep);
-
-    /* gold armor plates on both shoulders — dark-rimmed so they read as
-       metal pauldrons, not flame */
-    pxEllipse(ctx, 24, 40+bob*0.3, 7, 6, pal.outline);
-    pxEllipse(ctx, 24, 40+bob*0.3, 6, 5, pal.armor);
-    pxEllipse(ctx, 23, 39+bob*0.3, 4, 2, pal.armorHi);
-    pxRect(ctx, 26, 41+bob*0.3, 2, 2, pal.armorDk);
-    pxEllipse(ctx, 56, 40+bob*0.3, 7, 6, pal.outline);
-    pxEllipse(ctx, 56, 40+bob*0.3, 6, 5, pal.armor);
-    pxEllipse(ctx, 55, 39+bob*0.3, 4, 2, pal.armorHi);
-    pxRect(ctx, 52, 41+bob*0.3, 2, 2, pal.armorDk);
-
-    /* glowing chest rune — pulses with the breath, flares when thinking.
-       drawn opaque (alpha red over dark fur reads pink) with a soft halo */
-    var runePulse = P.runeFlare ? 1 : (0.6 + 0.4*Math.sin(flick*0.12));
-    ctx.globalAlpha = runePulse * 0.3;                 /* outer glow */
-    pxTri(ctx, 40, 35+bob*0.3, 31, 49+bob*0.3, 49, 49+bob*0.3, pal.rune);
-    ctx.globalAlpha = 1;
-    pxTri(ctx, 40, 37+bob*0.3, 34, 47+bob*0.3, 46, 47+bob*0.3, pal.rune);   /* solid core */
-    pxTri(ctx, 40, 49+bob*0.3, 35, 41+bob*0.3, 45, 41+bob*0.3, pal.rune);
-    pxRect(ctx, 39, 41+bob*0.3, 2, 3, pal.runeCore);   /* hot center */
-    pxRect(ctx, 39, 39+bob*0.3, 2, 1, pal.flameCore);
-
-    var wag = Math.sin((P.tailWag||0))*3.5;
-    pxLine(ctx, 56, 44, 65+wag*0.4, 38, 4, pal.furDark);
-    pxLine(ctx, 65+wag*0.4, 38, 69+wag, 29, 4, pal.furDark);
-    flameTongue(ctx, 69+wag, 30, 10*flameI, 5, wag, 9, pal);
-    flameTongue(ctx, 67+wag, 33, 7*flameI, 4, wag, 5, pal);
-
+    var W=80,H=64; ctx.clearRect(0,0,W,H);
+    var pal=PAL2, bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0, gx=P.gazeX||0, gy=P.gazeY||0;
+    var sad=P.sad||0, droop=sad*3, howl=P.howl||0;
+    var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*5;
+    var hf=[{x:12,h:19,l:-2},{x:20,h:24,l:-1},{x:27,h:28,l:0},{x:34,h:29,l:0},{x:40,h:29,l:0},{x:46,h:28,l:0},{x:53,h:24,l:1},{x:60,h:19,l:2}];
+    for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue(ctx,tg.x,36+bob*0.4,Math.max(6,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*2)),7,Math.sin(flick*0.18+fi*1.7)*1.4+tg.l,fi,pal);}
+    pxEllipse(ctx,40,45+bob*0.3,20,10,pal.furDark); pxEllipse(ctx,40,41+bob*0.3,13,11,pal.furMid);
+    pxEllipse(ctx,40,35+bob*0.3,8,4,pal.furLight); pxEllipse(ctx,40,33+bob*0.3,5,2,pal.furHi);
+    pxEllipse(ctx,40,52+bob*0.3,15,2,pal.furDeep);
+    pxEllipse(ctx,24,40+bob*0.3,7,6,pal.outline); pxEllipse(ctx,24,40+bob*0.3,6,5,pal.armor);
+    pxEllipse(ctx,23,39+bob*0.3,4,2,pal.armorHi); pxRect(ctx,26,41+bob*0.3,2,2,pal.armorDk);
+    pxEllipse(ctx,56,40+bob*0.3,7,6,pal.outline); pxEllipse(ctx,56,40+bob*0.3,6,5,pal.armor);
+    pxEllipse(ctx,55,39+bob*0.3,4,2,pal.armorHi); pxRect(ctx,52,41+bob*0.3,2,2,pal.armorDk);
+    var runePulse=P.runeFlare?1:(0.6+0.4*Math.sin(flick*0.12));
+    ctx.globalAlpha=runePulse*0.3; pxTri(ctx,40,35+bob*0.3,31,49+bob*0.3,49,49+bob*0.3,pal.rune); ctx.globalAlpha=1;
+    pxTri(ctx,40,37+bob*0.3,34,47+bob*0.3,46,47+bob*0.3,pal.rune);
+    pxTri(ctx,40,49+bob*0.3,35,41+bob*0.3,45,41+bob*0.3,pal.rune);
+    pxRect(ctx,39,41+bob*0.3,2,3,pal.runeCore); pxRect(ctx,39,39+bob*0.3,2,1,pal.flameCore);
+    var wag=Math.sin((P.tailWag||0))*3.5;
+    pxLine(ctx,56,44,65+wag*0.4,38,4,pal.furDark); pxLine(ctx,65+wag*0.4,38,69+wag,29,4,pal.furDark);
+    flameTongue(ctx,69+wag,30,10*flameI,5,wag,9,pal); flameTongue(ctx,67+wag,33,7*flameI,4,wag,5,pal);
     if (P.wave) {
-      pxLine(ctx, 33, 46, 32, 58, 5, pal.furMid);
-      pxRect(ctx, 28, 57, 7, 3, pal.furMid);
-      pxRect(ctx, 28, 59, 1, 2, pal.claw); pxRect(ctx, 32, 59, 1, 2, pal.claw);
-      var wv = Math.sin(flick*0.5)*3.5;
-      pxLine(ctx, 48, 42, 53+wv, 32, 5, pal.furMid);
-      pxRect(ctx, 51+wv, 29, 6, 3, pal.furMid);
-      pxRect(ctx, 52+wv, 28, 1, 2, pal.claw); pxRect(ctx, 56+wv, 28, 1, 2, pal.claw);
+      pxLine(ctx,33,46,32,58,5,pal.furMid); pxRect(ctx,28,57,7,3,pal.furMid);
+      pxRect(ctx,28,59,1,2,pal.claw); pxRect(ctx,32,59,1,2,pal.claw);
+      var wv=Math.sin(flick*0.5)*3.5;
+      pxLine(ctx,48,42,53+wv,32,5,pal.furMid); pxRect(ctx,51+wv,29,6,3,pal.furMid);
+      pxRect(ctx,52+wv,28,1,2,pal.claw); pxRect(ctx,56+wv,28,1,2,pal.claw);
     } else {
-      pxLine(ctx, 33, 46, 32, 58, 5, pal.furMid);
-      pxRect(ctx, 28, 57, 7, 3, pal.furMid);
-      pxRect(ctx, 28, 59, 1, 2, pal.claw); pxRect(ctx, 32, 59, 1, 2, pal.claw);
-      pxLine(ctx, 48, 46, 49, 58, 5, pal.furMid);
-      pxRect(ctx, 45, 57, 7, 3, pal.furMid);
-      pxRect(ctx, 46, 59, 1, 2, pal.claw); pxRect(ctx, 50, 59, 1, 2, pal.claw);
+      pxLine(ctx,33,46,32,58,5,pal.furMid); pxRect(ctx,28,57,7,3,pal.furMid);
+      pxRect(ctx,28,59,1,2,pal.claw); pxRect(ctx,32,59,1,2,pal.claw);
+      pxLine(ctx,48,46,49,58,5,pal.furMid); pxRect(ctx,45,57,7,3,pal.furMid);
+      pxRect(ctx,46,59,1,2,pal.claw); pxRect(ctx,50,59,1,2,pal.claw);
     }
-
-    pxLine(ctx, 20+hl, 25+bob*0.8+droop-headLift, 30, 38+bob*0.3, 5, pal.furDark);
-    pxLine(ctx, 40+hc, 19+bob+droop*0.5-headLift, 40, 38+bob*0.3, 6, pal.furDark);
-    pxLine(ctx, 60+hr, 25+bob*0.8+droop-headLift, 50, 38+bob*0.3, 5, pal.furDark);
-
-    var hgx = Math.max(-1, Math.min(1, gx)), hgy = Math.max(-1, Math.min(1, gy));
-    var glx = P.gazeLOverride!=null ? P.gazeLOverride : hgx;
-    var grx = P.gazeROverride!=null ? P.gazeROverride : hgx;
-    drawHead2(ctx, 20+hl, 19+bob*0.8+droop-headLift, {dir:-1, size:1.0, roar:P.roarSide||false, blink:P.blink, gazeX:glx, gazeY:hgy});
-    drawHead2(ctx, 40+hc, 14+bob+droop*0.5-headLift,  {dir:0,  size:1.25, roar:P.roarCenter!==false, blink:P.blink, gazeX:hgx, gazeY:hgy, horn:true});
-    drawHead2(ctx, 60+hr, 19+bob*0.8+droop-headLift, {dir:1,  size:1.0, roar:P.roarSide||false, blink:P.blink, gazeX:grx, gazeY:hgy});
-
-    /* thinking: orbiting sparks around the heads */
-    if (P.runeFlare) {
-      for (var oi=0; oi<5; oi++) {
-        var ang = flick*0.15 + oi*(Math.PI*2/5);
-        var ox = 40 + Math.cos(ang)*26;
-        var oy = 20 + Math.sin(ang)*10;
-        ctx.fillStyle = oi%2 ? pal.flameYel : pal.rune;
-        ctx.globalAlpha = 0.9;
-        ctx.fillRect(Math.round(ox), Math.round(oy), 2, 2);
-        ctx.globalAlpha = 1;
-      }
-    }
-
-    if (P.fireBreath) {
-      var fb = P.fireBreath;
-      var topY = 22, botY = 55;
-      for (var by = topY; by <= botY; by++) {
-        var bt = (by - topY) / (botY - topY);
-        var halfW = (1 + bt * 9) * fb;
-        var wob = Math.sin(flick*0.4 + by*0.7) * bt * 1.8;
-        var color;
-        if (bt < 0.25) color = pal.flameCore;
-        else if (bt < 0.5) color = pal.flameYel;
-        else if (bt < 0.78) color = pal.flameOrg;
-        else color = pal.flameRed;
-        ctx.fillStyle = color;
-        ctx.globalAlpha = fb * (0.85 + 0.15*Math.sin(flick*0.5+by));
-        ctx.fillRect(Math.round(40 - halfW + wob), by, Math.round(halfW*2), 1);
-        ctx.globalAlpha = 1;
-      }
-      for (var si=0; si<5; si++) {
-        var st = ((flick*0.6 + si*5) % 10)/10;
-        var sx = 40 + Math.sin(si*9.1) * (2+st*10) * fb;
-        var sy = 22 + st*32*fb;
-        ctx.fillStyle = si%2 ? pal.flameYel : pal.flameMag;
-        ctx.globalAlpha = (1-st)*fb;
-        ctx.fillRect(Math.round(sx), Math.round(sy), 1, 1);
-        ctx.globalAlpha = 1;
-      }
-    }
+    pxLine(ctx,20+hl,25+bob*0.8+droop-headLift,30,38+bob*0.3,5,pal.furDark);
+    pxLine(ctx,40+hc,19+bob+droop*0.5-headLift,40,38+bob*0.3,6,pal.furDark);
+    pxLine(ctx,60+hr,25+bob*0.8+droop-headLift,50,38+bob*0.3,5,pal.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    var glx=P.gazeLOverride!=null?P.gazeLOverride:hgx, grx=P.gazeROverride!=null?P.gazeROverride:hgx;
+    drawHead2(ctx,20+hl,19+bob*0.8+droop-headLift,{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:glx,gazeY:hgy});
+    drawHead2(ctx,40+hc,14+bob+droop*0.5-headLift,{dir:0,size:1.25,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy,horn:true});
+    drawHead2(ctx,60+hr,19+bob*0.8+droop-headLift,{dir:1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:grx,gazeY:hgy});
+    if (P.runeFlare) for (var oi=0;oi<5;oi++){var ang=flick*0.15+oi*(Math.PI*2/5);ctx.fillStyle=oi%2?pal.flameYel:pal.rune;ctx.globalAlpha=0.9;ctx.fillRect(Math.round(40+Math.cos(ang)*26),Math.round(20+Math.sin(ang)*10),2,2);ctx.globalAlpha=1;}
+    if (P.fireBreath) drawFireBreath(ctx, 40, 22, 55, 9, P.fireBreath, flick, pal);
   }
 
+  /* ══════════════════════ ULTRA — lava-cracked obsidian + gold regalia ══════════════════════ */
+  function ultraCracks(ctx, cx, cy, flick, pal) {
+    /* dense glowing magma-vein network — the ULTRA signature. bright orange
+       veins with yellow-white hot junction nodes that pulse with the breath. */
+    var pulse = 0.75 + 0.25*Math.sin(flick*0.12);
+    var veins = [
+      [cx-17,cy-6, cx-9,cy-1, cx-2,cy+3],
+      [cx+17,cy-6, cx+9,cy-1, cx+2,cy+3],
+      [cx-13,cy+5, cx-6,cy+8, cx+1,cy+7, cx+8,cy+9],
+      [cx-10,cy+9, cx-3,cy+11, cx+5,cy+10],
+      [cx,cy-9, cx-1,cy-2, cx+1,cy+4, cx,cy+9],
+      [cx-14,cy+1, cx-7,cy+3, cx,cy+1],
+      [cx+14,cy+1, cx+7,cy+3, cx,cy+2],
+      [cx-6,cy-5, cx-3,cy-1, cx-5,cy+4],
+      [cx+6,cy-5, cx+3,cy-1, cx+5,cy+4],
+      [cx-20,cy-9, cx-12,cy-6, cx-6,cy-8],
+      [cx+20,cy-9, cx+12,cy-6, cx+6,cy-8],
+      [cx-9,cy-10, cx-4,cy-7, cx-8,cy-3],
+      [cx+9,cy-10, cx+4,cy-7, cx+8,cy-3],
+      [cx-16,cy+8, cx-11,cy+5, cx-14,cy+1],
+      [cx+16,cy+8, cx+11,cy+5, cx+14,cy+1]
+    ];
+    for (var v=0; v<veins.length; v++) {
+      var vn = veins[v];
+      for (var sgm=0; sgm<vn.length-2; sgm+=2) {
+        pxLine(ctx, vn[sgm], vn[sgm+1], vn[sgm+2], vn[sgm+3], 1, pal.lava3);
+      }
+    }
+    ctx.globalAlpha = pulse;
+    var nodes = [[cx-9,cy-1],[cx+9,cy-1],[cx-2,cy+3],[cx+2,cy+3],[cx,cy-2],[cx-6,cy+8],[cx+5,cy+7],[cx,cy+4],[cx-7,cy+3],[cx+7,cy+3],[cx-3,cy-1],[cx+3,cy-1]];
+    for (var n=0; n<nodes.length; n++) {
+      pxRect(ctx, nodes[n][0], nodes[n][1], 1, 1, n%3===0 ? pal.lava5 : pal.lava4);
+    }
+    ctx.globalAlpha = 1;
+  }
+  function ultraBracer(ctx, x, y, pal) {
+    /* segmented thorned vambrace: dark-rimmed cuff + jagged dorsal plate, 2 fin spikes */
+    pxEllipse(ctx, x, y, 5, 4, pal.outline);
+    pxEllipse(ctx, x, y, 4, 3, pal.goldDk);
+    pxEllipse(ctx, x, y, 3, 2, pal.gold);
+    pxRect(ctx, x-1, y-1, 2, 1, pal.goldHi);
+    /* three dark-outlined metallic spikes (outline behind each for contrast) */
+    pxTri(ctx, x-4, y-2, x-8, y-9, x-1, y-3, pal.outline);
+    pxTri(ctx, x-4, y-2, x-7, y-8, x-1, y-3, pal.gold);
+    pxTri(ctx, x+4, y-2, x+8, y-9, x+1, y-3, pal.outline);
+    pxTri(ctx, x+4, y-2, x+7, y-8, x+1, y-3, pal.gold);
+    pxTri(ctx, x, y-3, x-2, y-9, x+2, y-9, pal.outline);
+    pxTri(ctx, x, y-3, x-2, y-8, x+2, y-8, pal.gold);
+    pxRect(ctx, x-7, y-8, 1, 2, pal.goldHi);
+    pxRect(ctx, x+7, y-8, 1, 2, pal.goldHi);
+    pxRect(ctx, x, y-8, 1, 2, pal.goldHi);
+  }
+  function ultraChestGem(ctx, cx, cy, flick, pal, flare) {
+    /* BIG, SIMPLE, BRIGHT red diamond — at sprite scale, contrast beats detail.
+       solid bright red pops against the dark obsidian body; white-hot center;
+       thin gold outline frames it. no complex layering that muddies at scale. */
+    var pulse = flare ? 1 : (0.75 + 0.25*Math.sin(flick*0.12));
+    /* soft red glow halo behind */
+    ctx.globalAlpha = pulse*0.35;
+    pxDiamond(ctx, cx, cy, 12, 10, pal.gemHalo);
+    ctx.globalAlpha = 1;
+    /* thin gold outline frame (1px bigger than the gem on each axis) */
+    pxDiamond(ctx, cx, cy, 10, 8, pal.gold);
+    /* the gem — solid bright red, wider than tall, unmistakable ◆ */
+    pxDiamond(ctx, cx, cy, 9, 7, "#e01a0a");
+    pxDiamond(ctx, cx, cy, 6, 5, "#ff3a1a");
+    /* white-hot facet highlight + center */
+    pxDiamond(ctx, cx-2, cy-2, 2, 2, pal.gemCore);
+    pxRect(ctx, cx, cy, 1, 1, "#ffffff");
+  }
+  function ultraTailSpade(ctx, x0, y0, wag, flick, flameI, pal) {
+    /* left tail — curls up, ends in a spade/arrowhead finial */
+    pxLine(ctx, x0, y0, x0-6, y0-4, 3, pal.furDark);
+    pxLine(ctx, x0-6, y0-4, x0-9+wag*0.3, y0-11, 3, pal.furDark);
+    var tx=x0-9+wag*0.3, ty=y0-11;
+    pxTri(ctx, tx, ty-5, tx-3, ty, tx+3, ty, pal.furMid);   /* spade blade */
+    pxTri(ctx, tx-3, ty, tx-5, ty-2, tx-2, ty-1, pal.furMid); /* left barb */
+    pxTri(ctx, tx+3, ty, tx+5, ty-2, tx+2, ty-1, pal.furMid); /* right barb */
+    pxRect(ctx, tx, ty-5, 1, 1, pal.lava3);
+  }
+  function ultraTailBarb(ctx, x0, y0, wag, flick, flameI, pal) {
+    /* right tail — S-curve, ends in a hooked barbed multi-spike tuft */
+    pxLine(ctx, x0, y0, x0+6, y0-3, 3, pal.furDark);
+    pxLine(ctx, x0+6, y0-3, x0+4+wag*0.3, y0-9, 3, pal.furDark);
+    pxLine(ctx, x0+4+wag*0.3, y0-9, x0+9+wag, y0-13, 3, pal.furDark);
+    var tx=x0+9+wag, ty=y0-13;
+    pxTri(ctx, tx, ty-4, tx-2, ty+1, tx+2, ty+1, pal.furMid);
+    pxTri(ctx, tx+2, ty-2, tx+5, ty-4, tx+3, ty, pal.furMid);
+    pxTri(ctx, tx-2, ty-2, tx-5, ty-4, tx-3, ty, pal.furMid);
+    flameTongue(ctx, tx, ty-2, 5*flameI, 3, wag*0.5, 7, pal);
+  }
+  function drawUltraFront(ctx, P) {
+    var W=96,H=76; ctx.clearRect(0,0,W,H);
+    var pal=PAL3, bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0, gx=P.gazeX||0, gy=P.gazeY||0;
+    var sad=P.sad||0, droop=sad*3, howl=P.howl||0;
+    var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*6;
+    /* roaring flame wall behind — 5-band, taller */
+    var hf=[{x:14,h:24,l:-2},{x:24,h:30,l:-1},{x:33,h:35,l:0},{x:42,h:37,l:0},{x:48,h:37,l:0},{x:54,h:37,l:0},{x:63,h:35,l:0},{x:72,h:30,l:1},{x:82,h:24,l:2}];
+    for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue5(ctx,tg.x,44+bob*0.4,Math.max(8,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*3)),8,Math.sin(flick*0.18+fi*1.7)*1.6+tg.l,fi,pal);}
+    /* molten ground fissures */
+    pxRect(ctx, 8, H-4, W-16, 3, pal.furDeep);
+    for (var gx2=12; gx2<W-12; gx2+=9) { pxRect(ctx, gx2, H-3, 4, 1, pal.lava3); pxRect(ctx, gx2+1, H-3, 2, 1, pal.lava4); }
+    pxRect(ctx, W/2-1, H-4, 2, 3, pal.lava4);
+    /* torso */
+    pxEllipse(ctx,48,54+bob*0.3,24,12,pal.furDark); pxEllipse(ctx,48,49+bob*0.3,16,13,pal.furMid);
+    pxEllipse(ctx,48,42+bob*0.3,10,5,pal.furLight); pxEllipse(ctx,48,40+bob*0.3,6,2,pal.furHi);
+    pxEllipse(ctx,48,63+bob*0.3,18,2,pal.furDeep);
+    ultraCracks(ctx, 48, 50+bob*0.3, flick, pal);
+    /* dual tails */
+    var wag=Math.sin((P.tailWag||0))*4;
+    ultraTailSpade(ctx, 28, 52, wag, flick, flameI, pal);
+    ultraTailBarb(ctx, 68, 52, wag, flick, flameI, pal);
+    /* starburst chest gem */
+    ultraChestGem(ctx, 48, 48+bob*0.3, flick, pal, P.runeFlare);
+    /* front legs + spiked bracers + 4 gold talons */
+    if (P.wave) {
+      pxLine(ctx,40,55,39,69,6,pal.furMid); pxRect(ctx,34,68,8,3,pal.furMid); ultraBracer(ctx,39,62,pal);
+      for (var c1=0;c1<4;c1++) pxRect(ctx,34+c1*2,71,1,2,pal.claw);
+      var wv=Math.sin(flick*0.5)*4;
+      pxLine(ctx,58,50,64+wv,38,6,pal.furMid); pxRect(ctx,62+wv,35,7,3,pal.furMid); ultraBracer(ctx,62+wv,44,pal);
+      for (var c2=0;c2<4;c2++) pxRect(ctx,62+wv+c2*2,34,1,2,pal.claw);
+    } else {
+      pxLine(ctx,40,55,39,69,6,pal.furMid); pxRect(ctx,34,68,8,3,pal.furMid); ultraBracer(ctx,39,62,pal);
+      for (var c3=0;c3<4;c3++) pxRect(ctx,34+c3*2,71,1,2,pal.claw);
+      pxLine(ctx,58,55,59,69,6,pal.furMid); pxRect(ctx,55,68,8,3,pal.furMid); ultraBracer(ctx,58,62,pal);
+      for (var c4=0;c4<4;c4++) pxRect(ctx,55+c4*2,71,1,2,pal.claw);
+    }
+    /* necks + three regal heads (center wears the gold crown crest) */
+    pxLine(ctx,24+hl,30+bob*0.8+droop-headLift,36,46+bob*0.3,5,pal.furDark);
+    pxLine(ctx,48+hc,23+bob+droop*0.5-headLift,48,46+bob*0.3,7,pal.furDark);
+    pxLine(ctx,72+hr,30+bob*0.8+droop-headLift,60,46+bob*0.3,5,pal.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    var glx=P.gazeLOverride!=null?P.gazeLOverride:hgx, grx=P.gazeROverride!=null?P.gazeROverride:hgx;
+    drawHeadRegal(ctx,24+hl,23+bob*0.8+droop-headLift,{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:glx,gazeY:hgy},pal,0);
+    drawHeadRegal(ctx,48+hc,17+bob+droop*0.5-headLift,{dir:0,size:1.3,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,1);
+    drawHeadRegal(ctx,72+hr,23+bob*0.8+droop-headLift,{dir:1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:grx,gazeY:hgy},pal,0);
+    if (P.runeFlare) for (var oi=0;oi<6;oi++){var ang=flick*0.15+oi*(Math.PI*2/6);ctx.fillStyle=oi%2?pal.flameYel:pal.gem;ctx.globalAlpha=0.9;ctx.fillRect(Math.round(48+Math.cos(ang)*32),Math.round(24+Math.sin(ang)*12),2,2);ctx.globalAlpha=1;}
+    if (P.fireBreath) drawFireBreath(ctx, 48, 26, 66, 11, P.fireBreath, flick, pal);
+  }
+  function drawUltraSide(ctx, P) {
+    var W=96,H=76; ctx.clearRect(0,0,W,H);
+    var pal=PAL3, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
+    var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
+    var x;
+    for (x=18;x<=76;x+=5){var hgt=(21+Math.round(5*Math.sin(x*0.26)))*flameI;flameTongue5(ctx,x,42+bob*0.4,Math.max(7,hgt+Math.round(Math.sin(flick*0.28+x)*3)),8,Math.sin(flick*0.18+x*0.5)*1.6+lean*0.6,x,pal);}
+    var hf=[{x:13,h:24,l:-2},{x:20,h:30,l:-1},{x:28,h:35,l:0},{x:36,h:36,l:0},{x:43,h:33,l:1},{x:50,h:27,l:1}];
+    for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue5(ctx,tg.x,41+bob*0.4,Math.max(8,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*3)),8,Math.sin(flick*0.18+fi*1.7)*1.6+tg.l+lean*0.6,fi,pal);}
+    pxRect(ctx, 10, H-4, W-20, 3, pal.furDeep);
+    for (var gx2=14; gx2<W-14; gx2+=10) pxRect(ctx, gx2, H-3, 4, 1, pal.lava3);
+    var legAmp=walk?7:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
+    pxLine(ctx,22+legSwing(0),52,21+legSwing(0),66,6,pal.furDark); pxRect(ctx,16+legSwing(0),65,8,3,pal.furDark); ultraBracer(ctx,21+legSwing(0),60,pal);
+    for (var c1=0;c1<4;c1++) pxRect(ctx,16+legSwing(0)+c1*2,68,1,2,pal.claw);
+    pxLine(ctx,58+legSwing(Math.PI),52,60+legSwing(Math.PI),66,6,pal.furDark); pxRect(ctx,55+legSwing(Math.PI),65,8,3,pal.furDark); ultraBracer(ctx,60+legSwing(Math.PI),60,pal);
+    for (var c2=0;c2<4;c2++) pxRect(ctx,55+legSwing(Math.PI)+c2*2,68,1,2,pal.claw);
+    var wag=Math.sin((P.tailWag||0))*3;
+    ultraTailBarb(ctx, 70, 48, wag, flick, flameI, pal);
+    pxEllipse(ctx,46,50+bob*0.3,25*squash,11/squash,pal.furDark);
+    pxEllipse(ctx,25,48+bob*0.3,12*squash,11/squash,pal.furMid);
+    pxEllipse(ctx,64,48+bob*0.3,11*squash,11/squash,pal.furDark);
+    pxEllipse(ctx,43,41+bob*0.3,18,3,pal.furLight); pxEllipse(ctx,23,45+bob*0.3,5,3,pal.furLight);
+    pxEllipse(ctx,46,58+bob*0.3,18,2,pal.furDeep);
+    ultraCracks(ctx, 46, 49+bob*0.3, flick, pal);
+    pxEllipse(ctx,25,44+bob*0.3,7,5,pal.outline); pxEllipse(ctx,25,44+bob*0.3,6,4,pal.gold); pxEllipse(ctx,24,43+bob*0.3,4,2,pal.goldHi);
+    pxLine(ctx,30+legSwing(Math.PI),53,30+legSwing(Math.PI),68,6,pal.furMid); pxRect(ctx,25+legSwing(Math.PI),67,8,3,pal.furMid); ultraBracer(ctx,30+legSwing(Math.PI),61,pal);
+    for (var c3=0;c3<4;c3++) pxRect(ctx,25+legSwing(Math.PI)+c3*2,70,1,2,pal.claw);
+    pxLine(ctx,65+legSwing(0),52,67+legSwing(0),60,6,pal.furMid); pxLine(ctx,67+legSwing(0),60,66+legSwing(0),68,5,pal.furMid);
+    pxRect(ctx,62+legSwing(0),67,8,3,pal.furMid); ultraBracer(ctx,66+legSwing(0),61,pal);
+    for (var c4=0;c4<4;c4++) pxRect(ctx,62+legSwing(0)+c4*2,70,1,2,pal.claw);
+    var droop=sad*3, nl=-lean;
+    pxLine(ctx,17+nl,28+bob*0.8+droop,17,44+bob*0.3,6,pal.furDark);
+    pxLine(ctx,32+nl,22+bob+droop*0.5,32,44+bob*0.3,7,pal.furDark);
+    pxLine(ctx,48+nl,28+bob*0.8+droop,48,44+bob*0.3,6,pal.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    drawHeadRegal(ctx,17+nl,22+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,0);
+    drawHeadRegal(ctx,32+nl,16+bob+droop*0.5+(lean?1:0),{dir:0,size:1.25,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,1);
+    drawHeadRegal(ctx,48+nl,22+bob*0.8+droop+(lean?1:0),{dir:1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,0);
+    if (walk) for (var ei=0;ei<5;ei++){var ex=70+((flick*0.8+ei*9)%18),ey=32+((ei*7+flick*0.3)%20);ctx.fillStyle=ei%2?pal.flameOrg:pal.flameYel;ctx.globalAlpha=0.8-(ex-70)/24;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
+  }
+
+  /* ══════════════════════ OMEGA — polished obsidian + gold inlay, CRT aura ══════════════════════ */
+  function omegaChevron(ctx, cx, cy, flick, pal, flare) {
+    /* gold V-chevron with downward spike tip + 2 diamond studs */
+    var pulse = flare ? 1 : (0.7 + 0.3*Math.sin(flick*0.12));
+    ctx.globalAlpha = pulse*0.3;
+    pxTri(ctx, cx, cy+6, cx-11, cy-6, cx+11, cy-6, pal.gemHalo);
+    ctx.globalAlpha = 1;
+    pxLine(ctx, cx-10, cy-6, cx, cy+4, 2, pal.gold);
+    pxLine(ctx, cx+10, cy-6, cx, cy+4, 2, pal.gold);
+    pxLine(ctx, cx-10, cy-6, cx-1, cy+3, 1, pal.goldHi);
+    pxLine(ctx, cx+10, cy-6, cx+1, cy+3, 1, pal.goldHi);
+    pxTri(ctx, cx, cy+4, cx-2, cy+8, cx+2, cy+8, pal.gold);   /* dripping spike tip */
+    pxRect(ctx, cx, cy+3, 1, 2, pal.goldHi);
+    pxDiamond(ctx, cx-9, cy-1, 3, 3, pal.gold);   /* left stud — bigger */
+    pxDiamond(ctx, cx+9, cy-1, 3, 3, pal.gold);   /* right stud */
+    pxRect(ctx, cx-9, cy-1, 1, 1, pal.goldHi);
+    pxRect(ctx, cx+9, cy-1, 1, 1, pal.goldHi);
+  }
+  function omegaTail(ctx, x0, y0, wag, flick, flameI, pal) {
+    /* right-hip tail, 4 gold dorsal barbs + flared flame-barb tip */
+    pxLine(ctx, x0, y0, x0+7, y0+2, 4, pal.furDark);
+    pxLine(ctx, x0+7, y0+2, x0+6+wag*0.3, y0-6, 4, pal.furDark);
+    pxLine(ctx, x0+6+wag*0.3, y0-6, x0+12+wag, y0-11, 4, pal.furDark);
+    for (var b=0;b<4;b++){
+      var bt=b/3;
+      var bx=x0+7+ (x0+12+wag-(x0+7))*bt*0.9;
+      var by=y0+2 + (y0-11-(y0+2))*bt;
+      pxTri(ctx, bx, by-3, bx-2, by+1, bx+2, by+1, pal.gold);
+    }
+    var tx=x0+12+wag, ty=y0-11;
+    pxTri(ctx, tx, ty-5, tx-3, ty+1, tx+1, ty, pal.gold);   /* flared flame-barb */
+    pxTri(ctx, tx+1, ty-3, tx+4, ty-5, tx+3, ty, pal.gold);
+    pxTri(ctx, tx-1, ty-3, tx-4, ty-5, tx-3, ty, pal.gold);
+    flameTongue(ctx, tx, ty-3, 6*flameI, 3, wag*0.5, 7, pal);
+  }
+  function omegaAura(ctx, W, H, flick, pal) {
+    /* external fire aura + rising embers behind the body (drawn first) */
+    for (var ax=10; ax<W-10; ax+=7) {
+      var ah = (16 + Math.round(6*Math.sin(ax*0.2 + flick*0.05)));
+      flameTongue(ctx, ax, H-16, ah, 6, Math.sin(flick*0.15+ax)*1.5, ax, pal);
+    }
+  }
+  function drawOmegaFront(ctx, P) {
+    var W=112,H=88; ctx.clearRect(0,0,W,H);
+    var pal=PAL4, bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0, gx=P.gazeX||0, gy=P.gazeY||0;
+    var sad=P.sad||0, droop=sad*3, howl=P.howl||0;
+    var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*7;
+    omegaAura(ctx, W, H, flick, pal);
+    /* scorched ground band */
+    pxRect(ctx, 6, H-5, W-12, 4, "#3a1410");
+    for (var sx=10; sx<W-10; sx+=8) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
+    /* torso — polished, cel-banded, NO cracks */
+    pxEllipse(ctx,56,64+bob*0.3,28,14,pal.furDark); pxEllipse(ctx,56,58+bob*0.3,19,15,pal.furMid);
+    pxEllipse(ctx,56,50+bob*0.3,12,6,pal.furLight); pxEllipse(ctx,56,47+bob*0.3,7,3,pal.furHi);
+    pxEllipse(ctx,56,74+bob*0.3,21,2,pal.furDeep);
+    pxEllipse(ctx,48,52+bob*0.3,4,2,pal.furHi);   /* polished shoulder sheen */
+    /* gold collar/ruff ring at neck base */
+    for (var rk=0; rk<7; rk++) { var ra=Math.PI + rk*(Math.PI/6); pxTri(ctx, 56+Math.cos(ra)*16, 44+bob*0.3+Math.sin(ra)*4, 56+Math.cos(ra)*19, 42+bob*0.3+Math.sin(ra)*5, 56+Math.cos(ra+0.2)*16, 45+bob*0.3, pal.gold); }
+    omegaTail(ctx, 78, 62, Math.sin((P.tailWag||0))*4, flick, flameI, pal);
+    omegaChevron(ctx, 56, 58+bob*0.3, flick, pal, P.runeFlare);
+    /* front legs + gold inlay joints + 4 gold talons */
+    if (P.wave) {
+      pxLine(ctx,46,65,45,81,7,pal.furMid); pxRect(ctx,39,80,9,3,pal.furMid);
+      pxRect(ctx,45,72,1,4,pal.gold);
+      for (var c1=0;c1<4;c1++) pxRect(ctx,39+c1*2,83,1,2,pal.claw);
+      var wv=Math.sin(flick*0.5)*4.5;
+      pxLine(ctx,68,58,75+wv,44,7,pal.furMid); pxRect(ctx,73+wv,41,8,3,pal.furMid);
+      for (var c2=0;c2<4;c2++) pxRect(ctx,73+wv+c2*2,40,1,2,pal.claw);
+    } else {
+      pxLine(ctx,46,65,45,81,7,pal.furMid); pxRect(ctx,39,80,9,3,pal.furMid);
+      pxRect(ctx,45,72,1,4,pal.gold);
+      for (var c3=0;c3<4;c3++) pxRect(ctx,39+c3*2,83,1,2,pal.claw);
+      pxLine(ctx,68,65,69,81,7,pal.furMid); pxRect(ctx,64,80,9,3,pal.furMid);
+      pxRect(ctx,69,72,1,4,pal.gold);
+      for (var c4=0;c4<4;c4++) pxRect(ctx,64+c4*2,83,1,2,pal.claw);
+    }
+    /* necks + three regal heads (center wears OMEGA gold crest + ear inlay) */
+    pxLine(ctx,28+hl,35+bob*0.8+droop-headLift,42,54+bob*0.3,6,pal.furDark);
+    pxLine(ctx,56+hc,27+bob+droop*0.5-headLift,56,54+bob*0.3,8,pal.furDark);
+    pxLine(ctx,84+hr,35+bob*0.8+droop-headLift,70,54+bob*0.3,6,pal.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    var glx=P.gazeLOverride!=null?P.gazeLOverride:hgx, grx=P.gazeROverride!=null?P.gazeROverride:hgx;
+    drawHeadRegal(ctx,28+hl,27+bob*0.8+droop-headLift,{dir:-1,size:1.05,roar:P.roarSide||false,blink:P.blink,gazeX:glx,gazeY:hgy},pal,2);
+    drawHeadRegal(ctx,56+hc,20+bob+droop*0.5-headLift,{dir:0,size:1.35,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,2);
+    drawHeadRegal(ctx,84+hr,27+bob*0.8+droop-headLift,{dir:1,size:1.05,roar:P.roarSide||false,blink:P.blink,gazeX:grx,gazeY:hgy},pal,2);
+    if (P.runeFlare) for (var oi=0;oi<7;oi++){var ang=flick*0.15+oi*(Math.PI*2/7);ctx.fillStyle=oi%2?pal.goldHi:pal.gem;ctx.globalAlpha=0.9;ctx.fillRect(Math.round(56+Math.cos(ang)*38),Math.round(28+Math.sin(ang)*14),2,2);ctx.globalAlpha=1;}
+    if (P.fireBreath) drawFireBreath(ctx, 56, 30, 78, 13, P.fireBreath, flick, pal);
+  }
+  function drawOmegaSide(ctx, P) {
+    var W=112,H=88; ctx.clearRect(0,0,W,H);
+    var pal=PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
+    var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
+    omegaAura(ctx, W, H, flick, pal);
+    pxRect(ctx, 8, H-5, W-16, 4, "#3a1410");
+    for (var sx=12; sx<W-12; sx+=9) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
+    var legAmp=walk?8:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
+    pxLine(ctx,26+legSwing(0),60,25+legSwing(0),76,7,pal.furDark); pxRect(ctx,19+legSwing(0),75,9,3,pal.furDark);
+    for (var c1=0;c1<4;c1++) pxRect(ctx,19+legSwing(0)+c1*2,78,1,2,pal.claw);
+    pxLine(ctx,68+legSwing(Math.PI),60,70+legSwing(Math.PI),76,7,pal.furDark); pxRect(ctx,64+legSwing(Math.PI),75,9,3,pal.furDark);
+    for (var c2=0;c2<4;c2++) pxRect(ctx,64+legSwing(Math.PI)+c2*2,78,1,2,pal.claw);
+    omegaTail(ctx, 82, 58, Math.sin((P.tailWag||0))*3.5, flick, flameI, pal);
+    pxEllipse(ctx,54,58+bob*0.3,29*squash,13/squash,pal.furDark);
+    pxEllipse(ctx,29,56+bob*0.3,14*squash,13/squash,pal.furMid);
+    pxEllipse(ctx,75,56+bob*0.3,13*squash,13/squash,pal.furDark);
+    pxEllipse(ctx,51,48+bob*0.3,21,3,pal.furLight); pxEllipse(ctx,27,52+bob*0.3,6,3,pal.furLight);
+    pxEllipse(ctx,54,68+bob*0.3,21,2,pal.furDeep);
+    pxEllipse(ctx,29,52+bob*0.3,8,6,pal.outline); pxEllipse(ctx,29,52+bob*0.3,7,5,pal.gold); pxEllipse(ctx,28,51+bob*0.3,5,2,pal.goldHi);
+    pxLine(ctx,35+legSwing(Math.PI),61,35+legSwing(Math.PI),78,7,pal.furMid); pxRect(ctx,29+legSwing(Math.PI),77,9,3,pal.furMid);
+    pxRect(ctx,35+legSwing(Math.PI),68,1,4,pal.gold);
+    for (var c3=0;c3<4;c3++) pxRect(ctx,29+legSwing(Math.PI)+c3*2,80,1,2,pal.claw);
+    pxLine(ctx,76+legSwing(0),60,78+legSwing(0),69,7,pal.furMid); pxLine(ctx,78+legSwing(0),69,77+legSwing(0),78,6,pal.furMid);
+    pxRect(ctx,73+legSwing(0),77,9,3,pal.furMid);
+    for (var c4=0;c4<4;c4++) pxRect(ctx,73+legSwing(0)+c4*2,80,1,2,pal.claw);
+    var droop=sad*3, nl=-lean;
+    pxLine(ctx,20+nl,33+bob*0.8+droop,20,52+bob*0.3,7,pal.furDark);
+    pxLine(ctx,37+nl,26+bob+droop*0.5,37,52+bob*0.3,8,pal.furDark);
+    pxLine(ctx,55+nl,33+bob*0.8+droop,55,52+bob*0.3,7,pal.furDark);
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    drawHeadRegal(ctx,20+nl,26+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.05,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,2);
+    drawHeadRegal(ctx,37+nl,19+bob+droop*0.5+(lean?1:0),{dir:0,size:1.3,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,2);
+    drawHeadRegal(ctx,55+nl,26+bob*0.8+droop+(lean?1:0),{dir:1,size:1.05,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,2);
+    if (walk) for (var ei=0;ei<6;ei++){var ex=82+((flick*0.8+ei*9)%20),ey=36+((ei*7+flick*0.3)%22);ctx.fillStyle=ei%2?pal.flameOrg:pal.goldHi;ctx.globalAlpha=0.8-(ex-82)/26;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
+  }
+
+  /* ── post-processing ── */
   function applyRim(ctx, W, H, pal) {
-    var img = ctx.getImageData(0,0,W,H);
-    var d = img.data;
+    var img = ctx.getImageData(0,0,W,H); var d = img.data;
     function isSolid(x,y){ return x>=0&&y>=0&&x<W&&y<H && d[(y*W+x)*4+3]>0; }
+    var rh=parseInt(pal.rimHot.slice(1,3),16), rg=parseInt(pal.rimHot.slice(3,5),16), rb=parseInt(pal.rimHot.slice(5,7),16);
+    var nr=parseInt(pal.rim.slice(1,3),16), ng=parseInt(pal.rim.slice(3,5),16), nb=parseInt(pal.rim.slice(5,7),16);
     for (var y=0;y<H;y++) for (var x=0;x<W;x++) {
-      var i=(y*W+x)*4;
-      if (d[i+3]===0) continue;
+      var i=(y*W+x)*4; if (d[i+3]===0) continue;
       var edge = !isSolid(x+1,y)||!isSolid(x-1,y)||!isSolid(x,y+1)||!isSolid(x,y-1);
       if (!edge) continue;
       var r=d[i],g=d[i+1],b=d[i+2];
-      if (r<110 && g<110 && b<130) {
-        if (!isSolid(x,y-1)) { d[i]=parseInt(pal.rimHot.slice(1,3),16); d[i+1]=parseInt(pal.rimHot.slice(3,5),16); d[i+2]=parseInt(pal.rimHot.slice(5,7),16); }
-        else { d[i]=parseInt(pal.rim.slice(1,3),16); d[i+1]=parseInt(pal.rim.slice(3,5),16); d[i+2]=parseInt(pal.rim.slice(5,7),16); }
+      if (r<120 && g<120 && b<140) {
+        if (!isSolid(x,y-1)) { d[i]=rh; d[i+1]=rg; d[i+2]=rb; }
+        else { d[i]=nr; d[i+1]=ng; d[i+2]=nb; }
       }
     }
     ctx.putImageData(img,0,0);
   }
   function applyOutline(ctx, W, H, color) {
-    var img = ctx.getImageData(0,0,W,H);
-    var d = img.data;
+    var img = ctx.getImageData(0,0,W,H); var d = img.data;
     function isSolid(x,y){ return x>=0&&y>=0&&x<W&&y<H && d[(y*W+x)*4+3]>0; }
     var out = new Uint8ClampedArray(d);
     var or=parseInt(color.slice(1,3),16), og=parseInt(color.slice(3,5),16), ob=parseInt(color.slice(5,7),16);
@@ -11684,21 +11867,30 @@ switchTab(initialTab);
         if (near){out[i]=or;out[i+1]=og;out[i+2]=ob;out[i+3]=255;}
       }
     }
-    img.data.set(out);
-    ctx.putImageData(img,0,0);
+    img.data.set(out); ctx.putImageData(img,0,0);
+  }
+  /* OMEGA-only CRT scanline + vignette overlay (applied to the display ctx) */
+  function applyScanlines(ctx, W, H) {
+    ctx.save();
+    ctx.globalAlpha = 0.07; ctx.fillStyle = "#000000";
+    for (var y=0; y<H; y+=3) ctx.fillRect(0, y, W, 1);
+    ctx.globalAlpha = 1;
+    var g = ctx.createRadialGradient(W/2, H/2, H*0.35, W/2, H/2, H*0.75);
+    g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.4)");
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    ctx.restore();
   }
 
   var embers = [];
-  for (var ei2=0; ei2<6; ei2++) embers.push({x:6+Math.random()*60, y:8+Math.random()*44, vy:0.12+Math.random()*0.2, c:Math.random()});
-  function drawEmbers(ctx, t, W) {
+  for (var ei2=0; ei2<8; ei2++) embers.push({x:6+Math.random()*100, y:8+Math.random()*70, vy:0.12+Math.random()*0.22, c:Math.random()});
+  function drawEmbers(ctx, t, W, H, pal) {
     for (var i=0;i<embers.length;i++) {
       var e = embers[i];
-      e.y -= e.vy;
-      e.x += Math.sin(t.flick*0.1 + e.c*10)*0.18;
-      if (e.y < 3) { e.y = 56; e.x = 6+Math.random()*(W-12); }
+      e.y -= e.vy; e.x += Math.sin(t.flick*0.1 + e.c*10)*0.18;
+      if (e.y < 3) { e.y = H-4; e.x = 6+Math.random()*(W-12); }
       var a = Math.min(1, (e.y-3)/16);
       ctx.globalAlpha = a;
-      ctx.fillStyle = e.c>0.5 ? (t.stage?PAL2.flameYel:PAL.flameYel) : (t.stage?PAL2.flameOrg:PAL.flameOrg);
+      ctx.fillStyle = e.c>0.5 ? pal.flameYel : pal.flameOrg;
       ctx.fillRect(Math.round(e.x), Math.round(e.y), 1, 1);
       ctx.globalAlpha = 1;
     }
@@ -11706,81 +11898,59 @@ switchTab(initialTab);
 
   /* ── settings (persisted) ── */
   var SETTINGS_KEY = "cerbPetSettings";
-  var settings = { enabled: true, scale: 3, glow: true, autoEvolve: true, stage: 0, xp: 0 };
+  var settings = { enabled:true, scale:3, glow:true, autoEvolve:true, stage:0, xp:0 };
   try {
     var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
     if (saved) for (var k in settings) if (saved[k] !== undefined) settings[k] = saved[k];
   } catch (e) {}
-  function saveSettings() {
-    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
-  }
+  if (settings.stage < 0 || settings.stage > 3) settings.stage = 0;
+  function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {} }
 
-  /* ── canvas element, fixed to viewport bottom ── */
+  /* ── canvas element ── */
   var canvas = document.createElement("canvas");
   canvas.id = "cerbPet";
-  canvas.width = PW; canvas.height = PH;   /* prime-sized buffer; base is centered */
+  canvas.width = MAXW; canvas.height = MAXH;
   canvas.style.cssText = "position:fixed;z-index:9999;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;";
   document.body.appendChild(canvas);
   var nctx = canvas.getContext("2d");
 
   function applyCanvasStyle() {
-    var sc = settings.scale;
-    var w = (settings.stage ? PW : BW) * sc;
-    var h = (settings.stage ? PH : BH) * sc;
-    var glow = settings.glow ? "filter:drop-shadow(0 0 6px rgba(224,69,26,0.45)) drop-shadow(0 4px 8px rgba(0,0,0,0.6));" : "";
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
+    var F = FORMS[settings.stage], sc = settings.scale;
+    canvas.style.width = (F.w*sc) + "px";
+    canvas.style.height = (F.h*sc) + "px";
     canvas.style.filter = settings.glow ? "drop-shadow(0 0 6px rgba(224,69,26,0.45)) drop-shadow(0 4px 8px rgba(0,0,0,0.6))" : "none";
     canvas.style.display = settings.enabled ? "block" : "none";
   }
   applyCanvasStyle();
 
-  /* ── always-on evolution HUD (pinned bottom-centre) ──────────────────────
-     The gear panel already showed XP, but only when opened. The Creator wants
-     evolution progress AND the live reactive state visible at a glance while
-     the harness is working, so this strip is permanent. It mirrors the same
-     settings.xp / settings.stage source of truth — no second counter. */
+  /* ── always-on evolution HUD ── */
   var hud = document.createElement("div");
   hud.id = "cerbPetHud";
-  hud.style.cssText = [
-    "position:fixed", "z-index:10000", "left:50%", "transform:translateX(-50%)",
-    "bottom:10px", "min-width:230px", "padding:6px 12px 7px",
-    "border-radius:9px", "border:1px solid rgba(224,69,26,0.45)",
-    "background:rgba(14,8,8,0.86)", "backdrop-filter:blur(6px)",
-    "font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace",
-    "color:#c9beb0", "pointer-events:none",
-    "box-shadow:0 4px 18px rgba(0,0,0,0.55)"
-  ].join(";") + ";";
+  hud.style.cssText = ["position:fixed","z-index:10000","left:50%","transform:translateX(-50%)","bottom:10px","min-width:250px","padding:6px 12px 7px","border-radius:9px","border:1px solid rgba(224,69,26,0.45)","background:rgba(14,8,8,0.86)","backdrop-filter:blur(6px)","font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace","color:#c9beb0","pointer-events:none","box-shadow:0 4px 18px rgba(0,0,0,0.55)"].join(";") + ";";
   hud.innerHTML =
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">'
-    + '<span id="cerbHudDot" style="width:7px;height:7px;border-radius:50%;background:#6b5a52;flex:none;box-shadow:0 0 6px rgba(0,0,0,0);"></span>'
+    + '<span id="cerbHudDot" style="width:7px;height:7px;border-radius:50%;background:#6b5a52;flex:none;"></span>'
     + '<span id="cerbHudForm" style="color:#ffd97a;font-weight:700;letter-spacing:0.6px;">PUP</span>'
     + '<span id="cerbHudState" style="color:#8d7e72;">idle</span>'
     + '<span id="cerbHudXP" style="margin-left:auto;color:#e8b84a;">0/100</span>'
     + '</div>'
     + '<div style="height:5px;border-radius:3px;background:#2a1512;overflow:hidden;">'
-    + '<div id="cerbHudBar" style="height:100%;width:0%;border-radius:3px;'
-    + 'background:linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a);transition:width .35s ease;"></div>'
+    + '<div id="cerbHudBar" style="height:100%;width:0%;border-radius:3px;background:linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a);transition:width .35s ease;"></div>'
     + '</div>';
   document.body.appendChild(hud);
 
-  /* Colour per live reactive state so "Azazel is working" is readable at a
-     glance without watching the sprite itself. */
   var HUD_TONE = {
-    idle:    ["#6b5a52", "idle"],
-    running: ["#ff8a1e", "working"],
-    review:  ["#ffd24a", "thinking"],
-    waving:  ["#7ddc7d", "done"],
-    jumping: ["#7ddc7d", "done"],
-    failed:  ["#e0451a", "error"],
-    waiting: ["#8d7e72", "waiting"]
+    idle:["#6b5a52","idle"], running:["#ff8a1e","working"], review:["#ffd24a","thinking"],
+    waving:["#7ddc7d","done"], jumping:["#7ddc7d","done"], failed:["#e0451a","error"], waiting:["#8d7e72","waiting"]
   };
+  var FORM_COLOR = ["#ffd97a", "#fff4d0", "#ff9a2a", "#ffd878"];
 
   function updateHud() {
     if (!hud) return;
     hud.style.display = settings.enabled ? "block" : "none";
-    var prime = settings.stage >= 1;
-    var pct = prime ? 100 : Math.max(0, Math.min(100, (settings.xp / XP_MAX) * 100));
+    var F = FORMS[settings.stage];
+    var maxed = settings.stage >= 3;
+    var pct = maxed ? 100 : Math.max(0, Math.min(100, (settings.xp / F.xpMax) * 100));
     var bar = document.getElementById("cerbHudBar");
     var xpEl = document.getElementById("cerbHudXP");
     var formEl = document.getElementById("cerbHudForm");
@@ -11788,91 +11958,80 @@ switchTab(initialTab);
     var dot = document.getElementById("cerbHudDot");
     if (bar) {
       bar.style.width = pct + "%";
-      bar.style.background = prime
-        ? "linear-gradient(90deg,#ffd24a,#fff4d0,#ffd24a)"
-        : "linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a)";
+      bar.style.background = maxed
+        ? "linear-gradient(90deg,#d99a3a,#ffd878,#fff4d0,#ffd878)"
+        : (settings.stage>=2 ? "linear-gradient(90deg,#ff5a00,#ff9a2a,#ffd84a)" : "linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a)");
     }
-    if (xpEl) xpEl.textContent = prime ? "MAX" : (Math.floor(settings.xp) + "/" + XP_MAX);
-    if (formEl) {
-      formEl.textContent = prime ? "PRIME CERBERUS" : "PUP";
-      formEl.style.color = prime ? "#fff4d0" : "#ffd97a";
-    }
+    if (xpEl) xpEl.textContent = maxed ? "MAX" : (Math.floor(settings.xp) + "/" + F.xpMax);
+    if (formEl) { formEl.textContent = F.name; formEl.style.color = FORM_COLOR[settings.stage]; }
     var tone = HUD_TONE[state] || HUD_TONE.idle;
     if (stEl) { stEl.textContent = tone[1]; stEl.style.color = tone[0]; }
-    if (dot) {
-      dot.style.background = tone[0];
-      dot.style.boxShadow = (state === "idle") ? "none" : "0 0 7px " + tone[0];
-    }
+    if (dot) { dot.style.background = tone[0]; dot.style.boxShadow = (state==="idle") ? "none" : "0 0 7px " + tone[0]; }
   }
 
   var STATES = {
-    idle:    { flameI:1.0, walk:0, bobAmp:1,   roarCenter:true,  roarSide:false, tailSpeed:0.10, sad:0 },
-    running: { flameI:1.5, walk:1, bobAmp:1.5, roarCenter:true,  roarSide:true,  tailSpeed:0.30, sad:0 },
-    review:  { flameI:0.8, walk:0, bobAmp:0.6, roarCenter:false, roarSide:false, tailSpeed:0.06, sad:0 },
-    failed:  { flameI:0.4, walk:0, bobAmp:0.4, roarCenter:false, roarSide:false, tailSpeed:0.03, sad:1 },
-    waving:  { flameI:1.2, walk:0, bobAmp:1.2, roarCenter:true,  roarSide:false, tailSpeed:0.35, sad:0 },
-    jumping: { flameI:1.6, walk:0, bobAmp:0,   roarCenter:true,  roarSide:true,  tailSpeed:0.25, sad:0 },
-    waiting: { flameI:0.7, walk:0, bobAmp:0.8, roarCenter:false, roarSide:false, tailSpeed:0.05, sad:0.3 }
+    idle:{flameI:1.0,walk:0,bobAmp:1,roarCenter:true,roarSide:false,tailSpeed:0.10,sad:0},
+    running:{flameI:1.5,walk:1,bobAmp:1.5,roarCenter:true,roarSide:true,tailSpeed:0.30,sad:0},
+    review:{flameI:0.8,walk:0,bobAmp:0.6,roarCenter:false,roarSide:false,tailSpeed:0.06,sad:0},
+    failed:{flameI:0.4,walk:0,bobAmp:0.4,roarCenter:false,roarSide:false,tailSpeed:0.03,sad:1},
+    waving:{flameI:1.2,walk:0,bobAmp:1.2,roarCenter:true,roarSide:false,tailSpeed:0.35,sad:0},
+    jumping:{flameI:1.6,walk:0,bobAmp:0,roarCenter:true,roarSide:true,tailSpeed:0.25,sad:0},
+    waiting:{flameI:0.7,walk:0,bobAmp:0.8,roarCenter:false,roarSide:false,tailSpeed:0.05,sad:0.3}
   };
 
   var state = "idle";
   var frame = 0;
-  var petX = window.innerWidth - 150, petY = window.innerHeight - 120;
+  var petX = window.innerWidth - 170, petY = window.innerHeight - 140;
   var mouseX = petX, mouseY = petY - 100;
   var facing = -1;
   var jumpT = -1;
   var paused = false;
 
-  /* ── evolution ── */
-  var XP_MAX = 100;
-  var EVOLVE_MS = 20 * 60 * 1000;      /* ~20 minutes of uptime */
+  /* ── evolution ladder ── */
+  var EVOLVE_MS = 20 * 60 * 1000;
   var bornAt = Date.now();
   var evolving = false;
-  var evolveT = 0;                     /* 0..1 during the evolve animation */
+  var evolveT = 0;
 
   function gainXP(n) {
-    if (settings.stage >= 1) return;   /* already prime */
+    if (settings.stage >= 3) return;   /* OMEGA is the apex */
     settings.xp += n;
-    if (settings.autoEvolve && settings.xp >= XP_MAX) doEvolve();
-    saveSettings();
-    updatePanel();
-    updateHud();
+    var F = FORMS[settings.stage];
+    if (settings.autoEvolve && settings.xp >= F.xpMax) doEvolve();
+    saveSettings(); updatePanel(); updateHud();
   }
   function doEvolve() {
-    if (settings.stage >= 1 || evolving) return;
-    evolving = true;
-    evolveT = 0;
+    if (settings.stage >= 3 || evolving) return;
+    evolving = true; evolveT = 0;
   }
   function finishEvolve() {
-    settings.stage = 1;
+    settings.stage = Math.min(3, settings.stage + 1);
     settings.xp = 0;
-    evolving = false;
-    evolveT = 0;
-    saveSettings();
-    applyCanvasStyle();
-    updatePanel();
-    updateHud();
+    evolving = false; evolveT = 0;
+    saveSettings(); applyCanvasStyle(); updatePanel(); updateHud();
   }
-  function resetToBase() {
-    settings.stage = 0;
-    settings.xp = 0;
-    evolving = false;
-    saveSettings();
-    applyCanvasStyle();
-    updatePanel();
-    updateHud();
+  function setForm(stage) {
+    stage = Math.max(0, Math.min(3, stage|0));
+    settings.stage = stage; settings.xp = 0; evolving = false; evolveT = 0;
+    saveSettings(); applyCanvasStyle(); updatePanel(); updateHud();
   }
+  function resetToBase() { setForm(0); }
 
-  /* ── easter-egg idles ── */
-  var egg = null;
-  var eggT = 0;
+  /* ── easter eggs ── */
+  var egg = null, eggT = 0;
   var EGG_INTERVAL = 5 * 60 * FPS;
   var EGG_DURATION = 4 * FPS;
   var nextEggIn = EGG_INTERVAL;
 
-  window.addEventListener("mousemove", function (e) {
-    mouseX = e.clientX; mouseY = e.clientY;
-  });
+  /* per-form egg pools — ULTRA/OMEGA get 5 cooler eggs each */
+  var EGGS = {
+    0: ["play","fire","howl"],
+    1: ["play","fire","howl"],
+    2: ["inferno","crownflare","lavasurge","triplehowl","meteor"],
+    3: ["omegaflare","goldnova","realmgate","omegahowl","extinction"]
+  };
+
+  window.addEventListener("mousemove", function (e) { mouseX = e.clientX; mouseY = e.clientY; });
 
   function setState(s) {
     if (!STATES[s]) return;
@@ -11883,10 +12042,18 @@ switchTab(initialTab);
   }
 
   window.cerbPetEgg = function (name) {
-    if (name === "play" || name === "fire" || name === "howl") {
-      setState("idle");
-      egg = name; eggT = 0;
-    }
+    setState("idle"); egg = name; eggT = 0;
+  };
+
+  /* tool-call-type reactivity — different tool categories give different XP
+     and can nudge the pet into a matching pose. Called by the SSE bridge. */
+  var TOOL_XP = { terminal:2, file:2, code:3, web:2, browser:2, search:2, delegate:3, vision:2, default:1 };
+  window.cerbPetTool = function (toolType, phase) {
+    if (phase === "end") return;   /* only reward the start of work */
+    var xp = TOOL_XP[toolType] || TOOL_XP.default;
+    gainXP(xp);
+    if (toolType === "delegate" || toolType === "code") setState("review");
+    else setState("running");
   };
 
   window.cerbPetReact = function (mode) {
@@ -11900,16 +12067,16 @@ switchTab(initialTab);
   };
   window.cerbPetSetState = setState;
   window.cerbPetEvolve = doEvolve;
+  window.cerbPetSetForm = setForm;
   window.cerbPetGetInfo = function () {
-    return { stage: settings.stage, xp: settings.xp, xpMax: XP_MAX, enabled: settings.enabled,
-             scale: settings.scale, glow: settings.glow, autoEvolve: settings.autoEvolve, state: state };
+    return { stage:settings.stage, form:FORMS[settings.stage].key, name:FORMS[settings.stage].name,
+             xp:settings.xp, xpMax:FORMS[settings.stage].xpMax, enabled:settings.enabled,
+             scale:settings.scale, glow:settings.glow, autoEvolve:settings.autoEvolve, state:state };
   };
 
-  document.addEventListener("visibilitychange", function () {
-    paused = document.hidden;
-  });
+  document.addEventListener("visibilitychange", function () { paused = document.hidden; });
 
-  /* ── settings panel (gear button + card) ── */
+  /* ── settings panel ── */
   var gear = document.createElement("button");
   gear.id = "cerbPetGear";
   gear.title = "Cerberus pet settings";
@@ -11921,7 +12088,7 @@ switchTab(initialTab);
 
   var panel = document.createElement("div");
   panel.id = "cerbPetPanel";
-  panel.style.cssText = "position:fixed;z-index:10001;right:14px;top:96px;width:230px;background:rgba(16,9,9,0.96);border:1px solid rgba(224,69,26,0.45);border-radius:10px;padding:14px;font-family:inherit;color:#e8e0d8;font-size:12px;display:none;pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,0.6);";
+  panel.style.cssText = "position:fixed;z-index:10001;right:14px;top:96px;width:240px;background:rgba(16,9,9,0.96);border:1px solid rgba(224,69,26,0.45);border-radius:10px;padding:14px;font-family:inherit;color:#e8e0d8;font-size:12px;display:none;pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,0.6);";
   document.body.appendChild(panel);
 
   var panelOpen = false;
@@ -11934,11 +12101,8 @@ switchTab(initialTab);
   function row(label) {
     var d = document.createElement("div");
     d.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin:8px 0;";
-    var l = document.createElement("span");
-    l.textContent = label;
-    l.style.cssText = "color:#c9beb0;";
-    d.appendChild(l);
-    return d;
+    var l = document.createElement("span"); l.textContent = label; l.style.cssText = "color:#c9beb0;";
+    d.appendChild(l); return d;
   }
   function toggle(get, set) {
     var b = document.createElement("button");
@@ -11948,15 +12112,13 @@ switchTab(initialTab);
     b.appendChild(knob);
     function paint(){ var on=get(); knob.style.left=on?"22px":"2px"; knob.style.background=on?"#ff8a1e":"#8a8078"; b.style.background=on?"rgba(224,69,26,0.35)":"#2a1512"; }
     b.addEventListener("click", function(){ set(!get()); paint(); saveSettings(); applyCanvasStyle(); updateHud(); });
-    paint();
-    return b;
+    paint(); return b;
   }
   function btn(label, fn, accent) {
     var b = document.createElement("button");
     b.textContent = label;
     b.style.cssText = "width:100%;margin:6px 0 0;padding:7px 0;border-radius:6px;border:1px solid " + (accent?"rgba(255,138,30,0.6)":"rgba(224,69,26,0.4)") + ";background:" + (accent?"rgba(255,138,30,0.15)":"rgba(224,69,26,0.1)") + ";color:" + (accent?"#ffd97a":"#e8b84a") + ";font-size:12px;font-family:inherit;cursor:pointer;";
-    b.addEventListener("click", fn);
-    return b;
+    b.addEventListener("click", fn); return b;
   }
 
   function buildPanel() {
@@ -11976,8 +12138,26 @@ switchTab(initialTab);
     var xpBar = document.createElement("div");
     xpBar.id = "cerbPetXP";
     xpBar.style.cssText = "height:100%;width:0%;background:linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a);border-radius:3px;transition:width .3s;";
-    xpWrap.appendChild(xpBar);
-    panel.appendChild(xpWrap);
+    xpWrap.appendChild(xpBar); panel.appendChild(xpWrap);
+
+    /* form switcher — 4 buttons, manual select */
+    var formLabel = document.createElement("div");
+    formLabel.textContent = "Form"; formLabel.style.cssText = "color:#c9beb0;margin:8px 0 4px;";
+    panel.appendChild(formLabel);
+    var formRow = document.createElement("div");
+    formRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:4px;";
+    var shortNames = ["Pup","Prime","Ultra","Omega"];
+    for (var fi=0; fi<4; fi++) {
+      (function(idx){
+        var b = document.createElement("button");
+        b.textContent = shortNames[idx];
+        b.setAttribute("data-form", idx);
+        b.style.cssText = "padding:6px 0;border-radius:6px;border:1px solid rgba(224,69,26,0.4);background:rgba(224,69,26,0.1);color:" + FORM_COLOR[idx] + ";font-size:11px;font-family:inherit;cursor:pointer;";
+        b.addEventListener("click", function(){ setForm(idx); });
+        formRow.appendChild(b);
+      })(fi);
+    }
+    panel.appendChild(formRow);
 
     var r1 = row("Show pet"); r1.appendChild(toggle(function(){return settings.enabled;}, function(v){settings.enabled=v;})); panel.appendChild(r1);
     var r2 = row("Ember glow"); r2.appendChild(toggle(function(){return settings.glow;}, function(v){settings.glow=v;})); panel.appendChild(r2);
@@ -11993,8 +12173,7 @@ switchTab(initialTab);
       b.setAttribute("data-size", s);
       sizes.appendChild(b);
     });
-    r4.appendChild(sizes);
-    panel.appendChild(r4);
+    r4.appendChild(sizes); panel.appendChild(r4);
 
     panel.appendChild(btn("Evolve now", function(){ doEvolve(); }, true));
     panel.appendChild(btn("Reset to pup", function(){ resetToBase(); }, false));
@@ -12004,20 +12183,88 @@ switchTab(initialTab);
   function updatePanel() {
     var stageEl = document.getElementById("cerbPetStage");
     var xpEl = document.getElementById("cerbPetXP");
-    if (stageEl) stageEl.innerHTML = settings.stage >= 1
-      ? "Form: <b style='color:#ffd97a;'>PRIME CERBERUS</b>"
-      : "Form: <b style='color:#e8b84a;'>Pup</b> &nbsp;·&nbsp; XP " + settings.xp + "/" + XP_MAX;
-    if (xpEl) xpEl.style.width = (settings.stage >= 1 ? 100 : Math.min(100, settings.xp)) + "%";
+    var F = FORMS[settings.stage];
+    if (stageEl) {
+      if (settings.stage >= 3) stageEl.innerHTML = "Form: <b style='color:#ffd878;'>OMEGA CERBERUS</b> &nbsp;·&nbsp; MAX";
+      else stageEl.innerHTML = "Form: <b style='color:" + FORM_COLOR[settings.stage] + ";'>" + F.name + "</b> &nbsp;·&nbsp; XP " + Math.floor(settings.xp) + "/" + F.xpMax;
+    }
+    if (xpEl) xpEl.style.width = (settings.stage>=3 ? 100 : Math.min(100, (settings.xp/F.xpMax)*100)) + "%";
     var sizeBtns = panel.querySelectorAll("[data-size]");
     for (var i=0;i<sizeBtns.length;i++) {
       var on = parseInt(sizeBtns[i].getAttribute("data-size")) === settings.scale;
       sizeBtns[i].style.background = on ? "rgba(255,138,30,0.4)" : "rgba(224,69,26,0.1)";
     }
+    var formBtns = panel.querySelectorAll("[data-form]");
+    for (var j=0;j<formBtns.length;j++) {
+      var fon = parseInt(formBtns[j].getAttribute("data-form")) === settings.stage;
+      formBtns[j].style.background = fon ? "rgba(255,138,30,0.4)" : "rgba(224,69,26,0.1)";
+      formBtns[j].style.borderColor = fon ? "rgba(255,138,30,0.8)" : "rgba(224,69,26,0.4)";
+    }
   }
   updatePanel();
   updateHud();
 
+  /* ── easter-egg pose application (per-form, cooler for ULTRA/OMEGA) ── */
+  function applyEgg(P, flameI, eggEnv) {
+    if (!egg) return;
+    var e = eggEnv;
+    /* base / prime eggs */
+    if (egg === "play") {
+      P.headL=e*6; P.headR=-e*6; P.gazeLOverride=1; P.gazeROverride=-1;
+      P.roarCenter=false; P.roarSide=false; if (e>0.5) P.blink=1; P.tailWag=frame*0.3*2;
+    } else if (egg === "fire") {
+      P.fireBreath=e; P.roarCenter=true; P.flameI=flameI+e*0.5;
+    } else if (egg === "howl") {
+      P.howl=e; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*0.8; if (e>0.4) P.blink=1;
+    }
+    /* ULTRA eggs */
+    else if (egg === "inferno") {           /* all three heads breathe fire */
+      P.fireBreath=e; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*1.2;
+      P.headL=e*2; P.headR=-e*2;
+    } else if (egg === "crownflare") {      /* crown crest blazes, heads bow then rise */
+      P.runeFlare=true; P.howl=e*0.6; P.roarCenter=true; P.flameI=flameI+e*0.9;
+      P.headC=-e*3;
+    } else if (egg === "lavasurge") {       /* crouch, magma pulse, ground erupts */
+      P.squash=1+e*0.15; P.runeFlare=true; P.flameI=flameI+e*1.0; P.roarCenter=true;
+    } else if (egg === "triplehowl") {      /* three heads howl in sequence */
+      P.howl=e; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*1.0;
+      P.headL=Math.sin(frame*0.4)*e*4; P.headR=Math.sin(frame*0.4+2)*e*4; if (e>0.3) P.blink=1;
+    } else if (egg === "meteor") {          /* rears up, fire rains from above */
+      P.howl=e*0.8; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*1.3; P.meteor=e;
+    }
+    /* OMEGA eggs */
+    else if (egg === "omegaflare") {        /* sustained white-hot beam */
+      P.fireBreath=e; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*1.4; P.runeFlare=true;
+    } else if (egg === "goldnova") {        /* golden shockwave ring burst */
+      P.runeFlare=true; P.nova=e; P.roarCenter=true; P.flameI=flameI+e*1.1;
+    } else if (egg === "realmgate") {       /* eyes blaze, aura intensifies, portal shimmer */
+      P.runeFlare=true; P.gate=e; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*1.2;
+    } else if (egg === "omegahowl") {       /* apex howl — heads fan wide, crown flares */
+      P.howl=e; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*1.3;
+      P.headL=e*8; P.headR=-e*8; P.runeFlare=true; if (e>0.3) P.blink=1;
+    } else if (egg === "extinction") {      /* the big one — meteor storm + nova + beam */
+      P.fireBreath=e; P.roarCenter=true; P.roarSide=true; P.flameI=flameI+e*1.6;
+      P.runeFlare=true; P.meteor=e; P.nova=e*0.7;
+    }
+  }
+
   var lastDraw = 0;
+  /* render one form (by stage index) into its off-screen buffer; returns its
+     buffer + dims so callers (e.g. the evolution crossfade) can composite it */
+  function renderForm(stage, P) {
+    var b = bufs[stage];
+    var octx = b.ctx;
+    var Fm = FORMS[stage];
+    var pal = PALS[Fm.pal];
+    if (stage === 0) { if (P.view==="front") drawPupFront(octx,P); else drawPupSide(octx,P); }
+    else if (stage === 1) { if (P.view==="front") drawPrimeFront(octx,P); else drawPrimeSide(octx,P); }
+    else if (stage === 2) { if (P.view==="front") drawUltraFront(octx,P); else drawUltraSide(octx,P); }
+    else { if (P.view==="front") drawOmegaFront(octx,P); else drawOmegaSide(octx,P); }
+    applyRim(octx, Fm.w, Fm.h, pal);
+    applyOutline(octx, Fm.w, Fm.h, pal.outline);
+    return { canvas:b.canvas, w:Fm.w, h:Fm.h, pal:pal };
+  }
+
   function tick(now) {
     requestAnimationFrame(tick);
     if (paused || !settings.enabled) return;
@@ -12026,23 +12273,26 @@ switchTab(initialTab);
     frame += TICKS_PER_FRAME;
 
     var S = STATES[state];
+    var F = FORMS[settings.stage];
 
-    /* ── evolution: uptime timer + random chance while working ── */
-    if (!evolving && settings.stage < 1 && settings.autoEvolve) {
+    /* evolution: uptime timer + random chance while working */
+    if (!evolving && settings.stage < 3 && settings.autoEvolve) {
       if (Date.now() - bornAt > EVOLVE_MS) doEvolve();
-      else if ((state === "running" || state === "review") && Math.random() < 0.0008) doEvolve();
+      else if ((state === "running" || state === "review") && Math.random() < 0.0006) doEvolve();
     }
     if (evolving) {
-      evolveT += 1 / (2.2 * FPS);
+      evolveT += 1/(2.2*FPS);
+      var evSt = document.getElementById("cerbHudState");
+      if (evSt) { evSt.textContent = "EVOLVING"; evSt.style.color = "#fff4d0"; }
       if (evolveT >= 1) finishEvolve();
     }
 
-    /* ── easter-egg scheduling (idle only, base form only) ── */
-    if (state === "idle" && !egg && settings.stage < 1) {
+    /* easter-egg scheduling (idle only) — pool depends on form */
+    if (state === "idle" && !egg) {
       nextEggIn--;
       if (nextEggIn <= 0) {
-        var roll = Math.random();
-        egg = roll < 0.34 ? "play" : (roll < 0.67 ? "fire" : "howl");
+        var pool = EGGS[settings.stage] || EGGS[0];
+        egg = pool[Math.floor(Math.random()*pool.length)];
         eggT = 0;
         nextEggIn = EGG_INTERVAL + Math.floor(Math.random()*900);
       }
@@ -12055,136 +12305,206 @@ switchTab(initialTab);
       if (eggT >= 1) { egg = null; eggT = 0; eggEnv = 0; }
     }
 
-    /* ── movement ── */
-    var walkPhase = 0;
-    var moving = false;
+    /* movement */
+    var walkPhase = 0, moving = false;
     if (state === "running") {
       var dx = mouseX - petX;
       if (Math.abs(dx) > 6) {
-        walkPhase = frame * 0.35;
-        petX += (dx>0?1:-1) * Math.min(Math.abs(dx), 2.2);
-        facing = dx > 0 ? 1 : -1;
-        moving = true;
+        walkPhase = frame*0.35;
+        petX += (dx>0?1:-1)*Math.min(Math.abs(dx), 2.2);
+        facing = dx>0?1:-1; moving = true;
       }
     } else if ((state === "idle" || state === "waiting") && !egg) {
-      var dx2 = mouseX - petX, dy2 = mouseY - petY;
-      var dist = Math.sqrt(dx2*dx2 + dy2*dy2);
+      var dx2 = mouseX-petX, dy2 = mouseY-petY;
+      var dist = Math.sqrt(dx2*dx2+dy2*dy2);
       if (dist > 160) {
-        walkPhase = frame * 0.25;
-        petX += (dx2/dist) * 1.4;
-        petY += (dy2/dist) * 1.0;
-        if (Math.abs(dx2) > 4) facing = dx2 > 0 ? 1 : -1;
+        walkPhase = frame*0.25;
+        petX += (dx2/dist)*1.4; petY += (dy2/dist)*1.0;
+        if (Math.abs(dx2) > 4) facing = dx2>0?1:-1;
         moving = true;
       }
-      petY = Math.max(window.innerHeight*0.4, Math.min(window.innerHeight - 120, petY));
-      petX = Math.max(40, Math.min(window.innerWidth - 40, petX));
+      petY = Math.max(window.innerHeight*0.4, Math.min(window.innerHeight-140, petY));
+      petX = Math.max(40, Math.min(window.innerWidth-40, petX));
     }
     var viewFront = !moving;
 
-    /* ── gaze ── */
-    var gdx = mouseX - petX, gdy = mouseY - petY;
+    /* gaze */
+    var gdx = mouseX-petX, gdy = mouseY-petY;
     var gazeX = Math.max(-1, Math.min(1, Math.round(gdx/60)));
     var gazeY = Math.max(-1, Math.min(1, Math.round(gdy/80)));
     var runeFlare = false;
     if (state === "review") {
       gazeX = Math.max(-1, Math.min(1, Math.round(Math.sin(frame*0.15)*1.4)));
-      gazeY = 0;
-      runeFlare = true;                 /* prime: rune flares + sparks orbit */
-    } else if (state === "failed") {
-      gazeX = 0; gazeY = 1;
-    }
+      gazeY = 0; runeFlare = true;
+    } else if (state === "failed") { gazeX = 0; gazeY = 1; }
 
-    var bob = reduced ? 0 : Math.sin(frame*0.07) * S.bobAmp;
-    var squash = 1;
-    var yOff = 0;
+    var bob = reduced ? 0 : Math.sin(frame*0.07)*S.bobAmp;
+    var squash = 1, yOff = 0;
     if (state === "jumping") {
-      jumpT += 0.06 * TICKS_PER_FRAME;
-      var arc = Math.sin(Math.min(1, jumpT) * Math.PI);
-      yOff = -arc * 26;
-      squash = 1 + arc*0.25 - (jumpT<0.15?0.2:0);
+      jumpT += 0.06*TICKS_PER_FRAME;
+      var arc = Math.sin(Math.min(1, jumpT)*Math.PI);
+      yOff = -arc*26; squash = 1+arc*0.25-(jumpT<0.15?0.2:0);
       if (jumpT >= 1.15) setState("idle");
     }
 
-    var flameI = S.flameI;
-    /* prime runs a little hotter */
-    if (settings.stage >= 1) flameI = flameI * 1.15 + 0.1;
+    /* progressive flame intensity per tier */
+    var flameI = S.flameI * F.flame;
 
     var P = {
       bob:bob, walk:walkPhase, flameI:flameI, flick:frame,
       gazeX:gazeX, gazeY:gazeY, squash:squash, sad:S.sad,
       lean:(state==="running")?3:0,
-      tailWag:frame * S.tailSpeed * 2,
+      tailWag:frame*S.tailSpeed*2,
       roarCenter:S.roarCenter, roarSide:S.roarSide,
-      blink:(frame % 110 < 4) ? 1 : 0,
-      view:viewFront ? "front" : "side",
+      blink:(frame%110<4)?1:0,
+      view:viewFront?"front":"side",
       wave:(state==="waving")?1:0,
       runeFlare:runeFlare,
       stage:settings.stage
     };
 
-    if (egg === "play") {
-      P.headL = eggEnv*6;  P.headR = -eggEnv*6;
-      P.gazeLOverride = 1; P.gazeROverride = -1;
-      P.roarCenter = false; P.roarSide = false;
-      if (eggEnv > 0.5) P.blink = 1;
-      P.tailWag = frame * 0.3 * 2;
-    } else if (egg === "fire") {
-      P.fireBreath = eggEnv;
-      P.roarCenter = true;
-      P.flameI = flameI + eggEnv*0.5;
-    } else if (egg === "howl") {
-      P.howl = eggEnv;
-      P.roarCenter = true; P.roarSide = true;
-      P.flameI = flameI + eggEnv*0.8;
-      if (eggEnv > 0.4) P.blink = 1;
-    }
+    applyEgg(P, flameI, eggEnv);
 
-    /* ── render the right form into its off-screen buffer ── */
-    var isPrime = settings.stage >= 1;
-    var srcCanvas, srcCtx, sw, sh;
-    if (isPrime) {
-      if (P.view === "front") drawPrimeFront(octx2, P); else drawPrimeSide(octx2, P);
-      applyRim(octx2, PW, PH, PAL2);
-      applyOutline(octx2, PW, PH, PAL2.outline);
-      srcCanvas = off2; sw = PW; sh = PH;
-    } else {
-      if (P.view === "front") drawPupFront(octx, P); else drawPupSide(octx, P);
-      applyRim(octx, BW, BH, PAL);
-      applyOutline(octx, BW, BH, PAL.outline);
-      srcCanvas = off; sw = BW; sh = BH;
-    }
+    /* render the right form into its buffer */
+    renderForm(settings.stage, P);
+    var b = bufs[settings.stage];
+    var sw = F.w, sh = F.h;
+    var pal = PALS[F.pal];
 
-    nctx.clearRect(0,0,PW,PH);
+    nctx.clearRect(0,0,MAXW,MAXH);
 
-    /* evolving: white flash + expanding ring before the reveal */
     if (evolving) {
-      var cx = PW/2, cy = PH/2;
+      /* 3-phase evolution: charge-up glow + inward streaks -> bright flash ->
+         new form emerges with thick expanding shockwave rings + outward burst.
+         Effects are deliberately bold so the moment reads at any scale. */
+      var cx=MAXW/2, cy=MAXH*0.55;
+      var oldStage = settings.stage;
+      var newStage = Math.min(3, settings.stage + 1);
+      var rold = renderForm(oldStage, P);
+      var rnew = renderForm(newStage, P);
+      var oxOld = Math.round((MAXW-rold.w)/2), oyOld = MAXH-rold.h;
+      var oxNew = Math.round((MAXW-rnew.w)/2), oyNew = MAXH-rnew.h;
+      var shake = (evolveT < 0.4) ? Math.sin(frame*1.5)*(evolveT/0.4)*3 : 0;
       nctx.save();
-      nctx.globalAlpha = Math.min(1, evolveT*2);
-      nctx.fillStyle = "#fff4d0";
-      nctx.beginPath(); nctx.arc(cx, cy, 6 + evolveT*40, 0, Math.PI*2); nctx.fill();
-      nctx.globalAlpha = (1-evolveT);
-      nctx.strokeStyle = "#ffd24a"; nctx.lineWidth = 2;
-      nctx.beginPath(); nctx.arc(cx, cy, evolveT*46, 0, Math.PI*2); nctx.stroke();
+      if (evolveT < 0.5) {
+        /* PHASE 1 — old form charges up: glows white-hot, shakes, energy streaks IN */
+        var p1 = evolveT/0.5;
+        var a = evolveT < 0.4 ? 1 : Math.max(0, 1-(evolveT-0.4)/0.1);
+        nctx.globalAlpha = a;
+        nctx.drawImage(rold.canvas, oxOld+shake, oyOld);
+        nctx.globalCompositeOperation = "lighter";
+        nctx.globalAlpha = p1*0.9*a;
+        nctx.drawImage(rold.canvas, oxOld+shake, oyOld);    /* white-hot build */
+        nctx.drawImage(rold.canvas, oxOld+shake, oyOld);    /* double-pass = hotter */
+        /* inward energy streaks — each drawn as a short radial line so motion reads */
+        for (var ep=0; ep<12; ep++) {
+          var ang = ep*(Math.PI*2/12) + frame*0.05;
+          var radOut = (1-p1)*46 + 6;
+          var radIn = radOut - 9;
+          nctx.globalAlpha = (0.4 + 0.5*p1);
+          nctx.strokeStyle = ep%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 2;
+          nctx.beginPath();
+          nctx.moveTo(cx+Math.cos(ang)*radOut, cy+Math.sin(ang)*radOut*0.7);
+          nctx.lineTo(cx+Math.cos(ang)*radIn, cy+Math.sin(ang)*radIn*0.7);
+          nctx.stroke();
+        }
+        nctx.globalCompositeOperation = "source-over";
+      } else {
+        /* PHASE 2 — new form emerges from a bright flash */
+        var t2 = (evolveT-0.5)/0.5;
+        /* bright full-canvas flash that peaks at the transition then decays */
+        var flashA = Math.max(0, 1 - t2*1.6);
+        nctx.globalAlpha = flashA*0.85;
+        nctx.fillStyle = "#fff8e0";
+        nctx.fillRect(0, 0, MAXW, MAXH);
+        /* central bloom */
+        nctx.globalAlpha = Math.max(0, 1-t2);
+        nctx.fillStyle = "#fffef0";
+        nctx.beginPath(); nctx.arc(cx, cy, 12+t2*46, 0, Math.PI*2); nctx.fill();
+        /* new form fades in over the flash */
+        nctx.globalAlpha = Math.min(1, t2*1.5);
+        nctx.drawImage(rnew.canvas, oxNew, oyNew);
+        /* thick expanding shockwave rings */
+        nctx.globalCompositeOperation = "lighter";
+        for (var rr=0; rr<3; rr++) {
+          var rt = Math.min(1, t2*1.2 + rr*0.18);
+          nctx.globalAlpha = (1-rt)*0.9;
+          nctx.strokeStyle = rr%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 3;
+          nctx.beginPath(); nctx.arc(cx, cy, rt*58, 0, Math.PI*2); nctx.stroke();
+        }
+        /* outward particle burst with short trails so motion reads */
+        for (var bp=0; bp<16; bp++) {
+          var bang = bp*(Math.PI*2/16) + 0.2;
+          var brad = t2*54;
+          var brad0 = Math.max(0, brad-8);
+          nctx.globalAlpha = (1-t2);
+          nctx.strokeStyle = bp%3===0 ? "#fff4d0" : (bp%2 ? "#ffd878" : "#ff5a00");
+          nctx.lineWidth = 2;
+          nctx.beginPath();
+          nctx.moveTo(cx+Math.cos(bang)*brad0, cy+Math.sin(bang)*brad0*0.75);
+          nctx.lineTo(cx+Math.cos(bang)*brad, cy+Math.sin(bang)*brad*0.75);
+          nctx.stroke();
+        }
+        nctx.globalCompositeOperation = "source-over";
+      }
       nctx.restore();
     } else {
-      var ox = Math.round((PW - sw)/2), oy = PH - sh;
-      pxEllipse(nctx, PW/2, PH-2, isPrime?27:22, 2, "rgba(0,0,0,0.5)");
+      var ox = Math.round((MAXW-sw)/2), oy = MAXH-sh;
+      pxEllipse(nctx, MAXW/2, MAXH-2, Math.round(sw*0.42), 2, "rgba(0,0,0,0.5)");
       nctx.save();
-      if (P.view === "side" && facing > 0) { nctx.translate(PW, 0); nctx.scale(-1, 1); ox = PW - ox - sw; }
-      nctx.drawImage(srcCanvas, ox, oy);
+      if (P.view === "side" && facing > 0) { nctx.translate(MAXW, 0); nctx.scale(-1, 1); ox = MAXW-ox-sw; }
+      nctx.drawImage(b.canvas, ox, oy);
       nctx.restore();
+
+      /* egg FX layered on the display buffer (in MAXW space) */
+      var fcx = MAXW/2;
+      if (P.nova) {   /* golden shockwave rings */
+        nctx.save();
+        for (var nr=0; nr<3; nr++) {
+          var rt = (P.nova + nr*0.18) % 1;
+          nctx.globalAlpha = (1-rt)*0.8;
+          nctx.strokeStyle = nr%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 2;
+          nctx.beginPath(); nctx.arc(fcx, MAXH*0.55, rt*52, 0, Math.PI*2); nctx.stroke();
+        }
+        nctx.restore();
+      }
+      if (P.meteor) {   /* fire raining from above */
+        nctx.save();
+        for (var mr=0; mr<7; mr++) {
+          var mt = ((frame*0.05 + mr*0.14) % 1);
+          var mxp = fcx-40 + ((mr*29)%80);
+          var myp = mt*MAXH*0.7;
+          nctx.globalAlpha = (1-mt)*P.meteor;
+          nctx.fillStyle = mr%2 ? "#ffd84a" : "#ff5a00";
+          nctx.fillRect(Math.round(mxp), Math.round(myp), 2, 3);
+          nctx.fillStyle = "#fff0b0";
+          nctx.fillRect(Math.round(mxp), Math.round(myp)-1, 1, 1);
+        }
+        nctx.restore();
+      }
+      if (P.gate) {   /* realm gate shimmer — vertical portal bars */
+        nctx.save();
+        for (var gr=0; gr<5; gr++) {
+          var gxp = fcx-24 + gr*12;
+          nctx.globalAlpha = (0.3+0.3*Math.sin(frame*0.2+gr))*P.gate;
+          nctx.fillStyle = gr%2 ? "#ffd878" : "#ff5a1e";
+          nctx.fillRect(Math.round(gxp), Math.round(MAXH*0.2), 2, Math.round(MAXH*0.5));
+        }
+        nctx.restore();
+      }
     }
-    drawEmbers(nctx, P, PW);
+    drawEmbers(nctx, P, MAXW, MAXH, pal);
+
+    /* OMEGA gets the CRT scanline + vignette overlay on top */
+    if (settings.stage === 3 && !evolving) applyScanlines(nctx, MAXW, MAXH);
 
     var sc = settings.scale;
-    var dispW = (isPrime?PW:BW) * sc, dispH = (isPrime?PH:BH) * sc;
+    var dispW = F.w*sc, dispH = F.h*sc;
     canvas.style.left = (petX - dispW/2) + "px";
-    canvas.style.top  = (petY - dispH + yOff*sc) + "px";
+    canvas.style.top = (petY - dispH + yOff*sc) + "px";
   }
   requestAnimationFrame(tick);
 })();
-
 </script>
 </body>
 </html>`;
