@@ -36,6 +36,8 @@ const STRING_METADATA = new Map([
   ["code", 80],
   ["controlId", 64],
   ["errorCode", 80],
+  ["evidenceKind", 32],
+  ["evidenceStatus", 32],
   ["model", 200],
   ["provider", 80],
   ["receiptId", 200],
@@ -56,6 +58,7 @@ const INTEGER_METADATA = new Set([
   "criteriaPassed",
   "durationMs",
   "editCount",
+  "evidenceNudges",
   "failed",
   "inputTokens",
   "iteration",
@@ -67,6 +70,9 @@ const INTEGER_METADATA = new Set([
   "revision",
   "routes",
   "total",
+  "mutationEvidence",
+  "verificationEvidence",
+  "visualEvidence",
   "visualChanges",
   "warnings"
 ]);
@@ -628,6 +634,20 @@ export function turnInspectorMetadata(event) {
       phase: "provider_retry",
       status: "running",
       metadata: {}
+    };
+  }
+  if (phase === "completion-evidence") {
+    return {
+      phase: "completion_evidence",
+      status: "running",
+      metadata: {
+        evidenceKind: event?.kind,
+        evidenceStatus: event?.status,
+        mutationEvidence: event?.mutationCount,
+        verificationEvidence: event?.verificationCount,
+        visualEvidence: event?.visualCount,
+        evidenceNudges: event?.nudges
+      }
     };
   }
   return {

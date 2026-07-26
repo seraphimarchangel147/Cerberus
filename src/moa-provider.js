@@ -277,6 +277,9 @@ function referenceContext(context = {}, { preset, index, turnId }) {
   delete cloned.__allowedTools;
   delete cloned.__onToolEvent;
   delete cloned.__turnAbortController;
+  // Reference analysts have no tools and must not independently satisfy the
+  // aggregator's completion-evidence contract.
+  delete cloned.__completionContract;
   return cloned;
 }
 

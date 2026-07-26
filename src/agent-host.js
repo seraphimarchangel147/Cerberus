@@ -22,6 +22,10 @@ import {
 } from "./project-store.js";
 import { profileMemoryScope } from "./memory-system.js";
 import { turnInspectorMetadata } from "./run-inspector.js";
+import {
+  completionToolPreferences,
+  createCompletionContract
+} from "./completion-evidence.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -76,6 +80,48 @@ export function toolSearchBridgesActive(tools, _env = process.env) {
       .filter((name) => TOOL_SEARCH_BRIDGE_NAME_SET.has(name))
   );
   return TOOL_SEARCH_BRIDGE_NAMES.every((name) => names.has(name));
+}
+
+export async function prepareTurnHints({
+  runtime,
+  text,
+  projectId = DEFAULT_PROJECT_ID,
+  channel = "chat",
+  memoryScope = "main"
+} = {}) {
+  const principlePromise = channel !== "subagent" && runtime?.vectorStore
+    ? Promise.resolve()
+        .then(() => runtime.vectorStore.search(
+          "principle",
+          text,
+          { limit: 10, minScore: 0.1 }
+        ))
+        .then((rawHits) => filterPrincipleHits(rawHits, runtime.memory, {
+          limit: 3,
+          scope: memoryScope
+        }))
+        .catch(() => [])
+    : Promise.resolve([]);
+  const ambientPromise = (
+    projectId === DEFAULT_PROJECT_ID
+    && channel !== "autopilot"
+    && channel !== "cron"
+    && channel !== "subagent"
+    && runtime?.observations?.getRecentContext
+  )
+    ? Promise.resolve()
+        .then(() => runtime.observations.getRecentContext({
+          minutes: 10,
+          maxChars: 1500,
+          maxSnippets: 6
+        }))
+        .catch(() => null)
+    : Promise.resolve(null);
+  const [intuitions, ambientContext] = await Promise.all([
+    principlePromise,
+    ambientPromise
+  ]);
+  return { intuitions, ambientContext };
 }
 
 function openAIToolPlan(toolRegistry, options = {}) {
@@ -734,6 +780,24 @@ export class AgentHost {
       allowPropagation: channel !== "subagent",
       ephemeral
     });
+    const referenceOptions = {
+      workspaceDir: project.workspaceRoot ?? this.workspaceDir,
+      signal: input.abortSignal
+    };
+    if (project.id !== DEFAULT_PROJECT_ID) {
+      referenceOptions.homeDir = project.workspaceRoot;
+    }
+    // Scrutiny may safely prepare late-bound files, so expansion starts only
+    // after processSignal. From here it can overlap independent policy, tool
+    // catalog, principle, and ambient-context preparation without changing
+    // the exact model input.
+    const providerInputPreparation = expandContextReferences(
+      text,
+      referenceOptions
+    ).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
+    );
 
     if (output.propagation?.specialist) {
       this.ensureSpecialistAgent(output.propagation.specialist, agentId);
@@ -821,6 +885,14 @@ export class AgentHost {
     const resumedGoalTurn = input.goalContinuation === true
       && this.runtime.goals?.get?.(sessionId)?.status === "active";
     const toolRegistry = this.runtime.tools;
+    const completionContract = createCompletionContract(text, {
+      channel,
+      referenceOnly: input.metadata?.moaReference === true
+    });
+    const preferredToolNames = completionToolPreferences(completionContract);
+    const preferencePlan = preferredToolNames.length > 0
+      ? { prefer: preferredToolNames }
+      : {};
 
     // Specialist bounds: a bounded specialist sees (and may invoke) only its
     // scoped allowlist + the core set every specialist needs. Without this,
@@ -876,6 +948,7 @@ export class AgentHost {
           toolRegistry,
           conversational
             ? {
+                ...preferencePlan,
                 only: CHAT_CORE_TOOLS,
                 readOnly: toolPolicy === "read-only",
                 context: {
@@ -884,6 +957,7 @@ export class AgentHost {
                 }
               }
             : {
+                ...preferencePlan,
                 readOnly: toolPolicy === "read-only",
                 context: {
                   ...projectToolPlanContext,
@@ -899,6 +973,7 @@ export class AgentHost {
     const chatCoreUnavailable = conversational && tools.length === 0 && toolPolicy === "read-only";
     if (chatCoreUnavailable) {
       toolPlan = openAIToolPlan(toolRegistry, {
+        ...preferencePlan,
         readOnly: true,
         context: {
           ...projectToolPlanContext,
@@ -915,6 +990,7 @@ export class AgentHost {
       toolPlan = toolPolicy === "none" && !conversational
         ? { active: false, tools: [], omittedNames: Object.freeze([]), notice: null }
         : openAIToolPlan(toolRegistry, {
+            ...preferencePlan,
             only: scopedNames,
             readOnly: toolPolicy === "read-only",
             context: {
@@ -933,16 +1009,13 @@ export class AgentHost {
 
     // Lava intuition (C2): top principles from the vector store inserted into
     // the prompt as soft hints — distinct from explicit memoryHits.
-    let intuitions = [];
-    if (channel !== "subagent" && this.runtime.vectorStore) {
-      try {
-        const rawHits = await this.runtime.vectorStore.search("principle", text, { limit: 10, minScore: 0.1 });
-        intuitions = filterPrincipleHits(rawHits, this.runtime.memory, {
-          limit: 3,
-          scope: memoryScope
-        });
-      } catch { /* best effort */ }
-    }
+    const preparedHints = prepareTurnHints({
+      runtime: this.runtime,
+      text,
+      projectId: project.id,
+      channel,
+      memoryScope
+    });
 
     // Ambient on-screen context: top apps + most recent OCR snippets from
     // the last 10 minutes. Lets the agent ground its replies in what the
@@ -950,18 +1023,7 @@ export class AgentHost {
     // failures fall through silently so chat keeps working without capture.
     // Ambient capture is user-global rather than project-owned. Only the
     // default control plane may place OCR/window text in a model prompt.
-    let ambientContext = null;
-    if (
-      project.id === DEFAULT_PROJECT_ID
-      && channel !== "autopilot"
-      && channel !== "cron"
-      && channel !== "subagent"
-      && this.runtime.observations?.getRecentContext
-    ) {
-      try {
-        ambientContext = await this.runtime.observations.getRecentContext({ minutes: 10, maxChars: 1500, maxSnippets: 6 });
-      } catch { /* swallow */ }
-    }
+    const { intuitions, ambientContext } = await preparedHints;
 
     const memoryHitsForModel = output.customContext.map((entry) => ({
       score: entry.score,
@@ -1026,6 +1088,7 @@ export class AgentHost {
       // does not read this field.
       __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
       __toolSearchActive: toolSearchActive,
+      __completionContract: completionContract,
       // Exact request-local radar universe used to build `tools` above.
       // Discovery and forwarding intersect it with enforced policy/scope.
       __toolRadarOmitted: toolPlan.omittedNames,
@@ -1079,14 +1142,9 @@ export class AgentHost {
 
     let modelResult;
     try {
-      const referenceOptions = {
-        workspaceDir: project.workspaceRoot ?? this.workspaceDir,
-        signal: turnAbortController.signal
-      };
-      if (project.id !== DEFAULT_PROJECT_ID) {
-        referenceOptions.homeDir = project.workspaceRoot;
-      }
-      const providerInput = await expandContextReferences(text, referenceOptions);
+      const preparedInput = await providerInputPreparation;
+      if (!preparedInput.ok) throw preparedInput.error;
+      const providerInput = preparedInput.value;
       const providerInstructions = this.instructionsForAgent(
         agent,
         project,
@@ -1176,6 +1234,7 @@ export class AgentHost {
         consentOverride,
         askDamped,
         conversational,
+        completionEvidence: modelResult.completionEvidence ?? null,
         scrutinyCeilingApplied,
         effectiveScrutinyAction: verdict,
         verdictOverrideReason,
@@ -1209,6 +1268,7 @@ export class AgentHost {
               iterations: modelResult.iterations ?? null,
               maxIterations: modelResult.maxIterations ?? null,
               stopReason: modelResult.stopReason ?? null,
+              completionEvidence: modelResult.completionEvidence ?? null,
               outputId: output.id,
               outcomeId: outcomeRecord?.id ?? null,
               conversational,
@@ -1322,7 +1382,9 @@ export class AgentHost {
       projectId: project.id,
       sessionId,
       phase: "turn_complete",
-      status: "succeeded",
+      status: modelResult.completionEvidence?.status === "incomplete"
+        ? "failed"
+        : "succeeded",
       metadata: {
         agentId,
         provider: modelResult.provider,
@@ -1330,6 +1392,12 @@ export class AgentHost {
         iteration: modelResult.iterations,
         maxIterations: modelResult.maxIterations,
         stopReason: modelResult.stopReason,
+        evidenceKind: modelResult.completionEvidence?.kind,
+        evidenceStatus: modelResult.completionEvidence?.status,
+        mutationEvidence: modelResult.completionEvidence?.mutationCount,
+        verificationEvidence: modelResult.completionEvidence?.verificationCount,
+        visualEvidence: modelResult.completionEvidence?.visualCount,
+        evidenceNudges: modelResult.completionEvidence?.nudges,
         inputTokens: inspectorUsageValue(
           modelResult.usage,
           "inputTokens",

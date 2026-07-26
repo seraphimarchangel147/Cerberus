@@ -227,6 +227,34 @@ test("Run Inspector observers cannot break its authoritative journal", (t) => {
   assert.equal(store.list({ projectId: "alpha" }).length, 1);
 });
 
+test("Run Inspector exposes content-free completion-evidence progress", () => {
+  const inspected = turnInspectorMetadata({
+    phase: "completion-evidence",
+    status: "retry",
+    kind: "ui-change",
+    missing: ["mutation", "verification", "visual"],
+    mutationCount: 0,
+    verificationCount: 1,
+    visualCount: 0,
+    nudges: 1,
+    assistantText: "private model output"
+  });
+  assert.deepEqual(inspected, {
+    phase: "completion_evidence",
+    status: "running",
+    metadata: {
+      evidenceKind: "ui-change",
+      evidenceStatus: "retry",
+      mutationEvidence: 0,
+      verificationEvidence: 1,
+      visualEvidence: 0,
+      evidenceNudges: 1
+    }
+  });
+  assert.equal(JSON.stringify(inspected).includes("private model output"), false);
+  assert.equal(JSON.stringify(inspected).includes("missing"), false);
+});
+
 test("Run Inspector journal outranks snapshots and replays a valid suffix", (t) => {
   const dir = tempDir(t, "openagi-run-inspector-replay-");
   const canary = "snapshot-content-canary";

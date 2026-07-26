@@ -944,3 +944,14 @@ TRANSACTIONAL CODE EDITS COMPLETE
 - Added scheduler, cap, conflict, rejection, provider-ordering, mutation-barrier, duplicate-security, approval-suspension, and both-policy regressions.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test -- --test-concurrency=1` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy -- --test-concurrency=1` each pass 1652/1653 tests with zero failures and one intentional Windows permission-mode skip.
 RESOURCE AWARE TOOL BATCHING COMPLETE
+
+## 2026-07-25 - Evidence-aware routing and quality-preserving preparation (Codex)
+
+- Added bounded completion contracts for code changes, UI changes, code verification, and UI verification while leaving explanation, research, ordinary chat, cron, and autopilot turns unchanged.
+- Both paid provider loops now reject unsupported completion claims, issue at most one compact evidence retry, and label unresolved work incomplete; failed, blocked, pending, unrelated, or uncertain tool calls cannot satisfy the gate.
+- Bound code completion to same-turn project mutation plus passing code evidence, and bound user-facing UI work to passing browser and visual QA. Deterministic and provider-unavailable fallbacks can no longer imply actionable work completed.
+- Added request-local tool preferences that keep coder and QA schemas directly visible through progressive disclosure and model-tool caps without widening project, profile, specialist, read-only, or exact-tool boundaries.
+- Started late-bound context expansion immediately after scrutiny and overlapped it with independent principle and ambient reads, preserving exact prompt bytes while removing avoidable serial latency.
+- Added content-free completion status, evidence counts, and retry visibility to Run Inspector, persisted bounded evidence state with assistant outcomes, and kept MoA reference analysts outside the aggregator's completion contract.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1717/1718 tests with zero failures and one intentional Windows permission-mode skip.
+EVIDENCE ROUTING COMPLETE

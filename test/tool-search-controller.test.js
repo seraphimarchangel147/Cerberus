@@ -188,6 +188,43 @@ test("auto mode engages only when deferred schema bytes strictly exceed the thre
   assert.deepEqual(names(exceeded.tools).slice(-3), TOOL_SEARCH_BRIDGE_NAMES);
 });
 
+test("request-local preferences surface relevant deferred tools without bypassing scope", () => {
+  const registry = new FakeRegistry();
+  add(registry, "remember");
+  add(registry, "qa_run", { sideEffects: true });
+  add(registry, "qa_status", { sideEffects: false });
+  add(registry, "unrelated_remote", { source: "mcp" });
+  registerToolSearchTools(registry);
+  const controller = new ToolSearchController({
+    registry,
+    env: { OPENAGI_TOOL_SEARCH: "on" }
+  });
+
+  const preferred = controller.planModelTools(registry.list(), {
+    prefer: ["qa_run", "qa_status"]
+  });
+  assert.deepEqual(preferred.preferredNames, ["qa_run", "qa_status"]);
+  assert.ok(names(preferred.tools).includes("qa_run"));
+  assert.ok(names(preferred.tools).includes("qa_status"));
+  assert.equal(names(preferred.tools).includes("unrelated_remote"), false);
+
+  const readOnly = controller.planModelTools(registry.list(), {
+    prefer: ["qa_run", "qa_status"],
+    readOnly: true
+  });
+  assert.equal(names(readOnly.tools).includes("qa_run"), false);
+  assert.ok(names(readOnly.tools).includes("qa_status"));
+
+  const narrowed = controller.planModelTools(registry.list(), {
+    only: ["remember"],
+    prefer: ["qa_run"]
+  });
+  assert.deepEqual(names(narrowed.tools), [
+    "remember",
+    ...TOOL_SEARCH_BRIDGE_NAMES
+  ]);
+});
+
 test("only and explicit defer controls intersect without mutating the registry", () => {
   const registry = new FakeRegistry();
   add(registry, "remember");

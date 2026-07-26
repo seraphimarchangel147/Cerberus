@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { MoaProvider, normalizeMoaModelSpec } from "../src/moa-provider.js";
+import { createCompletionContract } from "../src/completion-evidence.js";
 import {
   AnthropicProvider,
   OpenAIResponsesProvider,
@@ -107,7 +108,12 @@ test("preferred moa selects a native MoaProvider and preserves aggregator tool-l
   const result = await provider.generate({
     input: "solve this",
     turnContext: "[context]\noriginal\n[/context]",
-    context: { sessionId: "session-1" }
+    context: {
+      sessionId: "session-1",
+      __completionContract: createCompletionContract(
+        "Implement a new API endpoint."
+      )
+    }
   });
 
   assert.equal(result.provider, "moa");
@@ -154,6 +160,15 @@ test("preferred moa selects a native MoaProvider and preserves aggregator tool-l
   assert.match(aggregatorRequest.request.turnContext, /\[moa-analyses\]/);
   assert.match(aggregatorRequest.request.turnContext, /analysis from claude-reference/);
   assert.match(aggregatorRequest.request.turnContext, /analysis from gpt-reference/);
+  assert.equal(
+    aggregatorRequest.request.context.__completionContract.kind,
+    "code-change"
+  );
+  for (const reference of log.requests.filter((entry) => (
+    entry.metadata.role === "reference"
+  ))) {
+    assert.equal(reference.request.context.__completionContract, undefined);
+  }
 });
 
 test("preset selection honors model alias, environment selection, and config order", (t) => {

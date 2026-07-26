@@ -4,7 +4,16 @@ export {
   createDurableRuntime,
   resolveExternalMemoryProvider
 } from "./abi-runtime.js";
-export { AgentHost } from "./agent-host.js";
+export { AgentHost, prepareTurnHints } from "./agent-host.js";
+export {
+  appendCompletionEvidenceWarning,
+  assessCompletionEvidence,
+  assistantClaimsCompletion,
+  completionEvidenceDecision,
+  completionEvidenceNudge,
+  completionToolPreferences,
+  createCompletionContract
+} from "./completion-evidence.js";
 export { BudgetGuard } from "./budget-guard.js";
 export {
   buildSetCookie,

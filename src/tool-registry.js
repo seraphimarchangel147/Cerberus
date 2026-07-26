@@ -428,10 +428,15 @@ export class ToolRegistry {
         }
         selectedDirect = selectCappedModelTools(
           plannedDirect,
-          max - TOOL_SEARCH_BRIDGE_NAMES.length
+          max - TOOL_SEARCH_BRIDGE_NAMES.length,
+          new Set(searchPlan.preferredNames ?? [])
         );
       } else {
-        selectedDirect = selectCappedModelTools(plannedDirect, max);
+        selectedDirect = selectCappedModelTools(
+          plannedDirect,
+          max,
+          new Set(searchPlan.preferredNames ?? [])
+        );
       }
       const selectedNames = new Set(selectedDirect.map((tool) => tool.name));
       capOmitted = plannedDirect.filter((tool) => !selectedNames.has(tool.name));
@@ -467,6 +472,7 @@ export class ToolRegistry {
       advertisedNames: Object.freeze(tools.map((tool) => tool.name)),
       omittedNames: Object.freeze(omitted),
       deferredNames: Object.freeze([...(searchPlan.deferredNames ?? [])]),
+      preferredNames: Object.freeze([...(searchPlan.preferredNames ?? [])]),
       capOmittedNames: Object.freeze(capOmitted.map((tool) => tool.name)),
       schemaBytes: toolSchemaBytes(tools),
       eligibleSchemaBytes: searchPlan.eligibleSchemaBytes ?? toolSchemaBytes(narrowed),
@@ -2344,15 +2350,26 @@ function modelToolCap(env = process.env) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 128;
 }
 
-function selectCappedModelTools(tools, max) {
+function selectCappedModelTools(tools, max, preferredNames = null) {
   if (tools.length <= max) return tools;
   if (max <= 0) return [];
 
+  const preferred = preferredNames instanceof Set
+    ? tools.filter((tool) => preferredNames.has(tool.name))
+    : [];
+  if (preferred.length >= max) return preferred.slice(0, max);
+  const preferredSet = new Set(preferred.map((tool) => tool.name));
+  const remaining = preferred.length > 0
+    ? tools.filter((tool) => !preferredSet.has(tool.name))
+    : tools;
+  const remainingBudget = max - preferred.length;
   const core = tools.filter((tool) => tool.source !== "mcp");
-  const mcp = tools.filter((tool) => tool.source === "mcp");
-  const selectedCore = core.slice(0, max);
-  const budget = Math.max(0, max - selectedCore.length);
-  if (budget === 0) return selectedCore;
+  const mcp = remaining.filter((tool) => tool.source === "mcp");
+  const selectedCore = core
+    .filter((tool) => !preferredSet.has(tool.name))
+    .slice(0, remainingBudget);
+  const budget = Math.max(0, remainingBudget - selectedCore.length);
+  if (budget === 0) return [...preferred, ...selectedCore];
 
   const byServer = new Map();
   for (const tool of mcp) {
@@ -2374,7 +2391,7 @@ function selectCappedModelTools(tools, max) {
     }
     cursor += 1;
   }
-  return [...selectedCore, ...picked];
+  return [...preferred, ...selectedCore, ...picked];
 }
 
 function legacyToolCapNotice(all, selected) {

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { InMemoryAgentStore } from "../src/agent-store.js";
-import { AgentHost } from "../src/agent-host.js";
+import { AgentHost, prepareTurnHints } from "../src/agent-host.js";
 import { CapabilityProfileStore } from "../src/capability-profile-store.js";
 import { ProjectStore } from "../src/project-store.js";
 import { ToolRegistry } from "../src/tool-registry.js";
@@ -60,6 +60,8 @@ function makeHarness(options = {}) {
         model: request.model ?? null,
         tier: request.tier ?? null,
         task: request.task ?? null,
+        completionContract: request.context.__completionContract ?? null,
+        toolNames: request.tools.map((tool) => tool.name),
         memoryScope: request.context.__memoryScope ?? null,
         turnContext: request.turnContext,
         projectId: request.context.__projectId ?? null,
@@ -137,6 +139,76 @@ function durableProjectStore(t) {
     defaultWorkspaceRoot: path.join(root, "default-workspace")
   });
 }
+
+test("turn hint preparation overlaps independent principle and ambient reads", async () => {
+  let started = 0;
+  let release;
+  const rendezvous = new Promise((resolve) => {
+    release = resolve;
+  });
+  const begin = async (value) => {
+    started += 1;
+    if (started === 2) release();
+    await rendezvous;
+    return value;
+  };
+  const principle = {
+    id: "principle-fast-path",
+    scope: "main",
+    metadata: {}
+  };
+  const runtime = {
+    memory: { items: new Map([[principle.id, principle]]) },
+    vectorStore: {
+      search: () => begin([{ id: principle.id, score: 0.9 }])
+    },
+    observations: {
+      getRecentContext: () => begin({
+        apps: [{ app: "editor", n: 1 }],
+        snippets: []
+      })
+    }
+  };
+
+  const result = await prepareTurnHints({
+    runtime,
+    text: "inspect the current work",
+    projectId: "default",
+    channel: "discord",
+    memoryScope: "main"
+  });
+
+  assert.equal(started, 2);
+  assert.deepEqual(result.intuitions, [{ id: principle.id, score: 0.9 }]);
+  assert.deepEqual(result.ambientContext.apps, [{ app: "editor", n: 1 }]);
+});
+
+test("AgentHost attaches bounded completion contracts only to actionable work", async () => {
+  const actionable = makeHarness();
+  await actionable.host.handleMessage({
+    channel: "discord",
+    from: "user-completion",
+    sessionId: "completion-actionable",
+    text: "Implement a new API endpoint.",
+    backgroundReview: false
+  });
+  assert.deepEqual(actionable.requests[0].completionContract, {
+    version: 1,
+    kind: "code-change",
+    requirements: ["mutation", "verification"],
+    maxNudges: 1
+  });
+
+  const explanatory = makeHarness();
+  await explanatory.host.handleMessage({
+    channel: "discord",
+    from: "user-completion",
+    sessionId: "completion-explanation",
+    text: "Explain how the API endpoint works.",
+    backgroundReview: false
+  });
+  assert.equal(explanatory.requests[0].completionContract, null);
+});
 
 test("AgentHost keeps user-global auto tasks in the default project", async () => {
   const added = [];

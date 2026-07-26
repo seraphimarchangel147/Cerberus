@@ -128,6 +128,31 @@ test("cap overflow reserves all bridges and leaves every capped target reachable
   assert.equal(call.outcome.status, "succeeded");
 });
 
+test("request-local preferred tools survive the direct-schema cap", (t) => {
+  setModelToolCap(t, 5);
+  const registry = new ToolRegistry();
+  for (const name of [
+    "core_chat",
+    "internal_alpha",
+    "internal_beta",
+    "internal_gamma",
+    "internal_delta",
+    "qa_run"
+  ]) {
+    registerTool(registry, name);
+  }
+  bindRadar(registry, { mode: "off" });
+
+  const plan = registry.toOpenAIToolPlan({ prefer: ["qa_run"] });
+  assert.ok(plan.advertisedNames.includes("qa_run"));
+  assert.ok(plan.preferredNames.includes("qa_run"));
+  assert.equal(plan.capOmittedNames.includes("qa_run"), false);
+  assert.deepEqual(
+    TOOL_SEARCH_BRIDGE_NAMES.filter((name) => plan.advertisedNames.includes(name)),
+    TOOL_SEARCH_BRIDGE_NAMES
+  );
+});
+
 test("only shapes direct schemas but does not revoke always-direct or internal tools", async (t) => {
   setModelToolCap(t, 128);
   const registry = new ToolRegistry();

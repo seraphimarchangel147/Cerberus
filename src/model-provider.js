@@ -48,6 +48,12 @@ import {
   SecretsStore,
   secretsStoreRedactionSnapshot
 } from "./secrets-store.js";
+import {
+  appendCompletionEvidenceWarning,
+  assessCompletionEvidence,
+  completionEvidenceDecision,
+  completionEvidenceNudge
+} from "./completion-evidence.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
@@ -1883,6 +1889,16 @@ function appendOpenAIContinue(conversationInput) {
   }));
 }
 
+function appendOpenAICompletionEvidenceNudge(conversationInput, report) {
+  conversationInput.push(markLiveContextSyntheticTurn({
+    role: "user",
+    content: [{
+      type: "input_text",
+      text: completionEvidenceNudge(report)
+    }]
+  }));
+}
+
 function appendAnthropicUserText(convo, text, { synthetic = false } = {}) {
   if (synthetic) {
     convo.push(markLiveContextSyntheticTurn({
@@ -1899,6 +1915,24 @@ function appendAnthropicUserText(convo, text, { synthetic = false } = {}) {
   } else {
     const message = { role: "user", content: text };
     convo.push(message);
+  }
+}
+
+function emitCompletionEvidence(context, report, status) {
+  if (!report) return;
+  try {
+    context?.__onToolEvent?.({
+      phase: "completion-evidence",
+      status,
+      kind: report.kind,
+      missing: [...report.missing],
+      mutationCount: report.mutationCount,
+      verificationCount: report.verificationCount,
+      visualCount: report.visualCount,
+      nudges: report.nudges
+    });
+  } catch {
+    // Completion visibility is advisory; the provider decision is authoritative.
   }
 }
 
@@ -3537,11 +3571,25 @@ export class DeterministicModelProvider {
       lines.push(`\n(Running without OPENAI_API_KEY — set it in .openagi/.env to enable real reasoning and tool use.)`);
     }
 
+    const completionEvidence = assessCompletionEvidence(
+      context?.__completionContract,
+      [],
+      toolRegistry
+    );
+    const reply = lines.join("\n");
     return {
       provider: this.name,
       model: "deterministic",
-      text: lines.join("\n"),
-      toolCalls: []
+      text: completionEvidence
+        ? appendCompletionEvidenceWarning(reply, completionEvidence)
+        : reply,
+      toolCalls: [],
+      ...(completionEvidence
+        ? {
+            stopReason: "evidence-incomplete",
+            completionEvidence
+          }
+        : {})
     };
   }
 }
@@ -3630,21 +3678,30 @@ export class OpenAIResponsesProvider {
       const fallback = await tryFallbackProvider(this, generationRequest, error);
       if (fallback.used) return fallback.result;
       if (!isCredentialPoolExhausted(error)) throw error;
+      const completionEvidence = assessCompletionEvidence(
+        context?.__completionContract,
+        [],
+        toolRegistry
+      );
+      const failureText = localPartialSummary({
+        reason: "provider-error",
+        iterations: 0,
+        maxIterations,
+        toolCalls: [],
+        lastText: ""
+      });
       return {
         provider: "openai",
         model,
-        text: localPartialSummary({
-          reason: "provider-error",
-          iterations: 0,
-          maxIterations,
-          toolCalls: [],
-          lastText: ""
-        }),
+        text: completionEvidence
+          ? appendCompletionEvidenceWarning(failureText, completionEvidence)
+          : failureText,
         toolCalls: [],
         iterations: 0,
         maxIterations,
         stopReason: "provider-error",
-        usage: null
+        usage: null,
+        ...(completionEvidence ? { completionEvidence } : {})
       };
     }
 
@@ -3767,6 +3824,13 @@ export class OpenAIResponsesProvider {
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
+    const completionContract = context?.__completionContract ?? null;
+    let completionNudges = 0;
+    let completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry
+    );
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -3962,6 +4026,48 @@ export class OpenAIResponsesProvider {
       const wantsContinuation = openAIWantsContinuation(response, calls)
         || callBatch.notices.length > 0;
       if (!wantsContinuation) {
+        const evidenceDecision = completionEvidenceDecision({
+          contract: completionContract,
+          toolCalls,
+          toolRegistry,
+          assistantText: responseText,
+          nudges: completionNudges,
+          canContinue: iterations < maxIterations && this.now() < deadline
+        });
+        completionEvidence = evidenceDecision.report;
+        if (evidenceDecision.continue) {
+          completionNudges += 1;
+          completionEvidence = assessCompletionEvidence(
+            completionContract,
+            toolCalls,
+            toolRegistry,
+            { nudges: completionNudges }
+          );
+          emitCompletionEvidence(context, completionEvidence, "retry");
+          appendOpenAIAssistantText(conversationInput, response);
+          appendOpenAICompletionEvidenceNudge(
+            conversationInput,
+            completionEvidence
+          );
+          void primeProviderContextLedger(this, conversationInput, {
+            format: "openai",
+            model,
+            context,
+            redactValues: [
+              credentialState.request.lease?.value,
+              credentialState.request.lease?.refreshToken
+            ]
+          });
+          continue;
+        }
+        if (completionEvidence?.status === "incomplete") {
+          stopReason = "evidence-incomplete";
+          emitCompletionEvidence(context, completionEvidence, "incomplete");
+          break;
+        }
+        if (completionEvidence?.status === "verified") {
+          emitCompletionEvidence(context, completionEvidence, "verified");
+        }
         const goalDecision = await evaluateGoalTurn({
           provider: this,
           context,
@@ -4233,6 +4339,15 @@ export class OpenAIResponsesProvider {
     } else if (text === undefined) {
       text = extractResponseText(response) || "(no text)";
     }
+    completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry,
+      { nudges: completionNudges }
+    );
+    if (stopReason === "evidence-incomplete") {
+      text = appendCompletionEvidenceWarning(text, completionEvidence);
+    }
 
     const result = {
       provider: "openai",
@@ -4243,7 +4358,8 @@ export class OpenAIResponsesProvider {
       iterations,
       maxIterations,
       stopReason,
-      usage: finalizedProviderUsage(usageAccumulator)
+      usage: finalizedProviderUsage(usageAccumulator),
+      ...(completionEvidence ? { completionEvidence } : {})
     };
     const finalResponseText = extractResponseText(response);
     const actualCredentialIdentity = openAICredentialIdentity(
@@ -4549,21 +4665,30 @@ export class AnthropicProvider {
       const fallback = await tryFallbackProvider(this, generationRequest, error);
       if (fallback.used) return fallback.result;
       if (!isCredentialPoolExhausted(error)) throw error;
+      const completionEvidence = assessCompletionEvidence(
+        context?.__completionContract,
+        [],
+        toolRegistry
+      );
+      const failureText = localPartialSummary({
+        reason: "provider-error",
+        iterations: 0,
+        maxIterations,
+        toolCalls: [],
+        lastText: ""
+      });
       return {
         provider: "anthropic",
         model,
-        text: localPartialSummary({
-          reason: "provider-error",
-          iterations: 0,
-          maxIterations,
-          toolCalls: [],
-          lastText: ""
-        }),
+        text: completionEvidence
+          ? appendCompletionEvidenceWarning(failureText, completionEvidence)
+          : failureText,
         toolCalls: [],
         iterations: 0,
         maxIterations,
         stopReason: "provider-error",
-        usage: null
+        usage: null,
+        ...(completionEvidence ? { completionEvidence } : {})
       };
     }
 
@@ -4652,6 +4777,13 @@ export class AnthropicProvider {
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
+    const completionContract = context?.__completionContract ?? null;
+    let completionNudges = 0;
+    let completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry
+    );
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -4757,6 +4889,48 @@ export class AnthropicProvider {
       if (responseText) lastText = responseText;
       const wantsContinuation = anthropicWantsContinuation(response, toolUses);
       if (!wantsContinuation) {
+        const evidenceDecision = completionEvidenceDecision({
+          contract: completionContract,
+          toolCalls,
+          toolRegistry,
+          assistantText: responseText,
+          nudges: completionNudges,
+          canContinue: iterations < maxIterations && this.now() < deadline
+        });
+        completionEvidence = evidenceDecision.report;
+        if (evidenceDecision.continue) {
+          completionNudges += 1;
+          completionEvidence = assessCompletionEvidence(
+            completionContract,
+            toolCalls,
+            toolRegistry,
+            { nudges: completionNudges }
+          );
+          emitCompletionEvidence(context, completionEvidence, "retry");
+          appendAnthropicUserText(
+            convo,
+            completionEvidenceNudge(completionEvidence),
+            { synthetic: true }
+          );
+          void primeProviderContextLedger(this, convo, {
+            format: "anthropic",
+            model,
+            context,
+            redactValues: [
+              credentialState.request.lease?.value,
+              credentialState.request.lease?.refreshToken
+            ]
+          });
+          continue;
+        }
+        if (completionEvidence?.status === "incomplete") {
+          stopReason = "evidence-incomplete";
+          emitCompletionEvidence(context, completionEvidence, "incomplete");
+          break;
+        }
+        if (completionEvidence?.status === "verified") {
+          emitCompletionEvidence(context, completionEvidence, "verified");
+        }
         const goalDecision = await evaluateGoalTurn({
           provider: this,
           context,
@@ -5008,17 +5182,27 @@ export class AnthropicProvider {
     const emptyReply = thinkingOnly
       ? "Reply truncated before the model produced user-facing text. Retry the request or raise OPENAGI_MAX_TOKENS."
       : "(no text)";
+    completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry,
+      { nudges: completionNudges }
+    );
+    const visibleText = stopReason === "evidence-incomplete"
+      ? appendCompletionEvidenceWarning(text || emptyReply, completionEvidence)
+      : text || emptyReply;
 
     return {
       provider: "anthropic",
       model,
       id: response?.id,
-      text: text || emptyReply,
+      text: visibleText,
       toolCalls,
       iterations,
       maxIterations,
       stopReason,
-      usage: finalizedProviderUsage(usageAccumulator)
+      usage: finalizedProviderUsage(usageAccumulator),
+      ...(completionEvidence ? { completionEvidence } : {})
     };
   }
 
@@ -5404,6 +5588,7 @@ Guidelines:
 - Call inspect_skill_capabilities before running an imported or uncertain skill; if it reports a partial or text-only scope, do not assume omitted tools are available.
 - Use checkpoints as the fast pre-mutation safety gate. Use timeline_preview before any slower post-mutation timeline recovery.
 - Read before editing. Reuse a code_read/code_search tag only for the exact file version it describes; after any successful write, use the returned tag or read again.
+- Never claim an implementation request is complete without a successful state-changing receipt and passing verification from the same turn. User-facing UI changes additionally require passing qa_run browser and visual evidence. If evidence is blocked or unavailable, report that limitation instead of claiming success.
 - For multi-file coding work, use coder_start only after inspection. Give every check a stable ASCII id and map each immutable acceptance criterion to its proving checkIds, then call coder_apply. Use the visual oracle for an approved pixel baseline, keyboard for reachability/focus proof, and screenshot only for capture evidence. Treat only state=passed with acceptance.status=passed as complete; deterministic failures cannot be overruled, and a blocked run requires coder_status and explicit recovery.
 - For user-facing web changes, create or update a version-1 qa-manifest.json, classify every interactive control, give each executed action an observable expectation, and run qa_run. Missing visual baselines require review, strict visual changes fail, and only a human may approve a new baseline. Never treat a screenshot alone as proof when deterministic QA evidence failed.
 - Treat each tool's receipt and semantic outcome as authoritative: dispatched=false means its handler did not run, and changed=null after dispatch requires inspection before retrying.
