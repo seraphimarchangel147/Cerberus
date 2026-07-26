@@ -1150,4 +1150,22 @@ Azazel reported "0 failures"; the real suite had **4**, all genuine.
   `wall-clock-checkpoint` events (extensionsLeft 2/1/0), the status-check ping
   reached the model each time, and the turn continued to a real finish with
   `stopReason: "completed"` instead of `turn-timeout`.
+- **`kanban_move` had no HTTP surface.** The test it lives in asserts the tools,
+  HTTP routes, CLI client and dashboard "form one safe surface", but the new
+  verb was registered as a tool only — an agent could park work on hold while
+  the dashboard and CLI could not. Added the `move` action to `POST /kanban`.
+  The store still refuses terminal and blocked transitions, so the route cannot
+  be used to skip the completion handoff or the blocker bookkeeping.
+- **Config had to go through the daemon's own API.** `~/.openagi/.env` is a
+  managed file — a hand append is discarded on the next boot, which is why the
+  earlier attempt kept vanishing. Restarted first so the new allowlist was in
+  memory, then `POST /setup/save` returned `keys: [OPENAGI_MAX_TURN_SECONDS,
+  OPENAGI_WALL_CLOCK_CHECKPOINTS]` (previously `[]`) and the values survived the
+  restart.
+- Live verification on the running daemon (pid rotated, `supervised: true`):
+  boot-time env resolves `maxTurnSeconds: 1200` / `wallClockCheckpoints: 3` =
+  **80 minutes** of runway; and a real task walked
+  backlog -> on-hold -> review -> done over HTTP, with `?status=on-hold` and
+  `?status=done` both returning it, the unfiltered board correctly keeping it
+  out of `tasks` and in `completed`, and moving a completed task still refused.
 MERGE REVIEW COMPLETE

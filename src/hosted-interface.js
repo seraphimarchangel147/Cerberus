@@ -3044,6 +3044,21 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           } else if (action === "heartbeat") {
             await requireProjectKanbanTask(runtime, project, body.taskId);
             result = await runtime.kanban.heartbeatTask(body.taskId, body, context);
+          } else if (action === "move") {
+            // Parity with the kanban_move tool. Without this the new
+            // 'on-hold' column and every backwards move were reachable by an
+            // agent but not by the dashboard or CLI, so the two surfaces
+            // disagreed about what the board can do. Terminal and blocked
+            // transitions are still refused by the store itself, so this route
+            // cannot be used to skip the completion handoff or the blocker
+            // bookkeeping.
+            await requireProjectKanbanTask(runtime, project, body.taskId);
+            result = await runtime.kanban.moveTask(
+              body.taskId,
+              body.status,
+              context,
+              { reason: body.reason }
+            );
           } else if (action === "link") {
             await requireProjectKanbanTask(runtime, project, body.parentId);
             await requireProjectKanbanTask(runtime, project, body.childId);
