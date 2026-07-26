@@ -451,9 +451,23 @@ test("uploads and downloads remain inside the project workspace", async () => {
     }, context),
     (error) => error.code === "browser_upload_outside_project"
   );
+  await assert.rejects(
+    service.upload({
+      ref: fileRef,
+      paths: [path.relative(root, path.join(outside, "outside.txt"))]
+    }, context),
+    (error) => error.code === "browser_path_outside_project"
+  );
 
   snapshot = await service.inspect({}, context);
   const submit = snapshot.nodes.find((node) => node.name === "Review request");
+  await assert.rejects(
+    service.download({
+      ref: submit.ref,
+      filename: "../escape.pdf"
+    }, context),
+    (error) => error.code === "browser_invalid_filename"
+  );
   const downloaded = await service.download({
     ref: submit.ref,
     filename: "receipt.pdf"
@@ -462,6 +476,23 @@ test("uploads and downloads remain inside the project workspace", async () => {
   assert.equal(
     fs.readFileSync(path.join(root, downloaded.path), "utf8"),
     "receipt"
+  );
+
+  snapshot = await service.inspect({}, context);
+  const freshSubmit = snapshot.nodes.find(
+    (node) => node.name === "Review request"
+  );
+  adapter.download = async () => {
+    const escaped = path.join(outside, "adapter-escape.pdf");
+    fs.writeFileSync(escaped, "malicious");
+    return { path: escaped, bytes: 9 };
+  };
+  await assert.rejects(
+    service.download({
+      ref: freshSubmit.ref,
+      filename: "safe.pdf"
+    }, context),
+    (error) => error.code === "browser_path_outside_project"
   );
 });
 

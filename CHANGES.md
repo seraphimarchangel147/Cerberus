@@ -2,6 +2,22 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Quality-preserving QA performance proof (Codex)
+
+- Added exact per-result measurements for wall-clock duration, semantic actions, page loads, deterministic replay actions, blind retries, screenshot captures, decoded screenshot bytes, and screenshot capture duration.
+- Added the read-only `qa_benchmark` tool and public performance-proof builder. Proofs are stable, project/session-scoped, content-free, and qualify only when terminal implementation, design, completeness, measurement, and owned-artifact evidence all pass.
+- Compared actual semantic-first evidence with a clearly labeled screenshot-only pre/post-action counterfactual, while separating exact observations from estimated capture bytes and latency. Provider/model image tokens remain explicitly unavailable instead of being fabricated from bytes.
+- Extended Run Inspector with allowlisted numeric QA efficiency counters only; page text, pixels, arguments, intent statements, and hidden reasoning remain excluded.
+- Exercised bounded exploration across forms, navigation, dialogs, tables, accessible canvas controls, and desktop/mobile layouts, with successful completion and capture-reduction assertions.
+- Tightened cancellation at route, control, state, candidate, and replay boundaries so no later semantic action starts after abort and partial evidence cannot qualify.
+- Added durable exact-tuple visual approval claims with JSONL authority and atomic snapshots. Exact retries are idempotent, while project, manifest, source, run, or result substitution fails closed across restart.
+- Isolated throwing Run Inspector and event observers from QA execution, and added hostile page-injection, cross-scope benchmark, path-traversing upload, unsafe filename, malicious download-adapter, approval-replay, restart, cancellation, and redaction regressions alongside existing stale-pixel and secret-reflection coverage.
+- Documented Phase 2 acceptance around semantic-first perception, deterministic correctness, visible evidence, safe recovery, and quality-preserving speed.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1745/1746 tests with zero failures and one intentional platform skip; `npm audit --audit-level=high` reports zero vulnerabilities.
+QUALITY PERFORMANCE PROOF COMPLETE
+
+HIGH ASSURANCE HARNESS PHASE 2 COMPLETE
+
 ## 2026-07-25 - Revision-matched intent and differential QA (Codex)
 
 - Added immutable manifest intent criteria for behavior, visual, accessibility, keyboard, diagnostic, and state-graph oracles, with explicit ASCII fixture revisions and exact route, viewport, and control scopes.

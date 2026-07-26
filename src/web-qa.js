@@ -22,6 +22,7 @@ import {
   QaComparisonStore,
   QaDifferentialAnalyzer
 } from "./qa-differential.js";
+import { buildQaPerformanceProof } from "./qa-performance.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const RUN_ID_RE = /^qa_[a-f0-9]{16}$/;
@@ -170,18 +171,12 @@ export class WebQaController {
       for (const viewport of loaded.manifest.viewports) {
         for (const route of selectedRoutes) {
           if (scope.abortSignal?.aborted) {
-            run = this.store.update(run.id, run.revision, {
-              state: "cancelled",
+            return this._cancelRun(
+              run,
               results,
-              artifacts: [...artifactRefs],
-              summary: summarizeResults(results),
-              error: {
-                code: "qa_cancelled",
-                message: "QA was cancelled before all declared surfaces ran."
-              }
-            });
-            this._emit(run);
-            return qaRunResult(run);
+              artifactRefs,
+              "QA was cancelled before all declared surfaces ran."
+            );
           }
 
           const baseline = await this._exercisePage({
@@ -195,6 +190,14 @@ export class WebQaController {
           results.push(baseline);
           for (const ref of baseline.artifacts) artifactRefs.add(ref);
           this._emitProgress(run, baseline, results.length, totalResults);
+          if (scope.abortSignal?.aborted) {
+            return this._cancelRun(
+              run,
+              results,
+              artifactRefs,
+              "QA was cancelled after the current route evidence settled."
+            );
+          }
 
           if (mode === "explore") {
             const exploration = await this.explorer.explore({
@@ -217,24 +220,26 @@ export class WebQaController {
               totalResults
             );
             if (scope.abortSignal?.aborted) {
-              run = this.store.update(run.id, run.revision, {
-                state: "cancelled",
+              return this._cancelRun(
+                run,
                 results,
-                artifacts: [...artifactRefs],
-                summary: summarizeResults(results),
-                error: {
-                  code: "qa_cancelled",
-                  message: "QA was cancelled during state exploration."
-                }
-              });
-              this._emit(run);
-              return qaRunResult(run);
+                artifactRefs,
+                "QA was cancelled during state exploration."
+              );
             }
             continue;
           }
 
           for (const control of route.controls) {
             if (control.action === "inspect") continue;
+            if (scope.abortSignal?.aborted) {
+              return this._cancelRun(
+                run,
+                results,
+                artifactRefs,
+                "QA was cancelled before the next declared control."
+              );
+            }
             if (results.length >= MAX_RESULTS) {
               throw new Error("QA result bound exceeded.");
             }
@@ -249,6 +254,14 @@ export class WebQaController {
             results.push(result);
             for (const ref of result.artifacts) artifactRefs.add(ref);
             this._emitProgress(run, result, results.length, totalResults);
+            if (scope.abortSignal?.aborted) {
+              return this._cancelRun(
+                run,
+                results,
+                artifactRefs,
+                "QA was cancelled after the current control evidence settled."
+              );
+            }
           }
         }
       }
@@ -340,6 +353,15 @@ export class WebQaController {
     return publicComparison(comparison);
   }
 
+  benchmark(args = {}, context = {}) {
+    const scope = qaScope(context, this.workspaceDir);
+    const run = this._authorizedRun(args.runId, scope);
+    return buildQaPerformanceProof({
+      run,
+      artifacts: this.artifacts
+    });
+  }
+
   artifact(args = {}, context = {}) {
     const scope = qaScope(context, this.workspaceDir);
     const run = this._authorizedRun(args.runId, scope);
@@ -375,7 +397,6 @@ export class WebQaController {
     }
     const selected = selectResultIds(run.results, args.resultIds);
     const approvalId = String(scope.__pendingActionId ?? "");
-    const approved = [];
     for (const result of selected) {
       if (!result.screenshotRef) {
         throw new Error(`QA result '${result.id}' has no screenshot evidence.`);
@@ -384,27 +405,75 @@ export class WebQaController {
         projectId: scope.projectId,
         runId: run.id
       });
-      const baseline = this.baselines.approve({
+    }
+    const claim = this.baselines.claimApproval({
+      approvalId,
+      projectId: scope.projectId,
+      manifestDigest: run.manifest.digest,
+      sourceRevision: run.sourceRevision,
+      runId: run.id,
+      resultIds: selected.map((result) => result.id)
+    });
+    const approved = [];
+    for (const result of selected) {
+      const current = this.baselines.get({
         projectId: scope.projectId,
         manifestDigest: run.manifest.digest,
-        resultId: result.id,
-        screenshotRef: result.screenshotRef,
-        sourceRevision: run.sourceRevision,
-        runId: run.id,
-        approvalId
+        resultId: result.id
       });
-      this.artifacts.retain(result.screenshotRef, {
-        projectId: scope.projectId,
-        runId: run.id,
-        kind: `baseline_${safeCode(result.id)}`.slice(0, 64),
-        retention: "baseline"
-      });
+      if (
+        claim.replayed
+        && current
+        && (
+          current.screenshotRef !== result.screenshotRef
+          || current.sourceRevision !== run.sourceRevision
+          || current.runId !== run.id
+          || current.approvalId !== approvalId
+        )
+      ) {
+        throw new Error(
+          "QA visual baseline approval replay no longer matches the approved evidence."
+        );
+      }
+      const exactReplay = claim.replayed && current != null;
+      const baseline = exactReplay
+        ? current
+        : this.baselines.approve({
+            projectId: scope.projectId,
+            manifestDigest: run.manifest.digest,
+            resultId: result.id,
+            screenshotRef: result.screenshotRef,
+            sourceRevision: run.sourceRevision,
+            runId: run.id,
+            approvalId
+          });
+      const baselineKind = `baseline_${safeCode(result.id)}`.slice(0, 64);
+      const artifactBinding = this.artifacts.metadata(
+        result.screenshotRef,
+        {
+          projectId: scope.projectId,
+          runId: run.id
+        }
+      );
+      if (
+        !exactReplay
+        || artifactBinding.retention !== "baseline"
+        || artifactBinding.kind !== baselineKind
+      ) {
+        this.artifacts.retain(result.screenshotRef, {
+          projectId: scope.projectId,
+          runId: run.id,
+          kind: baselineKind,
+          retention: "baseline"
+        });
+      }
       approved.push(baseline);
     }
     return {
       ok: true,
       runId: run.id,
       sourceRevision: run.sourceRevision,
+      replayed: claim.replayed,
       approved
     };
   }
@@ -449,9 +518,15 @@ export class WebQaController {
     viewport,
     control
   }) {
+    const startedAt = Date.now();
     const failures = [];
     const warnings = [];
     const artifactRefs = [];
+    let pageLoads = 0;
+    let semanticActions = 0;
+    let screenshotCaptures = 0;
+    let screenshotBytes = 0;
+    let screenshotDurationMs = 0;
     const pageId = control == null
       ? `${route.id}_${viewport.id}`
       : `${route.id}_${viewport.id}_${control.id}`;
@@ -488,6 +563,7 @@ export class WebQaController {
     let traceRef = null;
 
     try {
+      pageLoads += 1;
       await this.browser.openForQa({
         url,
         viewport,
@@ -517,6 +593,7 @@ export class WebQaController {
             `Declared control '${control.id}' is disabled.`
           ));
         } else {
+          semanticActions += 1;
           await performControlAction(
             this.browser,
             matched,
@@ -625,12 +702,14 @@ export class WebQaController {
         }
       }
 
+      const screenshotStartedAt = Date.now();
       const screenshot = await this.browser.screenshot({
         fullPage: route.fullPageScreenshot
       }, qaContext);
-      const screenshotBytes = Buffer.from(screenshot.image.data, "base64");
+      screenshotDurationMs += Math.max(0, Date.now() - screenshotStartedAt);
+      const capturedBytes = Buffer.from(screenshot.image.data, "base64");
       const screenshotArtifact = this.artifacts.put(
-        screenshotBytes,
+        capturedBytes,
         {
           projectId: run.projectId,
           runId: run.id,
@@ -643,6 +722,8 @@ export class WebQaController {
       );
       artifactRefs.push(screenshotArtifact.ref);
       screenshotRef = screenshotArtifact.ref;
+      screenshotCaptures += 1;
+      screenshotBytes += capturedBytes.length;
       visual.actualRef = screenshotArtifact.ref;
 
       if (route.visual.mode !== "off") {
@@ -675,7 +756,7 @@ export class WebQaController {
           });
           const comparison = comparePngScreenshots(
             Buffer.from(expected.data, expected.encoding),
-            screenshotBytes,
+            capturedBytes,
             route.visual.maxDiffRatio
           );
           visual = {
@@ -808,11 +889,36 @@ export class WebQaController {
         trapped: keyboard.trapped
       },
       visual,
+      performance: {
+        durationMs: Math.max(0, Date.now() - startedAt),
+        semanticActions,
+        pageLoads,
+        replayedSemanticActions: 0,
+        blindRetries: 0,
+        screenshotCaptures,
+        screenshotBytes,
+        screenshotDurationMs
+      },
       artifacts: artifactRefs,
       screenshotRef,
       diagnosticsRef,
       traceRef
     };
+  }
+
+  _cancelRun(run, results, artifactRefs, message) {
+    const cancelled = this.store.update(run.id, run.revision, {
+      state: "cancelled",
+      results,
+      artifacts: [...artifactRefs],
+      summary: summarizeResults(results),
+      error: {
+        code: "qa_cancelled",
+        message
+      }
+    });
+    this._emit(cancelled);
+    return qaRunResult(cancelled);
   }
 
   _authorizedRun(id, scope) {
@@ -845,7 +951,11 @@ export class WebQaController {
     } catch {
       // Operational visibility is advisory and cannot break a QA run.
     }
-    this.runtime?.events?.emit?.("qa-run", event);
+    try {
+      this.runtime?.events?.emit?.("qa-run", event);
+    } catch {
+      // Operational observers are advisory and cannot break a QA run.
+    }
   }
 
   _emitProgress(run, result, completed, total) {
@@ -865,7 +975,8 @@ export class WebQaController {
         controlId: result.controlId ?? null,
         viewport: result.viewport,
         status: result.status,
-        exploration: result.exploration ?? null
+        exploration: result.exploration ?? null,
+        performance: result.performance ?? null
       },
       updatedAt: new Date().toISOString()
     };
@@ -874,7 +985,11 @@ export class WebQaController {
     } catch {
       // Operational visibility is advisory and cannot break a QA run.
     }
-    this.runtime?.events?.emit?.("qa-run", event);
+    try {
+      this.runtime?.events?.emit?.("qa-run", event);
+    } catch {
+      // Operational observers are advisory and cannot break QA progress.
+    }
   }
 
   _emitComparison(comparison, run, scope) {
@@ -883,16 +998,20 @@ export class WebQaController {
     } catch {
       // Operational visibility is advisory and cannot break QA comparison.
     }
-    this.runtime?.events?.emit?.("qa-comparison", {
-      id: comparison.id,
-      status: comparison.status,
-      projectId: scope.projectId,
-      sessionId: scope.sessionId,
-      candidateRunId: run.id,
-      summary: comparison.summary,
-      artifactRef: comparison.artifactRef,
-      updatedAt: comparison.createdAt
-    });
+    try {
+      this.runtime?.events?.emit?.("qa-comparison", {
+        id: comparison.id,
+        status: comparison.status,
+        projectId: scope.projectId,
+        sessionId: scope.sessionId,
+        candidateRunId: run.id,
+        summary: comparison.summary,
+        artifactRef: comparison.artifactRef,
+        updatedAt: comparison.createdAt
+      });
+    } catch {
+      // Operational observers are advisory and cannot break QA comparison.
+    }
   }
 }
 
@@ -1003,6 +1122,21 @@ export function registerWebQaTools(registry, runtime) {
       additionalProperties: false
     },
     handler: (args, context) => controller.comparisonStatus(args, context)
+  });
+
+  register({
+    name: "qa_benchmark",
+    description: "Build a content-free quality and efficiency proof from one project/session QA run. Reports exact completion, failure, truncation, latency, semantic action, deterministic replay, screenshot capture, and artifact-byte evidence. Screenshot-only latency and byte savings are explicitly labeled estimates; provider-specific image token counts are never invented.",
+    sideEffects: false,
+    parameters: {
+      type: "object",
+      properties: {
+        runId: { type: "string", pattern: "^qa_[a-f0-9]{16}$" }
+      },
+      required: ["runId"],
+      additionalProperties: false
+    },
+    handler: (args, context) => controller.benchmark(args, context)
   });
 
   register({

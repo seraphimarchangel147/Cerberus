@@ -614,8 +614,51 @@ export class QaBaselineStore {
     this.writeSnapshot = options.writeSnapshot ?? writeJsonAtomic;
     this.now = options.now ?? nowIso;
     this.baselines = new Map();
+    this.approvalClaims = new Map();
     ensureDir(this.dir);
     this._load();
+  }
+
+  claimApproval({
+    approvalId,
+    projectId,
+    manifestDigest,
+    sourceRevision,
+    runId,
+    resultIds
+  }) {
+    const claim = normalizeApprovalClaim({
+      version: 1,
+      approvalId,
+      projectId,
+      manifestDigest,
+      sourceRevision,
+      runId,
+      resultIds,
+      claimedAt: this.now()
+    });
+    if (!claim) {
+      throw new TypeError("QA visual baseline approval claim is invalid.");
+    }
+    const current = this.approvalClaims.get(claim.approvalId);
+    if (current) {
+      if (approvalClaimDigest(current) !== approvalClaimDigest(claim)) {
+        throw new Error(
+          "QA visual baseline approval was already used for different evidence."
+        );
+      }
+      return { ...clone(current), replayed: true };
+    }
+    const event = {
+      version: 1,
+      op: "claim-approval",
+      at: claim.claimedAt,
+      claim
+    };
+    this.appendEvent(this.eventsPath, event);
+    this._installApprovalClaim(claim);
+    this._writeSnapshot();
+    return { ...clone(claim), replayed: false };
   }
 
   approve({
@@ -690,7 +733,8 @@ export class QaBaselineStore {
 
   _load() {
     const events = readJsonLines(this.eventsPath).filter((event) => (
-      event?.version === 1 && event.op === "approve"
+      event?.version === 1
+      && ["approve", "claim-approval"].includes(event.op)
     ));
     let snapshot = null;
     try {
@@ -702,8 +746,17 @@ export class QaBaselineStore {
       for (const baseline of snapshot?.baselines ?? []) {
         this._install(baseline);
       }
+      for (const claim of snapshot?.approvalClaims ?? []) {
+        this._installApprovalClaim(claim);
+      }
     } else {
-      for (const event of events) this._install(event.baseline);
+      for (const event of events) {
+        if (event.op === "approve") {
+          this._install(event.baseline);
+        } else {
+          this._installApprovalClaim(event.claim);
+        }
+      }
     }
   }
 
@@ -716,12 +769,28 @@ export class QaBaselineStore {
     }
   }
 
+  _installApprovalClaim(value) {
+    const claim = normalizeApprovalClaim(value);
+    if (!claim) return;
+    const current = this.approvalClaims.get(claim.approvalId);
+    if (
+      current
+      && approvalClaimDigest(current) !== approvalClaimDigest(claim)
+    ) {
+      throw new Error(
+        "QA visual baseline journal contains a conflicting approval claim."
+      );
+    }
+    this.approvalClaims.set(claim.approvalId, claim);
+  }
+
   _writeSnapshot() {
     try {
       this.writeSnapshot(this.snapshotPath, {
         version: 1,
         updatedAt: this.now(),
-        baselines: [...this.baselines.values()]
+        baselines: [...this.baselines.values()],
+        approvalClaims: [...this.approvalClaims.values()]
       });
     } catch {
       // The fsynced JSONL approval is authoritative.
@@ -951,6 +1020,65 @@ function normalizeBaseline(value) {
     return null;
   }
   return clone(value);
+}
+
+function normalizeApprovalClaim(value) {
+  try {
+    if (
+      !value
+      || typeof value !== "object"
+      || Array.isArray(value)
+      || value.version !== 1
+      || !Array.isArray(value.resultIds)
+      || value.resultIds.length < 1
+      || value.resultIds.length > MAX_RESULTS
+      || !validIso(value.claimedAt)
+    ) {
+      return null;
+    }
+    const resultIds = [...new Set(
+      value.resultIds.map(requiredResultId)
+    )].sort();
+    if (resultIds.length !== value.resultIds.length) return null;
+    return {
+      version: 1,
+      approvalId: requiredAscii(
+        value.approvalId,
+        "approval id",
+        128
+      ),
+      projectId: requiredProjectId(value.projectId),
+      manifestDigest: requiredSha256(
+        value.manifestDigest,
+        "manifest digest"
+      ),
+      sourceRevision: requiredSha256(
+        value.sourceRevision,
+        "source revision"
+      ),
+      runId: requiredRunId(value.runId),
+      resultIds,
+      claimedAt: value.claimedAt
+    };
+  } catch {
+    return null;
+  }
+}
+
+function approvalClaimDigest(value) {
+  return createHash("sha256")
+    .update(value.approvalId)
+    .update("\0")
+    .update(value.projectId)
+    .update("\0")
+    .update(value.manifestDigest)
+    .update("\0")
+    .update(value.sourceRevision)
+    .update("\0")
+    .update(value.runId)
+    .update("\0")
+    .update(value.resultIds.join("\0"))
+    .digest("hex");
 }
 
 function normalizeArtifactEntry(value) {

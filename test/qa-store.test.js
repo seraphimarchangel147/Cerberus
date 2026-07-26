@@ -211,3 +211,44 @@ test("visual baseline approvals are project-scoped, revisioned, and durable", (t
   const recovered = new QaBaselineStore({ dir: root });
   assert.equal(recovered.get(input).revision, 2);
 });
+
+test("visual approval claims are exact, idempotent, and durable", (t) => {
+  const root = tempDir(t, "openagi-qa-approval-claim-");
+  const store = new QaBaselineStore({ dir: root });
+  const input = {
+    approvalId: "action_visual_exact_1",
+    projectId: "alpha",
+    manifestDigest: "b".repeat(64),
+    sourceRevision: "c".repeat(64),
+    runId: "qa_0123456789abcdef",
+    resultIds: ["editor_mobile", "editor_desktop"]
+  };
+
+  const first = store.claimApproval(input);
+  assert.equal(first.replayed, false);
+  assert.deepEqual(first.resultIds, [
+    "editor_desktop",
+    "editor_mobile"
+  ]);
+  assert.equal(store.claimApproval({
+    ...input,
+    resultIds: [...input.resultIds].reverse()
+  }).replayed, true);
+  assert.throws(
+    () => store.claimApproval({
+      ...input,
+      runId: "qa_fedcba9876543210"
+    }),
+    /already used for different evidence/
+  );
+
+  const recovered = new QaBaselineStore({ dir: root });
+  assert.equal(recovered.claimApproval(input).replayed, true);
+  assert.throws(
+    () => recovered.claimApproval({
+      ...input,
+      projectId: "beta"
+    }),
+    /already used for different evidence/
+  );
+});

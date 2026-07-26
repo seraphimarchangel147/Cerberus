@@ -56,6 +56,7 @@ const STRING_METADATA = new Map([
 ]);
 const INTEGER_METADATA = new Set([
   "attempt",
+  "blindRetries",
   "cachedTokens",
   "completed",
   "controls",
@@ -79,16 +80,22 @@ const INTEGER_METADATA = new Set([
   "maxExplorationDepth",
   "maxIterations",
   "outputTokens",
+  "pageLoads",
   "passed",
   "revision",
   "routes",
+  "semanticActions",
+  "screenshotBytes",
+  "screenshotCaptures",
+  "screenshotDurationMs",
   "total",
   "mutationEvidence",
   "observationRevision",
   "verificationEvidence",
   "visualEvidence",
   "visualChanges",
-  "warnings"
+  "warnings",
+  "replayedSemanticActions"
 ]);
 const NUMBER_METADATA = new Set(["scrutinyScore"]);
 const BOOLEAN_METADATA = new Set([
@@ -476,6 +483,17 @@ export class RunInspector {
           ?? summary.explorationTruncated,
         explorationTruncationReason:
           event.result?.exploration?.truncationReason,
+        durationMs: event.result?.performance?.durationMs,
+        semanticActions: event.result?.performance?.semanticActions,
+        pageLoads: event.result?.performance?.pageLoads,
+        replayedSemanticActions:
+          event.result?.performance?.replayedSemanticActions,
+        blindRetries: event.result?.performance?.blindRetries,
+        screenshotCaptures:
+          event.result?.performance?.screenshotCaptures,
+        screenshotBytes: event.result?.performance?.screenshotBytes,
+        screenshotDurationMs:
+          event.result?.performance?.screenshotDurationMs,
         artifactRefs: [event.result?.exploration?.graphRef].filter(Boolean),
         verificationStatus: event.result?.status,
         errorCode: event.error?.code ?? null

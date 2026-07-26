@@ -66,9 +66,37 @@ export class UiStateExplorer {
     const seen = new Map();
     const queue = [];
     const attemptedControlIds = new Set();
+    const performance = {
+      pageLoads: 0,
+      semanticActions: 0,
+      replayedSemanticActions: 0,
+      screenshotCaptures: 0,
+      screenshotBytes: 0,
+      screenshotDurationMs: 0
+    };
     let actions = 0;
     let truncated = false;
     let truncationReason = null;
+
+    if (abortSignal?.aborted) {
+      return this._result({
+        run,
+        route,
+        viewport,
+        limits,
+        states,
+        transitions,
+        artifacts,
+        failures,
+        warnings,
+        actions,
+        truncated: true,
+        truncationReason: "cancelled",
+        rootScreenshotRef,
+        startedAt,
+        performance
+      });
+    }
 
     const root = await this._reach({
       path: [],
@@ -76,8 +104,29 @@ export class UiStateExplorer {
       route,
       viewport,
       url,
-      trace: false
+      trace: false,
+      performance,
+      abortSignal
     });
+    if (root.cancelled) {
+      return this._result({
+        run,
+        route,
+        viewport,
+        limits,
+        states,
+        transitions,
+        artifacts,
+        failures,
+        warnings,
+        actions,
+        truncated: true,
+        truncationReason: "cancelled",
+        rootScreenshotRef,
+        startedAt,
+        performance
+      });
+    }
     if (!root.ok) {
       const rootFailure = finding(
         "exploration_root_failed",
@@ -97,7 +146,9 @@ export class UiStateExplorer {
         actions,
         truncated,
         truncationReason,
-        rootScreenshotRef
+        rootScreenshotRef,
+        startedAt,
+        performance
       });
     }
     const rootSignature = stateSignature(root, salt);
@@ -137,8 +188,15 @@ export class UiStateExplorer {
             route,
             viewport,
             url,
-            trace: false
+            trace: false,
+            performance,
+            abortSignal
           });
+      if (reached.cancelled) {
+        truncated = true;
+        truncationReason = "cancelled";
+        break;
+      }
       if (!reached.ok) {
         failures.push(finding(
           "state_replay_failed",
@@ -166,6 +224,11 @@ export class UiStateExplorer {
         continue;
       }
       for (const candidate of candidates) {
+        if (abortSignal?.aborted) {
+          truncated = true;
+          truncationReason = "cancelled";
+          break;
+        }
         if (states.length >= limits.maxStates) {
           truncated = true;
           truncationReason = "state_budget";
@@ -193,8 +256,16 @@ export class UiStateExplorer {
           url,
           limits,
           salt,
-          seen
+          seen,
+          performance,
+          abortSignal
         });
+        if (transition.cancelled) {
+          truncated = true;
+          truncationReason = "cancelled";
+          for (const ref of transition.artifacts) artifacts.add(ref);
+          break;
+        }
         transitions.push(transition.edge);
         for (const ref of transition.artifacts) artifacts.add(ref);
         failures.push(...transition.failures);
@@ -219,19 +290,21 @@ export class UiStateExplorer {
       }
     }
 
-    for (const control of route.controls) {
-      if (
-        control.action === "inspect"
-        || (control.destructive && !limits.includeDestructive)
-        || attemptedControlIds.has(control.id)
-      ) {
-        continue;
+    if (truncationReason !== "cancelled") {
+      for (const control of route.controls) {
+        if (
+          control.action === "inspect"
+          || (control.destructive && !limits.includeDestructive)
+          || attemptedControlIds.has(control.id)
+        ) {
+          continue;
+        }
+        failures.push(finding(
+          "exploration_control_unexercised",
+          `Control '${control.id}' had no state where its declared postcondition could discriminate the action.`,
+          { controlId: control.id }
+        ));
       }
-      failures.push(finding(
-        "exploration_control_unexercised",
-        `Control '${control.id}' had no state where its declared postcondition could discriminate the action.`,
-        { controlId: control.id }
-      ));
     }
     if (truncated && truncationReason !== "cancelled") {
       failures.push(finding(
@@ -277,7 +350,9 @@ export class UiStateExplorer {
       truncated,
       truncationReason,
       rootScreenshotRef,
-      graphRef: graphArtifact.ref
+      graphRef: graphArtifact.ref,
+      startedAt,
+      performance
     });
   }
 
@@ -291,7 +366,9 @@ export class UiStateExplorer {
     url,
     limits,
     salt,
-    seen
+    seen,
+    performance,
+    abortSignal
   }) {
     const artifacts = [];
     const failures = [];
@@ -301,6 +378,7 @@ export class UiStateExplorer {
     let traceRef = null;
     let screenshotRef = null;
     let next = null;
+    let cancelled = false;
     try {
       reached = await this._reach({
         path: source.path,
@@ -309,13 +387,19 @@ export class UiStateExplorer {
         viewport,
         url,
         trace: true,
-        keepOpen: true
+        keepOpen: true,
+        performance,
+        abortSignal
       });
       if (!reached.ok) {
-        failures.push(finding(
-          "state_replay_failed",
-          reached.error
-        ));
+        if (reached.cancelled) {
+          cancelled = true;
+        } else {
+          failures.push(finding(
+            "state_replay_failed",
+            reached.error
+          ));
+        }
       } else {
         const beforeExpectation = evaluateAssertions(
           candidate.expect,
@@ -333,7 +417,10 @@ export class UiStateExplorer {
             "exploration_control_disabled",
             `Declared control '${candidate.id}' was disabled.`
           ));
+        } else if (abortSignal?.aborted) {
+          cancelled = true;
         } else {
+          performance.semanticActions += 1;
           await performAction(this.browser, node, candidate, qaContext);
           reached.state = await this.browser.waitForQaSettled({
             timeoutMs: route.settleTimeoutMs
@@ -382,7 +469,7 @@ export class UiStateExplorer {
           });
         }
       }
-      if (reached?.ok) {
+      if (reached?.ok && !cancelled) {
         const signature = stateSignature(reached, salt);
         const previous = seen.get(signature);
         if (
@@ -400,11 +487,20 @@ export class UiStateExplorer {
           failures.length > 0
           || (isNew && limits.captureStates)
         ) {
+          const screenshotStartedAt = this.now();
           const screenshot = await this.browser.screenshot({
             fullPage: route.fullPageScreenshot
           }, qaContext);
+          performance.screenshotDurationMs += Math.max(
+            0,
+            this.now() - screenshotStartedAt
+          );
+          const screenshotBytes = Buffer.from(
+            screenshot.image.data,
+            "base64"
+          );
           const artifact = this.artifacts.put(
-            Buffer.from(screenshot.image.data, "base64"),
+            screenshotBytes,
             {
               projectId: run.projectId,
               runId: run.id,
@@ -417,6 +513,8 @@ export class UiStateExplorer {
           );
           artifacts.push(artifact.ref);
           screenshotRef = artifact.ref;
+          performance.screenshotCaptures += 1;
+          performance.screenshotBytes += screenshotBytes.length;
         }
         if (isNew) {
           const state = stateRecord({
@@ -431,10 +529,14 @@ export class UiStateExplorer {
         }
       }
     } catch (error) {
-      failures.push(finding(
-        "state_transition_failed",
-        boundedError(error)
-      ));
+      if (abortSignal?.aborted) {
+        cancelled = true;
+      } else {
+        failures.push(finding(
+          "state_transition_failed",
+          boundedError(error)
+        ));
+      }
     } finally {
       try {
         const trace = await this.browser.stopQaTrace({
@@ -461,6 +563,15 @@ export class UiStateExplorer {
         ));
       }
       await this.browser.close({}, qaContext).catch(() => {});
+    }
+
+    if (cancelled) {
+      return {
+        cancelled: true,
+        artifacts,
+        failures: [],
+        warnings: []
+      };
     }
 
     let replayRef = null;
@@ -513,6 +624,7 @@ export class UiStateExplorer {
     return {
       edge,
       next,
+      cancelled: false,
       artifacts,
       failures: failures.slice(0, MAX_FAILURES).map((item) => ({
         ...item,
@@ -531,9 +643,22 @@ export class UiStateExplorer {
     viewport,
     url,
     trace,
-    keepOpen = false
+    keepOpen = false,
+    performance = null,
+    abortSignal = null
   }) {
     try {
+      if (abortSignal?.aborted) {
+        return {
+          ok: false,
+          cancelled: true,
+          error: "QA exploration cancelled."
+        };
+      }
+      if (performance) {
+        performance.pageLoads += 1;
+        performance.replayedSemanticActions += path.length;
+      }
       await this.browser.openForQa({
         url,
         viewport,
@@ -546,6 +671,16 @@ export class UiStateExplorer {
         maxNodes: 500
       }, qaContext);
       for (const step of path) {
+        if (abortSignal?.aborted) {
+          await this.browser.stopQaTrace({ retain: false }, qaContext)
+            .catch(() => {});
+          await this.browser.close({}, qaContext).catch(() => {});
+          return {
+            ok: false,
+            cancelled: true,
+            error: "QA exploration cancelled."
+          };
+        }
         const control = route.controls.find((item) => (
           item.id === step.controlId
         ));
@@ -576,7 +711,11 @@ export class UiStateExplorer {
       await this.browser.stopQaTrace({ retain: false }, qaContext)
         .catch(() => {});
       await this.browser.close({}, qaContext).catch(() => {});
-      return { ok: false, error: boundedError(error) };
+      return {
+        ok: false,
+        cancelled: abortSignal?.aborted === true,
+        error: boundedError(error)
+      };
     }
   }
 
@@ -670,7 +809,9 @@ export class UiStateExplorer {
     truncated,
     truncationReason,
     rootScreenshotRef = null,
-    graphRef = null
+    graphRef = null,
+    startedAt,
+    performance
   }) {
     const boundedFailures = failures.slice(0, MAX_FAILURES);
     return {
@@ -747,6 +888,16 @@ export class UiStateExplorer {
         replayRefs: transitions
           .map((edge) => edge.replayRef)
           .filter(Boolean)
+      },
+      performance: {
+        durationMs: Math.max(0, this.now() - startedAt),
+        semanticActions: performance.semanticActions,
+        pageLoads: performance.pageLoads,
+        replayedSemanticActions: performance.replayedSemanticActions,
+        blindRetries: 0,
+        screenshotCaptures: performance.screenshotCaptures,
+        screenshotBytes: performance.screenshotBytes,
+        screenshotDurationMs: performance.screenshotDurationMs
       },
       artifacts: [...artifacts],
       screenshotRef: transitions.find((edge) => edge.screenshotRef)

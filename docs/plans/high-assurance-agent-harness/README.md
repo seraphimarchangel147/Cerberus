@@ -73,7 +73,7 @@ Phase 1 acceptance:
 
 ## Phase 2 - Governed Perception and Autonomous QA
 
-Status: active.
+Status: complete.
 
 Phase 2 connects perception, interaction, exhaustive UI exploration, and bug
 discovery to the Phase 1 evidence kernel.
@@ -202,7 +202,7 @@ Delivered:
 
 ### F4 - Final hardening and performance proof
 
-Status: next.
+Status: complete.
 
 - Benchmark semantic observation against screenshot-only loops for tokens,
   latency, retries, and successful task completion.
@@ -213,6 +213,54 @@ Status: next.
   cancellation, and observer failure.
 - Run both full test lanes, added-line ASCII scanning, `git diff --check`, and
   dependency audit.
+
+Delivered:
+
+- Every deterministic route and exploration result records actual wall-clock
+  duration, semantic actions, page loads, replayed semantic setup actions,
+  blind retries, screenshot captures, decoded screenshot bytes, and capture
+  duration. Run Inspector exposes only those numeric counters.
+- `qa_benchmark(runId)` derives a stable, project/session-owned performance
+  proof from the durable run and artifact evidence. A proof qualifies only
+  when implementation and design checks pass, exploration is complete, and
+  every metric and artifact remains available.
+- The proof compares actual semantic-first captures with a labeled visual-only
+  counterfactual that uses fresh pre-action and post-action screenshots. It
+  reports exact observed values separately from estimated counterfactual bytes
+  and latency.
+- Provider-specific image token counts remain explicitly unavailable because
+  the deterministic QA engine cannot observe a provider tokenizer. Structural
+  and image byte counts are exposed as a model-independent proxy rather than
+  fabricated token precision.
+- Representative tests exercise forms, navigation, dialogs, tables,
+  accessible canvas controls, and desktop/mobile viewports under bounded
+  exploration.
+- Cancellation is checked before every route, control, candidate transition,
+  and semantic replay action. No new candidate action starts after abort, and
+  canceled or truncated evidence cannot qualify a performance claim.
+- Visual baseline approval IDs are durable exact-tuple claims. Exact replay is
+  idempotent, while a different project, run, source revision, manifest, or
+  result set is rejected across restart.
+- Throwing Run Inspector and lifecycle observers remain advisory. Stale pixel
+  receipts, prompt-injected page text, cross-project references, secret
+  reflection, path-traversing transfers, and malicious adapter download paths
+  are covered by fail-closed regressions.
+- Both policy lanes pass 1,746 tests with zero failures and one intentional
+  Windows permission-mode skip. Added lines are ASCII-clean, the diff check is
+  clean, and the dependency audit reports no vulnerabilities.
+
+Phase 2 acceptance:
+
+- A semantic or coordinate action cannot use stale observation authority.
+- A canceled exploration cannot dispatch the next semantic action.
+- Page content and pixels remain untrusted, scoped evidence rather than
+  instructions or ordinary persisted visibility.
+- A visual change cannot self-approve or reuse approval authority for
+  different evidence.
+- A speed claim cannot qualify when deterministic quality, intent, artifact,
+  or completeness evidence is missing.
+- Equivalent verified coverage uses fewer screenshot captures without
+  weakening policy, model quality, or deterministic checks.
 
 ## Definition of "god tier"
 

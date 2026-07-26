@@ -318,6 +318,17 @@ test("Run Inspector exposes structural state-exploration progress only", (t) => 
         truncationReason: "depth_budget",
         graphRef: ARTIFACT_REF,
         privateState: canary
+      },
+      performance: {
+        durationMs: 123,
+        semanticActions: 11,
+        pageLoads: 19,
+        replayedSemanticActions: 8,
+        blindRetries: 0,
+        screenshotCaptures: 5,
+        screenshotBytes: 4096,
+        screenshotDurationMs: 37,
+        privateMetric: canary
       }
     },
     updatedAt: "2026-01-01T00:01:00.000Z"
@@ -334,6 +345,14 @@ test("Run Inspector exposes structural state-exploration progress only", (t) => 
     recorded.latest.explorationTruncationReason,
     "depth_budget"
   );
+  assert.equal(recorded.latest.durationMs, 123);
+  assert.equal(recorded.latest.semanticActions, 11);
+  assert.equal(recorded.latest.pageLoads, 19);
+  assert.equal(recorded.latest.replayedSemanticActions, 8);
+  assert.equal(recorded.latest.blindRetries, 0);
+  assert.equal(recorded.latest.screenshotCaptures, 5);
+  assert.equal(recorded.latest.screenshotBytes, 4096);
+  assert.equal(recorded.latest.screenshotDurationMs, 37);
   assert.deepEqual(recorded.latest.artifactRefs, [ARTIFACT_REF]);
   const persisted = fs.readFileSync(
     path.join(dir, "events.jsonl"),

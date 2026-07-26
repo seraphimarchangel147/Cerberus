@@ -306,6 +306,7 @@ export {
   QaComparisonStore,
   QaDifferentialAnalyzer
 } from "./qa-differential.js";
+export { buildQaPerformanceProof } from "./qa-performance.js";
 export {
   QaArtifactStore,
   QaBaselineStore,
