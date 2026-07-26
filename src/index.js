@@ -290,6 +290,12 @@ export {
   QaRunStore,
   QA_STORE_LIMITS
 } from "./qa-store.js";
+export {
+  RUN_INSPECTOR_LIMITS,
+  RunInspector,
+  RunInspectorStore,
+  turnInspectorMetadata
+} from "./run-inspector.js";
 export { createHostedInterface } from "./hosted-interface.js";
 export {
   DEFAULT_API_SERVER_PORT,

@@ -2,6 +2,16 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Live governed Run Inspector (Codex)
+
+- Added one project-scoped operational timeline for agent turns, provider iterations, tool receipts, durable jobs, coder transactions, Web QA progress, verification, acceptance, rollback, and artifact evidence.
+- Persisted a strictly allowlisted content-free event journal through fsynced JSONL plus atomic cache snapshots, with journal-authoritative replay, bounded per-run and global retention, latest-per-run compaction, valid-suffix recovery, hostile snapshot normalization, and same-ID project isolation.
+- Kept observability advisory and fail-open across AgentHost, jobs, coder, and QA so an inspector or listener failure can never change execution; prompts, tool arguments, raw results, error messages, and model reasoning never enter the inspector journal.
+- Added authenticated project-contained list, detail, SSE, and integrity-checked QA artifact endpoints with no-store responses, plus a live dashboard for status, tokens, checks, acceptance contracts, rollback state, screenshots, visual diffs, accessibility, keyboard coverage, traces, and historical durable jobs.
+- Added restart, redaction, observer-failure, project-collision, post-snapshot replay, durable-job discovery, AgentHost lifecycle, SSE, HTTP authorization, and artifact-ownership regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1706/1707 tests with zero failures and one intentional platform skip; added-line ASCII review and `npm audit --audit-level=high` are clean.
+RUN INSPECTOR COMPLETE
+
 ## 2026-07-25 - Proof-carrying web QA and visual evidence (Codex)
 
 - Added an opt-in, project-scoped Playwright QA controller that loads bounded version-1 manifests, inventories every interactive control, executes fixture-safe declared behavior in fresh sessions, and rejects unclassified, missing, disabled, expired-exemption, stuck-loading, console, page, and network failures.

@@ -212,6 +212,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   bindHostedEvent("outreach", (data) => broadcast("outreach", data));
   bindHostedEvent("outreach-resolved", (data) => broadcast("outreach-resolved", data));
   bindHostedEvent("background-review", (data) => broadcast("background-review", data));
+  bindHostedEvent("run-inspector", (data) => (
+    broadcast("run-inspector", sanitizeForAudit(data))
+  ));
 
   // Expose the bus to runtime subsystems (pattern miner, session miner) so
   // they can emit "skill-candidate" without holding a reference to this
@@ -1515,6 +1518,75 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/events") {
         const project = requireRequestProject(runtime, req, url);
         return handleSse(req, res, sseClients, project.id);
+      }
+
+      if (method === "GET" && pathname === "/runs") {
+        const project = requireRequestProject(runtime, req, url);
+        res.setHeader("Cache-Control", "no-store");
+        if (!runtime.runInspector?.list) {
+          return sendJson(res, 503, { error: "run inspector unavailable" });
+        }
+        try {
+          const runs = runtime.runInspector.list({
+            projectId: project.id,
+            kind: url.searchParams.get("kind") || null,
+            status: url.searchParams.get("status") || null,
+            limit: Number(url.searchParams.get("limit") ?? 100)
+          });
+          return sendJson(res, 200, sanitizeForAudit({ runs }));
+        } catch (error) {
+          return sendJson(res, 400, {
+            error: String(error?.message ?? "invalid run query").slice(0, 500)
+          });
+        }
+      }
+
+      const runArtifactRoute = /^\/runs\/qa\/([^/]+)\/artifacts\/([^/]+)$/u
+        .exec(pathname);
+      if (method === "GET" && runArtifactRoute) {
+        const project = requireRequestProject(runtime, req, url);
+        if (!runtime.runInspector?.readQaArtifact) {
+          return sendJson(res, 503, { error: "run inspector unavailable" });
+        }
+        try {
+          const artifact = runtime.runInspector.readQaArtifact({
+            projectId: project.id,
+            runId: decodeURIComponent(runArtifactRoute[1]),
+            ref: decodeURIComponent(runArtifactRoute[2])
+          });
+          if (!artifact) {
+            return sendJson(res, 404, { error: "run artifact not found" });
+          }
+          return sendRunArtifact(res, artifact);
+        } catch (error) {
+          return sendJson(res, 404, {
+            error: String(error?.message ?? "run artifact not found").slice(0, 500)
+          });
+        }
+      }
+
+      const runDetailRoute = /^\/runs\/(turn|coder|qa|job)\/([^/]+)$/u
+        .exec(pathname);
+      if (method === "GET" && runDetailRoute) {
+        const project = requireRequestProject(runtime, req, url);
+        res.setHeader("Cache-Control", "no-store");
+        if (!runtime.runInspector?.detail) {
+          return sendJson(res, 503, { error: "run inspector unavailable" });
+        }
+        try {
+          const run = runtime.runInspector.detail({
+            projectId: project.id,
+            kind: runDetailRoute[1],
+            runId: decodeURIComponent(runDetailRoute[2])
+          });
+          return run
+            ? sendJson(res, 200, sanitizeForAudit({ run }))
+            : sendJson(res, 404, { error: "run not found" });
+        } catch (error) {
+          return sendJson(res, 400, {
+            error: String(error?.message ?? "invalid run id").slice(0, 500)
+          });
+        }
       }
 
       if (method === "POST" && pathname === "/jobs") {
@@ -4233,6 +4305,30 @@ function sendJson(res, status, value) {
   res.end(body);
 }
 
+function sendRunArtifact(res, artifact) {
+  const data = Buffer.from(artifact.data);
+  const extension = artifact.mediaType === "image/png"
+    ? "png"
+    : artifact.mediaType === "image/jpeg"
+      ? "jpg"
+      : artifact.mediaType === "image/webp"
+        ? "webp"
+        : artifact.mediaType === "application/json"
+          ? "json"
+          : artifact.mediaType === "application/zip" ? "zip" : "txt";
+  const inline = artifact.mediaType.startsWith("image/")
+    || artifact.mediaType === "application/json"
+    || artifact.mediaType.startsWith("text/");
+  res.writeHead(200, {
+    "content-type": artifact.mediaType,
+    "content-length": data.length,
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+    "content-disposition": `${inline ? "inline" : "attachment"}; filename="${artifact.ref}.${extension}"`
+  });
+  res.end(data);
+}
+
 function sendSecretsJson(res, status, value) {
   res.setHeader("Cache-Control", "no-store");
   return sendJson(res, status, value);
@@ -5474,6 +5570,22 @@ function renderApp() {
     }
     .page-chat .page-chat-send:hover:not(:disabled) { opacity: 0.9; }
     .page-chat .page-chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Run Inspector: metadata-only live execution visibility. */
+    .run-toolbar { display:flex; gap:var(--space-2); align-items:center; flex-wrap:wrap; margin-bottom:var(--space-4); }
+    .run-layout { display:grid; grid-template-columns:minmax(280px, .8fr) minmax(420px, 1.6fr); gap:var(--space-4); align-items:start; }
+    .run-list { display:flex; flex-direction:column; gap:var(--space-2); max-height:72vh; overflow:auto; }
+    .run-row { width:100%; cursor:pointer; text-align:left; color:inherit; font:inherit; transition:border-color .12s ease, background .12s ease; }
+    .run-row:hover, .run-row.active { border-color:var(--primary); background:var(--muted-bg); }
+    .run-timeline { display:flex; flex-direction:column; gap:0; border-left:2px solid var(--border); margin-left:8px; padding-left:16px; }
+    .run-event { position:relative; padding:0 0 14px; }
+    .run-event::before { content:""; position:absolute; width:8px; height:8px; border-radius:50%; background:var(--primary); left:-21px; top:5px; }
+    .run-event:last-child { padding-bottom:0; }
+    .run-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:var(--space-2); }
+    .qa-evidence-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:var(--space-3); }
+    .qa-shot { width:100%; max-height:280px; object-fit:contain; background:var(--input); border:1px solid var(--border); border-radius:var(--radius-sm); margin-top:var(--space-2); }
+    .qa-result-failed { border-color:rgba(240,128,128,.5); }
+    @media (max-width:900px) { .run-layout { grid-template-columns:1fr; } .run-list { max-height:40vh; } }
   </style>
 </head>
 <body>
@@ -5508,6 +5620,7 @@ function renderApp() {
             <button data-tab="today" title="What you got done today — completed tasks, skills run, actions approved, time tracked, themes.">Today</button>
             <button data-tab="activity" title="Ambient capture log — what you were doing on screen (if capture is enabled).">Activity</button>
             <button data-tab="computer-use" title="Computer use (beta) — every action the agent intended to take, with the reasoning it gave.">Computer Use</button>
+            <button data-tab="runs" title="Live tools, checks, QA screenshots, visual diffs, approvals, tokens, and rollback state without raw model reasoning.">Runs</button>
             <button data-tab="budget" title="Today's LLM spend + 14-day history.">Credits</button>
             <button data-tab="outcomes" title="Quality scores for completed agent work, 7d + 30d rolling.">Outcomes</button>
             <button data-tab="health" title="Memory saturation, specialist health, MCP status, upcoming cron.">Health</button>
@@ -5546,7 +5659,10 @@ const state = {
   messages: [],
   health: null,
   kanban: null,
-  kanbanTaskId: null
+  kanbanTaskId: null,
+  runs: [],
+  runKind: "",
+  runSelected: null
 };
 
 const $ = (id) => document.getElementById(id);
@@ -5864,6 +5980,9 @@ async function switchTab(tab) {
   } else if (tab === "activity") {
     showSidebar(false);
     await renderActivity();
+  } else if (tab === "runs") {
+    showSidebar(false);
+    await renderRuns();
   } else if (tab === "computer-use") {
     showSidebar(false);
     await renderComputerUse();
@@ -8753,6 +8872,292 @@ function uiHelp(text) {
   return \`<span class="ui-help" tabindex="0" aria-label="\${escapeHtml(text)}">?<span class="ui-help-tip">\${escapeHtml(text)}</span></span>\`;
 }
 
+async function renderRuns({ keepSelection = true } = {}) {
+  const kindQuery = state.runKind
+    ? "&kind=" + encodeURIComponent(state.runKind)
+    : "";
+  let payload;
+  try {
+    payload = await fetchJson("/runs?limit=200" + kindQuery);
+  } catch (error) {
+    main.innerHTML = '<div class="ui-empty">Run Inspector unavailable: '
+      + escapeHtml(error.message) + '</div>';
+    return;
+  }
+  state.runs = Array.isArray(payload.runs) ? payload.runs : [];
+  const active = state.runs.filter((run) => (
+    ["running", "waiting_approval", "editing", "verifying", "planned", "queued"]
+      .includes(run.status)
+  )).length;
+  const passed = state.runs.filter((run) => (
+    ["passed", "succeeded"].includes(run.status)
+  )).length;
+  const failed = state.runs.filter((run) => (
+    ["failed", "blocked", "cancelled", "interrupted"].includes(run.status)
+  )).length;
+  const list = state.runs.length
+    ? state.runs.map((run) => \`
+        <button type="button" class="ui-card run-row \${state.runSelected?.id === run.id ? "active" : ""}"
+          data-run-kind="\${escapeHtml(run.kind)}" data-run-id="\${escapeHtml(run.runId)}">
+          <div class="ui-row">
+            <span class="ui-badge">\${escapeHtml(run.kind)}</span>
+            <span class="ui-badge \${runStatusClass(run.status)}">\${escapeHtml(run.status)}</span>
+            <span class="ui-grow"></span>
+            <span class="ui-meta">\${escapeHtml(timeAgo(run.updatedAt))}</span>
+          </div>
+          <div class="ui-meta" style="margin-top:6px;font-family:ui-monospace,Menlo,monospace;">\${escapeHtml(run.runId)}</div>
+          \${renderRunMetrics(run.latest, { compact: true })}
+        </button>
+      \`).join("")
+    : '<div class="ui-empty">No runs have been recorded for this project yet.</div>';
+  main.innerHTML = \`
+    <div class="ui-section">
+      <div class="ui-section-header">
+        <h2 style="margin:0;">Run Inspector</h2>
+        <span class="ui-section-meta">Live operational facts and acceptance evidence. No secrets, tool arguments, or raw model reasoning.</span>
+      </div>
+      <div class="run-toolbar">
+        <select id="runKindFilter" class="ui-select" style="width:auto;">
+          <option value="" \${state.runKind === "" ? "selected" : ""}>All runs</option>
+          <option value="turn" \${state.runKind === "turn" ? "selected" : ""}>Agent turns</option>
+          <option value="coder" \${state.runKind === "coder" ? "selected" : ""}>Coder</option>
+          <option value="qa" \${state.runKind === "qa" ? "selected" : ""}>Web QA</option>
+          <option value="job" \${state.runKind === "job" ? "selected" : ""}>Jobs</option>
+        </select>
+        <span class="ui-badge">\${active} active</span>
+        <span class="ui-badge ui-badge-accent">\${passed} passed</span>
+        <span class="ui-badge \${failed ? "ui-badge-err" : ""}">\${failed} need attention</span>
+        <button id="runRefresh" class="ui-btn ui-btn-secondary ui-btn-sm" type="button">Refresh</button>
+      </div>
+      <div class="run-layout">
+        <div class="run-list" id="runList">\${list}</div>
+        <div id="runDetail"><div class="ui-empty">Select a run to inspect its proof and timeline.</div></div>
+      </div>
+    </div>
+  \`;
+  document.getElementById("runKindFilter")?.addEventListener("change", (event) => {
+    state.runKind = event.target.value;
+    state.runSelected = null;
+    renderRuns({ keepSelection: false });
+  });
+  document.getElementById("runRefresh")?.addEventListener("click", () => (
+    renderRuns()
+  ));
+  document.querySelectorAll("[data-run-kind][data-run-id]").forEach((button) => {
+    button.addEventListener("click", () => (
+      showRunDetail(button.dataset.runKind, button.dataset.runId)
+    ));
+  });
+  const retained = keepSelection && state.runSelected
+    ? state.runs.find((run) => run.id === state.runSelected.id)
+    : null;
+  const selected = retained ?? state.runs[0] ?? null;
+  if (selected) await showRunDetail(selected.kind, selected.runId);
+}
+
+async function showRunDetail(kind, runId) {
+  const host = document.getElementById("runDetail");
+  if (!host) return;
+  host.innerHTML = '<div class="ui-empty">Loading run evidence…</div>';
+  try {
+    const payload = await fetchJson(
+      "/runs/" + encodeURIComponent(kind) + "/" + encodeURIComponent(runId)
+    );
+    const run = payload.run;
+    state.runSelected = { id: run.id, kind: run.kind, runId: run.runId };
+    document.querySelectorAll(".run-row").forEach((row) => {
+      row.classList.toggle(
+        "active",
+        row.dataset.runKind === run.kind && row.dataset.runId === run.runId
+      );
+    });
+    host.innerHTML = \`
+      <div class="ui-card">
+        <div class="ui-row">
+          <span class="ui-badge">\${escapeHtml(run.kind)}</span>
+          <span class="ui-badge \${runStatusClass(run.status)}">\${escapeHtml(run.status)}</span>
+          <span class="ui-grow"></span>
+          <span class="ui-meta">updated \${escapeHtml(new Date(run.updatedAt).toLocaleString())}</span>
+        </div>
+        <h2 style="margin:10px 0 2px;font-family:ui-monospace,Menlo,monospace;font-size:16px;">\${escapeHtml(run.runId)}</h2>
+        <div class="ui-meta">\${escapeHtml(run.sessionId ?? "no session")} · \${run.eventCount ?? 0} events</div>
+      </div>
+      \${renderRunMetrics(run.latest)}
+      \${run.kind === "coder" && run.detail ? renderCoderRunDetail(run.detail) : ""}
+      \${run.kind === "qa" && run.detail ? renderQaRunDetail(run, run.detail) : ""}
+      \${run.kind === "job" && run.detail ? renderJobRunDetail(run.detail) : ""}
+      \${renderRunTimeline(run.events)}
+    \`;
+  } catch (error) {
+    host.innerHTML = '<div class="ui-empty">Could not load run: '
+      + escapeHtml(error.message) + '</div>';
+  }
+}
+
+function renderRunMetrics(metadata, { compact = false } = {}) {
+  const entries = Object.entries(metadata ?? {}).filter(([, value]) => (
+    value !== null && value !== undefined && !Array.isArray(value)
+  ));
+  if (!entries.length) return "";
+  const shown = compact ? entries.slice(0, 3) : entries;
+  return \`<div class="run-metrics" style="margin-top:\${compact ? "8px" : "12px"};">
+    \${shown.map(([key, value]) => \`
+      <div class="\${compact ? "ui-meta" : "ui-card"}">
+        <div class="ui-meta">\${escapeHtml(humanRunKey(key))}</div>
+        <div style="\${compact ? "" : "font-size:17px;font-weight:700;margin-top:3px;"}">\${escapeHtml(String(value))}</div>
+      </div>
+    \`).join("")}
+  </div>\`;
+}
+
+function renderRunTimeline(events) {
+  const rows = Array.isArray(events) ? events.slice().reverse() : [];
+  if (!rows.length) return "";
+  return \`
+    <div class="ui-section">
+      <div class="ui-section-header"><h3>Timeline</h3><span class="ui-section-meta">newest first</span></div>
+      <div class="ui-card"><div class="run-timeline">
+        \${rows.map((event) => \`
+          <div class="run-event">
+            <div class="ui-row">
+              <strong>\${escapeHtml(humanRunKey(event.phase))}</strong>
+              <span class="ui-badge \${runStatusClass(event.status)}">\${escapeHtml(event.status)}</span>
+              <span class="ui-meta">#\${event.sequence} · \${escapeHtml(new Date(event.at).toLocaleTimeString())}</span>
+            </div>
+            \${renderRunMetrics(event.metadata, { compact: true })}
+          </div>
+        \`).join("")}
+      </div></div>
+    </div>
+  \`;
+}
+
+function renderCoderRunDetail(detail) {
+  const checks = detail.verification?.results ?? detail.checks ?? [];
+  const criteria = detail.acceptance?.criteria ?? [];
+  return \`
+    <div class="ui-section">
+      <div class="ui-section-header"><h3>Acceptance contract</h3>
+        <span class="ui-badge \${runStatusClass(detail.acceptance?.status)}">\${escapeHtml(detail.acceptance?.status ?? "pending")}</span>
+      </div>
+      <div class="ui-stack">
+        \${criteria.map((criterion) => \`
+          <div class="ui-card">
+            <div class="ui-row">
+              <strong>\${escapeHtml(criterion.id)}</strong>
+              <span class="ui-badge">\${escapeHtml(criterion.oracle)}</span>
+              <span class="ui-badge">\${escapeHtml(criterion.kind)}</span>
+            </div>
+            <div style="margin-top:6px;">\${escapeHtml(criterion.statement)}</div>
+            <div class="ui-meta" style="margin-top:5px;">checks: \${escapeHtml((criterion.checkIds ?? []).join(", "))}</div>
+          </div>
+        \`).join("") || '<div class="ui-empty">No acceptance criteria recorded.</div>'}
+      </div>
+    </div>
+    <div class="ui-section">
+      <div class="ui-section-header"><h3>Verification</h3></div>
+      <div class="ui-stack">
+        \${checks.map((check) => \`
+          <div class="ui-card">
+            <div class="ui-row">
+              <strong>\${escapeHtml(check.id)}</strong>
+              <span class="ui-badge">\${escapeHtml(check.type)}</span>
+              \${typeof check.ok === "boolean" ? \`<span class="ui-badge \${check.ok ? "ui-badge-accent" : "ui-badge-err"}">\${check.ok ? "passed" : "failed"}</span>\` : ""}
+              <span class="ui-grow"></span>
+              \${check.durationMs != null ? \`<span class="ui-meta">\${check.durationMs} ms</span>\` : ""}
+            </div>
+            <div class="ui-meta" style="margin-top:5px;">\${escapeHtml(check.path ?? check.code ?? "")}</div>
+          </div>
+        \`).join("") || '<div class="ui-empty">Verification has not run yet.</div>'}
+      </div>
+    </div>
+    \${detail.rollback ? \`
+      <div class="ui-section">
+        <div class="ui-section-header"><h3>Rollback</h3><span class="ui-badge \${runStatusClass(detail.rollback.status)}">\${escapeHtml(detail.rollback.status ?? "unknown")}</span></div>
+        <div class="ui-card">\${escapeHtml((detail.rollback.files ?? []).map((file) => file.path + ": " + file.status).join(" · ") || "Rollback state recorded.")}</div>
+      </div>
+    \` : ""}
+  \`;
+}
+
+function renderQaRunDetail(run, detail) {
+  const artifactUrl = (ref) => (
+    "/runs/qa/" + encodeURIComponent(run.runId)
+      + "/artifacts/" + encodeURIComponent(ref)
+      + "?project=" + encodeURIComponent(state.projectId || "default")
+  );
+  return \`
+    <div class="ui-section">
+      <div class="ui-section-header"><h3>QA evidence</h3>
+        <span class="ui-section-meta">\${detail.summary?.passed ?? 0} passed · \${detail.summary?.failed ?? 0} failed</span>
+      </div>
+      <div class="qa-evidence-grid">
+        \${(detail.results ?? []).map((result) => \`
+          <div class="ui-card \${result.status === "failed" ? "qa-result-failed" : ""}">
+            <div class="ui-row">
+              <strong>\${escapeHtml(result.id)}</strong>
+              <span class="ui-badge \${runStatusClass(result.status)}">\${escapeHtml(result.status)}</span>
+              <span class="ui-badge">\${escapeHtml(result.viewport?.id ?? "")}</span>
+            </div>
+            <div class="ui-meta" style="margin-top:5px;">
+              \${escapeHtml(result.routeId)}\${result.controlId ? " · " + escapeHtml(result.controlId) : ""}
+            </div>
+            \${result.screenshotRef ? \`<a href="\${artifactUrl(result.screenshotRef)}" target="_blank" rel="noopener"><img class="qa-shot" loading="lazy" alt="QA screenshot for \${escapeHtml(result.id)}" src="\${artifactUrl(result.screenshotRef)}"></a>\` : ""}
+            \${result.visual?.diffRef ? \`<div class="ui-meta" style="margin-top:8px;">Visual diff · \${Math.round((result.visual.diffRatio ?? 0) * 100000) / 1000}% changed</div><a href="\${artifactUrl(result.visual.diffRef)}" target="_blank" rel="noopener"><img class="qa-shot" loading="lazy" alt="Visual diff for \${escapeHtml(result.id)}" src="\${artifactUrl(result.visual.diffRef)}"></a>\` : ""}
+            \${(result.failures ?? []).map((failure) => \`<div class="err" style="margin-top:7px;"><strong>\${escapeHtml(failure.code)}</strong></div>\`).join("")}
+            <div class="ui-row" style="margin-top:9px;">
+              \${result.diagnosticsRef ? \`<a class="ui-btn ui-btn-secondary ui-btn-sm" href="\${artifactUrl(result.diagnosticsRef)}" target="_blank" rel="noopener">Diagnostics</a>\` : ""}
+              \${result.traceRef ? \`<a class="ui-btn ui-btn-secondary ui-btn-sm" href="\${artifactUrl(result.traceRef)}">Trace</a>\` : ""}
+              <span class="ui-meta">a11y \${result.accessibility?.violations ?? 0} · keyboard \${result.keyboard?.missing ?? 0}</span>
+            </div>
+          </div>
+        \`).join("") || '<div class="ui-empty">No QA result evidence recorded.</div>'}
+      </div>
+    </div>
+  \`;
+}
+
+function renderJobRunDetail(detail) {
+  const timestamps = [
+    ["started", detail.startedAt],
+    ["finished", detail.finishedAt],
+    ["recovered", detail.recoveredAt]
+  ].filter(([, value]) => value);
+  return \`
+    <div class="ui-section">
+      <div class="ui-section-header"><h3>Durable job</h3>
+        <span class="ui-section-meta">attempt \${detail.attempt ?? 0} / \${detail.maxAttempts ?? 0}</span>
+      </div>
+      <div class="ui-card">
+        <div class="ui-row">
+          <strong>\${escapeHtml(detail.target ?? "unknown target")}</strong>
+          <span class="ui-badge">\${escapeHtml(detail.kind ?? "job")}</span>
+          \${detail.error?.code ? \`<span class="ui-badge ui-badge-err">\${escapeHtml(detail.error.code)}</span>\` : ""}
+        </div>
+        \${timestamps.length ? \`<div class="ui-meta" style="margin-top:7px;">\${timestamps.map(([label, value]) => label + ": " + new Date(value).toLocaleString()).join(" · ")}</div>\` : ""}
+      </div>
+    </div>
+  \`;
+}
+
+function runStatusClass(status) {
+  if (["passed", "succeeded"].includes(status)) return "ui-badge-accent";
+  if (["failed", "blocked", "cancelled", "interrupted"].includes(status)) {
+    return "ui-badge-err";
+  }
+  if (["waiting_approval", "verifying", "editing"].includes(status)) {
+    return "ui-badge-warn";
+  }
+  return "";
+}
+
+function humanRunKey(value) {
+  return String(value ?? "")
+    .replaceAll("_", " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/^./, (letter) => letter.toUpperCase());
+}
+
 async function refreshHealth() {
   try {
     const [h, b, p] = await Promise.all([
@@ -8921,6 +9326,11 @@ evt.addEventListener("kanban-status", (event) => {
   } catch {}
 });
 
+const refreshRunsLive = debounce(() => {
+  if (state.tab === "runs") renderRuns().catch(() => {});
+}, 150);
+evt.addEventListener("run-inspector", refreshRunsLive);
+
 // Auto-changed task (observation-driven completion or in-progress).
 // Surface as a toast so the user sees what we did and can revert.
 evt.addEventListener("task-auto-changed", (e) => {
@@ -9008,7 +9418,7 @@ refreshAmbientBadge();
 
 // Honor ?tab=X in URL on first load — notifications + Mac tray menu deep-link
 // to specific tabs and we need to land on them. Defaults to chat.
-const VALID_TABS = new Set(["chat","tasks","memory","cron","kanban","projects","skills","mcp","integrations","agents","nodes","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","today"]);
+const VALID_TABS = new Set(["chat","tasks","memory","cron","kanban","projects","skills","mcp","integrations","agents","nodes","channels","budget","outcomes","scrutiny","health","activity","suggestions","computer-use","runs","today"]);
 const initialTab = (() => {
   try {
     const t = new URLSearchParams(window.location.search).get("tab");

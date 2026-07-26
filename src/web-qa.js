@@ -103,6 +103,13 @@ export class WebQaController {
       args.routeIds,
       mode
     );
+    const totalResults = loaded.manifest.viewports.length
+      * selectedRoutes.reduce(
+        (total, route) => total + 1 + route.controls.filter(
+          (control) => control.action !== "inspect"
+        ).length,
+        0
+      );
     let run = this.store.create({
       projectId: scope.projectId,
       sessionId: scope.sessionId,
@@ -154,6 +161,7 @@ export class WebQaController {
           });
           results.push(baseline);
           for (const ref of baseline.artifacts) artifactRefs.add(ref);
+          this._emitProgress(run, baseline, results.length, totalResults);
 
           for (const control of route.controls) {
             if (control.action === "inspect") continue;
@@ -170,6 +178,7 @@ export class WebQaController {
             });
             results.push(result);
             for (const ref of result.artifacts) artifactRefs.add(ref);
+            this._emitProgress(run, result, results.length, totalResults);
           }
         }
       }
@@ -681,7 +690,7 @@ export class WebQaController {
   }
 
   _emit(run) {
-    this.runtime?.events?.emit?.("qa-run", {
+    const event = {
       id: run.id,
       revision: run.revision,
       state: run.state,
@@ -689,8 +698,43 @@ export class WebQaController {
       sessionId: run.sessionId,
       sourceRevision: run.sourceRevision,
       summary: run.summary,
-      error: run.error
-    });
+      error: run.error,
+      updatedAt: run.updatedAt
+    };
+    try {
+      this.runtime?.runInspector?.recordQa?.(event);
+    } catch {
+      // Operational visibility is advisory and cannot break a QA run.
+    }
+    this.runtime?.events?.emit?.("qa-run", event);
+  }
+
+  _emitProgress(run, result, completed, total) {
+    const event = {
+      id: run.id,
+      revision: run.revision,
+      state: "running",
+      projectId: run.projectId,
+      sessionId: run.sessionId,
+      sourceRevision: run.sourceRevision,
+      completed,
+      total,
+      result: {
+        id: result.id,
+        kind: result.kind,
+        routeId: result.routeId,
+        controlId: result.controlId ?? null,
+        viewport: result.viewport,
+        status: result.status
+      },
+      updatedAt: new Date().toISOString()
+    };
+    try {
+      this.runtime?.runInspector?.recordQa?.(event);
+    } catch {
+      // Operational visibility is advisory and cannot break a QA run.
+    }
+    this.runtime?.events?.emit?.("qa-run", event);
   }
 }
 

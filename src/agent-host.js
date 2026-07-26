@@ -21,6 +21,7 @@ import {
   projectMemoryScope
 } from "./project-store.js";
 import { profileMemoryScope } from "./memory-system.js";
+import { turnInspectorMetadata } from "./run-inspector.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -802,6 +803,17 @@ export class AgentHost {
       : { ...output, scrutiny: effectiveScrutiny };
     // Tell the live-progress observer (Discord status line) what the
     // scrutiny gate decided before any model/tool work starts.
+    recordRunInspector(this.runtime, {
+      runId: turnId,
+      projectId: project.id,
+      sessionId,
+      phase: "turn_start",
+      status: "running",
+      metadata: {
+        agentId,
+        scrutinyScore: output.scrutiny.score
+      }
+    });
     if (typeof input.onToolEvent === "function") {
       try { input.onToolEvent({ phase: "verdict", action: verdict, score: output.scrutiny.score }); } catch { /* advisory */ }
     }
@@ -967,6 +979,17 @@ export class AgentHost {
     else inputAbortSignal?.addEventListener?.("abort", onInputAbort, { once: true });
     const parsedSpawnDepth = Number(input.spawnDepth);
     const forwardToolEvent = (event) => {
+      const inspected = turnInspectorMetadata(event);
+      recordRunInspector(this.runtime, {
+        runId: turnId,
+        projectId: project.id,
+        sessionId,
+        ...inspected,
+        metadata: {
+          agentId,
+          ...inspected.metadata
+        }
+      });
       if (typeof input.onToolEvent === "function") {
         try { input.onToolEvent(event); } catch { /* advisory */ }
       }
@@ -1047,7 +1070,11 @@ export class AgentHost {
       __turnAbortController: turnAbortController,
       // Live-progress observer: channels (Discord) pass a callback so the
       // user can watch tool activity in real time. Best-effort, advisory.
-      __onToolEvent: lifecycle || typeof input.onToolEvent === "function" ? forwardToolEvent : null
+      __onToolEvent: lifecycle
+        || typeof input.onToolEvent === "function"
+        || this.runtime.runInspector
+        ? forwardToolEvent
+        : null
     };
 
     let modelResult;
@@ -1114,6 +1141,17 @@ export class AgentHost {
       });
     } catch (error) {
       turnAbortController.abort(error);
+      recordRunInspector(this.runtime, {
+        runId: turnId,
+        projectId: project.id,
+        sessionId,
+        phase: "turn_failed",
+        status: "failed",
+        metadata: {
+          agentId,
+          errorCode: error?.code ?? error?.name ?? "provider_error"
+        }
+      });
       throw error;
     } finally {
       toolRegistry?.clearFailureScope?.(modelContext);
@@ -1278,6 +1316,40 @@ export class AgentHost {
         }
       );
     }
+
+    recordRunInspector(this.runtime, {
+      runId: turnId,
+      projectId: project.id,
+      sessionId,
+      phase: "turn_complete",
+      status: "succeeded",
+      metadata: {
+        agentId,
+        provider: modelResult.provider,
+        model: modelResult.model,
+        iteration: modelResult.iterations,
+        maxIterations: modelResult.maxIterations,
+        stopReason: modelResult.stopReason,
+        inputTokens: inspectorUsageValue(
+          modelResult.usage,
+          "inputTokens",
+          "input_tokens",
+          "prompt_tokens"
+        ),
+        outputTokens: inspectorUsageValue(
+          modelResult.usage,
+          "outputTokens",
+          "output_tokens",
+          "completion_tokens"
+        ),
+        cachedTokens: inspectorUsageValue(
+          modelResult.usage,
+          "cachedTokens",
+          "cached_tokens",
+          "cache_read_input_tokens"
+        )
+      }
+    });
 
     return {
       id: turnId,
@@ -2258,6 +2330,22 @@ function projectIdentityFromTranscript(messages, sessionId) {
     projectId: projectIds.values().next().value ?? null,
     legacySession: messages.length > 0 && !tagged
   };
+}
+
+function recordRunInspector(runtime, event) {
+  try {
+    runtime?.runInspector?.recordTurn?.(event);
+  } catch {
+    // Operational visibility is advisory and cannot break an agent turn.
+  }
+}
+
+function inspectorUsageValue(usage, ...keys) {
+  for (const key of keys) {
+    const value = Number(usage?.[key]);
+    if (Number.isSafeInteger(value) && value >= 0) return value;
+  }
+  return undefined;
 }
 
 // Maps a provider class to a short user-facing label. Avoids leaking

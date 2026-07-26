@@ -430,6 +430,47 @@ export class QaArtifactStore {
     return result;
   }
 
+  readBytes(ref, {
+    projectId,
+    runId = null,
+    maxBytes = MAX_ARTIFACT_BYTES
+  } = {}) {
+    const entry = this._authorized(ref, projectId, runId);
+    const limit = boundedInteger(
+      maxBytes,
+      1,
+      MAX_ARTIFACT_BYTES,
+      MAX_ARTIFACT_BYTES
+    );
+    if (entry.bytes > limit) {
+      throw new RangeError("QA artifact exceeds the requested byte bound.");
+    }
+    const blobPath = this._blobPath(entry.sha256);
+    const stat = fs.lstatSync(blobPath);
+    if (
+      !stat.isFile()
+      || stat.isSymbolicLink()
+      || stat.size !== entry.bytes
+      || stat.size > limit
+    ) {
+      throw new Error("QA artifact blob path is invalid.");
+    }
+    const data = fs.readFileSync(blobPath);
+    if (
+      createHash("sha256")
+        .update(entry.mediaType)
+        .update("\0")
+        .update(data)
+        .digest("hex") !== entry.sha256
+    ) {
+      throw new Error("QA artifact failed its integrity check.");
+    }
+    return {
+      ...publicArtifact(entry, projectId, runId),
+      data
+    };
+  }
+
   list({ projectId, runId, limit = 100 } = {}) {
     const project = requiredProjectId(projectId);
     const run = runId == null ? null : requiredRunId(runId);

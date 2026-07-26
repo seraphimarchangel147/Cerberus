@@ -58,6 +58,9 @@ export class CoderRunStore {
     this.appendEvent = options.appendEvent ?? appendJsonLine;
     this.writeSnapshot = options.writeSnapshot ?? writeJsonAtomic;
     this.now = options.now ?? nowIso;
+    this.onChange = typeof options.onChange === "function"
+      ? options.onChange
+      : null;
     this.runs = new Map();
     ensureDir(this.dir);
     this._load();
@@ -161,6 +164,9 @@ export class CoderRunStore {
     } catch {
       // The fsynced JSONL event remains authoritative.
     }
+    try { this.onChange?.(clone(run), op); } catch {
+      // Live inspection is advisory; the durable coder journal is authoritative.
+    }
   }
 
   _load() {
@@ -227,6 +233,12 @@ export class CoderController {
     this.store = options.store ?? new CoderRunStore({
       dataDir: options.dataDir
     });
+    const previousOnChange = this.store.onChange;
+    this.store.onChange = (run, op) => {
+      try { previousOnChange?.(run, op); } finally {
+        this.runtime?.runInspector?.recordCoder?.(run);
+      }
+    };
     this.checkpoints = options.checkpoints
       ?? this.runtime?.checkpoints
       ?? new CheckpointStore({

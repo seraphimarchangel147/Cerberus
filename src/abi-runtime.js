@@ -103,6 +103,7 @@ import {
   WebQaController,
   webQaEnabled
 } from "./web-qa.js";
+import { RunInspector } from "./run-inspector.js";
 import { registerDefaultWorkflows, WorkflowRegistry } from "./workflow-registry.js";
 import { applyPersona } from "./persona.js";
 import { createId, nowIso } from "./utils.js";
@@ -626,6 +627,13 @@ export class AbiRuntime {
       if (this.events) this.outreachMapper.attach();
     }
     this.skillReplay = options.skillReplay ?? new SkillReplay({ runtime: this, dataDir: options.dataDir, ...(options.skillReplayOptions ?? {}) });
+    this.runInspector = options.runInspector === false
+      ? null
+      : options.runInspector ?? new RunInspector({
+          runtime: this,
+          dataDir: secretsDataDir,
+          ...(options.runInspectorOptions ?? {})
+        });
     this.semanticBrowser = resolveSemanticBrowser(this, options, {
       dataDir: secretsDataDir,
       workspaceDir: options.workspaceDir ?? process.cwd()
