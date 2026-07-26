@@ -1158,13 +1158,28 @@ export function chunkText(text, size = 1990) {
     // Closing an open fence consumes part of Discord's limit. Re-select the
     // natural boundary with that overhead included instead of truncating the
     // close marker or emitting an oversized chunk.
+    // Defense in depth: this re-fit loop must shrink `cut` every pass. A
+    // boundary helper that ever returns a non-decreasing cut would spin here
+    // forever and hang the event loop (see preferredChunkCut). Fall back to a
+    // hard slice rather than let a chunking edge case take the daemon down.
+    let guard = 0;
     while (prefix.length + payload.length + suffix.length > size) {
+      if (cut <= 1 || (guard += 1) > size) {
+        cut = Math.max(1, size - prefix.length - suffix.length);
+        payload = rest.slice(0, cut);
+        nextFence = scanFenceState(payload, carriedFence);
+        suffix = nextFence ? `\n${nextFence.marker}` : "";
+        break;
+      }
       limit = Math.max(1, size - prefix.length - suffix.length);
       cut = preferredChunkCut(rest, Math.min(limit, cut - 1));
       payload = rest.slice(0, cut);
       nextFence = scanFenceState(payload, carriedFence);
       suffix = nextFence ? `\n${nextFence.marker}` : "";
     }
+
+    // The outer loop only terminates if `rest` strictly shrinks.
+    if (cut <= 0) cut = Math.min(rest.length, Math.max(1, size));
 
     chunks.push(`${prefix}${payload}${suffix}`);
     rest = rest.slice(cut);
@@ -1175,12 +1190,22 @@ export function chunkText(text, size = 1990) {
 
 function preferredChunkCut(text, limit) {
   if (text.length <= limit) return text.length;
-  const paragraph = text.lastIndexOf("\n\n", limit);
-  if (paragraph >= Math.floor(limit * 0.35)) return paragraph + 2;
-  const line = text.lastIndexOf("\n", limit);
-  if (line >= Math.floor(limit * 0.35)) return line + 1;
-  const whitespace = Math.max(text.lastIndexOf(" ", limit), text.lastIndexOf("\t", limit));
-  if (whitespace >= Math.floor(limit * 0.6)) return whitespace + 1;
+  // lastIndexOf(needle, limit) can MATCH AT `limit` itself, so a boundary
+  // found there yields limit+1 / limit+2 — a cut LARGER than the limit we
+  // were asked to respect. The inner re-fit loop in chunkText() then asks for
+  // min(limit, cut-1), gets the same oversized cut back, and never converges:
+  // a hard infinite loop that pegs the event loop at 100% CPU and wedges the
+  // whole daemon (observed live 2026-07-25 — a reply with a blank line at
+  // exactly char 1990). Search from limit-1 and clamp so the result is always
+  // <= limit and the re-fit loop is guaranteed to make progress.
+  const scan = limit - 1;
+  const clamp = (cut) => Math.min(cut, limit);
+  const paragraph = text.lastIndexOf("\n\n", scan);
+  if (paragraph >= Math.floor(limit * 0.35)) return clamp(paragraph + 2);
+  const line = text.lastIndexOf("\n", scan);
+  if (line >= Math.floor(limit * 0.35)) return clamp(line + 1);
+  const whitespace = Math.max(text.lastIndexOf(" ", scan), text.lastIndexOf("\t", scan));
+  if (whitespace >= Math.floor(limit * 0.6)) return clamp(whitespace + 1);
   return limit;
 }
 

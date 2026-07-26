@@ -107,3 +107,39 @@ test("Discord REST gives up after three consecutive 429 responses", async () => 
   assert.equal(calls, 3);
   assert.equal(sleeps, 2);
 });
+
+
+// ── Regression: boundary-separator infinite loop (2026-07-25) ─────────
+// A reply whose paragraph/line/word break landed at EXACTLY the chunk limit
+// made preferredChunkCut() return a cut > limit (lastIndexOf matches AT the
+// limit, then +1/+2 pushes it over). chunkText()'s re-fit loop asked for
+// min(limit, cut-1), got the same oversized cut back, and spun forever —
+// pegging the event loop at 100% CPU and wedging the whole daemon: the HTTP
+// port stayed open, so systemd Restart=always never fired. Azazel went
+// silent on Discord while systemd still reported the unit healthy.
+test("chunkText terminates when a separator sits exactly at the chunk limit", () => {
+  const size = 1990;
+  for (const sep of ["\n\n", "\n", " ", "\t"]) {
+    for (let off = size - 4; off <= size + 4; off += 1) {
+      const text = "a".repeat(off) + sep + "b".repeat(2500);
+      const started = Date.now();
+      const chunks = chunkText(text, size);
+      assert.ok(
+        Date.now() - started < 2000,
+        `chunkText hung for separator ${JSON.stringify(sep)} at offset ${off}`
+      );
+      for (const chunk of chunks) {
+        assert.ok(
+          chunk.length <= size,
+          `oversized chunk (${chunk.length}) for ${JSON.stringify(sep)} at offset ${off}`
+        );
+      }
+    }
+  }
+});
+
+test("chunkText preserves content when the break lands on the limit", () => {
+  const size = 1990;
+  const text = "a".repeat(size) + "\n\n" + "b".repeat(3000);
+  assert.equal(chunkText(text, size).join(""), text);
+});
