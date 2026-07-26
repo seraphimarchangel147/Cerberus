@@ -1,8 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import pixelmatch from "pixelmatch";
-import { PNG } from "pngjs";
 import {
   createSemanticBrowserService,
   validateQaNavigationUrl
@@ -59,6 +57,46 @@ const MAX_TEXT_ASSERTIONS = 32;
 const MAX_RESULTS = 500;
 const MAX_VISUAL_PIXELS = 20_000_000;
 
+const DEFAULT_IMPORTER = (specifier) => import(specifier);
+
+let visualComparatorPromise = null;
+
+/**
+ * Visual regression relies on the optional `pixelmatch` and `pngjs` packages.
+ * They are loaded lazily so that importing this module — and therefore booting
+ * the runtime — never depends on optional dependencies being installed.
+ */
+export async function loadVisualComparator(importer = DEFAULT_IMPORTER) {
+  if (importer === DEFAULT_IMPORTER) {
+    if (!visualComparatorPromise) {
+      visualComparatorPromise = resolveVisualComparator(importer)
+        .catch((error) => {
+          visualComparatorPromise = null;
+          throw error;
+        });
+    }
+    return visualComparatorPromise;
+  }
+  return resolveVisualComparator(importer);
+}
+
+async function resolveVisualComparator(importer) {
+  let pixelmatchModule;
+  let pngModule;
+  try {
+    pixelmatchModule = await importer("pixelmatch");
+    pngModule = await importer("pngjs");
+  } catch {
+    return null;
+  }
+  const pixelmatch = pixelmatchModule?.default ?? pixelmatchModule;
+  const PNG = pngModule?.PNG ?? pngModule?.default?.PNG;
+  if (typeof pixelmatch !== "function" || typeof PNG !== "function") {
+    return null;
+  }
+  return { pixelmatch, PNG };
+}
+
 export function webQaEnabled(env = process.env) {
   const value = String(env?.OPENAGI_WEB_QA ?? "").trim().toLowerCase();
   return ["1", "true", "on", "yes"].includes(value);
@@ -78,6 +116,7 @@ export class WebQaController {
       headless: options.headless
     });
     this.ownsBrowser = options.browser == null;
+    this.importer = options.importer ?? DEFAULT_IMPORTER;
     this.store = options.store ?? new QaRunStore({
       dataDir: options.dataDir
     });
@@ -750,48 +789,69 @@ export class WebQaController {
           }
         } else {
           visual.baselineRef = baseline.screenshotRef;
-          const expected = this.artifacts.read(baseline.screenshotRef, {
-            projectId: run.projectId,
-            includeData: true
-          });
-          const comparison = comparePngScreenshots(
-            Buffer.from(expected.data, expected.encoding),
-            capturedBytes,
-            route.visual.maxDiffRatio
-          );
-          visual = {
-            ...visual,
-            ...comparison,
-            status: comparison.passed ? "matched" : "changed"
-          };
-          if (comparison.diff) {
-            const diffArtifact = this.artifacts.put(comparison.diff, {
+          const comparator = await loadVisualComparator(this.importer);
+          if (!comparator) {
+            const unavailable = failure(
+              "visual_comparator_unavailable",
+              "Visual regression needs the optional 'pixelmatch' and 'pngjs' packages, which are unavailable."
+            );
+            if (route.visual.mode === "strict") {
+              failures.push(unavailable);
+              this.artifacts.retain(screenshotArtifact.ref, {
+                projectId: run.projectId,
+                runId: run.id,
+                kind: "missing_visual_comparator",
+                retention: "failure"
+              });
+            } else {
+              warnings.push(unavailable);
+            }
+            visual.status = "unavailable";
+          } else {
+            const expected = this.artifacts.read(baseline.screenshotRef, {
               projectId: run.projectId,
-              runId: run.id,
-              kind: "visual_diff",
-              mediaType: "image/png",
-              retention: "failure"
+              includeData: true
             });
-            artifactRefs.push(diffArtifact.ref);
-            visual.diffRef = diffArtifact.ref;
-          }
-          delete visual.diff;
-          delete visual.passed;
-          if (!comparison.passed) {
-            failures.push(failure(
-              comparison.sizeChanged
-                ? "visual_size_changed"
-                : "visual_regression",
-              comparison.sizeChanged
-                ? `Visual dimensions changed for '${pageId}'.`
-                : `Visual difference ${formatRatio(comparison.diffRatio)} exceeds ${formatRatio(route.visual.maxDiffRatio)} for '${pageId}'.`
-            ));
-            this.artifacts.retain(screenshotArtifact.ref, {
-              projectId: run.projectId,
-              runId: run.id,
-              kind: "failed_visual_actual",
-              retention: "failure"
-            });
+            const comparison = comparePngScreenshots(
+              comparator,
+              Buffer.from(expected.data, expected.encoding),
+              capturedBytes,
+              route.visual.maxDiffRatio
+            );
+            visual = {
+              ...visual,
+              ...comparison,
+              status: comparison.passed ? "matched" : "changed"
+            };
+            if (comparison.diff) {
+              const diffArtifact = this.artifacts.put(comparison.diff, {
+                projectId: run.projectId,
+                runId: run.id,
+                kind: "visual_diff",
+                mediaType: "image/png",
+                retention: "failure"
+              });
+              artifactRefs.push(diffArtifact.ref);
+              visual.diffRef = diffArtifact.ref;
+            }
+            delete visual.diff;
+            delete visual.passed;
+            if (!comparison.passed) {
+              failures.push(failure(
+                comparison.sizeChanged
+                  ? "visual_size_changed"
+                  : "visual_regression",
+                comparison.sizeChanged
+                  ? `Visual dimensions changed for '${pageId}'.`
+                  : `Visual difference ${formatRatio(comparison.diffRatio)} exceeds ${formatRatio(route.visual.maxDiffRatio)} for '${pageId}'.`
+              ));
+              this.artifacts.retain(screenshotArtifact.ref, {
+                projectId: run.projectId,
+                runId: run.id,
+                kind: "failed_visual_actual",
+                retention: "failure"
+              });
+            }
           }
         }
       }
@@ -1741,7 +1801,13 @@ function sanitizeKeyboardItems(value) {
   }));
 }
 
-function comparePngScreenshots(expectedBytes, actualBytes, maxDiffRatio) {
+function comparePngScreenshots(
+  comparator,
+  expectedBytes,
+  actualBytes,
+  maxDiffRatio
+) {
+  const { pixelmatch, PNG } = comparator;
   const expected = PNG.sync.read(expectedBytes);
   const actual = PNG.sync.read(actualBytes);
   const expectedPixels = expected.width * expected.height;

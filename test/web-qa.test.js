@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { PNG } from "pngjs";
+import nodeTest from "node:test";
+const pngModule = await import("pngjs").catch(() => null);
+const PNG = pngModule?.PNG ?? pngModule?.default?.PNG ?? null;
+// pngjs is an OPTIONAL dependency: this suite fabricates real PNG bytes for the
+// fake browser, so it can only run when the optional package is installed.
+const test = PNG == null ? nodeTest.skip : nodeTest;
 import { AbiRuntime } from "../src/abi-runtime.js";
 import { buildDefaultInstructions } from "../src/model-provider.js";
 import {

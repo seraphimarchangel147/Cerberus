@@ -3081,7 +3081,11 @@ function safeLstat(file) {
   try {
     return fs.lstatSync(file);
   } catch (error) {
-    if (error?.code === "ENOENT") return null;
+    // ENOENT: the path is absent. ENOTDIR: a parent component is currently a
+    // file, so the path cannot exist either — this happens legitimately during
+    // travel across a file <-> directory type transition. Both mean "nothing
+    // is there", so callers should see null rather than a thrown error.
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
     throw error;
   }
 }

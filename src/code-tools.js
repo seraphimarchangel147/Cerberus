@@ -953,11 +953,21 @@ export function registerCodeTools(registry, runtime, options = {}) {
           ]
         : ["--test"];
       if (args.file) {
-        testArgs.push(resolveWorkspaceOperand(
+        const absoluteFile = resolveWorkspaceOperand(
           args.file,
           scope.workspaceDir,
           scope.safetyOptions
-        ));
+        );
+        // Node's permission model cannot resolve an ABSOLUTE test-file spec:
+        // `node --permission --allow-fs-read=<dir> --test <dir>/x.test.js`
+        // reports "Could not find '<dir>/x.test.js'" even when the directory
+        // is readable. The same run succeeds with a workspace-relative spec,
+        // and the child already runs with cwd = scope.workspaceDir. Resolve
+        // and validate absolutely (so traversal is still rejected), then hand
+        // the runner the relative form.
+        testArgs.push(scope.projectScoped
+          ? path.relative(scope.workspaceDir, absoluteFile) || "."
+          : absoluteFile);
       }
       const runTest = options.runTest ?? run;
       const execution = buildTestExecution(runtime, {

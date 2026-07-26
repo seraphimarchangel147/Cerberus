@@ -34,7 +34,8 @@
   "bin": {
     "openagi": "bin/openagi.js"
   },
-  "dependencies": {
+  "dependencies": {},
+  "optionalDependencies": {
     "axe-core": "^4.12.1",
     "pixelmatch": "^7.2.0",
     "playwright": "^1.62.0",

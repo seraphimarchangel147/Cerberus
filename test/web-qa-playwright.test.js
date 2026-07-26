@@ -6,6 +6,40 @@ import path from "node:path";
 import test from "node:test";
 import { WebQaController } from "../src/web-qa.js";
 
+const BROWSER_UNAVAILABLE_RE
+  = /browser|executable|playwright|pixelmatch|pngjs|unavailable/i;
+
+/**
+ * A missing Playwright browser (or a missing optional QA package) surfaces two
+ * different ways depending on where it is caught:
+ *   - thrown out of the run  -> run.error.code === "qa_execution_failed"
+ *   - caught per route/control -> rolled into "qa_evidence_failed" with the
+ *     real reason nested in run.results[].failures[].
+ * Inspect both so the skip guard can actually fire on a machine that has not
+ * run `npx playwright install`.
+ */
+function playwrightUnavailableReason(run) {
+  const code = run?.error?.code;
+  if (code === "qa_execution_failed") {
+    const message = String(run.error.message ?? "");
+    return BROWSER_UNAVAILABLE_RE.test(message) ? message : null;
+  }
+  if (code !== "qa_evidence_failed") return null;
+  for (const result of run?.results ?? []) {
+    for (const entry of result?.failures ?? []) {
+      const message = String(entry?.message ?? "");
+      if (
+        entry?.code === "page_execution_failed"
+        || entry?.code === "browser_adapter_unavailable"
+        || entry?.code === "visual_comparator_unavailable"
+      ) {
+        if (BROWSER_UNAVAILABLE_RE.test(message)) return message;
+      }
+    }
+  }
+  return null;
+}
+
 test("real Playwright QA clicks controls, audits accessibility, and captures screenshots", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-web-qa-real-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -109,11 +143,9 @@ test("real Playwright QA clicks controls, audits accessibility, and captures scr
     __projectWorkspaceDir: workspaceRoot,
     approved: true
   });
-  if (
-    result.run.error?.code === "qa_execution_failed"
-    && /browser|executable|playwright/i.test(result.run.error.message)
-  ) {
-    t.skip(`Playwright browser unavailable: ${result.run.error.message}`);
+  const unavailable = playwrightUnavailableReason(result.run);
+  if (unavailable) {
+    t.skip(`Playwright browser unavailable: ${unavailable}`);
     return;
   }
 
