@@ -205,6 +205,13 @@ EXECUTION RECEIPTS COMPLETE
 - Added a registry-level defense: if the entire hook callback fails unexpectedly, mutating tools are blocked with `security_hook_unavailable`; declared read-only tools may continue.
 - Added regressions for thrown, timed-out, invalid, optional-extension, and whole-registry failure paths.
 SECURITY HOOK FAILURE MODES COMPLETE
+## 2026-07-22 — Discord session-key migration: recover orphaned transcripts (Seraphim)
+
+- Fixed Bug #1: when the guild session key gained a `:user` segment (`discord:<guild>:<channel>` → `discord:<guild>:<channel>:<user>`), the pre-existing transcript was orphaned. Measured on the live store: `discord_..._1496557186900431100.json` held **63 messages** (stranded on the old key) while the new key started a fresh 4-message history — 63 messages of context went dark with no alias, fallback, or migration anywhere.
+- Added pure exported helper `legacyDiscordKey(sessionId)` in `src/agent-store.js`: anchored regex maps a 4-segment guild key to its 3-segment ancestor, returns `null` for DM keys, already-3-segment keys, and any non-discord key. Unit-testable, no side effects.
+- Added `migrateLegacyKey(newId, legacyId)` on `FileBackedAgentStore`: one-time, idempotent, never-clobbering recovery — if the new key already has messages it's a no-op; else it copies the legacy transcript (preserving `createdAt`, tagging `metadata.migratedFrom`) and leaves the legacy file in place for recovery. Safe to run on every turn.
+- Wired into `src/agent-host.js` right after the sessionId resolves and before the first `appendMessage`: best-effort, `typeof`-guarded (in-memory store unaffected), wrapped in try/catch so a migration failure degrades to a fresh session and never breaks the turn. `sessionKeyFor` in discord-channel.js is deliberately unchanged — the 4-segment key is the intended scheme; we recover the old lineage into it, not revert it.
+- Regression: `test/session-key-migration.test.js` — legacyDiscordKey derivation cases, migrate copy/idempotency/never-clobber/no-crash, and an end-to-end append proving the handleMessage path sees recovered history (N+1). Suite green 692/692 (baseline 682 + 10).
 
 ## 2026-07-22 — Reversible cron job control from the agent loop (Seraphim)
 
