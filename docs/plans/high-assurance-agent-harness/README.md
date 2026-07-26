@@ -262,6 +262,26 @@ Phase 2 acceptance:
 - Equivalent verified coverage uses fewer screenshot captures without
   weakening policy, model quality, or deterministic checks.
 
+## Post-phase hardening - Explainable tool decisions
+
+Status: complete.
+
+The canonical receipt now explains the governed execution path without
+persisting content. Its bounded ASCII decision path covers contracts, scope,
+capabilities, scrutiny, hooks, approval, checkpoints, dispatch, semantic
+verification, and output contracts. It identifies the decisive stop and the
+slowest gate, survives provider result compaction, and appears in Run
+Inspector through structural allowlists only.
+
+Pre-dispatch validation, scope, and preflight failures remain isolated from
+lifecycle observers so secret-bearing input cannot cross that surface; their
+returned receipts still explain the rejection. Explicit approval resumes the
+same receipt and stays complete in both approval-policy lanes. Forwarding
+preserves one real-target receipt.
+
+The clean-room comparison and rejected alternatives are documented in
+`decision-provenance-research.md`.
+
 ## Definition of "god tier"
 
 The term is earned only if the final system demonstrates all of the following:

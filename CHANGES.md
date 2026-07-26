@@ -2,6 +2,19 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Explainable governed tool decisions (Codex)
+
+- Added a bounded, immutable `receipt.decision` to every finalized tool call, covering input snapshot and contracts, project/profile/capability scope, scrutiny, hooks, approval, checkpoints, authority refresh, resource leasing, dispatch, handler outcome, semantic verification, output contracts, and final outcome.
+- Kept the representation token-efficient as one fixed-ASCII path with an explicit gate count and truncation bit, the decisive `blockedAt` gate, and only the slowest gate timing alongside the receipt's existing total duration.
+- Preserved one receipt across tool-search forwarding and approval resume, while keeping pre-tool hooks and every authority boundary fresh.
+- Kept pre-dispatch validation, scope, and preflight failures isolated from lifecycle observers while making their returned receipts explain the rejection.
+- Extended Run Inspector with allowlisted decision path, decisive gate, gate count, truncation, and slowest-gate metadata; invalid or content-bearing fields are dropped rather than persisted.
+- Preserved bounded decision provenance when oversized tool results are compacted for the next model hop, and taught the static system prompt to treat the receipt path as authoritative.
+- Added policy-lane-independent regressions for success, handler failure, hook veto, invalid input, invalid output, forwarding, explicit manual approval, preflight observer isolation, immutability, redaction, durable Run Inspector projection, and compacted model output.
+- Documented a clean-room comparison of Claude Code lifecycle hooks and isolated contexts, Hermes toolsets and progressive disclosure, Cursor diff review and remote-agent security, Agent Zero watchable surfaces, and Cerberus's internal enforcement gap.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1751/1752 tests with zero failures and one intentional platform skip; added lines are ASCII-clean, `git diff --check` passes, and `npm audit --audit-level=high` reports zero vulnerabilities.
+EXPLAINABLE TOOL DECISIONS COMPLETE
+
 ## 2026-07-25 - Quality-preserving QA performance proof (Codex)
 
 - Added exact per-result measurements for wall-clock duration, semantic actions, page loads, deterministic replay actions, blind retries, screenshot captures, decoded screenshot bytes, and screenshot capture duration.

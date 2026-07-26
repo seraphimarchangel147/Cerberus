@@ -18,6 +18,7 @@ import {
 import { defaultToolOutputStore } from "./tool-output-store.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 import { executeToolBatch } from "./tool-batch-executor.js";
+import { normalizeExecutionDecision } from "./execution-decision.js";
 import {
   CONTEXT_GATEWAY_RATIO,
   contextCompressionTrigger,
@@ -2219,14 +2220,20 @@ function compactToolOutcome(outcome) {
 
 function compactExecutionReceipt(receipt) {
   if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return null;
+  const decision = compactExecutionDecision(receipt.decision);
   return {
     id: String(receipt.id ?? "receipt_unknown").slice(0, 200),
     tool: String(receipt.tool ?? "unknown_tool").slice(0, 128),
     status: String(receipt.status ?? "failed").slice(0, 16),
     code: String(receipt.code ?? "tool_error").slice(0, 64),
     dispatched: receipt.dispatched === true,
-    changed: receipt.changed === true ? true : receipt.changed === false ? false : null
+    changed: receipt.changed === true ? true : receipt.changed === false ? false : null,
+    ...(decision ? { decision } : {})
   };
+}
+
+function compactExecutionDecision(decision) {
+  return normalizeExecutionDecision(decision);
 }
 
 function smallestValidTruncation(base, target) {
@@ -5599,7 +5606,7 @@ Guidelines:
 - For multi-file coding work, use coder_start only after inspection. Give every check a stable ASCII id and map each immutable acceptance criterion to its proving checkIds, then call coder_apply. Use the visual oracle for an approved pixel baseline, keyboard for reachability/focus proof, and screenshot only for capture evidence. Treat only state=passed with acceptance.status=passed as complete; deterministic failures cannot be overruled, and a blocked run requires coder_status and explicit recovery.
 - For user-facing web changes, create or update a version-1 qa-manifest.json, classify every interactive control, give each executed action an observable expectation, and run qa_run. For revision comparisons, declare immutable intent criteria plus an explicit fixtureRevision in that manifest and use referenceRunId or qa_compare; a visual change is never self-approved by the model. Missing or changed visual baselines require review, and only a human may approve a new baseline. Never treat a screenshot alone as proof when deterministic QA evidence failed.
 - For interactive computer use, observe before every action and pass back the exact observation revision and generation. Prefer semantic refs. Use visual coordinates only when the target has no usable semantic ref, after a fresh viewport screenshot, and include a concrete fallback reason. Treat the automatic post-action observation as execution evidence, not as proof of the user's broader intent.
-- Treat each tool's receipt and semantic outcome as authoritative: dispatched=false means its handler did not run, and changed=null after dispatch requires inspection before retrying.
+- Treat each tool's receipt and semantic outcome as authoritative: dispatched=false means its handler did not run, changed=null after dispatch requires inspection before retrying, and receipt.decision.path lists the content-free gate path plus the decisive blockedAt gate when execution stopped.
 
 The latest user message may begin with a [context] block assembled by the runtime (scrutiny decision, memory hits). Treat it as trusted background — the user did not type it.`;
 }

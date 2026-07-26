@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveDataDir } from "./data-dir.js";
+import { normalizeExecutionDecision } from "./execution-decision.js";
 import {
   appendJsonLine,
   ensureDir,
@@ -36,6 +37,9 @@ const STRING_METADATA = new Map([
   ["code", 80],
   ["comparisonId", 64],
   ["controlId", 64],
+  ["blockedGate", 40],
+  ["decisionPath", 3200],
+  ["decisionSlowestGate", 40],
   ["designStatus", 32],
   ["errorCode", 80],
   ["evidenceKind", 32],
@@ -65,6 +69,8 @@ const INTEGER_METADATA = new Set([
   "criteriaReviewRequired",
   "criteriaFailed",
   "criteriaPassed",
+  "decisionGateCount",
+  "decisionSlowestMs",
   "durationMs",
   "editCount",
   "evidenceNudges",
@@ -100,6 +106,7 @@ const INTEGER_METADATA = new Set([
 const NUMBER_METADATA = new Set(["scrutinyScore"]);
 const BOOLEAN_METADATA = new Set([
   "changed",
+  "decisionTraceTruncated",
   "dispatched",
   "explorationTruncated",
   "ok",
@@ -670,6 +677,7 @@ export function turnInspectorMetadata(event) {
       event?.name,
       outcome
     );
+    const decision = executionDecisionInspectorMetadata(receipt?.decision);
     return {
       phase: "tool_end",
       status: "running",
@@ -683,6 +691,7 @@ export function turnInspectorMetadata(event) {
         changed: receipt?.changed ?? outcome?.changed,
         durationMs: receipt?.durationMs,
         artifactRefs: outcome?.artifacts,
+        ...decision,
         ...computer
       }
     };
@@ -731,6 +740,19 @@ export function turnInspectorMetadata(event) {
     phase: safePhase(phase || "progress"),
     status: "running",
     metadata: {}
+  };
+}
+
+function executionDecisionInspectorMetadata(decision) {
+  const safe = normalizeExecutionDecision(decision);
+  if (!safe) return {};
+  return {
+    decisionPath: safe.path,
+    decisionGateCount: safe.gateCount,
+    blockedGate: safe.blockedAt,
+    decisionSlowestGate: safe.slowestGate,
+    decisionSlowestMs: safe.slowestMs,
+    decisionTraceTruncated: safe.truncated
   };
 }
 

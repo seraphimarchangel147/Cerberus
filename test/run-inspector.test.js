@@ -147,7 +147,17 @@ test("Run Inspector journal is durable, content-free, and project-scoped", (t) =
       changed: true,
       dispatched: true,
       durationMs: 12,
-      raw: canary
+      raw: canary,
+      decision: {
+        version: 1,
+        path: `input_contract:passed>dispatch:dispatched>${canary}:failed`,
+        gateCount: 3,
+        blockedAt: null,
+        slowestGate: "dispatch",
+        slowestMs: 2,
+        truncated: false,
+        raw: canary
+      }
     },
     outcome: {
       content: canary,
@@ -192,6 +202,10 @@ test("Run Inspector journal is durable, content-free, and project-scoped", (t) =
   assert.equal(persisted.includes('"arguments"'), false);
   assert.equal(persisted.includes('"prompt"'), false);
   assert.equal(persisted.includes(ARTIFACT_REF), true);
+  assert.equal(
+    persisted.includes("input_contract:passed>dispatch:dispatched"),
+    true
+  );
 
   const recovered = new RunInspectorStore({ dir });
   const alpha = recovered.get("turn", "turn_shared", {
@@ -202,6 +216,14 @@ test("Run Inspector journal is durable, content-free, and project-scoped", (t) =
   });
   assert.equal(alpha.eventCount, 2);
   assert.deepEqual(alpha.events.map((event) => event.sequence), [1, 2]);
+  assert.equal(
+    alpha.events[1].metadata.decisionPath,
+    "input_contract:passed>dispatch:dispatched"
+  );
+  assert.equal(alpha.events[1].metadata.decisionGateCount, 2);
+  assert.equal(alpha.events[1].metadata.decisionSlowestGate, "dispatch");
+  assert.equal(alpha.events[1].metadata.decisionSlowestMs, 2);
+  assert.equal(alpha.events[1].metadata.decisionTraceTruncated, true);
   assert.equal(beta.eventCount, 1);
   assert.equal(
     recovered.get("turn", "turn_shared", { projectId: "missing" }),
@@ -225,6 +247,46 @@ test("Run Inspector observers cannot break its authoritative journal", (t) => {
     status: "running"
   }));
   assert.equal(store.list({ projectId: "alpha" }).length, 1);
+});
+
+test("Run Inspector exposes only structural tool decision provenance", () => {
+  const canary = "private_decision_rationale";
+  const inspected = turnInspectorMetadata({
+    phase: "end",
+    name: "code_edit",
+    ok: false,
+    receipt: {
+      id: "receipt_decision",
+      code: "hook_blocked",
+      dispatched: false,
+      changed: false,
+      durationMs: 9,
+      decision: {
+        version: 1,
+        path: `input_contract:passed>pre_hook:blocked>${canary}:failed`,
+        gateCount: 3,
+        blockedAt: "pre_hook",
+        slowestGate: "pre_hook",
+        slowestMs: 8,
+        truncated: false,
+        rationale: canary
+      }
+    }
+  });
+
+  assert.equal(
+    inspected.metadata.decisionPath,
+    "input_contract:passed>pre_hook:blocked"
+  );
+  assert.equal(inspected.metadata.decisionGateCount, 2);
+  assert.equal(inspected.metadata.blockedGate, "pre_hook");
+  assert.equal(inspected.metadata.decisionSlowestGate, "pre_hook");
+  assert.equal(inspected.metadata.decisionSlowestMs, 8);
+  assert.equal(inspected.metadata.decisionTraceTruncated, true);
+  assert.equal(
+    JSON.stringify(inspected).includes(canary),
+    false
+  );
 });
 
 test("Run Inspector exposes content-free completion-evidence progress", () => {
