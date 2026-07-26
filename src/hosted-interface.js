@@ -11324,6 +11324,14 @@ switchTab(initialTab);
       pxRect(ctx, cx+6, cy-hh-ch+3, 1, 2, pal.goldHi);
       pxDiamond(ctx, cx, cy-hh+3, 3, 4, pal.gem);
       pxRect(ctx, cx, cy-hh+2, 1, 2, pal.gemCore);
+      /* tall curved golden horns sweeping up and outward (regal headdress) */
+      var hornH = Math.round(10*s);
+      pxLine(ctx, cx-hw+1, cy-hh, cx-hw-5, cy-hh-hornH*0.55, 3, pal.gold);
+      pxLine(ctx, cx-hw-5, cy-hh-hornH*0.55, cx-hw-10, cy-hh-hornH, 2, pal.gold);
+      pxRect(ctx, cx-hw-10, cy-hh-hornH, 1, 2, pal.goldHi);
+      pxLine(ctx, cx+hw-1, cy-hh, cx+hw+5, cy-hh-hornH*0.55, 3, pal.gold);
+      pxLine(ctx, cx+hw+5, cy-hh-hornH*0.55, cx+hw+10, cy-hh-hornH, 2, pal.gold);
+      pxRect(ctx, cx+hw+10, cy-hh-hornH, 1, 2, pal.goldHi);
     } else if (crown === 2) {  /* OMEGA: upright gold diamond + inverted-V notch */
       var oh = Math.round(5*s);
       pxDiamond(ctx, cx, cy-hh-oh+3, 3, oh, pal.gold);
@@ -11632,9 +11640,9 @@ switchTab(initialTab);
     /* roaring flame wall behind — 5-band, taller */
     var hf=[{x:14,h:24,l:-2},{x:24,h:30,l:-1},{x:33,h:35,l:0},{x:42,h:37,l:0},{x:48,h:37,l:0},{x:54,h:37,l:0},{x:63,h:35,l:0},{x:72,h:30,l:1},{x:82,h:24,l:2}];
     for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue5(ctx,tg.x,44+bob*0.4,Math.max(8,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*3)),8,Math.sin(flick*0.18+fi*1.7)*1.6+tg.l,fi,pal);}
-    /* molten ground fissures */
-    pxRect(ctx, 8, H-4, W-16, 3, pal.furDeep);
-    for (var gx2=12; gx2<W-12; gx2+=9) { pxRect(ctx, gx2, H-3, 4, 1, pal.lava3); pxRect(ctx, gx2+1, H-3, 2, 1, pal.lava4); }
+    /* molten ground fissures — tapered at the edges so no hard canvas rectangle */
+    pxRect(ctx, 18, H-4, W-36, 3, pal.furDeep);
+    for (var gx2=22; gx2<W-22; gx2+=9) { pxRect(ctx, gx2, H-3, 4, 1, pal.lava3); pxRect(ctx, gx2+1, H-3, 2, 1, pal.lava4); }
     pxRect(ctx, W/2-1, H-4, 2, 3, pal.lava4);
     /* torso */
     pxEllipse(ctx,48,54+bob*0.3,24,12,pal.furDark); pxEllipse(ctx,48,49+bob*0.3,16,13,pal.furMid);
@@ -11645,8 +11653,8 @@ switchTab(initialTab);
     var wag=Math.sin((P.tailWag||0))*4;
     ultraTailSpade(ctx, 28, 52, wag, flick, flameI, pal);
     ultraTailBarb(ctx, 68, 52, wag, flick, flameI, pal);
-    /* starburst chest gem */
-    ultraChestGem(ctx, 48, 48+bob*0.3, flick, pal, P.runeFlare);
+    /* golden V-chevron breastplate (reference: ornate gold armor). Arms are
+       wide + thick so they extend beyond the gem's frame and read as a V plate */
     /* front legs + spiked bracers + 4 gold talons */
     if (P.wave) {
       pxLine(ctx,40,55,39,69,6,pal.furMid); pxRect(ctx,34,68,8,3,pal.furMid); ultraBracer(ctx,39,62,pal);
@@ -11669,6 +11677,16 @@ switchTab(initialTab);
     drawHeadRegal(ctx,24+hl,23+bob*0.8+droop-headLift,{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:glx,gazeY:hgy},pal,0);
     drawHeadRegal(ctx,48+hc,17+bob+droop*0.5-headLift,{dir:0,size:1.3,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal,1);
     drawHeadRegal(ctx,72+hr,23+bob*0.8+droop-headLift,{dir:1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:grx,gazeY:hgy},pal,0);
+    /* golden V-chevron breastplate + chest gem — drawn after the necks/heads so
+       the plate sits in front (anatomically correct) and is never occluded.
+       Arms start wide (outside the gem frame) so the V reads clearly. */
+    pxLine(ctx, 24, 38+bob*0.3, 48, 66+bob*0.3, 4, pal.gold);
+    pxLine(ctx, 72, 38+bob*0.3, 48, 66+bob*0.3, 4, pal.gold);
+    pxLine(ctx, 25, 38+bob*0.3, 48, 65+bob*0.3, 1, pal.goldHi);
+    pxLine(ctx, 71, 38+bob*0.3, 48, 65+bob*0.3, 1, pal.goldHi);
+    pxTri(ctx, 48, 66+bob*0.3, 44, 72+bob*0.3, 52, 72+bob*0.3, pal.gold);   /* pendant tip */
+    pxRect(ctx, 48, 67+bob*0.3, 1, 2, pal.goldHi);
+    ultraChestGem(ctx, 48, 48+bob*0.3, flick, pal, P.runeFlare);
     if (P.runeFlare) for (var oi=0;oi<6;oi++){var ang=flick*0.15+oi*(Math.PI*2/6);ctx.fillStyle=oi%2?pal.flameYel:pal.gem;ctx.globalAlpha=0.9;ctx.fillRect(Math.round(48+Math.cos(ang)*32),Math.round(24+Math.sin(ang)*12),2,2);ctx.globalAlpha=1;}
     if (P.fireBreath) drawFireBreath(ctx, 48, 26, 66, 11, P.fireBreath, flick, pal);
   }
@@ -11680,8 +11698,8 @@ switchTab(initialTab);
     for (x=18;x<=76;x+=5){var hgt=(21+Math.round(5*Math.sin(x*0.26)))*flameI;flameTongue5(ctx,x,42+bob*0.4,Math.max(7,hgt+Math.round(Math.sin(flick*0.28+x)*3)),8,Math.sin(flick*0.18+x*0.5)*1.6+lean*0.6,x,pal);}
     var hf=[{x:13,h:24,l:-2},{x:20,h:30,l:-1},{x:28,h:35,l:0},{x:36,h:36,l:0},{x:43,h:33,l:1},{x:50,h:27,l:1}];
     for (var fi=0;fi<hf.length;fi++){var tg=hf[fi];flameTongue5(ctx,tg.x,41+bob*0.4,Math.max(8,tg.h*flameI+Math.round(Math.sin(flick*0.28+fi*2.3)*3)),8,Math.sin(flick*0.18+fi*1.7)*1.6+tg.l+lean*0.6,fi,pal);}
-    pxRect(ctx, 10, H-4, W-20, 3, pal.furDeep);
-    for (var gx2=14; gx2<W-14; gx2+=10) pxRect(ctx, gx2, H-3, 4, 1, pal.lava3);
+    pxRect(ctx, 20, H-4, W-40, 3, pal.furDeep);
+    for (var gx2=24; gx2<W-24; gx2+=10) pxRect(ctx, gx2, H-3, 4, 1, pal.lava3);
     var legAmp=walk?7:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
     pxLine(ctx,22+legSwing(0),52,21+legSwing(0),66,6,pal.furDark); pxRect(ctx,16+legSwing(0),65,8,3,pal.furDark); ultraBracer(ctx,21+legSwing(0),60,pal);
     for (var c1=0;c1<4;c1++) pxRect(ctx,16+legSwing(0)+c1*2,68,1,2,pal.claw);
@@ -11760,9 +11778,9 @@ switchTab(initialTab);
     var sad=P.sad||0, droop=sad*3, howl=P.howl||0;
     var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*7;
     omegaAura(ctx, W, H, flick, pal);
-    /* scorched ground band */
-    pxRect(ctx, 6, H-5, W-12, 4, "#3a1410");
-    for (var sx=10; sx<W-10; sx+=8) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
+    /* scorched ground band — tapered at the edges so no hard canvas rectangle */
+    pxRect(ctx, 20, H-5, W-40, 4, "#3a1410");
+    for (var sx=24; sx<W-24; sx+=8) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
     /* torso — polished, cel-banded, NO cracks */
     pxEllipse(ctx,56,64+bob*0.3,28,14,pal.furDark); pxEllipse(ctx,56,58+bob*0.3,19,15,pal.furMid);
     pxEllipse(ctx,56,50+bob*0.3,12,6,pal.furLight); pxEllipse(ctx,56,47+bob*0.3,7,3,pal.furHi);
@@ -11792,6 +11810,11 @@ switchTab(initialTab);
     pxLine(ctx,28+hl,35+bob*0.8+droop-headLift,42,54+bob*0.3,6,pal.furDark);
     pxLine(ctx,56+hc,27+bob+droop*0.5-headLift,56,54+bob*0.3,8,pal.furDark);
     pxLine(ctx,84+hr,35+bob*0.8+droop-headLift,70,54+bob*0.3,6,pal.furDark);
+    /* gold diamond studs on the outer shoulders (drawn after necks so visible) */
+    pxDiamond(ctx, 33, 57+bob*0.3, 4, 4, pal.gold);
+    pxDiamond(ctx, 79, 57+bob*0.3, 4, 4, pal.gold);
+    pxDiamond(ctx, 33, 57+bob*0.3, 2, 2, pal.goldHi);
+    pxDiamond(ctx, 79, 57+bob*0.3, 2, 2, pal.goldHi);
     var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
     var glx=P.gazeLOverride!=null?P.gazeLOverride:hgx, grx=P.gazeROverride!=null?P.gazeROverride:hgx;
     drawHeadRegal(ctx,28+hl,27+bob*0.8+droop-headLift,{dir:-1,size:1.05,roar:P.roarSide||false,blink:P.blink,gazeX:glx,gazeY:hgy},pal,2);
@@ -11805,8 +11828,8 @@ switchTab(initialTab);
     var pal=PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
     var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
     omegaAura(ctx, W, H, flick, pal);
-    pxRect(ctx, 8, H-5, W-16, 4, "#3a1410");
-    for (var sx=12; sx<W-12; sx+=9) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
+    pxRect(ctx, 22, H-5, W-44, 4, "#3a1410");
+    for (var sx=26; sx<W-26; sx+=9) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
     var legAmp=walk?8:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
     pxLine(ctx,26+legSwing(0),60,25+legSwing(0),76,7,pal.furDark); pxRect(ctx,19+legSwing(0),75,9,3,pal.furDark);
     for (var c1=0;c1<4;c1++) pxRect(ctx,19+legSwing(0)+c1*2,78,1,2,pal.claw);
@@ -11869,15 +11892,14 @@ switchTab(initialTab);
     }
     img.data.set(out); ctx.putImageData(img,0,0);
   }
-  /* OMEGA-only CRT scanline + vignette overlay (applied to the display ctx) */
+  /* OMEGA-only CRT scanline overlay. source-atop compositing means the
+     scanlines only texture the creature's own pixels — they never paint the
+     transparent background, so no rectangular canvas edge / box is visible. */
   function applyScanlines(ctx, W, H) {
     ctx.save();
-    ctx.globalAlpha = 0.07; ctx.fillStyle = "#000000";
+    ctx.globalCompositeOperation = "source-atop";
+    ctx.globalAlpha = 0.09; ctx.fillStyle = "#000000";
     for (var y=0; y<H; y+=3) ctx.fillRect(0, y, W, 1);
-    ctx.globalAlpha = 1;
-    var g = ctx.createRadialGradient(W/2, H/2, H*0.35, W/2, H/2, H*0.75);
-    g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.4)");
-    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
     ctx.restore();
   }
 
