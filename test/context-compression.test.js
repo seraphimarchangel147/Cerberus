@@ -109,6 +109,51 @@ test("truncated tool output retains canonical dispatch identity", (t) => {
   assert.ok(capped.output.length <= 240);
 });
 
+test("truncated tool output retains bounded execution decision provenance", (t) => {
+  const store = makeStore(t);
+  const canary = "private_decision_rationale";
+  const capped = capToolOutput({
+    body: "x".repeat(2000),
+    outcome: {
+      status: "blocked",
+      code: "hook_blocked",
+      changed: false
+    },
+    receipt: {
+      id: "receipt_decision",
+      tool: "code_write",
+      status: "blocked",
+      code: "hook_blocked",
+      dispatched: false,
+      changed: false,
+      decision: {
+        version: 1,
+        path: `input_contract:passed>pre_hook:blocked>${canary}:failed`,
+        gateCount: 3,
+        blockedAt: "pre_hook",
+        slowestGate: "pre_hook",
+        slowestMs: 2,
+        truncated: false,
+        rationale: canary
+      }
+    },
+    tail: "z".repeat(2000)
+  }, {
+    maxChars: 700,
+    store
+  });
+
+  const visible = JSON.parse(capped.output);
+  assert.equal(
+    visible.receipt.decision.path,
+    "input_contract:passed>pre_hook:blocked"
+  );
+  assert.equal(visible.receipt.decision.blockedAt, "pre_hook");
+  assert.equal(visible.receipt.decision.truncated, true);
+  assert.equal(capped.output.includes(canary), false);
+  assert.ok(capped.output.length <= 700);
+});
+
 test("unsafe tiny truncation budgets fail before dropping semantic receipts", () => {
   assert.throws(
     () => capToolOutput(

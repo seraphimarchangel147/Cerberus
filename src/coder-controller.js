@@ -10,6 +10,15 @@ import {
 } from "./file-utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { createId, nowIso } from "./utils.js";
+import {
+  acceptancePassed,
+  createAcceptanceGraph,
+  criteriaEqual,
+  normalizeCheckIdentities,
+  normalizeStoredGraph,
+  recordVerificationEvidence,
+  sourceRevisionForRun
+} from "./acceptance-evidence.js";
 
 const RUN_STATES = new Set([
   "planned",
@@ -27,6 +36,7 @@ const MAX_FILES = 16;
 const MAX_PLAN_STEPS = 24;
 const MAX_OPERATIONS = 16;
 const MAX_CHECKS = 16;
+const MAX_CRITERIA = 32;
 const MAX_TEXT = 2_000;
 const MAX_TAIL = 2_000;
 const RUN_ID_RE = /^coder_[a-f0-9]{16}$/;
@@ -48,6 +58,9 @@ export class CoderRunStore {
     this.appendEvent = options.appendEvent ?? appendJsonLine;
     this.writeSnapshot = options.writeSnapshot ?? writeJsonAtomic;
     this.now = options.now ?? nowIso;
+    this.onChange = typeof options.onChange === "function"
+      ? options.onChange
+      : null;
     this.runs = new Map();
     ensureDir(this.dir);
     this._load();
@@ -68,6 +81,12 @@ export class CoderRunStore {
       plan: input.plan,
       files: input.files,
       checks: input.checks,
+      acceptance: input.acceptance ?? createAcceptanceGraph({
+        objective: input.objective,
+        criteria: input.criteria,
+        checks: input.checks,
+        allowLegacy: input.criteria == null
+      }),
       edits: [],
       verification: null,
       rollback: null,
@@ -88,6 +107,15 @@ export class CoderRunStore {
       throw new Error(
         `Coder run revision conflict: expected ${expectedRevision}, found ${current.revision}.`
       );
+    }
+    if (
+      patch?.acceptance?.criteria
+      && !criteriaEqual(
+        patch.acceptance.criteria,
+        current.acceptance?.criteria
+      )
+    ) {
+      throw new Error("Coder acceptance criteria are immutable after planning.");
     }
     const run = normalizeRun({
       ...clone(current),
@@ -135,6 +163,9 @@ export class CoderRunStore {
       });
     } catch {
       // The fsynced JSONL event remains authoritative.
+    }
+    try { this.onChange?.(clone(run), op); } catch {
+      // Live inspection is advisory; the durable coder journal is authoritative.
     }
   }
 
@@ -202,6 +233,12 @@ export class CoderController {
     this.store = options.store ?? new CoderRunStore({
       dataDir: options.dataDir
     });
+    const previousOnChange = this.store.onChange;
+    this.store.onChange = (run, op) => {
+      try { previousOnChange?.(run, op); } finally {
+        this.runtime?.runInspector?.recordCoder?.(run);
+      }
+    };
     this.checkpoints = options.checkpoints
       ?? this.runtime?.checkpoints
       ?? new CheckpointStore({
@@ -223,6 +260,11 @@ export class CoderController {
     const objective = boundedText(args?.objective, "Coder objective", MAX_TEXT);
     const plan = normalizePlan(args?.plan);
     const checks = normalizeChecks(args?.checks);
+    const acceptance = createAcceptanceGraph({
+      objective,
+      criteria: args?.criteria,
+      checks
+    });
     const requestedFiles = normalizeStartFiles(args?.files, workspaceRoot);
     const id = createId("coder");
     const files = [];
@@ -276,7 +318,8 @@ export class CoderController {
       objective,
       plan,
       files,
-      checks
+      checks,
+      acceptance
     });
     return publicRun(run);
   }
@@ -351,19 +394,28 @@ export class CoderController {
     run = this.store.update(run.id, run.revision, {
       state: "verifying"
     });
-    const verificationInvocation = await this.runtime.tools.invoke(
-      "code_verify",
-      { checks: run.checks },
-      nestedContext(context, run.id)
+    const sourceRevision = sourceRevisionForRun(run.files, run.edits);
+    const verificationPhase = await this._verifyChecks(
+      run,
+      context,
+      sourceRevision
     );
-    const verification = compactVerification(
-      verificationInvocation.result,
-      verificationInvocation.receipt
-    );
-    run = this.store.update(run.id, run.revision, { verification });
+    const verification = verificationPhase.verification;
+    const acceptance = recordVerificationEvidence({
+      graph: run.acceptance,
+      checks: run.checks,
+      verification,
+      sourceRevision,
+      at: nowIso()
+    });
+    run = this.store.update(run.id, run.revision, {
+      verification,
+      acceptance
+    });
     if (
-      verificationInvocation.ok
+      verificationPhase.ok
       && completeVerificationEvidence(verification, run.checks)
+      && acceptancePassed(acceptance, sourceRevision)
     ) {
       run = this.store.update(run.id, run.revision, {
         state: "passed",
@@ -386,7 +438,7 @@ export class CoderController {
     return this._handleFailure(
       run,
       context,
-      verificationInvocation.error ?? "Isolated verification did not pass.",
+      verificationPhase.error ?? "Required verification evidence did not pass.",
       "verification_failed"
     );
   }
@@ -439,6 +491,91 @@ export class CoderController {
       }
     }
     return [...new Set(resources)].sort();
+  }
+
+  async _verifyChecks(run, context, sourceRevision) {
+    const startedAt = Date.now();
+    const resultsById = new Map();
+    const receipts = [];
+    const codeChecks = run.checks.filter((check) => check.type !== "qa");
+    let error = null;
+
+    if (codeChecks.length > 0) {
+      const invocation = await this.runtime.tools.invoke(
+        "code_verify",
+        { checks: codeChecks },
+        nestedContext(context, run.id)
+      );
+      const codeVerification = compactVerification(
+        invocation.result,
+        invocation.receipt,
+        codeChecks
+      );
+      for (const result of codeVerification.results) {
+        resultsById.set(result.id, result);
+      }
+      if (codeVerification.receipt) receipts.push(codeVerification.receipt);
+      if (
+        !invocation.ok
+        || !completeVerificationEvidence(codeVerification, codeChecks)
+      ) {
+        error = invocation.error ?? "Isolated code verification did not pass.";
+        return combinedVerification({
+          checks: run.checks,
+          resultsById,
+          receipts,
+          startedAt,
+          error,
+          cancelled: codeVerification.status === "cancelled"
+        });
+      }
+    }
+
+    for (const check of run.checks.filter((candidate) => candidate.type === "qa")) {
+      if (context?.__abortSignal?.aborted) {
+        return combinedVerification({
+          checks: run.checks,
+          resultsById,
+          receipts,
+          startedAt,
+          error: "QA verification was cancelled.",
+          cancelled: true
+        });
+      }
+      const invocation = await this.runtime.tools.invoke(
+        "qa_run",
+        {
+          manifestPath: check.manifestPath,
+          mode: check.mode,
+          ...(check.routeIds ? { routeIds: check.routeIds } : {}),
+          ...(check.referenceRunId
+            ? { referenceRunId: check.referenceRunId }
+            : {}),
+          sourceRevision
+        },
+        nestedContext(context, run.id)
+      );
+      if (invocation.receipt) receipts.push(compactReceipt(invocation.receipt));
+      const result = compactQaVerification(
+        invocation,
+        check,
+        sourceRevision
+      );
+      resultsById.set(check.id, result);
+      if (!result.ok && !error) {
+        error = invocation.error
+          ?? `QA check '${check.id}' did not pass.`;
+      }
+    }
+
+    return combinedVerification({
+      checks: run.checks,
+      resultsById,
+      receipts,
+      startedAt,
+      error,
+      cancelled: false
+    });
   }
 
   async _assertBaselines(run, operations, context) {
@@ -612,7 +749,7 @@ export function registerCoderTools(registry, runtime) {
 
   register({
     name: "coder_start",
-    description: "Start a durable coding transaction only after inspecting exact file SHA-256 tags. Declares the objective, bounded plan, file baselines, and mandatory isolated verification checks, then captures rollback checkpoints.",
+    description: "Start a durable coding transaction only after inspecting exact file SHA-256 tags. Declares the objective, immutable acceptance criteria, bounded plan, file baselines, and mandatory code or web-QA checks, then captures rollback checkpoints.",
     sideEffects: true,
     parameters: {
       type: "object",
@@ -639,9 +776,10 @@ export function registerCoderTools(registry, runtime) {
           maxItems: MAX_PLAN_STEPS,
           items: { type: "string", minLength: 1, maxLength: MAX_TEXT }
         },
-        checks: verificationChecksSchema()
+        checks: verificationChecksSchema(),
+        criteria: acceptanceCriteriaSchema()
       },
-      required: ["objective", "files", "plan", "checks"],
+      required: ["objective", "files", "plan", "checks", "criteria"],
       additionalProperties: false
     },
     jobResources: (args, context) => controller.jobResources(args, context),
@@ -651,7 +789,7 @@ export function registerCoderTools(registry, runtime) {
 
   register({
     name: "coder_apply",
-    description: "Apply a planned coder transaction with exact CAS edits/writes, then run its mandatory isolated checks. Verification failure rolls back only controller-owned post-edit versions; ownership conflicts fail closed.",
+    description: "Apply a planned coder transaction with exact CAS edits/writes, then run mandatory isolated code checks and confirmed web-QA manifests. Any evidence failure rolls back only controller-owned post-edit versions; ownership conflicts fail closed.",
     sideEffects: true,
     parameters: {
       type: "object",
@@ -753,7 +891,17 @@ function normalizeRun(value) {
     return null;
   }
   try {
-    return clone(value);
+    const checks = normalizeCheckIdentities(value.checks);
+    const acceptance = normalizeStoredGraph(value.acceptance, {
+      objective: value.objective,
+      checks
+    });
+    if (!acceptance) return null;
+    return {
+      ...clone(value),
+      checks,
+      acceptance
+    };
   } catch {
     return null;
   }
@@ -774,14 +922,63 @@ function normalizeChecks(value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_CHECKS) {
     throw new TypeError(`Coder verification requires 1-${MAX_CHECKS} checks.`);
   }
-  return value.map((check, index) => {
+  const identified = normalizeCheckIdentities(value);
+  return identified.map((check, index) => {
     const type = String(check?.type ?? "").trim().toLowerCase();
-    if (!["syntax", "test"].includes(type)) {
+    if (!["qa", "syntax", "test"].includes(type)) {
       throw new TypeError(`Coder check ${index + 1} has an invalid type.`);
     }
     const target = check?.path == null ? null : String(check.path).trim();
     if (type === "syntax" && !target) {
       throw new TypeError(`Coder syntax check ${index + 1} requires a path.`);
+    }
+    const manifestPath = check?.manifestPath == null
+      ? null
+      : String(check.manifestPath).trim();
+    if (type === "qa" && !manifestPath) {
+      throw new TypeError(`Coder QA check ${index + 1} requires a manifestPath.`);
+    }
+    if (type !== "qa" && manifestPath) {
+      throw new TypeError(
+        `Coder check ${index + 1} cannot carry a QA manifestPath.`
+      );
+    }
+    const mode = ["impacted", "explore"].includes(check?.mode)
+      ? check.mode
+      : "full";
+    if (
+      check?.mode != null
+      && !["full", "impacted", "explore"].includes(String(check.mode))
+    ) {
+      throw new TypeError(`Coder QA check ${index + 1} has an invalid mode.`);
+    }
+    const routeIds = check?.routeIds == null
+      ? null
+      : normalizeCheckRouteIds(check.routeIds, index);
+    if (type !== "qa" && routeIds !== null) {
+      throw new TypeError(`Coder check ${index + 1} cannot carry QA routeIds.`);
+    }
+    if (type === "qa" && target) {
+      throw new TypeError(`Coder QA check ${index + 1} cannot carry path.`);
+    }
+    if (type === "qa" && mode === "impacted" && routeIds === null) {
+      throw new TypeError(
+        `Coder impacted QA check ${index + 1} requires routeIds.`
+      );
+    }
+    const referenceRunId = check?.referenceRunId == null
+      ? null
+      : String(check.referenceRunId);
+    if (
+      referenceRunId !== null
+      && (
+        type !== "qa"
+        || !/^qa_[a-f0-9]{16}$/.test(referenceRunId)
+      )
+    ) {
+      throw new TypeError(
+        `Coder check ${index + 1} has an invalid QA referenceRunId.`
+      );
     }
     const timeoutMs = check?.timeoutMs == null ? null : Number(check.timeoutMs);
     if (
@@ -790,12 +987,39 @@ function normalizeChecks(value) {
     ) {
       throw new TypeError(`Coder check ${index + 1} has an invalid timeout.`);
     }
+    if (type === "qa" && timeoutMs !== null) {
+      throw new TypeError(
+        `Coder QA check ${index + 1} uses manifest settle bounds, not timeoutMs.`
+      );
+    }
     return {
+      id: check.id,
       type,
       ...(target ? { path: target } : {}),
+      ...(manifestPath ? { manifestPath, mode } : {}),
+      ...(routeIds === null ? {} : { routeIds }),
+      ...(referenceRunId === null ? {} : { referenceRunId }),
       ...(timeoutMs === null ? {} : { timeoutMs })
     };
   });
+}
+
+function normalizeCheckRouteIds(value, checkIndex) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
+    throw new TypeError(
+      `Coder QA check ${checkIndex + 1} requires 1-32 routeIds.`
+    );
+  }
+  const ids = value.map((routeId) => String(routeId ?? ""));
+  if (
+    new Set(ids).size !== ids.length
+    || ids.some((routeId) => !/^[a-z][a-z0-9_-]{0,63}$/.test(routeId))
+  ) {
+    throw new TypeError(
+      `Coder QA check ${checkIndex + 1} has invalid routeIds.`
+    );
+  }
+  return ids;
 }
 
 function normalizeStartFiles(value, workspaceRoot) {
@@ -903,11 +1127,96 @@ function verificationChecksSchema() {
     items: {
       type: "object",
       properties: {
-        type: { type: "string", enum: ["syntax", "test"] },
+        id: {
+          type: "string",
+          pattern: "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        type: { type: "string", enum: ["qa", "syntax", "test"] },
         path: { type: "string" },
+        manifestPath: { type: "string", minLength: 1, maxLength: 1_024 },
+        mode: {
+          type: "string",
+          enum: ["full", "impacted", "explore"]
+        },
+        referenceRunId: {
+          type: "string",
+          pattern: "^qa_[a-f0-9]{16}$"
+        },
+        routeIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          uniqueItems: true,
+          items: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_-]{0,63}$"
+          }
+        },
         timeoutMs: { type: "integer", minimum: 1, maximum: 300_000 }
       },
-      required: ["type"],
+      required: ["id", "type"],
+      additionalProperties: false
+    }
+  };
+}
+
+function acceptanceCriteriaSchema() {
+  return {
+    type: "array",
+    minItems: 1,
+    maxItems: MAX_CRITERIA,
+    items: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          pattern: "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        statement: { type: "string", minLength: 1, maxLength: 1_000 },
+        kind: {
+          type: "string",
+          enum: [
+            "accessibility",
+            "behavior",
+            "compatibility",
+            "performance",
+            "security",
+            "visual"
+          ]
+        },
+        oracle: {
+          type: "string",
+          enum: [
+            "accessibility",
+            "browser",
+            "human",
+            "keyboard",
+            "performance",
+            "screenshot",
+            "test",
+            "visual"
+          ]
+        },
+        required: { type: "boolean" },
+        checkIds: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_CHECKS,
+          items: {
+            type: "string",
+            pattern: "^[a-z][a-z0-9_-]{0,63}$"
+          }
+        },
+        target: { type: "string", minLength: 1, maxLength: 500 },
+        threshold: {
+          anyOf: [
+            { type: "string", minLength: 1, maxLength: 500 },
+            { type: "number" },
+            { type: "boolean" }
+          ]
+        }
+      },
+      required: ["id", "statement", "kind", "oracle", "checkIds"],
       additionalProperties: false
     }
   };
@@ -998,7 +1307,138 @@ function compactReceipt(value) {
   };
 }
 
-function compactVerification(value, receipt) {
+function compactQaVerification(invocation, check, sourceRevision) {
+  const payload = invocation?.result;
+  const qaRun = payload?.run && typeof payload.run === "object"
+    ? payload.run
+    : null;
+  const exactRevision = qaRun?.sourceRevision === sourceRevision;
+  const comparisonRequired = Boolean(check.referenceRunId);
+  const comparisonPassed = comparisonRequired
+    ? qaRun?.comparison?.status === "passed"
+      && qaRun.comparison.referenceRunId === check.referenceRunId
+      && qaRun.comparison.candidateRunId === qaRun.id
+    : qaRun?.comparison == null
+      || qaRun.comparison.status === "passed";
+  const implementationPassed = qaRun?.state === "passed"
+    || qaRun?.comparison?.implementation?.passed === true;
+  const runPassed = implementationPassed
+    && payload?.ok === true
+    && exactRevision
+    && comparisonPassed;
+  const screenshotRefs = uniqueQaArtifactRefs(
+    qaRun?.results?.map((result) => result?.screenshotRef)
+  );
+  const artifactRefs = uniqueQaArtifactRefs([
+    ...(qaRun?.artifacts ?? []),
+    ...screenshotRefs
+  ]);
+  const qaResults = Array.isArray(qaRun?.results) ? qaRun.results : [];
+  const accessibilityPassed = qaResults.length > 0
+    && qaResults.every((result) => (
+      result?.accessibility?.supported === true
+      && result.accessibility.violations === 0
+    ));
+  const keyboardPassed = qaResults.length > 0
+    && qaResults.every((result) => (
+      result?.keyboard?.supported === true
+      && result.keyboard.missing === 0
+      && result.keyboard.focusVisibleFailures === 0
+      && result.keyboard.trapped === false
+    ));
+  const visualPassed = qaResults.length > 0
+    && qaResults.every((result) => result?.visual?.status === "matched");
+  const receipt = compactReceipt(invocation?.receipt);
+  const ok = invocation?.ok === true && runPassed;
+  return {
+    id: check.id,
+    type: "qa",
+    path: check.manifestPath,
+    ok,
+    code: ok
+      ? "ok"
+      : !exactRevision && qaRun
+        ? "qa_source_revision_mismatch"
+        : comparisonRequired && !comparisonPassed
+          ? "qa_intent_comparison_failed"
+        : String(
+            qaRun?.error?.code
+            ?? invocation?.outcome?.code
+            ?? "qa_failed"
+          ).slice(0, 80),
+    durationMs: Number.isSafeInteger(receipt?.durationMs)
+      ? receipt.durationMs
+      : 0,
+    tail: String(
+      qaRun?.error?.message
+      ?? invocation?.error
+      ?? ""
+    ).slice(-MAX_TAIL),
+    receiptId: receipt?.id ?? null,
+    evidence: {
+      qaRunId: /^qa_[a-f0-9]{16}$/.test(String(qaRun?.id ?? ""))
+        ? qaRun.id
+        : null,
+      comparisonId: /^qacmp_[a-f0-9]{16}$/.test(
+        String(qaRun?.comparison?.id ?? "")
+      )
+        ? qaRun.comparison.id
+        : null,
+      designPassed: comparisonPassed,
+      sourceRevision: exactRevision ? sourceRevision : null,
+      browserPassed: runPassed,
+      accessibilityPassed: runPassed && accessibilityPassed,
+      keyboardPassed: runPassed && keyboardPassed,
+      performancePassed: false,
+      visualPassed: runPassed && visualPassed,
+      screenshotRefs,
+      artifactRefs
+    }
+  };
+}
+
+function combinedVerification({
+  checks,
+  resultsById,
+  receipts,
+  startedAt,
+  error,
+  cancelled
+}) {
+  const results = checks
+    .map((check) => resultsById.get(check.id))
+    .filter(Boolean);
+  const passed = !cancelled
+    && results.length === checks.length
+    && results.every((result, index) => (
+      result.ok === true
+      && result.id === checks[index].id
+      && result.type === checks[index].type
+    ));
+  const verification = {
+    status: cancelled ? "cancelled" : passed ? "passed" : "failed",
+    checksPlanned: checks.length,
+    checksCompleted: results.length,
+    durationMs: Date.now() - startedAt,
+    results,
+    receipt: receipts[0] ?? null,
+    receipts: receipts.slice(0, MAX_CHECKS)
+  };
+  return {
+    ok: passed,
+    error: passed ? null : String(error ?? "Verification failed.").slice(0, MAX_TEXT),
+    verification
+  };
+}
+
+function uniqueQaArtifactRefs(value) {
+  return [...new Set(
+    (Array.isArray(value) ? value : [])
+      .filter((ref) => /^qaart_[a-f0-9]{64}$/.test(String(ref ?? "")))
+  )].slice(0, 100);
+}
+
+function compactVerification(value, receipt, checks = []) {
   if (!value || typeof value !== "object") {
     return {
       status: "failed",
@@ -1016,7 +1456,12 @@ function compactVerification(value, receipt) {
     checksCompleted: Number.isSafeInteger(value.checksCompleted) ? value.checksCompleted : 0,
     durationMs: Number.isSafeInteger(value.durationMs) ? value.durationMs : 0,
     results: Array.isArray(value.results)
-      ? value.results.slice(0, MAX_CHECKS).map((result) => ({
+      ? value.results.slice(0, MAX_CHECKS).map((result, index) => ({
+          id: String(
+            result?.id
+            ?? checks[index]?.id
+            ?? `check_${index + 1}`
+          ).slice(0, 64),
           type: String(result?.type ?? "").slice(0, 32),
           path: result?.path == null ? null : String(result.path).slice(0, 500),
           ok: result?.ok === true,
@@ -1035,7 +1480,9 @@ function completeVerificationEvidence(verification, checks) {
     && verification.checksCompleted === checks.length
     && verification.results.length === checks.length
     && verification.results.every(
-      (result, index) => result.ok === true && result.type === checks[index].type
+      (result, index) => result.ok === true
+        && result.id === checks[index].id
+        && result.type === checks[index].type
     );
 }
 
@@ -1069,5 +1516,6 @@ export const CODER_CONTROLLER_LIMITS = Object.freeze({
   maxFiles: MAX_FILES,
   maxPlanSteps: MAX_PLAN_STEPS,
   maxOperations: MAX_OPERATIONS,
-  maxChecks: MAX_CHECKS
+  maxChecks: MAX_CHECKS,
+  maxCriteria: MAX_CRITERIA
 });

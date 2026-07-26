@@ -408,7 +408,9 @@ test("OpenAI provider streams normal turns and keeps a slow active stream alive"
     apiKey: "test-key",
     maxIterations: 2,
     timeoutMs: 5000,
-    stallTimeoutMs: 40,
+    // The total stream lasts longer than the stall window, while every active
+    // gap has enough headroom to remain deterministic under full-suite load.
+    stallTimeoutMs: 250,
     budgetGuard: {
       check() {},
       record() {
@@ -457,7 +459,7 @@ test("OpenAI provider streams normal turns and keeps a slow active stream alive"
   chunks.push(new TextEncoder().encode("data: [DONE]\n\n"));
   globalThis.fetch = async (_url, options) => {
     sentBodies.push(JSON.parse(options.body));
-    return streamResponse(chunks, { delayMs: 20 });
+    return streamResponse(chunks, { delayMs: 80 });
   };
 
   const result = await provider.generate({

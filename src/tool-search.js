@@ -222,6 +222,10 @@ export class ToolSearchController {
       schemaBytes,
       thresholdBytes
     });
+    const preferredNames = nameSet(options.prefer);
+    if (preferredNames) {
+      for (const name of preferredNames) deferredNames.delete(name);
+    }
     if (only) {
       for (const tool of eligible) {
         if (!only.has(tool.name)) deferredNames.add(tool.name);
@@ -237,6 +241,11 @@ export class ToolSearchController {
         eligibleSchemaBytes: toolSchemaBytes(eligible),
         thresholdBytes,
         deferredNames: [],
+        preferredNames: preferredNames
+          ? directEligible
+              .filter((tool) => preferredNames.has(tool.name))
+              .map((tool) => tool.name)
+          : [],
         eligibleNames: eligible.map((tool) => tool.name),
         tools: directEligible
       };
@@ -256,6 +265,11 @@ export class ToolSearchController {
       eligibleSchemaBytes: toolSchemaBytes(eligible),
       thresholdBytes,
       deferredNames: [...deferredNames],
+      preferredNames: preferredNames
+        ? visible
+            .filter((tool) => preferredNames.has(tool.name))
+            .map((tool) => tool.name)
+        : [],
       eligibleNames: eligible.map((tool) => tool.name),
       tools: visible
     };

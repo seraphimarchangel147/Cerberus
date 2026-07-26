@@ -4,7 +4,16 @@ export {
   createDurableRuntime,
   resolveExternalMemoryProvider
 } from "./abi-runtime.js";
-export { AgentHost } from "./agent-host.js";
+export { AgentHost, prepareTurnHints } from "./agent-host.js";
+export {
+  appendCompletionEvidenceWarning,
+  assessCompletionEvidence,
+  assistantClaimsCompletion,
+  completionEvidenceDecision,
+  completionEvidenceNudge,
+  completionToolPreferences,
+  createCompletionContract
+} from "./completion-evidence.js";
 export { BudgetGuard } from "./budget-guard.js";
 export {
   buildSetCookie,
@@ -115,6 +124,10 @@ export {
 } from "./terminal-session-manager.js";
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";
+export {
+  ComputerUseController,
+  callComputerNode
+} from "./computer-use-controller.js";
 export {
   ARTIFACT_KINDS,
   ArtifactCanvasError,
@@ -274,8 +287,38 @@ export {
   isPrivateAddress,
   semanticBrowserEnabled,
   validateCdpUrl,
+  validateQaNavigationUrl,
   validateNavigationUrl
 } from "./semantic-browser.js";
+export {
+  registerWebQaTools,
+  WebQaController,
+  webQaEnabled,
+  WEB_QA_INTERNALS,
+  WEB_QA_LIMITS
+} from "./web-qa.js";
+export {
+  normalizeExplorationPolicy,
+  UiStateExplorer
+} from "./ui-state-explorer.js";
+export {
+  normalizeQaIntent,
+  QaComparisonStore,
+  QaDifferentialAnalyzer
+} from "./qa-differential.js";
+export { buildQaPerformanceProof } from "./qa-performance.js";
+export {
+  QaArtifactStore,
+  QaBaselineStore,
+  QaRunStore,
+  QA_STORE_LIMITS
+} from "./qa-store.js";
+export {
+  RUN_INSPECTOR_LIMITS,
+  RunInspector,
+  RunInspectorStore,
+  turnInspectorMetadata
+} from "./run-inspector.js";
 export { createHostedInterface } from "./hosted-interface.js";
 export {
   DEFAULT_API_SERVER_PORT,

@@ -28,8 +28,8 @@ test("isolated verifier combines syntax and targeted test evidence", async (t) =
   const result = await verifier.verify({
     workspaceDir: root,
     checks: [
-      { type: "syntax", path: "valid.js" },
-      { type: "test", path: "valid.test.js" }
+      { id: "syntax_check", type: "syntax", path: "valid.js" },
+      { id: "targeted_test", type: "test", path: "valid.test.js" }
     ]
   });
 
@@ -37,6 +37,10 @@ test("isolated verifier combines syntax and targeted test evidence", async (t) =
   assert.equal(result.status, "passed");
   assert.equal(result.checksCompleted, 2);
   assert.deepEqual(result.results.map((entry) => entry.code), ["ok", "ok"]);
+  assert.deepEqual(
+    result.results.map((entry) => entry.id),
+    ["syntax_check", "targeted_test"]
+  );
   assert.ok(result.results.every((entry) => entry.durationMs >= 0));
 });
 

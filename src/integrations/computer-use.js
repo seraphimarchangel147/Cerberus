@@ -1,98 +1,36 @@
-// Computer-use beta integration. Wires Anthropic's `computer_*` tool
-// vocabulary into OpenAGI's ToolRegistry. This build does NOT synthesize
-// mouse / keyboard events — real input synthesis lives in the Mac app
-// behind macOS Accessibility permission and ships in a later phase.
-//
-// IMPORTANT (production honesty): the input-synthesis tools (click, type,
-// key, scroll, move) record the agent's intent to the audit log and then
-// THROW. They never report fake success — an agent calling computer_click
-// gets an explicit "execution not available in this build" error so it
-// knows the action did not happen. Only session management and the
-// (real-data) screenshot/OCR readback actually function.
-//
-// The tools are registered behind a feature flag (OPENAGI_COMPUTER_USE=1)
-// so the default install is unaffected. Tool list:
-//   start_computer_use_session — user-gated approval that opens a session
-//                               with a stated goal. Subsequent actions
-//                               within that session don't re-prompt.
-//   computer_screenshot       — current screen state (returns OCR snippet,
-//                               since real screenshot transport needs the
-//                               Mac app).
-//   computer_click            — click at (x, y).
-//   computer_type             — type a string.
-//   computer_key              — press a key chord.
-//   computer_scroll           — scroll at (x, y).
-//   computer_move             — move mouse (no click).
-//   end_computer_use_session  — close the active session.
-//
-// Every action call records {kind, args, reasoning} to the ComputerUseLog
-// BEFORE attempting execution. The "reasoning" is whatever the model
-// produced in its assistant text turn alongside the tool call — captured
-// via a separate `reasoning` param that the agent is instructed to fill.
+import { ComputerUseController } from "../computer-use-controller.js";
 
-import { redactKnownValues } from "../redact.js";
-import { secretRedactionSpellings } from "../credential-redaction.js";
+const SAFETY_NOTE = [
+  "Computer use is experimental.",
+  "Every action is durably logged with bounded reasoning.",
+  "Use semantic element references first.",
+  "Coordinate actions require fresh screenshot evidence and never count as proof by themselves."
+].join(" ");
 
-const SAFETY_NOTE = "Computer use is experimental. Every action is logged with the reasoning you provide; the log is visible to the user. Input synthesis (click/type/key/scroll/move) is NOT available in this build — those calls are logged and then refused, so do not assume they succeed.";
-
-const EXECUTION_UNAVAILABLE = "computer-use input synthesis is not available in this build. The intent was recorded to the audit log but NOT performed. Do not assume the action succeeded.";
-
-// Tool names that this module registers. Kept here in one place so the
-// dynamic unregister path (used by the dashboard toggle) can remove
-// exactly what was added without guessing.
-export const COMPUTER_USE_TOOL_NAMES = [
+export const UNIFIED_COMPUTER_USE_TOOL_NAMES = Object.freeze([
   "start_computer_use_session",
-  "end_computer_use_session",
+  "computer_observe",
+  "computer_act",
   "computer_screenshot",
+  "end_computer_use_session"
+]);
+
+export const COMPUTER_USE_TOOL_NAMES = Object.freeze([
+  ...UNIFIED_COMPUTER_USE_TOOL_NAMES,
   "computer_click",
   "computer_type",
   "computer_key",
   "computer_scroll",
   "computer_move"
-];
+]);
 
-/// Reads the current enabled state from process.env. NOT cached — so when
-/// the dashboard toggle writes IMESSAGE-style to .env and updates
-/// process.env, the next check reflects the new value immediately.
 export function isComputerUseEnabled() {
-  const v = process.env.OPENAGI_COMPUTER_USE;
-  return v === "1" || v === "true" || v === "yes";
+  const value = String(process.env.OPENAGI_COMPUTER_USE ?? "")
+    .trim()
+    .toLowerCase();
+  return ["1", "true", "yes", "on"].includes(value);
 }
 
-/// A configured computer-use node (a Mac running `openagi computer-server`)
-/// turns the stub into real execution: screenshots + input synthesis run on
-/// that node. Without it, input is logged and refused (no fake success).
-function computerNode() {
-  const url = (process.env.OPENAGI_COMPUTER_NODE ?? "").replace(/\/$/, "");
-  if (!url) return null;
-  return { url, token: process.env.OPENAGI_COMPUTER_NODE_TOKEN ?? null };
-}
-
-async function callNode(node, path, body, fetchImpl) {
-  const redactValues = secretRedactionSpellings(node.token);
-  let res;
-  try {
-    res = await fetchImpl(`${node.url}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...(node.token ? { authorization: `Bearer ${node.token}` } : {}) },
-      body: JSON.stringify(body ?? {})
-    });
-  } catch (error) {
-    const message = redactKnownValues(
-      error?.message ?? String(error),
-      redactValues
-    );
-    throw new Error(message);
-  }
-  const json = await res.json().catch(() => ({}));
-  const safeJson = redactKnownValues(json, redactValues);
-  if (!res.ok) throw new Error(safeJson.error || `computer node HTTP ${res.status}`);
-  return safeJson;
-}
-
-/// Remove all computer-use tools from the registry. Caller is expected
-/// to also close any active session so the agent doesn't leave a dangling
-/// reference. Returns the number of tools actually unregistered.
 export function unregisterComputerUseTools(registry) {
   let count = 0;
   for (const name of COMPUTER_USE_TOOL_NAMES) {
@@ -104,179 +42,479 @@ export function unregisterComputerUseTools(registry) {
   return count;
 }
 
-export function registerComputerUseTools(registry, runtime, { fetchImpl = globalThis.fetch } = {}) {
-  if (!runtime.computerUseLog) return { registered: false, reason: "no computer-use log bound" };
-
-  const requireActiveSession = () => {
-    const active = runtime.computerUseLog.listSessions({ status: "active" })[0];
-    if (!active) throw new Error("No active computer-use session. Call start_computer_use_session first and have the user approve.");
-    return active;
-  };
+export function registerComputerUseTools(
+  registry,
+  runtime,
+  { fetchImpl = globalThis.fetch, env = process.env } = {}
+) {
+  if (!runtime?.computerUseLog) {
+    return {
+      registered: false,
+      reason: "no computer-use log bound",
+      names: []
+    };
+  }
+  const controller = runtime.computerUseController
+    ?? new ComputerUseController({ runtime, fetchImpl, env });
+  runtime.computerUseController = controller;
 
   registry.register({
     name: "start_computer_use_session",
-    description: "Open a computer-use session for a user-stated goal. THIS REQUIRES USER APPROVAL — once approved, subsequent computer_* actions in this session won't re-prompt. " + SAFETY_NOTE,
+    source: "computer",
+    description: `Open one project/session-scoped computer-use control session for a user-stated goal. Choose browser for semantic DOM-first control or desktop for a connected computer node. The session has a hard mutation budget. ${SAFETY_NOTE}`,
     parameters: {
       type: "object",
       properties: {
-        goal: { type: "string", description: "What the user is trying to accomplish, in one sentence. Will be shown verbatim in the approval card." }
+        goal: {
+          type: "string",
+          minLength: 1,
+          maxLength: 500,
+          description: "One-sentence user goal shown in the approval card."
+        },
+        surface: {
+          type: "string",
+          enum: ["auto", "browser", "desktop"],
+          description: "Use browser for web UI, desktop for native apps. Auto selects browser only when url is supplied."
+        },
+        url: {
+          type: "string",
+          maxLength: 4096,
+          description: "Optional initial HTTP(S) URL for a browser session."
+        },
+        maxActions: {
+          type: "integer",
+          minimum: 1,
+          maximum: 200,
+          description: "Hard cap on mutating actions; defaults to 40."
+        }
       },
       required: ["goal"],
       additionalProperties: false
     },
+    sideEffects: true,
     needsConfirmation: true,
-    summarize: (args) => `Open computer-use session: "${String(args.goal ?? "").slice(0, 120)}"`,
-    handler: async (args) => {
-      const session = runtime.computerUseLog.startSession({ goal: args.goal, approvedBy: "user" });
-      return {
-        sessionId: session.id,
-        goal: session.goal,
-        note: "Session active. Use computer_screenshot / computer_click / etc to act. Call end_computer_use_session when done."
-      };
-    }
+    summarize: (args) => (
+      `Open ${String(args.surface ?? "auto")} computer-use session: "${String(args.goal ?? "").slice(0, 120)}"`
+    ),
+    capability: computerCapability({
+      verbs: ["start", "control"],
+      effect: "write",
+      resources: ["ui", "network"],
+      requirements: ["computer-use", "human-approval"]
+    }),
+    handler: (args, context) => controller.start(args, context)
   });
 
   registry.register({
-    name: "end_computer_use_session",
-    description: "Close the active computer-use session. Call this when the goal is achieved, when you decide to stop, or when the user asks you to.",
+    name: "computer_observe",
+    source: "computer",
+    description: "Observe the active computer-use surface. Browser sessions return a compact untrusted semantic snapshot with generation-scoped refs. Desktop sessions return bounded OCR. The result advances an observation revision required by computer_act.",
     parameters: {
       type: "object",
       properties: {
-        reason: { type: "string", description: "Brief reason — 'goal achieved', 'user asked', 'cannot proceed without X', etc." }
+        query: { type: "string", maxLength: 1000 },
+        maxNodes: { type: "integer", minimum: 1, maximum: 500 }
       },
       additionalProperties: false
     },
-    handler: async (args) => {
-      const active = runtime.computerUseLog.listSessions({ status: "active" })[0];
-      if (!active) return { ended: false, reason: "no active session" };
-      runtime.computerUseLog.endSession(active.id, { reason: args.reason, status: "ended" });
-      return { ended: true, sessionId: active.id };
-    }
+    sideEffects: false,
+    normalizeOutcome: (result) => ({
+      changed: false,
+      code: "computer_observation_recorded",
+      evidence: observationEvidence(result)
+    }),
+    capability: computerCapability({
+      verbs: ["observe", "inspect"],
+      effect: "read",
+      resources: ["ui"],
+      latency: "low"
+    }),
+    handler: (args, context) => controller.observe(args, context)
+  });
+
+  registry.register({
+    name: "computer_act",
+    source: "computer",
+    description: "Perform one generation-bound action in the active control session and automatically collect a post-action observation. Browser actions are semantic-first: activate, input, select, scroll, or navigate. visual_click is a last resort and requires the exact fresh viewport screenshot SHA-256 plus a concrete fallback reason. Desktop click/move have the same screenshot precondition. Never put credentials in text; use browser_input_secret.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "activate",
+            "input",
+            "select",
+            "scroll",
+            "navigate",
+            "visual_click",
+            "click",
+            "type",
+            "key",
+            "move"
+          ]
+        },
+        observationRevision: {
+          type: "integer",
+          minimum: 1,
+          description: "Exact revision returned by the latest observation."
+        },
+        expectedGeneration: {
+          type: "string",
+          minLength: 1,
+          maxLength: 128,
+          description: "Exact generation returned by the latest observation."
+        },
+        reasoning: {
+          type: "string",
+          minLength: 1,
+          maxLength: 500,
+          description: "Short action rationale persisted in the user-visible audit log."
+        },
+        ref: { type: "string", minLength: 1, maxLength: 256 },
+        submit: { type: "boolean" },
+        text: { type: "string", maxLength: 100000 },
+        value: { type: "string", maxLength: 10000 },
+        values: {
+          type: "array",
+          maxItems: 100,
+          items: { type: "string", maxLength: 10000 }
+        },
+        url: { type: "string", maxLength: 4096 },
+        chord: { type: "string", maxLength: 200 },
+        x: { type: "integer", minimum: 0, maximum: 100000 },
+        y: { type: "integer", minimum: 0, maximum: 100000 },
+        deltaX: {
+          type: "integer",
+          minimum: -100000,
+          maximum: 100000
+        },
+        deltaY: {
+          type: "integer",
+          minimum: -100000,
+          maximum: 100000
+        },
+        button: {
+          type: "string",
+          enum: ["left", "right", "middle"]
+        },
+        screenshotSha256: {
+          type: "string",
+          pattern: "^[a-f0-9]{64}$"
+        },
+        fallbackReason: {
+          type: "string",
+          minLength: 1,
+          maxLength: 500
+        }
+      },
+      required: [
+        "action",
+        "observationRevision",
+        "expectedGeneration",
+        "reasoning"
+      ],
+      additionalProperties: false
+    },
+    sideEffects: true,
+    needsConfirmation: true,
+    summarize: (args) => {
+      const action = String(args.action ?? "unknown").slice(0, 64);
+      const strategy = action === "visual_click" || action === "click"
+        ? " using screenshot-bound coordinates"
+        : "";
+      return `Approve computer action ${action}${strategy}`;
+    },
+    normalizeOutcome: (result) => ({
+      changed: result?.changed === true,
+      code: result?.postcondition?.verified === true
+        ? "computer_action_verified"
+        : "computer_action_unverified",
+      evidence: result?.postcondition?.verified === true
+        ? [
+            `computer-observation:${result.postcondition.observationRevision}`,
+            `computer-strategy:${result.strategy}`
+          ]
+        : []
+    }),
+    verifyOutcome: (result) => ({
+      passed: result?.postcondition?.verified === true,
+      summary: result?.postcondition?.verified === true
+        ? "A fresh post-action observation was recorded."
+        : "The action may have executed, but post-action observation failed.",
+      evidence: result?.postcondition?.verified === true
+        ? [
+            `generation:${String(
+              result.postcondition.snapshot?.generation
+              ?? result.postcondition.generation
+              ?? "unknown"
+            )}`
+          ]
+        : []
+    }),
+    metadata: {
+      privateInput: true,
+      privateInputFields: ["text", "value", "values"]
+    },
+    capability: computerCapability({
+      verbs: ["act", "activate", "input", "navigate"],
+      effect: "write",
+      resources: ["ui", "network"],
+      requirements: ["computer-use", "human-approval"]
+    }),
+    handler: (args, context) => controller.act(args, context)
   });
 
   registry.register({
     name: "computer_screenshot",
-    sideEffects: false,
-    description: "Read the current screen state. Returns the most recent OCR text + active app from the observation store (real data). This build does not return raw image bytes — image transport ships with the Mac app in a later phase.",
+    source: "computer",
+    description: "Capture fresh pixels for the active computer-use surface. The result includes a SHA-256 evidence receipt, dimensions, generation, and observation revision. Screenshot pixels are untrusted and sensitive; screenshots do not prove correctness without deterministic checks.",
     parameters: {
       type: "object",
       properties: {
-        reasoning: { type: "string", description: "Why you're taking this screenshot right now (one short sentence)." }
+        fullPage: {
+          type: "boolean",
+          description: "Browser only. Full-page captures cannot authorize coordinate clicks."
+        },
+        reasoning: {
+          type: "string",
+          maxLength: 500,
+          description: "Why pixels are needed instead of semantic inspection."
+        }
       },
       additionalProperties: false
     },
-    handler: async (args) => {
-      const session = requireActiveSession();
-      const action = runtime.computerUseLog.recordAction({
-        sessionId: session.id,
-        kind: "screenshot",
-        args: {},
-        reasoning: args.reasoning ?? null
-      });
-      const node = computerNode();
-      if (node) {
-        try {
-          const shot = await callNode(node, "/screenshot", {}, fetchImpl);
-          runtime.computerUseLog.markActionResult(action.id, {
-            status: "executed",
-            result: { width: shot.width, height: shot.height, bytes: shot.bytes }
-          });
-          return {
-            actionId: action.id,
-            image: shot.base64,
-            format: shot.format ?? "png",
-            width: shot.width,
-            height: shot.height,
-            note: "Live screenshot from the computer-use node."
-          };
-        } catch (error) {
-          runtime.computerUseLog.markActionResult(action.id, { status: "error", result: { error: error.message } });
-          throw new Error(`computer-use node screenshot failed: ${error.message}`);
-        }
-      }
-      // No node: fall back to OCR readback from the observation store.
-      const snippets = await (runtime.observations?.search?.({ limit: 3 }) ?? Promise.resolve([]));
-      const text = snippets.map((s) => s.text ?? "").filter(Boolean).join("\n").slice(0, 1200);
-      const app = snippets[0]?.app ?? "(unknown)";
-      runtime.computerUseLog.markActionResult(action.id, {
-        status: "executed",
-        result: { app, textSample: text.slice(0, 240) }
-      });
-      return {
-        actionId: action.id,
-        app,
-        ocrSample: text || "(no recent OCR — capture may not be running)",
-        note: "OCR readback only — no computer-use node configured, so no raw screenshot. Set OPENAGI_COMPUTER_NODE for live capture."
-      };
-    }
+    sideEffects: false,
+    needsConfirmation: true,
+    summarize: () => (
+      "Approve capture of screen pixels that may contain sensitive content"
+    ),
+    normalizeOutcome: (result) => ({
+      changed: false,
+      code: "computer_screenshot_recorded",
+      evidence: observationEvidence(result)
+    }),
+    capability: computerCapability({
+      verbs: ["screenshot", "observe"],
+      effect: "read",
+      resources: ["ui"],
+      requirements: ["computer-use", "human-approval"],
+      latency: "low"
+    }),
+    handler: (args, context) => controller.screenshot(args, context)
   });
 
-  // Helper to register an input-synthesis action tool. When a computer-use
-  // node is configured the action executes ON that node (real input); without
-  // one, the intent + reasoning are logged and the handler THROWS so the agent
-  // gets an explicit failure instead of a fabricated success. No silent stub.
-  function registerAction(name, nodePath, description, paramShape, payloadOf) {
-    registry.register({
-      name,
-      description: description + " Executes on the connected computer-use node; without one (OPENAGI_COMPUTER_NODE unset) the call is logged and refused.",
-      parameters: {
-        type: "object",
-        properties: {
-          ...paramShape,
-          reasoning: { type: "string", description: "Why you're doing this (one short sentence). Captured to the action log for the user to review." }
-        },
-        additionalProperties: false
+  registry.register({
+    name: "end_computer_use_session",
+    source: "computer",
+    description: "Close the active project/session-scoped computer-use session. Call this when the goal is achieved, blocked, or cancelled.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", maxLength: 500 },
+        aborted: { type: "boolean" }
       },
-      handler: async (args) => {
-        const session = requireActiveSession();
-        const { reasoning, ...actionArgs } = args;
-        const action = runtime.computerUseLog.recordAction({
-          sessionId: session.id,
-          kind: name.replace(/^computer_/, ""),
-          args: actionArgs,
-          reasoning: reasoning ?? null
-        });
-        const node = computerNode();
-        if (!node) {
-          runtime.computerUseLog.markActionResult(action.id, {
-            status: "unavailable",
-            result: { reason: "no computer-use node configured" }
-          });
-          throw new Error(EXECUTION_UNAVAILABLE);
-        }
-        try {
-          await callNode(node, nodePath, payloadOf(actionArgs), fetchImpl);
-          runtime.computerUseLog.markActionResult(action.id, { status: "executed", result: { via: "node" } });
-          return { actionId: action.id, ok: true };
-        } catch (error) {
-          runtime.computerUseLog.markActionResult(action.id, { status: "error", result: { error: error.message } });
-          throw new Error(`computer-use node ${name} failed: ${error.message}`);
-        }
+      additionalProperties: false
+    },
+    sideEffects: true,
+    capability: computerCapability({
+      verbs: ["close"],
+      effect: "write",
+      resources: ["ui"],
+      idempotent: true
+    }),
+    handler: (args, context) => controller.end(args, context)
+  });
+
+  registerLegacyTools(registry, controller);
+  return {
+    registered: true,
+    node: controller.capabilities().desktopNode,
+    names: [...COMPUTER_USE_TOOL_NAMES]
+  };
+}
+
+function registerLegacyTools(registry, controller) {
+  registerLegacyAction(
+    registry,
+    controller,
+    "computer_click",
+    "click",
+    "/click",
+    "Legacy desktop coordinate click. Prefer computer_act for observation-bound execution and automatic post-action proof.",
+    {
+      x: { type: "integer" },
+      y: { type: "integer" },
+      button: {
+        type: "string",
+        enum: ["left", "right", "middle"]
       }
-    });
+    },
+    (args) => ({
+      x: args.x,
+      y: args.y,
+      button: args.button ?? "left"
+    })
+  );
+  registerLegacyAction(
+    registry,
+    controller,
+    "computer_type",
+    "type",
+    "/type",
+    "Legacy desktop typing. Raw text is sent to the node but never persisted. Prefer computer_act.",
+    {
+      text: { type: "string", maxLength: 100000 }
+    },
+    (args) => ({ text: args.text ?? "" })
+  );
+  registerLegacyAction(
+    registry,
+    controller,
+    "computer_key",
+    "key",
+    "/key",
+    "Legacy desktop key chord. Prefer computer_act.",
+    {
+      chord: { type: "string", maxLength: 200 }
+    },
+    (args) => ({ chord: args.chord })
+  );
+  registerLegacyAction(
+    registry,
+    controller,
+    "computer_scroll",
+    "scroll",
+    "/scroll",
+    "Legacy desktop scrolling. Prefer computer_act.",
+    {
+      x: { type: "integer" },
+      y: { type: "integer" },
+      deltaX: { type: "integer" },
+      deltaY: { type: "integer" }
+    },
+    (args) => ({
+      x: args.x,
+      y: args.y,
+      deltaX: args.deltaX,
+      deltaY: args.deltaY
+    })
+  );
+  registerLegacyAction(
+    registry,
+    controller,
+    "computer_move",
+    "move",
+    "/move",
+    "Legacy desktop pointer move. Prefer computer_act.",
+    {
+      x: { type: "integer" },
+      y: { type: "integer" }
+    },
+    (args) => ({ x: args.x, y: args.y })
+  );
+}
+
+function registerLegacyAction(
+  registry,
+  controller,
+  name,
+  kind,
+  path,
+  description,
+  properties,
+  payloadOf
+) {
+  registry.register({
+    name,
+    source: "computer-legacy",
+    description,
+    parameters: {
+      type: "object",
+      properties: {
+        ...properties,
+        reasoning: {
+          type: "string",
+          maxLength: 500
+        }
+      },
+      additionalProperties: false
+    },
+    sideEffects: true,
+    ...(kind === "type"
+      ? {
+          metadata: {
+            privateInput: true,
+            privateInputFields: ["text"]
+          }
+        }
+      : {}),
+    capability: computerCapability({
+      verbs: [kind],
+      effect: "write",
+      resources: ["ui"],
+      requirements: ["computer-use", "computer-node", "legacy-interface"],
+      availability: "conditional"
+    }),
+    handler: async (args, context) => {
+      const { reasoning, ...actionArgs } = args;
+      try {
+        return await controller.legacyDesktopAction({
+          kind,
+          path,
+          args: actionArgs,
+          payload: payloadOf(actionArgs),
+          reasoning
+        }, context);
+      } catch (error) {
+        if (/computer-use node .* failed:/.test(error.message)) throw error;
+        if (/not available in this build/.test(error.message)) throw error;
+        if (/without OPENAGI_COMPUTER_NODE/.test(error.message)) throw error;
+        throw new Error(`computer-use node ${name} failed: ${error.message}`);
+      }
+    }
+  });
+}
+
+function computerCapability({
+  verbs,
+  effect,
+  resources,
+  requirements = ["computer-use"],
+  latency = "medium",
+  idempotent = effect === "read",
+  availability = "conditional"
+}) {
+  return {
+    domain: "computer",
+    verbs,
+    effect,
+    idempotent,
+    latency,
+    cost: "low",
+    resources,
+    requirements,
+    examples: [],
+    successCriteria: [
+      "Returns a bounded session-scoped receipt.",
+      "Never reports an unavailable input action as executed."
+    ],
+    availability
+  };
+}
+
+function observationEvidence(result) {
+  const evidence = [];
+  if (Number.isSafeInteger(result?.observationRevision)) {
+    evidence.push(`computer-observation:${result.observationRevision}`);
   }
-
-  registerAction("computer_click", "/click", "Click at (x, y) coordinates on the screen. Coordinates are screen-space pixels with (0,0) at top-left.", {
-    x: { type: "integer", description: "Screen x (pixels)." },
-    y: { type: "integer", description: "Screen y (pixels)." },
-    button: { type: "string", enum: ["left", "right", "middle"], description: "Default left." }
-  }, (a) => ({ x: a.x, y: a.y, button: a.button ?? "left" }));
-  registerAction("computer_type", "/type", "Type a string into the focused app.", {
-    text: { type: "string", description: "Text to type. Use computer_key for non-printable keys." }
-  }, (a) => ({ text: a.text ?? "" }));
-  registerAction("computer_key", "/key", "Press a key chord. Examples: 'cmd+a', 'enter', 'esc', 'cmd+shift+t'.", {
-    chord: { type: "string", description: "Key chord, plus-separated. Modifiers: cmd, shift, alt, ctrl. Then the key name." }
-  }, (a) => ({ chord: a.chord }));
-  registerAction("computer_scroll", "/scroll", "Scroll at (x, y).", {
-    x: { type: "integer" },
-    y: { type: "integer" },
-    deltaX: { type: "integer", description: "Horizontal scroll delta in lines." },
-    deltaY: { type: "integer", description: "Vertical scroll delta in lines. Negative = down." }
-  }, (a) => ({ x: a.x, y: a.y, deltaX: a.deltaX, deltaY: a.deltaY }));
-  registerAction("computer_move", "/move", "Move the mouse to (x, y) without clicking.", {
-    x: { type: "integer" },
-    y: { type: "integer" }
-  }, (a) => ({ x: a.x, y: a.y }));
-
-  return { registered: true, node: Boolean(computerNode()) };
+  const generation = String(
+    result?.snapshot?.generation
+    ?? result?.generation
+    ?? ""
+  ).trim();
+  if (/^[A-Za-z0-9._-]{1,128}$/.test(generation)) {
+    evidence.push(`generation:${generation}`);
+  }
+  return evidence;
 }
