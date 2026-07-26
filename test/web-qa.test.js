@@ -19,6 +19,7 @@ import {
   WEB_QA_INTERNALS
 } from "../src/web-qa.js";
 import { normalizeExplorationPolicy } from "../src/ui-state-explorer.js";
+import { QaComparisonStore } from "../src/qa-differential.js";
 
 function harness(t, browser = new FakeQaBrowser()) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-web-qa-"));
@@ -69,12 +70,14 @@ class FakeQaBrowser {
   constructor({
     extraControl = false,
     diagnosticError = false,
+    diagnosticWarning = false,
     accessibilityViolation = false,
     deadSave = false
   } = {}) {
     this.dnsLookup = async () => [];
     this.extraControl = extraControl;
     this.diagnosticError = diagnosticError;
+    this.diagnosticWarning = diagnosticWarning;
     this.accessibilityViolation = accessibilityViolation;
     this.deadSave = deadSave;
     this.activations = 0;
@@ -166,15 +169,24 @@ class FakeQaBrowser {
   }
 
   async qaDiagnostics() {
+    const events = [];
+    if (this.diagnosticError) {
+      events.push({
+        kind: "pageerror",
+        severity: "error",
+        message: "fixture exploded"
+      });
+    }
+    if (this.diagnosticWarning) {
+      events.push({
+        kind: "console",
+        severity: "warning",
+        message: "fixture warning"
+      });
+    }
     return {
       supported: true,
-      events: this.diagnosticError
-        ? [{
-            kind: "pageerror",
-            severity: "error",
-            message: "fixture exploded"
-          }]
-        : []
+      events
     };
   }
 
@@ -527,6 +539,405 @@ test("state exploration rejects action expectations already satisfied before use
   ));
 });
 
+test("revision comparison preserves deterministic behavior intent", async (t) => {
+  const {
+    context,
+    controller,
+    workspaceRoot
+  } = harness(t);
+  writeManifest(workspaceRoot, {
+    intent: {
+      version: 1,
+      fixtureRevision: "editor-fixture-v1",
+      criteria: [{
+        id: "editor_behavior",
+        statement: "Editor behavior remains stable.",
+        oracle: "behavior",
+        expectation: "preserve",
+        routeId: "editor"
+      }]
+    }
+  });
+  const reference = await controller.run({}, context);
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export const app = 'candidate';\n"
+  );
+  const candidate = await controller.run({
+    referenceRunId: reference.run.id
+  }, context);
+
+  assert.equal(candidate.ok, true);
+  assert.equal(candidate.status, "passed");
+  assert.equal(candidate.run.comparison.status, "passed");
+  assert.equal(candidate.run.comparison.summary.intended, 1);
+  assert.ok(candidate.run.artifacts.includes(
+    candidate.run.comparison.artifactRef
+  ));
+  const comparison = controller.comparisonStatus({
+    comparisonId: candidate.run.comparison.id
+  }, context);
+  assert.equal(comparison.status, "passed");
+  assert.equal(comparison.criteria[0].classification, "intended");
+  assert.deepEqual(comparison.criteria[0].basis, ["preserved"]);
+  assert.equal(comparison.reference.runId, reference.run.id);
+  assert.equal(comparison.candidate.runId, candidate.run.id);
+  const repeated = controller.compare({
+    referenceRunId: reference.run.id,
+    candidateRunId: candidate.run.id
+  }, context);
+  assert.equal(repeated.comparison.id, comparison.id);
+  assert.equal(controller.comparisons.list({
+    projectId: "alpha",
+    sessionId: "qa-session"
+  }).length, 1);
+
+  const report = controller.artifact({
+    runId: candidate.run.id,
+    ref: comparison.artifactRef,
+    includeData: true
+  }, context);
+  assert.equal(JSON.parse(report.data).status, "passed");
+  assert.equal(report.data.includes("Editor behavior remains stable."), false);
+
+  const recovered = new QaComparisonStore({
+    dir: controller.comparisons.dir
+  }).get(comparison.id);
+  assert.equal(recovered.status, "passed");
+  assert.equal(recovered.artifactRef, comparison.artifactRef);
+
+  const snapshotPath = path.join(
+    controller.comparisons.dir,
+    "snapshot.json"
+  );
+  const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+  snapshot.comparisons[0].status = "failed";
+  snapshot.comparisons[0].privateContent = "snapshot-must-not-win";
+  fs.writeFileSync(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+  fs.appendFileSync(
+    path.join(controller.comparisons.dir, "events.jsonl"),
+    "{\"truncated\":"
+  );
+  const journalRecovered = new QaComparisonStore({
+    dir: controller.comparisons.dir
+  }).get(comparison.id);
+  assert.equal(journalRecovered.status, "passed");
+  assert.equal(
+    JSON.stringify(journalRecovered).includes("snapshot-must-not-win"),
+    false
+  );
+  assert.throws(
+    () => new QaComparisonStore({
+      dir: controller.comparisons.dir
+    }).create(recovered),
+    /corrupt suffix/
+  );
+});
+
+test("revision comparison classifies deterministic behavior regressions", async (t) => {
+  const browser = new FakeQaBrowser();
+  const {
+    context,
+    controller,
+    workspaceRoot
+  } = harness(t, browser);
+  writeManifest(workspaceRoot, {
+    intent: {
+      fixtureRevision: "editor-fixture-v1",
+      criteria: [{
+        id: "save_behavior",
+        statement: "Saving continues to produce visible feedback.",
+        oracle: "behavior",
+        expectation: "preserve",
+        routeId: "editor",
+        controlId: "save_button"
+      }]
+    }
+  });
+  const reference = await controller.run({}, context);
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export const app = 'broken-candidate';\n"
+  );
+  browser.deadSave = true;
+  const candidate = await controller.run({
+    referenceRunId: reference.run.id
+  }, context);
+
+  assert.equal(candidate.ok, false);
+  assert.equal(candidate.run.state, "failed");
+  assert.equal(candidate.run.comparison.status, "failed");
+  const comparison = controller.comparisonStatus({
+    comparisonId: candidate.run.comparison.id
+  }, context);
+  assert.equal(comparison.implementation.passed, false);
+  assert.equal(comparison.criteria[0].classification, "regression");
+  assert.ok(comparison.criteria[0].basis.includes(
+    "candidate_quality_worsened"
+  ));
+  assert.ok(comparison.hypotheses.some(
+    (hypothesis) => hypothesis.code === "behavior_regression"
+  ));
+  assert.ok(comparison.hypotheses.some(
+    (hypothesis) => hypothesis.code === "candidate_implementation_failed"
+  ));
+});
+
+test("revision comparison ignores salted state ids and compares graph structure", async (t) => {
+  const {
+    context,
+    controller,
+    workspaceRoot
+  } = harness(t);
+  writeManifest(workspaceRoot, {
+    intent: {
+      fixtureRevision: "editor-fixture-v1",
+      criteria: [{
+        id: "editor_state_graph",
+        statement: "The editor interaction graph remains stable.",
+        oracle: "state_graph",
+        expectation: "preserve",
+        routeId: "editor"
+      }]
+    }
+  });
+  const reference = await controller.run({ mode: "explore" }, context);
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export const app = 'same-state-graph';\n"
+  );
+  const candidate = await controller.run({
+    mode: "explore",
+    referenceRunId: reference.run.id
+  }, context);
+
+  assert.equal(candidate.ok, true);
+  const comparison = controller.comparisonStatus({
+    comparisonId: candidate.run.comparison.id
+  }, context);
+  assert.equal(comparison.criteria[0].classification, "intended");
+  assert.equal(comparison.criteria[0].observed.changed, false);
+  assert.equal(comparison.criteria[0].observed.direction, "same");
+  assert.ok(comparison.criteria[0].evidenceRefs.length >= 2);
+});
+
+test("revision comparison fails when a declared state change never appears", async (t) => {
+  const {
+    context,
+    controller,
+    workspaceRoot
+  } = harness(t);
+  writeManifest(workspaceRoot, {
+    intent: {
+      fixtureRevision: "editor-fixture-v1",
+      criteria: [{
+        id: "new_editor_state",
+        statement: "The candidate introduces a new editor interaction state.",
+        oracle: "state_graph",
+        expectation: "change",
+        routeId: "editor"
+      }]
+    }
+  });
+  const reference = await controller.run({ mode: "explore" }, context);
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export const app = 'missing-state-change';\n"
+  );
+  const candidate = await controller.run({
+    mode: "explore",
+    referenceRunId: reference.run.id
+  }, context);
+
+  assert.equal(candidate.ok, false);
+  assert.equal(candidate.run.state, "passed");
+  assert.equal(candidate.run.comparison.status, "failed");
+  const comparison = controller.comparisonStatus({
+    comparisonId: candidate.run.comparison.id
+  }, context);
+  assert.equal(comparison.criteria[0].classification, "regression");
+  assert.deepEqual(
+    comparison.criteria[0].basis,
+    ["expected_change_missing"]
+  );
+  assert.ok(comparison.hypotheses.some(
+    (hypothesis) => hypothesis.code === "expected_change_missing"
+  ));
+});
+
+test("revision comparison surfaces possible improvements for review", async (t) => {
+  const browser = new FakeQaBrowser({ diagnosticWarning: true });
+  const {
+    context,
+    controller,
+    workspaceRoot
+  } = harness(t, browser);
+  writeManifest(workspaceRoot, {
+    intent: {
+      fixtureRevision: "editor-fixture-v1",
+      criteria: [{
+        id: "editor_diagnostics",
+        statement: "The editor remains free of browser diagnostics.",
+        oracle: "diagnostics",
+        expectation: "preserve",
+        routeId: "editor"
+      }]
+    }
+  });
+  const reference = await controller.run({}, context);
+  assert.equal(reference.ok, true);
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export const app = 'warning-removed';\n"
+  );
+  browser.diagnosticWarning = false;
+  const candidate = await controller.run({
+    referenceRunId: reference.run.id
+  }, context);
+
+  assert.equal(candidate.ok, false);
+  assert.equal(candidate.status, "review_required");
+  assert.equal(candidate.run.state, "passed");
+  const comparison = controller.comparisonStatus({
+    comparisonId: candidate.run.comparison.id
+  }, context);
+  assert.equal(
+    comparison.criteria[0].classification,
+    "improvement_candidate"
+  );
+  assert.equal(comparison.criteria[0].observed.direction, "better");
+  assert.ok(comparison.hypotheses.some(
+    (hypothesis) => hypothesis.code === "possible_improvement"
+  ));
+});
+
+test("visual intent changes require an exact human-approved baseline", async (t) => {
+  const browser = new FakeQaBrowser();
+  const {
+    context,
+    controller,
+    workspaceRoot
+  } = harness(t, browser);
+  writeManifest(workspaceRoot, {
+    intent: {
+      fixtureRevision: "editor-fixture-v1",
+      criteria: [{
+        id: "editor_visual",
+        statement: "The editor receives the approved visual redesign.",
+        oracle: "visual",
+        expectation: "change",
+        routeId: "editor"
+      }]
+    }
+  });
+  const manualContext = {
+    ...context,
+    __pendingActionId: "action_visual_intent",
+    __approval: { decider: "human-reviewer" }
+  };
+  const reference = await controller.run({}, context);
+  controller.approveBaselines({
+    runId: reference.run.id
+  }, manualContext);
+
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export const app = 'visual-candidate';\n"
+  );
+  browser.visualVariant = "approved-redesign";
+  const unapproved = await controller.run({}, context);
+  assert.equal(unapproved.ok, false);
+  assert.ok(unapproved.run.results.some(
+    (result) => result.visual.status === "changed"
+  ));
+
+  const review = controller.compare({
+    referenceRunId: reference.run.id,
+    candidateRunId: unapproved.run.id
+  }, context);
+  assert.equal(review.status, "failed");
+  assert.equal(
+    review.comparison.criteria[0].classification,
+    "review_required"
+  );
+  assert.ok(review.comparison.criteria[0].basis.includes(
+    "visual_change_not_human_approved"
+  ));
+
+  controller.approveBaselines({
+    runId: unapproved.run.id
+  }, {
+    ...manualContext,
+    __pendingActionId: "action_visual_intent_candidate"
+  });
+  const approved = controller.compare({
+    referenceRunId: reference.run.id,
+    candidateRunId: unapproved.run.id
+  }, context);
+  assert.equal(approved.ok, true);
+  assert.equal(approved.status, "passed");
+  assert.equal(
+    approved.comparison.criteria[0].classification,
+    "intended"
+  );
+  assert.equal(
+    approved.comparison.criteria[0].observed.humanApproved,
+    true
+  );
+
+  const rerun = await controller.run({
+    referenceRunId: reference.run.id
+  }, context);
+  assert.equal(rerun.ok, true);
+  assert.equal(rerun.run.state, "passed");
+  assert.equal(rerun.run.comparison.status, "passed");
+});
+
+test("revision comparison rejects incompatible browser epochs", async (t) => {
+  const {
+    context,
+    controller,
+    store,
+    artifacts,
+    baselines,
+    workspaceRoot
+  } = harness(t);
+  writeManifest(workspaceRoot, {
+    intent: {
+      fixtureRevision: "editor-fixture-v1",
+      criteria: [{
+        id: "editor_behavior",
+        statement: "Editor behavior remains stable.",
+        oracle: "behavior",
+        expectation: "preserve",
+        routeId: "editor"
+      }]
+    }
+  });
+  const reference = await controller.run({}, context);
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export const app = 'new-process';\n"
+  );
+  const otherController = new WebQaController({
+    browser: new FakeQaBrowser(),
+    store,
+    artifacts,
+    baselines,
+    comparisonDir: controller.comparisons.dir,
+    workspaceDir: workspaceRoot
+  });
+  const candidate = await otherController.run({}, context);
+
+  assert.throws(
+    () => otherController.compare({
+      referenceRunId: reference.run.id,
+      candidateRunId: candidate.run.id
+    }, context),
+    /same browser execution epoch/
+  );
+});
+
 test("unclassified controls, browser errors, and accessibility failures retain traces", async (t) => {
   const browser = new FakeQaBrowser({
     extraControl: true,
@@ -573,6 +984,38 @@ test("QA manifests reject destructive host actions and expired exemptions", asyn
     /requires fixture=true/
   );
 
+  writeManifest(workspaceRoot, {
+    intent: {
+      criteria: [{
+        id: "missing_fixture_revision",
+        statement: "This comparison contract is incomplete.",
+        oracle: "behavior",
+        expectation: "preserve",
+        routeId: "editor"
+      }]
+    }
+  });
+  await assert.rejects(
+    controller.run({}, context),
+    /fixtureRevision/
+  );
+  writeManifest(workspaceRoot, {
+    intent: {
+      fixtureRevision: "fixture-\u0430",
+      criteria: [{
+        id: "ascii_intent",
+        statement: "Reject a lookalike fixture identifier.",
+        oracle: "behavior",
+        expectation: "preserve",
+        routeId: "editor"
+      }]
+    }
+  });
+  await assert.rejects(
+    controller.run({}, context),
+    /fixtureRevision/
+  );
+
   const coverage = WEB_QA_INTERNALS.evaluateControlCoverage(
     [{ role: "button", name: "Later" }],
     {
@@ -602,7 +1045,9 @@ test("QA tools are gated, prompt-visible, and setup-allowlisted", () => {
   }, {
     webQa: {
       run: async () => ({}),
+      compare: () => ({}),
       status: () => ({}),
+      comparisonStatus: () => ({}),
       artifact: () => ({}),
       approveBaselines: () => ({})
     }
@@ -610,7 +1055,14 @@ test("QA tools are gated, prompt-visible, and setup-allowlisted", () => {
 
   assert.deepEqual(
     specs.map((spec) => spec.name),
-    ["qa_run", "qa_status", "qa_artifact", "qa_approve_baseline"]
+    [
+      "qa_run",
+      "qa_compare",
+      "qa_status",
+      "qa_comparison_status",
+      "qa_artifact",
+      "qa_approve_baseline"
+    ]
   );
   assert.equal(specs[0].needsConfirmation, true);
   assert.equal(specs[0].sideEffects, true);
@@ -618,12 +1070,20 @@ test("QA tools are gated, prompt-visible, and setup-allowlisted", () => {
     specs[0].parameters.properties.mode.enum,
     ["full", "impacted", "explore"]
   );
+  assert.equal(
+    specs[0].parameters.properties.referenceRunId.pattern,
+    "^qa_[a-f0-9]{16}$"
+  );
   assert.equal(specs[1].sideEffects, false);
-  assert.equal(specs[3].manualApproval, true);
+  assert.equal(specs[3].sideEffects, false);
+  assert.equal(specs[5].manualApproval, true);
   assert.ok(SETUP_FIELDS.includes("OPENAGI_WEB_QA"));
   const prompt = buildDefaultInstructions({ agent: { name: "QA" } });
   assert.match(prompt, /qa_run\(manifestPath\?/);
   assert.match(prompt, /bounded breadth-first semantic state exploration/);
+  assert.match(prompt, /qa_compare\(referenceRunId, candidateRunId\)/);
+  assert.match(prompt, /explicit fixtureRevision/);
+  assert.match(prompt, /visual change is never self-approved/);
   assert.match(prompt, /qa_approve_baseline\(runId/);
   assert.match(prompt, /classify every interactive control/);
 });

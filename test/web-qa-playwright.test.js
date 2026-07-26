@@ -50,6 +50,17 @@ test("real Playwright QA clicks controls, audits accessibility, and captures scr
     baseUrl: `http://127.0.0.1:${address.port}`,
     fixture: true,
     sourceFiles: ["app.js"],
+    intent: {
+      version: 1,
+      fixtureRevision: "real-editor-v1",
+      criteria: [{
+        id: "editor_behavior",
+        statement: "The editor behavior remains stable.",
+        oracle: "behavior",
+        expectation: "preserve",
+        routeId: "editor"
+      }]
+    },
     routes: [{
       id: "editor",
       path: "/editor",
@@ -125,6 +136,24 @@ test("real Playwright QA clicks controls, audits accessibility, and captures scr
   assert.ok(result.run.results.every(
     (entry) => /^qaart_[a-f0-9]{64}$/.test(entry.screenshotRef)
   ));
+
+  fs.writeFileSync(
+    path.join(workspaceRoot, "app.js"),
+    "export default 'candidate';\n"
+  );
+  const differential = await controller.run({
+    referenceRunId: result.run.id
+  }, {
+    __projectId: "alpha",
+    sessionId: "real-browser-session",
+    __projectWorkspaceDir: workspaceRoot,
+    approved: true
+  });
+  assert.equal(differential.ok, true, JSON.stringify({
+    error: differential.run.error,
+    comparison: differential.run.comparison
+  }));
+  assert.equal(differential.run.comparison.status, "passed");
 
   const exploration = await controller.run({ mode: "explore" }, {
     __projectId: "alpha",

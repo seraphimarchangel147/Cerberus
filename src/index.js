@@ -302,6 +302,11 @@ export {
   UiStateExplorer
 } from "./ui-state-explorer.js";
 export {
+  normalizeQaIntent,
+  QaComparisonStore,
+  QaDifferentialAnalyzer
+} from "./qa-differential.js";
+export {
   QaArtifactStore,
   QaBaselineStore,
   QaRunStore,

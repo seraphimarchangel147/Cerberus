@@ -8,6 +8,7 @@ const CRITERION_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const SOURCE_REVISION_RE = /^[a-f0-9]{64}$/;
 const QA_RUN_ID_RE = /^qa_[a-f0-9]{16}$/;
+const QA_COMPARISON_ID_RE = /^qacmp_[a-f0-9]{16}$/;
 const KINDS = new Set([
   "accessibility",
   "behavior",
@@ -223,6 +224,12 @@ export function recordVerificationEvidence({
           qaRunId: QA_RUN_ID_RE.test(String(result?.evidence?.qaRunId ?? ""))
             ? result.evidence.qaRunId
             : null,
+          comparisonId: QA_COMPARISON_ID_RE.test(
+            String(result?.evidence?.comparisonId ?? "")
+          )
+            ? result.evidence.comparisonId
+            : null,
+          designPassed: result?.evidence?.designPassed === true,
           artifactRefs: normalizeArtifactRefs(
             result?.evidence?.artifactRefs
           )

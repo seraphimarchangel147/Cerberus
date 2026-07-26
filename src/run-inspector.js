@@ -34,7 +34,9 @@ const COMPACTED_EVENT_FILE_BYTES = 16 * 1024 * 1024;
 const STRING_METADATA = new Map([
   ["agentId", 128],
   ["code", 80],
+  ["comparisonId", 64],
   ["controlId", 64],
+  ["designStatus", 32],
   ["errorCode", 80],
   ["evidenceKind", 32],
   ["evidenceStatus", 32],
@@ -57,6 +59,9 @@ const INTEGER_METADATA = new Set([
   "cachedTokens",
   "completed",
   "controls",
+  "criteriaIntended",
+  "criteriaRegressions",
+  "criteriaReviewRequired",
   "criteriaFailed",
   "criteriaPassed",
   "durationMs",
@@ -474,6 +479,29 @@ export class RunInspector {
         artifactRefs: [event.result?.exploration?.graphRef].filter(Boolean),
         verificationStatus: event.result?.status,
         errorCode: event.error?.code ?? null
+      }
+    });
+  }
+
+  recordQaComparison(comparison, run) {
+    if (!comparison || !run) return null;
+    return this.store.record({
+      runId: run.id,
+      kind: "qa",
+      projectId: run.projectId,
+      sessionId: run.sessionId,
+      phase: "qa_comparison",
+      status: run.state,
+      at: comparison.createdAt,
+      metadata: {
+        revision: run.revision,
+        comparisonId: comparison.id,
+        designStatus: comparison.status,
+        criteriaIntended: comparison.summary?.intended,
+        criteriaRegressions: comparison.summary?.regressions,
+        criteriaReviewRequired: comparison.summary?.reviewRequired,
+        ok: comparison.status === "passed",
+        artifactRefs: [comparison.artifactRef]
       }
     });
   }

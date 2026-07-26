@@ -548,6 +548,9 @@ export class CoderController {
           manifestPath: check.manifestPath,
           mode: check.mode,
           ...(check.routeIds ? { routeIds: check.routeIds } : {}),
+          ...(check.referenceRunId
+            ? { referenceRunId: check.referenceRunId }
+            : {}),
           sourceRevision
         },
         nestedContext(context, run.id)
@@ -940,10 +943,12 @@ function normalizeChecks(value) {
         `Coder check ${index + 1} cannot carry a QA manifestPath.`
       );
     }
-    const mode = check?.mode === "impacted" ? "impacted" : "full";
+    const mode = ["impacted", "explore"].includes(check?.mode)
+      ? check.mode
+      : "full";
     if (
       check?.mode != null
-      && !["full", "impacted"].includes(String(check.mode))
+      && !["full", "impacted", "explore"].includes(String(check.mode))
     ) {
       throw new TypeError(`Coder QA check ${index + 1} has an invalid mode.`);
     }
@@ -959,6 +964,20 @@ function normalizeChecks(value) {
     if (type === "qa" && mode === "impacted" && routeIds === null) {
       throw new TypeError(
         `Coder impacted QA check ${index + 1} requires routeIds.`
+      );
+    }
+    const referenceRunId = check?.referenceRunId == null
+      ? null
+      : String(check.referenceRunId);
+    if (
+      referenceRunId !== null
+      && (
+        type !== "qa"
+        || !/^qa_[a-f0-9]{16}$/.test(referenceRunId)
+      )
+    ) {
+      throw new TypeError(
+        `Coder check ${index + 1} has an invalid QA referenceRunId.`
       );
     }
     const timeoutMs = check?.timeoutMs == null ? null : Number(check.timeoutMs);
@@ -979,6 +998,7 @@ function normalizeChecks(value) {
       ...(target ? { path: target } : {}),
       ...(manifestPath ? { manifestPath, mode } : {}),
       ...(routeIds === null ? {} : { routeIds }),
+      ...(referenceRunId === null ? {} : { referenceRunId }),
       ...(timeoutMs === null ? {} : { timeoutMs })
     };
   });
@@ -1114,7 +1134,14 @@ function verificationChecksSchema() {
         type: { type: "string", enum: ["qa", "syntax", "test"] },
         path: { type: "string" },
         manifestPath: { type: "string", minLength: 1, maxLength: 1_024 },
-        mode: { type: "string", enum: ["full", "impacted"] },
+        mode: {
+          type: "string",
+          enum: ["full", "impacted", "explore"]
+        },
+        referenceRunId: {
+          type: "string",
+          pattern: "^qa_[a-f0-9]{16}$"
+        },
         routeIds: {
           type: "array",
           minItems: 1,
@@ -1286,9 +1313,19 @@ function compactQaVerification(invocation, check, sourceRevision) {
     ? payload.run
     : null;
   const exactRevision = qaRun?.sourceRevision === sourceRevision;
-  const runPassed = qaRun?.state === "passed"
+  const comparisonRequired = Boolean(check.referenceRunId);
+  const comparisonPassed = comparisonRequired
+    ? qaRun?.comparison?.status === "passed"
+      && qaRun.comparison.referenceRunId === check.referenceRunId
+      && qaRun.comparison.candidateRunId === qaRun.id
+    : qaRun?.comparison == null
+      || qaRun.comparison.status === "passed";
+  const implementationPassed = qaRun?.state === "passed"
+    || qaRun?.comparison?.implementation?.passed === true;
+  const runPassed = implementationPassed
     && payload?.ok === true
-    && exactRevision;
+    && exactRevision
+    && comparisonPassed;
   const screenshotRefs = uniqueQaArtifactRefs(
     qaRun?.results?.map((result) => result?.screenshotRef)
   );
@@ -1322,6 +1359,8 @@ function compactQaVerification(invocation, check, sourceRevision) {
       ? "ok"
       : !exactRevision && qaRun
         ? "qa_source_revision_mismatch"
+        : comparisonRequired && !comparisonPassed
+          ? "qa_intent_comparison_failed"
         : String(
             qaRun?.error?.code
             ?? invocation?.outcome?.code
@@ -1340,6 +1379,12 @@ function compactQaVerification(invocation, check, sourceRevision) {
       qaRunId: /^qa_[a-f0-9]{16}$/.test(String(qaRun?.id ?? ""))
         ? qaRun.id
         : null,
+      comparisonId: /^qacmp_[a-f0-9]{16}$/.test(
+        String(qaRun?.comparison?.id ?? "")
+      )
+        ? qaRun.comparison.id
+        : null,
+      designPassed: comparisonPassed,
       sourceRevision: exactRevision ? sourceRevision : null,
       browserPassed: runPassed,
       accessibilityPassed: runPassed && accessibilityPassed,

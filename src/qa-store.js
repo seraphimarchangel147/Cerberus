@@ -12,6 +12,7 @@ import {
 import { createId, nowIso } from "./utils.js";
 
 const RUN_ID_RE = /^qa_[a-f0-9]{16}$/;
+const COMPARISON_ID_RE = /^qacmp_[a-f0-9]{16}$/;
 const ARTIFACT_REF_RE = /^qaart_[a-f0-9]{64}$/;
 const BASELINE_ID_RE = /^qabase_[a-f0-9]{64}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
@@ -729,6 +730,9 @@ export class QaBaselineStore {
 }
 
 function normalizeRun(value) {
+  const comparison = value?.comparison == null
+    ? null
+    : normalizeComparisonBinding(value.comparison);
   if (
     !value
     || typeof value !== "object"
@@ -753,14 +757,133 @@ function normalizeRun(value) {
     || !Array.isArray(value.artifacts)
     || !value.summary
     || typeof value.summary !== "object"
+    || (value.comparison != null && !comparison)
   ) {
     return null;
   }
   try {
-    return clone(value);
+    return {
+      ...clone(value),
+      ...(comparison === null ? {} : { comparison })
+    };
   } catch {
     return null;
   }
+}
+
+function normalizeComparisonBinding(value) {
+  const status = String(value?.status ?? "");
+  const implementationPassed = value?.implementation?.passed;
+  if (
+    !value
+    || typeof value !== "object"
+    || !["failed", "passed", "review_required"].includes(status)
+    || (
+      value.id != null
+      && !COMPARISON_ID_RE.test(String(value.id))
+    )
+    || (
+      value.referenceRunId != null
+      && !RUN_ID_RE.test(String(value.referenceRunId))
+    )
+    || (
+      value.candidateRunId != null
+      && !RUN_ID_RE.test(String(value.candidateRunId))
+    )
+    || (
+      value.artifactRef != null
+      && !ARTIFACT_REF_RE.test(String(value.artifactRef))
+    )
+    || (
+      value.createdAt != null
+      && !validIso(value.createdAt)
+    )
+    || !value.implementation
+    || typeof value.implementation !== "object"
+    || typeof implementationPassed !== "boolean"
+  ) {
+    return null;
+  }
+  if (value.id == null) {
+    const code = String(value.code ?? "");
+    const message = String(value.message ?? "");
+    if (
+      status !== "failed"
+      || !/^[a-z][a-z0-9_-]{0,79}$/.test(code)
+      || !message
+      || message.length > 2_000
+    ) {
+      return null;
+    }
+    return {
+      status,
+      code,
+      message,
+      implementation: { passed: implementationPassed }
+    };
+  }
+  if (
+    !COMPARISON_ID_RE.test(String(value.id))
+    || !RUN_ID_RE.test(String(value.referenceRunId ?? ""))
+    || !RUN_ID_RE.test(String(value.candidateRunId ?? ""))
+    || !ARTIFACT_REF_RE.test(String(value.artifactRef ?? ""))
+    || !validIso(value.createdAt)
+    || !value.summary
+    || typeof value.summary !== "object"
+  ) {
+    return null;
+  }
+  const summary = {};
+  for (const key of [
+    "total",
+    "required",
+    "intended",
+    "regressions",
+    "improvementCandidates",
+    "reviewRequired"
+  ]) {
+    if (
+      !Number.isSafeInteger(value.summary[key])
+      || value.summary[key] < 0
+    ) {
+      return null;
+    }
+    summary[key] = value.summary[key];
+  }
+  const failureCodes = Array.isArray(
+    value.implementation.unapprovedFailureCodes
+  )
+    ? value.implementation.unapprovedFailureCodes
+    : [];
+  if (
+    !["failed", "passed"].includes(value.implementation.candidateState)
+    || !Number.isSafeInteger(
+      value.implementation.approvedVisualFailures
+    )
+    || value.implementation.approvedVisualFailures < 0
+    || failureCodes.length > 100
+    || !failureCodes.every((code) => (
+      /^[a-z][a-z0-9_-]{0,79}$/.test(String(code))
+    ))
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    status,
+    referenceRunId: value.referenceRunId,
+    candidateRunId: value.candidateRunId,
+    artifactRef: value.artifactRef,
+    summary,
+    implementation: {
+      passed: implementationPassed,
+      candidateState: value.implementation.candidateState,
+      approvedVisualFailures:
+        value.implementation.approvedVisualFailures,
+      unapprovedFailureCodes: [...failureCodes]
+    },
+    createdAt: value.createdAt
+  };
 }
 
 function normalizeArtifact(value) {
@@ -897,7 +1020,12 @@ function emptySummary() {
     warnings: 0,
     visualChanges: 0,
     visualBaselinesMissing: 0,
-    keyboardFailures: 0
+    keyboardFailures: 0,
+    exploredStates: 0,
+    exploredTransitions: 0,
+    explorationActions: 0,
+    failedTransitions: 0,
+    explorationTruncated: false
   };
 }
 

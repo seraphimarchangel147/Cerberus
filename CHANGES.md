@@ -2,6 +2,20 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Revision-matched intent and differential QA (Codex)
+
+- Added immutable manifest intent criteria for behavior, visual, accessibility, keyboard, diagnostic, and state-graph oracles, with explicit ASCII fixture revisions and exact route, viewport, and control scopes.
+- Added `qa_compare` and `qa_comparison_status`, plus a `referenceRunId` fast path on `qa_run`, so the harness can reuse owned QA evidence without another browser pass or require comparison in the original governed call.
+- Required distinct source revisions and exact manifest, mode, project, session, workspace, fixture contract, and browser execution epoch compatibility before comparison; references must be earlier passing runs and candidates must be terminal.
+- Separated implementation evidence from product intent and classified each criterion as intended, regression, improvement candidate, or review required using deterministic structural metrics rather than model judgment.
+- Kept behavior, visual, accessibility, keyboard, diagnostic, and graph metrics independent; compared salted state graphs without state IDs or raw page content; and emitted concise code-based bug hypotheses with owned screenshot, graph, replay, trace, and diagnostic refs.
+- Extended manual baseline approval to otherwise-passing runs blocked only by missing or changed visuals; an intended visual change passes only when the exact candidate pixels and source revision have a real human approval.
+- Persisted differential reports through bounded fsynced JSONL authority plus atomic snapshots, strict recovery normalization, corrupt-suffix append refusal, bounded journal compaction, project/session containment, and input-digest idempotency.
+- Bound coder QA checks to exact comparison receipts, preserved comparison IDs in revision-matched acceptance evidence, and failed closed when a required comparison is missing, swapped, failed, or review-bound.
+- Extended content-free Run Inspector progress with comparison identity, design status, criterion counts, and the owned report ref; added fake-browser and real Chromium coverage for preserved behavior, regressions, stable graph structure, missing intended changes, improvement review, human-approved visual changes, incompatible epochs, durable recovery, and redaction.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1740/1741 tests with zero failures and one intentional platform skip.
+INTENT DIFFERENTIAL COMPLETE
+
 ## 2026-07-25 - Bounded semantic UI state exploration (Codex)
 
 - Extended `qa_run` with an `explore` mode that first proves the route and then builds a bounded breadth-first semantic state graph from fresh-page shortest-path replays.

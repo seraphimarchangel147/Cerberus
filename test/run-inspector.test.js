@@ -342,6 +342,42 @@ test("Run Inspector exposes structural state-exploration progress only", (t) => 
   assert.equal(persisted.includes(canary), false);
 });
 
+test("Run Inspector exposes differential classifications without report content", (t) => {
+  const dir = tempDir(t, "openagi-run-inspector-comparison-");
+  const inspector = new RunInspector({ dir });
+  const canary = "private-comparison-statement-must-not-persist";
+  const recorded = inspector.recordQaComparison({
+    id: "qacmp_0123456789abcdef",
+    status: "review_required",
+    createdAt: "2026-01-01T00:02:00.000Z",
+    summary: {
+      intended: 2,
+      regressions: 0,
+      reviewRequired: 1
+    },
+    artifactRef: ARTIFACT_REF,
+    statement: canary
+  }, {
+    id: "qa_0123456789abcdef",
+    revision: 4,
+    state: "passed",
+    projectId: "alpha",
+    sessionId: "alpha-session"
+  });
+
+  assert.equal(recorded.latest.comparisonId, "qacmp_0123456789abcdef");
+  assert.equal(recorded.latest.designStatus, "review_required");
+  assert.equal(recorded.latest.criteriaIntended, 2);
+  assert.equal(recorded.latest.criteriaRegressions, 0);
+  assert.equal(recorded.latest.criteriaReviewRequired, 1);
+  assert.deepEqual(recorded.latest.artifactRefs, [ARTIFACT_REF]);
+  const persisted = fs.readFileSync(
+    path.join(dir, "events.jsonl"),
+    "utf8"
+  ) + fs.readFileSync(path.join(dir, "snapshot.json"), "utf8");
+  assert.equal(persisted.includes(canary), false);
+});
+
 test("Run Inspector journal outranks snapshots and replays a valid suffix", (t) => {
   const dir = tempDir(t, "openagi-run-inspector-replay-");
   const canary = "snapshot-content-canary";

@@ -410,7 +410,8 @@ test("coder completion accepts browser, visual, keyboard, screenshot, and access
       properties: {
         manifestPath: { type: "string" },
         mode: { type: "string" },
-        sourceRevision: { type: "string" }
+        sourceRevision: { type: "string" },
+        referenceRunId: { type: "string" }
       },
       required: ["manifestPath", "mode", "sourceRevision"],
       additionalProperties: false
@@ -424,6 +425,13 @@ test("coder completion accepts browser, visual, keyboard, screenshot, and access
           id: "qa_0123456789abcdef",
           state: "passed",
           sourceRevision: args.sourceRevision,
+          comparison: {
+            id: "qacmp_0123456789abcdef",
+            status: "passed",
+            referenceRunId: args.referenceRunId,
+            candidateRunId: "qa_0123456789abcdef",
+            implementation: { passed: true }
+          },
           artifacts: [screenshotRef],
           results: [{
             status: "passed",
@@ -458,7 +466,8 @@ test("coder completion accepts browser, visual, keyboard, screenshot, and access
       id: "ui_contract",
       type: "qa",
       manifestPath: "qa-manifest.json",
-      mode: "full"
+      mode: "explore",
+      referenceRunId: "qa_fedcba9876543210"
     }],
     criteria: [
       {
@@ -517,10 +526,100 @@ test("coder completion accepts browser, visual, keyboard, screenshot, and access
   assert.equal(applied.result.run.acceptance.summary.requiredPassed, 5);
   assert.equal(qaCalls.length, 1);
   assert.match(qaCalls[0].sourceRevision, /^[a-f0-9]{64}$/);
+  assert.equal(qaCalls[0].mode, "explore");
+  assert.equal(
+    qaCalls[0].referenceRunId,
+    "qa_fedcba9876543210"
+  );
   assert.equal(
     applied.result.run.verification.results[0].evidence.screenshotRefs[0],
     screenshotRef
   );
+  assert.equal(
+    applied.result.run.verification.results[0].evidence.designPassed,
+    true
+  );
+  assert.ok(applied.result.run.acceptance.evidence.every(
+    (evidence) => (
+      evidence.result.comparisonId === "qacmp_0123456789abcdef"
+      && evidence.result.designPassed === true
+    )
+  ));
+});
+
+test("coder completion fails closed when a required QA comparison is absent", async (t) => {
+  const { context, tools, workspaceDir } = harness(t);
+  const { source, initial } = writeFixture(workspaceDir, 2);
+  tools.register({
+    name: "qa_run",
+    sideEffects: false,
+    handler: async (args) => ({
+      ok: true,
+      status: "passed",
+      run: {
+        id: "qa_0123456789abcdef",
+        state: "passed",
+        sourceRevision: args.sourceRevision,
+        artifacts: [],
+        results: [{
+          status: "passed",
+          screenshotRef: null,
+          accessibility: {
+            supported: true,
+            violations: 0,
+            incomplete: 0
+          },
+          keyboard: {
+            supported: true,
+            missing: 0,
+            focusVisibleFailures: 0,
+            trapped: false
+          },
+          visual: { status: "off" }
+        }],
+        summary: { failed: 0 },
+        error: null
+      }
+    })
+  });
+  const content = fs.readFileSync(source, "utf8");
+  const started = await tools.invoke("coder_start", {
+    objective: "Reject UI completion without its required intent comparison.",
+    files: [{ path: "value.mjs", tag: mintTag(content) }],
+    plan: ["Update the export.", "Require differential UI proof."],
+    checks: [{
+      id: "ui_contract",
+      type: "qa",
+      manifestPath: "qa-manifest.json",
+      mode: "full",
+      referenceRunId: "qa_fedcba9876543210"
+    }],
+    criteria: [{
+      id: "browser_behavior",
+      statement: "The browser behavior and intent comparison pass.",
+      kind: "behavior",
+      oracle: "browser",
+      checkIds: ["ui_contract"]
+    }]
+  }, context);
+  const applied = await tools.invoke("coder_apply", {
+    runId: started.result.id,
+    expectedRevision: started.result.revision,
+    operations: [{
+      kind: "edit",
+      path: "value.mjs",
+      tag: started.result.files[0].tag,
+      edits: [{ start: 1, end: 1, replace: "export const value = 2;" }]
+    }]
+  }, context);
+
+  assert.equal(applied.ok, false);
+  assert.equal(applied.result.run.state, "rolled_back");
+  assert.equal(
+    applied.result.run.verification.results[0].code,
+    "qa_intent_comparison_failed"
+  );
+  assert.equal(fs.readFileSync(source, "utf8"), initial);
 });
 
 test("failed QA evidence rolls coder-owned edits back", async (t) => {

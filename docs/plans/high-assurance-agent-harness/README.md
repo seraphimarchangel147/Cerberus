@@ -152,7 +152,7 @@ Delivered:
 
 ### F3 - Intent and differential oracle
 
-Status: next.
+Status: complete.
 
 Compare observed behavior against immutable acceptance criteria and, when
 available, a human-approved visual baseline or reference revision.
@@ -168,7 +168,41 @@ Required properties:
 - Produce a concise bug hypothesis with evidence refs and a minimized replay,
   never hidden reasoning.
 
+Delivered:
+
+- QA manifests can declare up to 32 immutable intent criteria over behavior,
+  visuals, accessibility, keyboard navigation, diagnostics, and state-graph
+  structure, plus an explicit ASCII `fixtureRevision`.
+- `qa_run(referenceRunId=...)` executes and compares in one governed call;
+  `qa_compare` reuses existing evidence without another browser pass, and
+  `qa_comparison_status` retrieves the durable report.
+- Comparisons require distinct source revisions and exact manifest, mode,
+  project, session, workspace, fixture contract, and browser execution epoch.
+  A passing reference must predate the terminal candidate.
+- Structural metrics deliberately exclude randomly salted state IDs and raw
+  page content. Behavior, visual, accessibility, keyboard, diagnostic, and
+  graph oracles remain separate so one kind of delta cannot impersonate
+  another.
+- Each criterion is classified as intended, regression, improvement candidate,
+  or review required. Required regressions fail; improvements and neutral
+  design deltas pause for review instead of being auto-accepted.
+- Visual intent changes become intended only when the candidate pixels and
+  exact source revision have a manual human baseline approval. The model and
+  ordinary tool confirmation cannot self-approve them.
+- Concise bug hypotheses contain criterion IDs, classification, deterministic
+  basis codes, and owned evidence refs, never hidden reasoning or page text.
+- Differential reports use fsynced JSONL authority plus atomic snapshots,
+  bounded compaction, corrupt-suffix refusal, strict recovery normalization,
+  and input-digest idempotency.
+- Coder QA checks can require a reference run. Completion evidence retains the
+  exact comparison ID and fails closed if the QA tool omits, swaps, or fails
+  that comparison.
+- Run Inspector shows only comparison ID, design status, classification counts,
+  and the owned report ref.
+
 ### F4 - Final hardening and performance proof
+
+Status: next.
 
 - Benchmark semantic observation against screenshot-only loops for tokens,
   latency, retries, and successful task completion.

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import pixelmatch from "pixelmatch";
@@ -17,6 +17,11 @@ import {
   normalizeExplorationPolicy,
   UiStateExplorer
 } from "./ui-state-explorer.js";
+import {
+  normalizeQaIntent,
+  QaComparisonStore,
+  QaDifferentialAnalyzer
+} from "./qa-differential.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const RUN_ID_RE = /^qa_[a-f0-9]{16}$/;
@@ -85,6 +90,20 @@ export class WebQaController {
     this.baselines = options.baselines ?? new QaBaselineStore({
       dir: path.join(this.store.dir, "baselines")
     });
+    this.comparisons = options.comparisons ?? new QaComparisonStore({
+      dir: options.comparisonDir ?? path.join(this.store.dir, "comparisons")
+    });
+    this.differential = options.differential ?? new QaDifferentialAnalyzer({
+      artifacts: this.artifacts,
+      baselines: this.baselines,
+      comparisons: this.comparisons
+    });
+    this.executionFingerprint = options.executionFingerprint == null
+      ? createHash("sha256").update(randomBytes(32)).digest("hex")
+      : requiredSha256(
+          options.executionFingerprint,
+          "QA execution fingerprint"
+        );
   }
 
   async run(args = {}, context = {}) {
@@ -132,7 +151,10 @@ export class WebQaController {
         title: loaded.manifest.title,
         routeIds: selectedRoutes.map((route) => route.id),
         viewports: loaded.manifest.viewports,
-        exploration: loaded.manifest.exploration
+        exploration: loaded.manifest.exploration,
+        intent: loaded.manifest.intent,
+        fixture: loaded.manifest.fixture,
+        executionFingerprint: this.executionFingerprint
       },
       mode
     });
@@ -257,6 +279,27 @@ export class WebQaController {
       await this.browser.close({}, qaBrowserContext(scope, run.id))
         .catch(() => {});
     }
+    if (
+      args.referenceRunId != null
+      && ["passed", "failed"].includes(run.state)
+    ) {
+      try {
+        run = this._attachComparison(
+          this._authorizedRun(args.referenceRunId, scope),
+          run,
+          scope
+        );
+      } catch (error) {
+        run = this.store.update(run.id, run.revision, {
+          comparison: {
+            status: "failed",
+            code: "qa_comparison_failed",
+            message: boundedError(error),
+            implementation: { passed: run.state === "passed" }
+          }
+        });
+      }
+    }
     this._emit(run);
     return qaRunResult(run);
   }
@@ -264,6 +307,37 @@ export class WebQaController {
   status(args = {}, context = {}) {
     const scope = qaScope(context, this.workspaceDir);
     return publicRun(this._authorizedRun(args.runId, scope));
+  }
+
+  compare(args = {}, context = {}) {
+    const scope = qaScope(context, this.workspaceDir);
+    const reference = this._authorizedRun(args.referenceRunId, scope);
+    const candidate = this._authorizedRun(args.candidateRunId, scope);
+    const run = this._attachComparison(
+      reference,
+      candidate,
+      scope
+    );
+    const comparison = this.comparisons.get(run.comparison.id);
+    return {
+      ok: comparison.status === "passed",
+      status: comparison.status,
+      comparison: publicComparison(comparison)
+    };
+  }
+
+  comparisonStatus(args = {}, context = {}) {
+    const scope = qaScope(context, this.workspaceDir);
+    const comparison = this.comparisons.get(String(args.comparisonId ?? ""));
+    if (
+      !comparison
+      || comparison.projectId !== scope.projectId
+      || comparison.sessionId !== scope.sessionId
+      || path.resolve(comparison.workspaceRoot) !== scope.workspaceRoot
+    ) {
+      throw new Error(`Unknown QA comparison: ${args.comparisonId}`);
+    }
+    return publicComparison(comparison);
   }
 
   artifact(args = {}, context = {}) {
@@ -348,6 +422,23 @@ export class WebQaController {
 
   async close() {
     if (this.ownsBrowser) await this.browser.closeAll?.();
+  }
+
+  _attachComparison(reference, candidate, scope) {
+    const comparison = this.differential.compare({
+      reference,
+      candidate
+    });
+    if (candidate.comparison?.id === comparison.id) return candidate;
+    const run = this.store.update(candidate.id, candidate.revision, {
+      comparison: comparisonBinding(comparison),
+      artifacts: [...new Set([
+        ...(candidate.artifacts ?? []),
+        comparison.artifactRef
+      ])]
+    });
+    this._emitComparison(comparison, run, scope);
+    return run;
   }
 
   async _exercisePage({
@@ -785,6 +876,24 @@ export class WebQaController {
     }
     this.runtime?.events?.emit?.("qa-run", event);
   }
+
+  _emitComparison(comparison, run, scope) {
+    try {
+      this.runtime?.runInspector?.recordQaComparison?.(comparison, run);
+    } catch {
+      // Operational visibility is advisory and cannot break QA comparison.
+    }
+    this.runtime?.events?.emit?.("qa-comparison", {
+      id: comparison.id,
+      status: comparison.status,
+      projectId: scope.projectId,
+      sessionId: scope.sessionId,
+      candidateRunId: run.id,
+      summary: comparison.summary,
+      artifactRef: comparison.artifactRef,
+      updatedAt: comparison.createdAt
+    });
+  }
 }
 
 export function registerWebQaTools(registry, runtime) {
@@ -826,6 +935,11 @@ export function registerWebQaTools(registry, runtime) {
           type: "string",
           pattern: "^[a-f0-9]{64}$",
           description: "Optional exact coder source revision; otherwise derived from manifest sourceFiles."
+        },
+        referenceRunId: {
+          type: "string",
+          pattern: "^qa_[a-f0-9]{16}$",
+          description: "Optional earlier passing run from this exact manifest, mode, session, and browser execution epoch. When supplied, qa_run performs deterministic intent comparison before reporting success."
         }
       },
       additionalProperties: false
@@ -834,6 +948,28 @@ export function registerWebQaTools(registry, runtime) {
       `Run web QA manifest ${String(args.manifestPath ?? "qa-manifest.json").slice(0, 200)}`
     ),
     handler: (args, context) => controller.run(args, context)
+  });
+
+  register({
+    name: "qa_compare",
+    description: "Compare an earlier passing reference QA run with a newer candidate from the exact same manifest, mode, project session, and browser execution epoch. Applies immutable manifest intent criteria, separates implementation evidence from design intent, and classifies each delta as intended, regression, improvement candidate, or review required.",
+    sideEffects: false,
+    parameters: {
+      type: "object",
+      properties: {
+        referenceRunId: {
+          type: "string",
+          pattern: "^qa_[a-f0-9]{16}$"
+        },
+        candidateRunId: {
+          type: "string",
+          pattern: "^qa_[a-f0-9]{16}$"
+        }
+      },
+      required: ["referenceRunId", "candidateRunId"],
+      additionalProperties: false
+    },
+    handler: (args, context) => controller.compare(args, context)
   });
 
   register({
@@ -849,6 +985,24 @@ export function registerWebQaTools(registry, runtime) {
       additionalProperties: false
     },
     handler: (args, context) => controller.status(args, context)
+  });
+
+  register({
+    name: "qa_comparison_status",
+    description: "Inspect one durable project/session QA differential report, including deterministic classifications, concise bug hypotheses, and owned evidence refs.",
+    sideEffects: false,
+    parameters: {
+      type: "object",
+      properties: {
+        comparisonId: {
+          type: "string",
+          pattern: "^qacmp_[a-f0-9]{16}$"
+        }
+      },
+      required: ["comparisonId"],
+      additionalProperties: false
+    },
+    handler: (args, context) => controller.comparisonStatus(args, context)
   });
 
   register({
@@ -870,7 +1024,7 @@ export function registerWebQaTools(registry, runtime) {
 
   register({
     name: "qa_approve_baseline",
-    description: "Approve screenshots from one otherwise-passing QA run as visual baselines. A run may be blocked only by missing baselines. This is a manual human decision: auto-approve and caller confirmation cannot satisfy it.",
+    description: "Approve screenshots from one otherwise-passing QA run as visual baselines, including a run blocked only by missing or changed visuals. This is a manual human decision: auto-approve and caller confirmation cannot satisfy it.",
     sideEffects: true,
     needsConfirmation: true,
     manualApproval: true,
@@ -973,12 +1127,17 @@ function normalizeManifest(value) {
       )
     };
   });
+  const intent = normalizeQaIntent(value.intent, {
+    routes,
+    viewports
+  });
   return {
     version: 1,
     title,
     baseUrl,
     fixture,
     exploration,
+    intent,
     sourceFiles,
     viewports,
     routes
@@ -1719,7 +1878,11 @@ function baselineEligibleRun(run) {
   if (run.state !== "failed" || !Array.isArray(run.results)) return false;
   const failures = run.results.flatMap((result) => result.failures ?? []);
   return failures.length > 0 && failures.every(
-    (entry) => entry?.code === "visual_baseline_missing"
+    (entry) => [
+      "visual_baseline_missing",
+      "visual_regression",
+      "visual_size_changed"
+    ].includes(entry?.code)
   );
 }
 
@@ -1814,11 +1977,46 @@ function publicRun(run) {
 }
 
 function qaRunResult(run) {
+  const implementationPassed = run.state === "passed"
+    || run.comparison?.implementation?.passed === true;
+  const comparisonPassed = run.comparison == null
+    || run.comparison.status === "passed";
+  const status = !implementationPassed
+    ? run.state
+    : run.comparison?.status ?? run.state;
   return {
-    ok: run.state === "passed",
-    status: run.state,
+    ok: implementationPassed && comparisonPassed,
+    status,
     run: publicRun(run)
   };
+}
+
+function comparisonBinding(comparison) {
+  return {
+    id: comparison.id,
+    status: comparison.status,
+    referenceRunId: comparison.reference.runId,
+    candidateRunId: comparison.candidate.runId,
+    artifactRef: comparison.artifactRef,
+    summary: structuredClone(comparison.summary),
+    implementation: {
+      passed: comparison.implementation.passed,
+      candidateState: comparison.implementation.candidateState,
+      approvedVisualFailures:
+        comparison.implementation.approvedVisualFailures,
+      unapprovedFailureCodes: [
+        ...comparison.implementation.unapprovedFailureCodes
+      ]
+    },
+    createdAt: comparison.createdAt
+  };
+}
+
+function publicComparison(comparison) {
+  const { workspaceRoot: _workspaceRoot, ...visible } = structuredClone(
+    comparison
+  );
+  return visible;
 }
 
 function requiredId(value, label) {
