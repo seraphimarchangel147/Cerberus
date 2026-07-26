@@ -11099,11 +11099,12 @@ switchTab(initialTab);
     eye:"#ff5a1e", eyeCore:"#ffe680", fang:"#f4ecd8", claw:"#e0982a", clawHi:"#ffd24a",
     mouth:"#5a1210", tongue:"#c24a3a", nose:"#0a0a10", earIn:"#7a2010"
   };
-  var PAL4 = {  /* OMEGA — polished obsidian + gold inlay (cool body, no cracks) */
+  var PAL4 = {  /* OMEGA — molten obsidian + gold inlay (ember veins beneath the hide) */
     outline:"#0e1116", furDeep:"#14171b", furDark:"#1b1f24", furMid:"#2e343b",
     furLight:"#4b535c", furHi:"#6a727b", rim:"#c8862e", rimHot:"#ffd878",
     gold:"#d99a3a", goldHi:"#ffd878", goldDk:"#8a5a1e",
     gem:"#e0461a", gemCore:"#ffd24a", gemHalo:"#7a1400",
+    lava1:"#7a1400", lava2:"#c83000", lava3:"#ff5a14", lava4:"#ffd24a", lava5:"#ffe680",
     flameCore:"#fff0b0", flameYel:"#ffd84a", flameOrg:"#ff7a1a", flameRed:"#e0451a", flameDeep:"#5a0d00",
     eye:"#ff5a1e", eyeCore:"#fff0a0", fang:"#f4ecd8", claw:"#d99a3a", clawHi:"#ffd878",
     mouth:"#3a1018", tongue:"#a83a4a", nose:"#0a0c10", earIn:"#1b1f24",
@@ -11747,21 +11748,39 @@ switchTab(initialTab);
 
   /* ══════════════════════ OMEGA — polished obsidian + gold inlay, CRT aura ══════════════════════ */
   function omegaChevron(ctx, cx, cy, flick, pal, flare) {
-    /* gold V-chevron with downward spike tip + 2 diamond studs */
+    /* ornate golden breastplate — V-chevron converging on a glowing red gem
+       core, with chain arcs sweeping out to the shoulders. The OMEGA centerpiece. */
     var pulse = flare ? 1 : (0.7 + 0.3*Math.sin(flick*0.12));
-    ctx.globalAlpha = pulse*0.3;
-    pxTri(ctx, cx, cy+6, cx-11, cy-6, cx+11, cy-6, pal.gemHalo);
+    /* soft red glow halo behind the gem */
+    ctx.globalAlpha = pulse*0.35;
+    pxDiamond(ctx, cx, cy-2, 13, 11, pal.gemHalo);
     ctx.globalAlpha = 1;
-    pxLine(ctx, cx-10, cy-6, cx, cy+4, 2, pal.gold);
-    pxLine(ctx, cx+10, cy-6, cx, cy+4, 2, pal.gold);
-    pxLine(ctx, cx-10, cy-6, cx-1, cy+3, 1, pal.goldHi);
-    pxLine(ctx, cx+10, cy-6, cx+1, cy+3, 1, pal.goldHi);
-    pxTri(ctx, cx, cy+4, cx-2, cy+8, cx+2, cy+8, pal.gold);   /* dripping spike tip */
-    pxRect(ctx, cx, cy+3, 1, 2, pal.goldHi);
-    pxDiamond(ctx, cx-9, cy-1, 3, 3, pal.gold);   /* left stud — bigger */
-    pxDiamond(ctx, cx+9, cy-1, 3, 3, pal.gold);   /* right stud */
-    pxRect(ctx, cx-9, cy-1, 1, 1, pal.goldHi);
-    pxRect(ctx, cx+9, cy-1, 1, 1, pal.goldHi);
+    /* chain arcs sweeping from the shoulders down to the gem */
+    pxLine(ctx, cx-16, cy-8, cx-9, cy-3, 1, pal.goldDk);
+    pxLine(ctx, cx+16, cy-8, cx+9, cy-3, 1, pal.goldDk);
+    for (var lk=0; lk<4; lk++) {
+      var lt = lk/3;
+      pxRect(ctx, Math.round(cx-16+7*lt), Math.round(cy-8+5*lt), 1, 1, pal.goldHi);
+      pxRect(ctx, Math.round(cx+16-7*lt), Math.round(cy-8+5*lt), 1, 1, pal.goldHi);
+    }
+    /* gold V-chevron arms converging on the gem */
+    pxLine(ctx, cx-12, cy-7, cx, cy+5, 2, pal.gold);
+    pxLine(ctx, cx+12, cy-7, cx, cy+5, 2, pal.gold);
+    pxLine(ctx, cx-12, cy-7, cx-1, cy+4, 1, pal.goldHi);
+    pxLine(ctx, cx+12, cy-7, cx+1, cy+4, 1, pal.goldHi);
+    pxTri(ctx, cx, cy+5, cx-2, cy+9, cx+2, cy+9, pal.gold);   /* dripping spike tip */
+    pxRect(ctx, cx, cy+4, 1, 2, pal.goldHi);
+    /* the gem — thin gold frame around a solid bright red diamond core */
+    pxDiamond(ctx, cx, cy-2, 8, 6, pal.gold);
+    pxDiamond(ctx, cx, cy-2, 7, 5, "#e01a0a");
+    ctx.globalAlpha = pulse;
+    pxDiamond(ctx, cx, cy-2, 3, 2, pal.gemCore);   /* white-hot gem heart */
+    ctx.globalAlpha = 1;
+    /* shoulder studs where the chains anchor */
+    pxDiamond(ctx, cx-16, cy-8, 3, 3, pal.gold);
+    pxDiamond(ctx, cx+16, cy-8, 3, 3, pal.gold);
+    pxRect(ctx, cx-16, cy-8, 1, 1, pal.goldHi);
+    pxRect(ctx, cx+16, cy-8, 1, 1, pal.goldHi);
   }
   function omegaTail(ctx, x0, y0, wag, flick, flameI, pal) {
     /* right-hip tail, 4 gold dorsal barbs + flared flame-barb tip */
@@ -11781,11 +11800,56 @@ switchTab(initialTab);
     flameTongue(ctx, tx, ty-3, 6*flameI, 3, wag*0.5, 7, pal);
   }
   function omegaAura(ctx, W, H, flick, pal) {
-    /* external fire aura + rising embers behind the body (drawn first) */
-    for (var ax=10; ax<W-10; ax+=7) {
-      var ah = (16 + Math.round(6*Math.sin(ax*0.2 + flick*0.05)));
+    /* CONTAINED fire halo — a radial ember-glow behind the body that fades to
+       fully transparent well before the canvas edge, so the beast reads as
+       wreathed in fire without any rectangular canvas border. Drawn first. */
+    var g = ctx.createRadialGradient(W/2, H/2+6, 6, W/2, H/2+6, 40);
+    g.addColorStop(0, "rgba(255,110,26,0.34)");
+    g.addColorStop(0.55, "rgba(224,60,16,0.16)");
+    g.addColorStop(1, "rgba(224,60,16,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    /* rising embers within the halo */
+    for (var e=0; e<9; e++) {
+      var ex = 16 + ((e*13 + Math.round(flick*0.35)) % (W-32));
+      var ey = H-14 - ((e*17 + Math.round(flick*0.6)) % 46);
+      ctx.globalAlpha = 0.55 + 0.4*Math.sin(flick*0.2 + e);
+      ctx.fillStyle = e%3===0 ? pal.lava4 : pal.flameOrg;
+      ctx.fillRect(ex, ey, 1, 1);
+    }
+    ctx.globalAlpha = 1;
+    /* fire tongues along the ground, tapered so no hard edge */
+    for (var ax=14; ax<W-14; ax+=7) {
+      var ah = (15 + Math.round(6*Math.sin(ax*0.2 + flick*0.05)));
       flameTongue(ctx, ax, H-16, ah, 6, Math.sin(flick*0.15+ax)*1.5, ax, pal);
     }
+  }
+  function omegaVeins(ctx, cx, cy, flick, pal) {
+    /* molten ember veins beneath the obsidian hide — traced across the visible
+       haunches and belly (not under the legs/gem) so they clearly read as a
+       burning core. Brighter than a whisper, sparser than ULTRA's full network. */
+    var pulse = 0.7 + 0.3*Math.sin(flick*0.1);
+    var veins = [
+      [cx-26,cy-2, cx-19,cy+2, cx-13,cy+6],   /* left haunch */
+      [cx+26,cy-2, cx+19,cy+2, cx+13,cy+6],   /* right haunch */
+      [cx-22,cy+6, cx-16,cy+9, cx-9,cy+10],   /* left lower */
+      [cx+22,cy+6, cx+16,cy+9, cx+9,cy+10],   /* right lower */
+      [cx-7,cy+9, cx,cy+11, cx+7,cy+9],       /* belly */
+      [cx-16,cy-8, cx-10,cy-5, cx-5,cy-7],    /* upper left chest */
+      [cx+16,cy-8, cx+10,cy-5, cx+5,cy-7]     /* upper right chest */
+    ];
+    for (var v=0; v<veins.length; v++) {
+      var vn = veins[v];
+      for (var sgm=0; sgm<vn.length-2; sgm+=2) {
+        pxLine(ctx, vn[sgm], vn[sgm+1], vn[sgm+2], vn[sgm+3], 1, pal.lava3);
+      }
+    }
+    ctx.globalAlpha = pulse;
+    var nodes = [[cx-19,cy+2],[cx+19,cy+2],[cx-13,cy+6],[cx+13,cy+6],[cx,cy+11],[cx-10,cy-5],[cx+10,cy-5],[cx-16,cy+9],[cx+16,cy+9]];
+    for (var n=0; n<nodes.length; n++) {
+      pxRect(ctx, nodes[n][0], nodes[n][1], 1, 1, n%3===0 ? pal.lava5 : pal.lava4);
+    }
+    ctx.globalAlpha = 1;
   }
   function drawOmegaFront(ctx, P) {
     var W=112,H=88; ctx.clearRect(0,0,W,H);
@@ -11796,35 +11860,40 @@ switchTab(initialTab);
     /* scorched ground band — tapered at the edges so no hard canvas rectangle */
     pxRect(ctx, 20, H-5, W-40, 4, "#3a1410");
     for (var sx=24; sx<W-24; sx+=8) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
-    /* torso — polished, cel-banded, NO cracks */
-    pxEllipse(ctx,56,64+bob*0.3,28,14,pal.furDark); pxEllipse(ctx,56,58+bob*0.3,19,15,pal.furMid);
-    pxEllipse(ctx,56,50+bob*0.3,12,6,pal.furLight); pxEllipse(ctx,56,47+bob*0.3,7,3,pal.furHi);
-    pxEllipse(ctx,56,74+bob*0.3,21,2,pal.furDeep);
-    pxEllipse(ctx,48,52+bob*0.3,4,2,pal.furHi);   /* polished shoulder sheen */
+    /* torso — broad, heavy, molten-veined obsidian */
+    pxEllipse(ctx,56,64+bob*0.3,32,16,pal.furDark); pxEllipse(ctx,56,58+bob*0.3,22,17,pal.furMid);
+    pxEllipse(ctx,38,66+bob*0.3,10,10,pal.furDark); pxEllipse(ctx,74,66+bob*0.3,10,10,pal.furDark);  /* haunches */
+    pxEllipse(ctx,56,50+bob*0.3,14,7,pal.furLight); pxEllipse(ctx,56,47+bob*0.3,8,3,pal.furHi);
+    pxEllipse(ctx,56,76+bob*0.3,24,2,pal.furDeep);
+    pxEllipse(ctx,46,52+bob*0.3,5,2,pal.furHi); pxEllipse(ctx,66,52+bob*0.3,5,2,pal.furHi);  /* shoulder sheen */
+    omegaVeins(ctx, 56, 60+bob*0.3, flick, pal);
     /* gold collar/ruff ring at neck base */
     for (var rk=0; rk<7; rk++) { var ra=Math.PI + rk*(Math.PI/6); pxTri(ctx, 56+Math.cos(ra)*16, 44+bob*0.3+Math.sin(ra)*4, 56+Math.cos(ra)*19, 42+bob*0.3+Math.sin(ra)*5, 56+Math.cos(ra+0.2)*16, 45+bob*0.3, pal.gold); }
     omegaTail(ctx, 78, 62, Math.sin((P.tailWag||0))*4, flick, flameI, pal);
-    omegaChevron(ctx, 56, 58+bob*0.3, flick, pal, P.runeFlare);
     /* front legs + gold inlay joints + 4 gold talons */
     if (P.wave) {
-      pxLine(ctx,46,65,45,81,7,pal.furMid); pxRect(ctx,39,80,9,3,pal.furMid);
-      pxRect(ctx,45,72,1,4,pal.gold);
-      for (var c1=0;c1<4;c1++) pxRect(ctx,39+c1*2,83,1,2,pal.claw);
+      pxLine(ctx,46,65,45,81,8,pal.furMid); pxRect(ctx,38,80,10,3,pal.furMid);
+      ultraBracer(ctx, 45, 72, pal);
+      for (var c1=0;c1<4;c1++) pxRect(ctx,38+c1*2,83,1,2,pal.claw);
       var wv=Math.sin(flick*0.5)*4.5;
-      pxLine(ctx,68,58,75+wv,44,7,pal.furMid); pxRect(ctx,73+wv,41,8,3,pal.furMid);
+      pxLine(ctx,68,58,75+wv,44,8,pal.furMid); pxRect(ctx,73+wv,41,8,3,pal.furMid);
+      ultraBracer(ctx, 73+wv, 47, pal);
       for (var c2=0;c2<4;c2++) pxRect(ctx,73+wv+c2*2,40,1,2,pal.claw);
     } else {
-      pxLine(ctx,46,65,45,81,7,pal.furMid); pxRect(ctx,39,80,9,3,pal.furMid);
-      pxRect(ctx,45,72,1,4,pal.gold);
-      for (var c3=0;c3<4;c3++) pxRect(ctx,39+c3*2,83,1,2,pal.claw);
-      pxLine(ctx,68,65,69,81,7,pal.furMid); pxRect(ctx,64,80,9,3,pal.furMid);
-      pxRect(ctx,69,72,1,4,pal.gold);
+      pxLine(ctx,46,65,45,81,8,pal.furMid); pxRect(ctx,38,80,10,3,pal.furMid);
+      ultraBracer(ctx, 45, 72, pal);
+      for (var c3=0;c3<4;c3++) pxRect(ctx,38+c3*2,83,1,2,pal.claw);
+      pxLine(ctx,68,65,69,81,8,pal.furMid); pxRect(ctx,64,80,10,3,pal.furMid);
+      ultraBracer(ctx, 69, 72, pal);
       for (var c4=0;c4<4;c4++) pxRect(ctx,64+c4*2,83,1,2,pal.claw);
     }
     /* necks + three regal heads (center wears OMEGA gold crest + ear inlay) */
-    pxLine(ctx,28+hl,35+bob*0.8+droop-headLift,42,54+bob*0.3,6,pal.furDark);
-    pxLine(ctx,56+hc,27+bob+droop*0.5-headLift,56,54+bob*0.3,8,pal.furDark);
-    pxLine(ctx,84+hr,35+bob*0.8+droop-headLift,70,54+bob*0.3,6,pal.furDark);
+    pxLine(ctx,28+hl,35+bob*0.8+droop-headLift,42,54+bob*0.3,8,pal.furDark);
+    pxLine(ctx,56+hc,27+bob+droop*0.5-headLift,56,54+bob*0.3,10,pal.furDark);
+    pxLine(ctx,84+hr,35+bob*0.8+droop-headLift,70,54+bob*0.3,8,pal.furDark);
+    /* ornate breastplate — drawn AFTER the necks so the gem sits in front of the
+       chest and is never buried by the center neck */
+    omegaChevron(ctx, 56, 60+bob*0.3, flick, pal, P.runeFlare);
     /* gold diamond studs on the outer shoulders (drawn after necks so visible) */
     pxDiamond(ctx, 33, 57+bob*0.3, 4, 4, pal.gold);
     pxDiamond(ctx, 79, 57+bob*0.3, 4, 4, pal.gold);
@@ -11851,15 +11920,16 @@ switchTab(initialTab);
     pxLine(ctx,68+legSwing(Math.PI),60,70+legSwing(Math.PI),76,7,pal.furDark); pxRect(ctx,64+legSwing(Math.PI),75,9,3,pal.furDark);
     for (var c2=0;c2<4;c2++) pxRect(ctx,64+legSwing(Math.PI)+c2*2,78,1,2,pal.claw);
     omegaTail(ctx, 82, 58, Math.sin((P.tailWag||0))*3.5, flick, flameI, pal);
-    pxEllipse(ctx,54,58+bob*0.3,29*squash,13/squash,pal.furDark);
-    pxEllipse(ctx,29,56+bob*0.3,14*squash,13/squash,pal.furMid);
-    pxEllipse(ctx,75,56+bob*0.3,13*squash,13/squash,pal.furDark);
-    pxEllipse(ctx,51,48+bob*0.3,21,3,pal.furLight); pxEllipse(ctx,27,52+bob*0.3,6,3,pal.furLight);
-    pxEllipse(ctx,54,68+bob*0.3,21,2,pal.furDeep);
+    pxEllipse(ctx,54,58+bob*0.3,32*squash,15/squash,pal.furDark);
+    pxEllipse(ctx,29,56+bob*0.3,15*squash,14/squash,pal.furMid);
+    pxEllipse(ctx,76,56+bob*0.3,14*squash,14/squash,pal.furDark);
+    pxEllipse(ctx,51,48+bob*0.3,23,3,pal.furLight); pxEllipse(ctx,27,52+bob*0.3,6,3,pal.furLight);
+    pxEllipse(ctx,54,70+bob*0.3,24,2,pal.furDeep);
+    omegaVeins(ctx, 52, 58+bob*0.3, flick, pal);
     pxEllipse(ctx,29,52+bob*0.3,8,6,pal.outline); pxEllipse(ctx,29,52+bob*0.3,7,5,pal.gold); pxEllipse(ctx,28,51+bob*0.3,5,2,pal.goldHi);
-    pxLine(ctx,35+legSwing(Math.PI),61,35+legSwing(Math.PI),78,7,pal.furMid); pxRect(ctx,29+legSwing(Math.PI),77,9,3,pal.furMid);
-    pxRect(ctx,35+legSwing(Math.PI),68,1,4,pal.gold);
-    for (var c3=0;c3<4;c3++) pxRect(ctx,29+legSwing(Math.PI)+c3*2,80,1,2,pal.claw);
+    pxLine(ctx,35+legSwing(Math.PI),61,35+legSwing(Math.PI),78,8,pal.furMid); pxRect(ctx,28+legSwing(Math.PI),77,10,3,pal.furMid);
+    ultraBracer(ctx, 35+legSwing(Math.PI), 68, pal);
+    for (var c3=0;c3<4;c3++) pxRect(ctx,28+legSwing(Math.PI)+c3*2,80,1,2,pal.claw);
     pxLine(ctx,76+legSwing(0),60,78+legSwing(0),69,7,pal.furMid); pxLine(ctx,78+legSwing(0),69,77+legSwing(0),78,6,pal.furMid);
     pxRect(ctx,73+legSwing(0),77,9,3,pal.furMid);
     for (var c4=0;c4<4;c4++) pxRect(ctx,73+legSwing(0)+c4*2,80,1,2,pal.claw);
