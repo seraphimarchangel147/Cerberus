@@ -2866,6 +2866,18 @@ function appendApprovalNote(result, approval) {
 function privateToolEventArgs(tool, args) {
   if (tool?.metadata?.privateInput !== true) return args;
   const safe = sanitizeForAudit(args ?? {});
+  const privateFields = Array.isArray(tool.metadata.privateInputFields)
+    ? tool.metadata.privateInputFields
+    : [];
+  for (const field of privateFields) {
+    if (
+      typeof field === "string"
+      && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(field)
+      && Object.hasOwn(safe, field)
+    ) {
+      safe[field] = "[PRIVATE INPUT OMITTED]";
+    }
+  }
   if (
     safe
     && typeof safe === "object"

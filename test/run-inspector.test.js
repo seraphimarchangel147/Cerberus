@@ -255,6 +255,39 @@ test("Run Inspector exposes content-free completion-evidence progress", () => {
   assert.equal(JSON.stringify(inspected).includes("missing"), false);
 });
 
+test("Run Inspector exposes content-free computer-use evidence", () => {
+  const inspected = turnInspectorMetadata({
+    phase: "end",
+    name: "computer_act",
+    ok: true,
+    arguments: {
+      text: "private typed value",
+      fallbackReason: "private rationale"
+    },
+    receipt: {
+      id: "receipt_cua",
+      code: "computer_action_verified",
+      changed: true,
+      dispatched: true,
+      durationMs: 18
+    },
+    outcome: {
+      code: "computer_action_verified",
+      changed: true,
+      evidence: [
+        "computer-observation:7",
+        "computer-strategy:visual-fallback"
+      ],
+      verification: "passed"
+    }
+  });
+  assert.equal(inspected.metadata.observationRevision, 7);
+  assert.equal(inspected.metadata.toolStrategy, "visual-fallback");
+  assert.equal(inspected.metadata.verificationStatus, "passed");
+  assert.equal(JSON.stringify(inspected).includes("private typed value"), false);
+  assert.equal(JSON.stringify(inspected).includes("private rationale"), false);
+});
+
 test("Run Inspector journal outranks snapshots and replays a valid suffix", (t) => {
   const dir = tempDir(t, "openagi-run-inspector-replay-");
   const canary = "snapshot-content-canary";

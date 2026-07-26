@@ -46,7 +46,9 @@ const STRING_METADATA = new Map([
   ["routeId", 64],
   ["sourceRevision", 64],
   ["stopReason", 80],
+  ["toolStrategy", 80],
   ["toolName", 128],
+  ["verificationStatus", 32],
   ["viewportId", 64]
 ]);
 const INTEGER_METADATA = new Set([
@@ -71,6 +73,7 @@ const INTEGER_METADATA = new Set([
   "routes",
   "total",
   "mutationEvidence",
+  "observationRevision",
   "verificationEvidence",
   "visualEvidence",
   "visualChanges",
@@ -594,6 +597,10 @@ export function turnInspectorMetadata(event) {
     };
   }
   if (phase === "end") {
+    const computer = computerUseInspectorMetadata(
+      event?.name,
+      outcome
+    );
     return {
       phase: "tool_end",
       status: "running",
@@ -606,7 +613,8 @@ export function turnInspectorMetadata(event) {
         dispatched: receipt?.dispatched,
         changed: receipt?.changed ?? outcome?.changed,
         durationMs: receipt?.durationMs,
-        artifactRefs: outcome?.artifacts
+        artifactRefs: outcome?.artifacts,
+        ...computer
       }
     };
   }
@@ -654,6 +662,36 @@ export function turnInspectorMetadata(event) {
     phase: safePhase(phase || "progress"),
     status: "running",
     metadata: {}
+  };
+}
+
+function computerUseInspectorMetadata(name, outcome) {
+  if (
+    !["computer_observe", "computer_act", "computer_screenshot"].includes(
+      String(name ?? "")
+    )
+  ) {
+    return {};
+  }
+  const evidence = Array.isArray(outcome?.evidence)
+    ? outcome.evidence
+    : [];
+  const observation = evidence.find((item) => (
+    /^computer-observation:\d+$/.test(String(item))
+  ));
+  const strategy = evidence.find((item) => (
+    /^computer-strategy:[A-Za-z0-9._-]+$/.test(String(item))
+  ));
+  return {
+    observationRevision: observation
+      ? Number(observation.split(":")[1])
+      : null,
+    toolStrategy: strategy
+      ? strategy.slice("computer-strategy:".length)
+      : null,
+    verificationStatus: String(
+      outcome?.verification ?? ""
+    ).slice(0, 32) || null
   };
 }
 

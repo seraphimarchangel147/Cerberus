@@ -16,6 +16,7 @@ const MAX_TRACE_BYTES = 100 * 1024 * 1024;
 const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 const MAX_TEXT = 100_000;
+const MAX_VISUAL_EVIDENCE_AGE_MS = 120_000;
 const UNTRUSTED_LABEL = "untrusted-page-content";
 
 export class SemanticBrowserError extends Error {
@@ -108,6 +109,7 @@ export class SemanticBrowserService {
       secretValues: new Set(),
       url: null,
       openedAt: new Date().toISOString(),
+      lastScreenshot: null,
       qa: null
     };
     this.sessions.set(key, session);
@@ -190,6 +192,7 @@ export class SemanticBrowserService {
       secretValues: new Set(),
       url: null,
       openedAt: new Date().toISOString(),
+      lastScreenshot: null,
       qa: {
         runId: qaRunId,
         allowedOrigin,
@@ -378,6 +381,7 @@ export class SemanticBrowserService {
     });
     session.refs.clear();
     session.generation = null;
+    session.lastScreenshot = null;
     session.url = finalUrl;
     return this._snapshot(session, {}, scope, {
       navigated: true,
@@ -653,6 +657,19 @@ export class SemanticBrowserService {
     await this._refreshGeneration(session);
     session.url = await this._adapterUrl(session.adapter, session.url);
     session.url = await this._validateSessionUrl(session, session.url);
+    const sha256 = crypto.createHash("sha256")
+      .update(Buffer.from(image.data, "base64"))
+      .digest("hex");
+    const capturedAt = new Date().toISOString();
+    session.lastScreenshot = {
+      sha256,
+      generation: session.generation,
+      capturedAt,
+      capturedAtMs: Date.now(),
+      fullPage: input.fullPage === true,
+      width: image.width,
+      height: image.height
+    };
     return {
       untrusted: true,
       trust: UNTRUSTED_LABEL,
@@ -660,12 +677,102 @@ export class SemanticBrowserService {
       sessionId: scope.sessionId,
       url: redactSecrets(session.url, session.secretValues),
       generation: publicGeneration(session.generation),
+      evidence: {
+        sha256,
+        capturedAt,
+        coordinateEligible: input.fullPage !== true
+          && image.width != null
+          && image.height != null
+      },
       image: {
         mediaType: image.mediaType,
         data: image.data
       },
       width: image.width,
       height: image.height
+    };
+  }
+
+  async visualClick(args = {}, context = {}) {
+    const input = plainRecord(args, "browser visual click arguments");
+    const scope = this._authorizeContext(context);
+    assertSensitiveApproval(scope, "Browser visual coordinate click");
+    const session = this._requireSession(scope);
+    if (typeof session.adapter.coordinateClick !== "function") {
+      throw new SemanticBrowserError(
+        "The active browser adapter does not support visual coordinate clicks.",
+        "browser_visual_click_unsupported"
+      );
+    }
+    const screenshotSha256 = requiredSha256(
+      input.screenshotSha256,
+      "screenshotSha256"
+    );
+    const expectedGeneration = requiredBoundedText(
+      input.expectedGeneration,
+      128,
+      "expectedGeneration"
+    );
+    requiredBoundedText(input.fallbackReason, 500, "fallbackReason");
+    const evidence = session.lastScreenshot;
+    const liveGeneration = normalizeGeneration(
+      await callAdapter("generation check", () => (
+        session.adapter.currentGeneration()
+      ))
+    );
+    const publicLiveGeneration = publicGeneration(liveGeneration);
+    if (
+      !evidence
+      || evidence.sha256 !== screenshotSha256
+      || expectedGeneration !== publicLiveGeneration
+      || evidence.generation !== liveGeneration
+    ) {
+      session.lastScreenshot = null;
+      throw new SemanticBrowserError(
+        "Visual click evidence is stale or does not belong to the current page generation. Capture a fresh viewport screenshot.",
+        "browser_visual_evidence_stale"
+      );
+    }
+    if (
+      evidence.fullPage
+      || evidence.width == null
+      || evidence.height == null
+    ) {
+      throw new SemanticBrowserError(
+        "Visual coordinate clicks require a viewport screenshot with known dimensions.",
+        "browser_visual_evidence_ineligible"
+      );
+    }
+    if (Date.now() - evidence.capturedAtMs > MAX_VISUAL_EVIDENCE_AGE_MS) {
+      session.lastScreenshot = null;
+      throw new SemanticBrowserError(
+        "Visual click evidence expired. Capture a fresh viewport screenshot.",
+        "browser_visual_evidence_expired"
+      );
+    }
+    const x = boundedInteger(input.x, 0, evidence.width - 1, null);
+    const y = boundedInteger(input.y, 0, evidence.height - 1, null);
+    if (x == null || y == null) {
+      throw new SemanticBrowserError(
+        "Visual click coordinates must be integer pixels inside the captured viewport.",
+        "browser_visual_coordinates_invalid"
+      );
+    }
+    const button = input.button == null ? "left" : String(input.button);
+    if (!["left", "right", "middle"].includes(button)) {
+      throw new SemanticBrowserError(
+        "Visual click button must be left, right, or middle.",
+        "browser_visual_coordinates_invalid"
+      );
+    }
+    await callAdapter("visual coordinate click", () => (
+      session.adapter.coordinateClick({ x, y, button }, adapterContext(scope, this))
+    ));
+    return {
+      ...(await this._afterAction(session, scope)),
+      clicked: true,
+      strategy: "visual-fallback",
+      evidenceSha256: screenshotSha256
     };
   }
 
@@ -683,6 +790,7 @@ export class SemanticBrowserService {
     this.sessions.delete(key);
     session.refs.clear();
     session.secretValues.clear();
+    session.lastScreenshot = null;
     await safeAdapterClose(session.adapter);
     return {
       closed: true,
@@ -699,6 +807,7 @@ export class SemanticBrowserService {
     await Promise.allSettled(sessions.map((session) => {
       session.refs.clear();
       session.secretValues.clear();
+      session.lastScreenshot = null;
       return safeAdapterClose(session.adapter);
     }));
     return { closed: sessions.length };
@@ -928,6 +1037,7 @@ export class SemanticBrowserService {
     // (for example, setting an input's value property). Conservatively
     // require a fresh semantic inspection after every mutating action.
     session.refs.clear();
+    session.lastScreenshot = null;
     session.url = await this._adapterUrl(session.adapter, session.url);
     session.url = await this._validateSessionUrl(session, session.url);
     return {
@@ -1709,6 +1819,14 @@ class PlaywrightSessionAdapter {
       return;
     }
     await this.page.mouse.wheel(0, deltaY);
+  }
+
+  async coordinateClick({ x, y, button }) {
+    await this._withTopLevelNavigation(false, () => (
+      this.page.mouse.click(x, y, {
+        button
+      })
+    ));
   }
 
   async download(locator, { downloadDir, filename }) {
@@ -2523,6 +2641,17 @@ function requiredQaRunId(value) {
     throw new SemanticBrowserError(
       "QA browser operations require an exact run identity.",
       "browser_qa_run_invalid"
+    );
+  }
+  return text;
+}
+
+function requiredSha256(value, label) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(text)) {
+    throw new SemanticBrowserError(
+      `${label} must be an exact SHA-256 digest.`,
+      "browser_invalid_arguments"
     );
   }
   return text;

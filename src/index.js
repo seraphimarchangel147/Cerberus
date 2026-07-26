@@ -125,6 +125,10 @@ export {
 export { HookRegistry } from "./hook-registry.js";
 export { ComputerUseLog } from "./computer-use-log.js";
 export {
+  ComputerUseController,
+  callComputerNode
+} from "./computer-use-controller.js";
+export {
   ARTIFACT_KINDS,
   ArtifactCanvasError,
   ArtifactCanvasStore,

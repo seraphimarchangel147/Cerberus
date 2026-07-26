@@ -2,6 +2,19 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-25 - Unified governed computer use (Codex)
+
+- Added one project/session-scoped computer-use controller over the semantic browser and optional remote desktop node, with approved goals, explicit surfaces, hard mutation budgets, exact observation revisions, generation preconditions, and automatic post-action observations.
+- Added `computer_observe` and `computer_act` as the preferred semantic-first agent path while retaining legacy desktop names for compatibility; every new agent-facing tool is bounded, registry-governed, capability-described, approval-aware, and documented in the static system prompt.
+- Added cryptographic browser screenshot receipts and fail-closed visual coordinate actions that require a fresh viewport capture, exact SHA-256, matching live generation, in-bounds coordinates, and an explicit semantic-fallback reason; full-page and stale captures cannot authorize clicks, and visual fallback cannot initiate top-level navigation.
+- Made unavailable desktop input fail honestly after intent logging, added fresh desktop screenshot verification after real actions, and preserved native image attachment handling for both model providers.
+- Rebuilt computer-use persistence around content-minimized JSONL authority plus atomic snapshots, scoped active sessions, restart-safe observation and action budgets, structural evidence only, and irreversible omission of typed text, selections, screenshot bytes, OCR, and page text.
+- Redacted managed secrets from goals, rationales, errors, node responses, lifecycle events, and audit records; private tool input cannot enter pending-action persistence or live visibility, and low-entropy text hashes are deliberately not retained.
+- Extended Run Inspector with content-free computer strategy, observation revision, and verification status; added setup allowlisting for the missing `OPENAGI_COMPUTER_NODE` endpoint and a measurable two-phase high-assurance harness plan.
+- Added scope, generation, visual freshness, full-page rejection, action-budget replay, managed-secret, private-event, prompt, provider, runtime, approval, red-team, and legacy-compatibility regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1725/1726 tests with zero failures and one intentional platform skip.
+GOVERNED COMPUTER USE COMPLETE
+
 ## 2026-07-25 - Live governed Run Inspector (Codex)
 
 - Added one project-scoped operational timeline for agent turns, provider iterations, tool receipts, durable jobs, coder transactions, Web QA progress, verification, acceptance, rollback, and artifact evidence.

@@ -96,6 +96,11 @@ class FakeBrowserAdapter {
     this.actions.push({ kind: "scroll", locator, deltaY });
   }
 
+  async coordinateClick({ x, y, button }) {
+    this.actions.push({ kind: "coordinate-click", x, y, button });
+    this.generation += 1;
+  }
+
   async download(locator, { downloadDir, filename }) {
     const target = path.join(downloadDir, filename ?? "receipt.pdf");
     fs.writeFileSync(target, "receipt");
@@ -223,6 +228,55 @@ test("semantic browser supports compact untrusted inspect and typed actions", as
   const closed = await service.close({}, context);
   assert.equal(closed.closed, true);
   assert.equal(adapter.closed, true);
+});
+
+test("visual clicks require exact fresh viewport screenshot evidence", async () => {
+  const root = workspace();
+  const adapter = new FakeBrowserAdapter();
+  const service = new SemanticBrowserService({
+    adapter,
+    dnsLookup: publicDns
+  });
+  const context = scope(root);
+  await service.open({ url: "https://example.com/canvas" }, context);
+
+  const shot = await service.screenshot({}, context);
+  assert.match(shot.evidence.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(shot.evidence.coordinateEligible, true);
+  const clicked = await service.visualClick({
+    x: 20,
+    y: 30,
+    button: "left",
+    screenshotSha256: shot.evidence.sha256,
+    expectedGeneration: shot.generation,
+    fallbackReason: "Canvas target has no semantic element reference."
+  }, context);
+  assert.equal(clicked.strategy, "visual-fallback");
+  assert.equal(adapter.actions.at(-1).kind, "coordinate-click");
+
+  await assert.rejects(
+    service.visualClick({
+      x: 20,
+      y: 30,
+      screenshotSha256: shot.evidence.sha256,
+      expectedGeneration: shot.generation,
+      fallbackReason: "Retry stale pixels."
+    }, context),
+    (error) => error.code === "browser_visual_evidence_stale"
+  );
+
+  const fullPage = await service.screenshot({ fullPage: true }, context);
+  assert.equal(fullPage.evidence.coordinateEligible, false);
+  await assert.rejects(
+    service.visualClick({
+      x: 20,
+      y: 30,
+      screenshotSha256: fullPage.evidence.sha256,
+      expectedGeneration: fullPage.generation,
+      fallbackReason: "Full page should not authorize coordinates."
+    }, context),
+    (error) => error.code === "browser_visual_evidence_ineligible"
+  );
 });
 
 test("generation-scoped references fail after known and asynchronous DOM changes", async () => {
