@@ -11,6 +11,11 @@ import {
 } from "./project-store.js";
 import { profileCapabilityBoundaryError } from "./capability-profile-store.js";
 import {
+  MAX_EXECUTION_DECISION_STAGES,
+  isExecutionDecisionGate,
+  isExecutionDecisionStatus
+} from "./execution-decision.js";
+import {
   TOOL_SEARCH_BRIDGE_NAMES,
   ToolSearchController,
   isToolSearchDeferrable,
@@ -55,6 +60,11 @@ const REGISTRY_FAILURE_STATE = new WeakMap();
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 const MAX_TURN_FAILURE_SCOPES = 256;
+const EXECUTION_DECISION_STOP_STATUSES = new Set([
+  "blocked",
+  "cancelled",
+  "failed"
+]);
 const TOOL_SEARCH_DISCOVERY_BRIDGES = new Set(["tool_search", "tool_describe"]);
 const TOOL_SEARCH_BRIDGE_SET = new Set(TOOL_SEARCH_BRIDGE_NAMES);
 const CAPABILITY_FIELDS = new Set([
@@ -430,10 +440,15 @@ export class ToolRegistry {
         }
         selectedDirect = selectCappedModelTools(
           plannedDirect,
-          max - TOOL_SEARCH_BRIDGE_NAMES.length
+          max - TOOL_SEARCH_BRIDGE_NAMES.length,
+          new Set(searchPlan.preferredNames ?? [])
         );
       } else {
-        selectedDirect = selectCappedModelTools(plannedDirect, max);
+        selectedDirect = selectCappedModelTools(
+          plannedDirect,
+          max,
+          new Set(searchPlan.preferredNames ?? [])
+        );
       }
       const selectedNames = new Set(selectedDirect.map((tool) => tool.name));
       capOmitted = plannedDirect.filter((tool) => !selectedNames.has(tool.name));
@@ -469,6 +484,7 @@ export class ToolRegistry {
       advertisedNames: Object.freeze(tools.map((tool) => tool.name)),
       omittedNames: Object.freeze(omitted),
       deferredNames: Object.freeze([...(searchPlan.deferredNames ?? [])]),
+      preferredNames: Object.freeze([...(searchPlan.preferredNames ?? [])]),
       capOmittedNames: Object.freeze(capOmitted.map((tool) => tool.name)),
       schemaBytes: toolSchemaBytes(tools),
       eligibleSchemaBytes: searchPlan.eligibleSchemaBytes ?? toolSchemaBytes(narrowed),
@@ -525,6 +541,7 @@ export class ToolRegistry {
   async invoke(name, args, context = {}, internalToken = null) {
     const internal = normalizeInternalInvocation(internalToken);
     const receiptState = internal.failureTracking?.receiptState
+      ?? internal.receiptState
       ?? createExecutionReceiptState(name);
     context = {
       ...(context ?? {}),
@@ -537,7 +554,9 @@ export class ToolRegistry {
         throw new TypeError("Tool arguments must be a plain JSON object.");
       }
       args = deepFreeze(safeArgs);
+      markExecutionDecision(receiptState, "input_snapshot", "passed");
     } catch (error) {
+      markExecutionDecision(receiptState, "input_snapshot", "failed");
       return this._finalizeInvocation(tool, name, null, context, {
         ok: false,
         blocked: tool?.sideEffects !== false,
@@ -548,6 +567,7 @@ export class ToolRegistry {
     if (tool) {
       const inputValidation = validateToolContractValue(tool.parameters, args);
       if (!inputValidation.ok) {
+        markExecutionDecision(receiptState, "input_contract", "failed");
         return this._finalizeInvocation(tool, name, args, context, {
           ok: false,
           blocked: tool.sideEffects !== false,
@@ -555,6 +575,9 @@ export class ToolRegistry {
           error: `Tool ${name} arguments do not match its declared schema: ${formatToolContractIssues(inputValidation)}.`
         });
       }
+      markExecutionDecision(receiptState, "input_contract", "passed");
+    } else {
+      markExecutionDecision(receiptState, "input_contract", "not_available");
     }
     const projectScope = validateProjectScope(
       this.projects,
@@ -562,6 +585,7 @@ export class ToolRegistry {
       this.profiles
     );
     if (projectScope.error) {
+      markExecutionDecision(receiptState, "project_scope", "blocked");
       return this._finalizeInvocation(tool, name, args, context, {
         ok: false,
         blocked: true,
@@ -569,6 +593,7 @@ export class ToolRegistry {
         error: projectScope.error
       });
     }
+    markExecutionDecision(receiptState, "project_scope", "passed");
     context = authorizedProjectContext(context, projectScope.project);
     const profileScope = authorizeProfileContext(
       this.profiles,
@@ -576,6 +601,7 @@ export class ToolRegistry {
       projectScope.project
     );
     if (profileScope.error) {
+      markExecutionDecision(receiptState, "profile_scope", "blocked");
       return this._finalizeInvocation(tool, name, args, context, {
         ok: false,
         blocked: true,
@@ -583,6 +609,7 @@ export class ToolRegistry {
         error: profileScope.error
       });
     }
+    markExecutionDecision(receiptState, "profile_scope", "passed");
     context = profileScope.context;
     const forwardInvocation = tool?.forwardInvocation;
     if (typeof forwardInvocation === "function") {
@@ -593,6 +620,7 @@ export class ToolRegistry {
           throw new TypeError(`Tool ${name} forwarding must be synchronous.`);
         }
       } catch (error) {
+        markExecutionDecision(receiptState, "forwarding", "failed");
         return this._finalizeInvocation(tool, name, args, context, {
           ok: false,
           code: "forwarding_error",
@@ -600,6 +628,7 @@ export class ToolRegistry {
         });
       }
       if (forwarded?.error) {
+        markExecutionDecision(receiptState, "forwarding", "failed");
         return this._finalizeInvocation(tool, name, args, context, {
           ok: false,
           code: "forwarding_error",
@@ -619,6 +648,7 @@ export class ToolRegistry {
         || typeof target.forwardInvocation === "function"
         || !reachableThroughRadar
       ) {
+        markExecutionDecision(receiptState, "forwarding", "blocked");
         return this._finalizeInvocation(tool, name, args, context, {
           ok: false,
           code: "forward_target_unavailable",
@@ -626,6 +656,7 @@ export class ToolRegistry {
         });
       }
       if (!targetArgs || typeof targetArgs !== "object" || Array.isArray(targetArgs)) {
+        markExecutionDecision(receiptState, "forwarding", "failed");
         return this._finalizeInvocation(tool, name, args, context, {
           ok: false,
           code: "invalid_tool_arguments",
@@ -636,7 +667,13 @@ export class ToolRegistry {
       // The real tool name now traverses scope, scrutiny, hooks, approvals,
       // checkpoints, dispatch, post hooks, and activity exactly once. Reset
       // the internal hook token so a bridge can never smuggle a prior pass.
-      return this.invoke(targetName, targetArgs, context, null);
+      markExecutionDecision(receiptState, "forwarding", "passed");
+      return this.invoke(
+        targetName,
+        targetArgs,
+        context,
+        makeInternalInvocation({ receiptState })
+      );
     }
     const inheritedTracking = internal.failureTracking;
     const tracking = inheritedTracking
@@ -647,6 +684,7 @@ export class ToolRegistry {
     }
     const ownsTracking = !inheritedTracking && tracking?.reserved === true;
     if (tracking?.blocked) {
+      markExecutionDecision(receiptState, "operation_guard", "blocked");
       return this._finalizeInvocation(
         tool,
         name,
@@ -656,7 +694,9 @@ export class ToolRegistry {
         { tracking: null, markTracked: true }
       );
     }
+    markExecutionDecision(receiptState, "operation_guard", "passed");
     if (tool && invocationWasAborted(context)) {
+      markExecutionDecision(receiptState, "cancellation", "cancelled");
       const outcome = await this._finalizeInvocation(
         tool,
         name,
@@ -674,7 +714,9 @@ export class ToolRegistry {
         if (result && typeof result.then === "function") {
           throw new TypeError(`Tool ${name} preflight must be synchronous.`);
         }
+        markExecutionDecision(receiptState, "preflight", "passed");
       } catch (error) {
+        markExecutionDecision(receiptState, "preflight", "failed");
         const outcome = await this._finalizeInvocation(tool, name, args, context, {
           ok: false,
           code: "preflight_error",
@@ -683,6 +725,8 @@ export class ToolRegistry {
         if (ownsTracking) this._releaseFailureTracking(tracking);
         return outcome;
       }
+    } else {
+      markExecutionDecision(receiptState, "preflight", "not_required");
     }
     const operationContext = tracking?.operationReceipt
       ? {
@@ -769,6 +813,11 @@ export class ToolRegistry {
       args,
       context,
       classifyLegacyToolFailure(value)
+    );
+    markExecutionDecision(
+      context?.[EXECUTION_RECEIPT_STATE],
+      "outcome",
+      executionOutcomeDecisionStatus(semantic)
     );
     semantic = attachExecutionReceipt(
       semantic,
@@ -1006,6 +1055,8 @@ export class ToolRegistry {
     { preToolHooksPassed = false, failureTracking = null } = {}
   ) {
     const tool = this.tools.get(name);
+    const receiptState = context?.[EXECUTION_RECEIPT_STATE];
+    markExecutionDecision(receiptState, "approval", "pending");
     // Lightweight store doubles used by embedders may only implement the old
     // queue API. Preserve that contract while the real store provides the
     // Hermes-style suspend/resume rail.
@@ -1039,6 +1090,7 @@ export class ToolRegistry {
       signal: context?.__abortSignal
     });
     if (decision.decision === "approve") {
+      markExecutionDecision(receiptState, "approval", "approved");
       // A legacy approval surface may already have executed before deciding.
       // Honor its recorded completion rather than replaying the side effect.
       if (decision.completed) {
@@ -1060,6 +1112,7 @@ export class ToolRegistry {
         action.approvalIdentity
         && action.approvalIdentity !== this.approvalIdentity(name, context)
       ) {
+        markExecutionDecision(receiptState, "approval_identity", "blocked");
         const blocked = semanticToolError(
           tool,
           "The tool or approval policy changed while this action was pending.",
@@ -1077,6 +1130,7 @@ export class ToolRegistry {
         return blocked;
       }
       if (context?.__abortSignal?.aborted) {
+        markExecutionDecision(receiptState, "approval", "cancelled");
         const error = "turn ended before the approved action could resume";
         this.pendingActions.complete?.(action.id, { result: null, error });
         return { ok: false, error };
@@ -1088,6 +1142,7 @@ export class ToolRegistry {
         tool?.manualApproval === true
         && (!decisionActor || decisionActor === "auto-approve")
       ) {
+        markExecutionDecision(receiptState, "approval", "blocked");
         const blocked = semanticToolError(
           tool,
           "This action requires an explicit human approval; auto-approve is insufficient.",
@@ -1135,6 +1190,7 @@ export class ToolRegistry {
       return invokeResult;
     }
     if (decision.decision === "timeout") {
+      markExecutionDecision(receiptState, "approval", "blocked");
       this.pendingActions.decide?.(action.id, {
         decision: "deny",
         decidedBy: "timeout",
@@ -1146,6 +1202,7 @@ export class ToolRegistry {
       };
     }
     if (decision.decision === "cancelled") {
+      markExecutionDecision(receiptState, "approval", "cancelled");
       this.pendingActions.decide?.(action.id, {
         decision: "deny",
         decidedBy: "turn-cancelled",
@@ -1153,6 +1210,7 @@ export class ToolRegistry {
       });
       return { ok: false, error: `Action ${action.id} cancelled because the turn ended while awaiting approval.` };
     }
+    markExecutionDecision(receiptState, "approval", "blocked");
     return {
       ok: false,
       error: `Action ${action.id} denied by ${decision.decidedBy ?? "human"}${decision.error ? `: ${decision.error}` : "."}`
@@ -1171,16 +1229,22 @@ export class ToolRegistry {
     } = {}
   ) {
     const tool = this.tools.get(name);
+    const receiptState = context?.[EXECUTION_RECEIPT_STATE];
     if (!tool) {
+      markExecutionDecision(receiptState, "tool_lookup", "failed");
       return { ok: false, error: `Unknown tool: ${name}` };
     }
+    markExecutionDecision(receiptState, "tool_lookup", "passed");
     if (invocationWasAborted(context)) {
+      markExecutionDecision(receiptState, "cancellation", "cancelled");
       return cancelledToolEnvelope(tool, { dispatched: false });
     }
     if (tool.sideEffects && this.startupBarrier) {
       try {
         await this.startupBarrier;
+        markExecutionDecision(receiptState, "startup_barrier", "passed");
       } catch {
+        markExecutionDecision(receiptState, "startup_barrier", "blocked");
         return semanticToolError(
           tool,
           "Runtime startup ownership reconciliation did not complete; mutating tools remain blocked.",
@@ -1191,8 +1255,11 @@ export class ToolRegistry {
           }
         );
       }
+    } else {
+      markExecutionDecision(receiptState, "startup_barrier", "not_required");
     }
     if (invocationWasAborted(context)) {
+      markExecutionDecision(receiptState, "cancellation", "cancelled");
       return cancelledToolEnvelope(tool, { dispatched: false });
     }
     const projectScope = validateProjectScope(
@@ -1201,6 +1268,7 @@ export class ToolRegistry {
       this.profiles
     );
     if (projectScope.error) {
+      markExecutionDecision(receiptState, "project_scope", "blocked");
       return {
         ok: false,
         blocked: true,
@@ -1208,6 +1276,7 @@ export class ToolRegistry {
         error: projectScope.error
       };
     }
+    markExecutionDecision(receiptState, "project_scope", "passed");
     context = authorizedProjectContext(context, projectScope.project);
     const profileScope = authorizeProfileContext(
       this.profiles,
@@ -1215,6 +1284,7 @@ export class ToolRegistry {
       projectScope.project
     );
     if (profileScope.error) {
+      markExecutionDecision(receiptState, "profile_scope", "blocked");
       return {
         ok: false,
         blocked: true,
@@ -1222,12 +1292,14 @@ export class ToolRegistry {
         error: profileScope.error
       };
     }
+    markExecutionDecision(receiptState, "profile_scope", "passed");
     context = profileScope.context;
     const freshProfileBoundaryError = profileCapabilityBoundaryError(
       tool,
       context?.__capabilityProfileResolution
     );
     if (freshProfileBoundaryError) {
+      markExecutionDecision(receiptState, "profile_capability", "blocked");
       return {
         ok: false,
         blocked: true,
@@ -1235,6 +1307,7 @@ export class ToolRegistry {
         error: freshProfileBoundaryError
       };
     }
+    markExecutionDecision(receiptState, "profile_capability", "passed");
     // Specialist bounds: a propagated specialist may only call tools inside
     // its allowlist (its scoped MCP tools + the core set agent-host grants).
     // Same advisory-list / enforced-gate split as the scrutiny policies.
@@ -1246,13 +1319,16 @@ export class ToolRegistry {
         && tool.metadata?.toolSearch === "core"
       )
     ) {
+      markExecutionDecision(receiptState, "specialist_scope", "blocked");
       return {
         ok: false,
         error: `Tool ${name} is outside this specialist's bounded scope. Recommend the user take this to the main agent.`
       };
     }
+    markExecutionDecision(receiptState, "specialist_scope", "passed");
     const projectBoundaryError = projectToolBoundaryError(tool, context);
     if (projectBoundaryError) {
+      markExecutionDecision(receiptState, "project_capability", "blocked");
       return {
         ok: false,
         blocked: true,
@@ -1260,12 +1336,14 @@ export class ToolRegistry {
         error: projectBoundaryError
       };
     }
+    markExecutionDecision(receiptState, "project_capability", "passed");
     // Scrutiny 'none' policy (ignore verdict): hard-block EVERY tool. An empty
     // advertised tool list is NOT enough — OpenAI/Anthropic providers treat an
     // empty `tools` array as "fall back to the full registry", and the
     // deterministic provider calls invoke() directly. This gate is the actual
     // guarantee that an ignored turn runs no tools.
     if (context?.__scrutinyPolicy === "none") {
+      markExecutionDecision(receiptState, "scrutiny", "blocked");
       return {
         ok: false,
         error: `Tool ${name} is blocked this turn: scrutiny verdict 'ignore' permits no tools.`
@@ -1275,11 +1353,13 @@ export class ToolRegistry {
     // tools (defense in depth — the filtered tool list is advisory to the
     // model, this gate is not).
     if (context?.__scrutinyPolicy === "read-only" && tool.sideEffects) {
+      markExecutionDecision(receiptState, "scrutiny", "blocked");
       return {
         ok: false,
         error: `Tool ${name} is blocked this turn: scrutiny verdict 'watch' permits read-only tools only.`
       };
     }
+    markExecutionDecision(receiptState, "scrutiny", "passed");
     const sessionAllowed = this.isAllowedForSession(context?.sessionId, name);
     if (!preToolHooksPassed) {
       let hookDecision = { action: "allow" };
@@ -1305,16 +1385,20 @@ export class ToolRegistry {
             failure: "registry_error"
           };
         } else {
+          markExecutionDecision(receiptState, "pre_hook", "degraded");
           console.warn(`[hooks] pre_tool_call registry failed open for read-only tool: ${detail}`);
         }
       }
       if (invocationWasAborted(context)) {
+        markExecutionDecision(receiptState, "cancellation", "cancelled");
         return cancelledToolEnvelope(tool, { dispatched: false });
       }
       if (hookDecision?.action === "block") {
+        markExecutionDecision(receiptState, "pre_hook", "blocked");
         if (isTrustedCatastrophicBlock(hookDecision)) {
           const reason = hookDecision.reason ?? hookDecision.message ?? "catastrophic policy veto";
           if (!this.pendingActions) {
+            markExecutionDecision(receiptState, "approval", "blocked");
             return {
               ok: false,
               blocked: true,
@@ -1359,7 +1443,10 @@ export class ToolRegistry {
         });
         return blocked;
       }
+      markExecutionDecision(receiptState, "pre_hook", "passed");
       preToolHooksPassed = true;
+    } else {
+      markExecutionDecision(receiptState, "pre_hook", "reused");
     }
 
     // Confirmation gate. When set, divert the call into the pending-action
@@ -1374,6 +1461,7 @@ export class ToolRegistry {
       && !sessionAllowed
     );
     if (manualConfirm && !this.pendingActions) {
+      markExecutionDecision(receiptState, "approval", "blocked");
       return semanticToolError(
         tool,
         "This tool requires an explicit human approval, but no approval store is available.",
@@ -1393,6 +1481,7 @@ export class ToolRegistry {
       // OPENAGI_AUTO_APPROVE in .env. Default is ON — only an explicit
       // "0"/"false" disables it.
       if (autoApproveEnabled() && !manualConfirm) {
+        markExecutionDecision(receiptState, "approval", "pending");
         const action = this.pendingActions.enqueue({
           toolName: name,
           args,
@@ -1402,6 +1491,7 @@ export class ToolRegistry {
           approvalIdentity: this.approvalIdentity(name, context),
           privateInput: tool.metadata?.privateInput === true
         });
+        markExecutionDecision(receiptState, "approval", "approved");
         const invokeResult = await this.invoke(
           name,
           args,
@@ -1435,6 +1525,13 @@ export class ToolRegistry {
         failureTracking
       });
     }
+    markExecutionDecision(
+      receiptState,
+      "approval",
+      (manualApprovalPassed || catastrophicApprovalPassed || context?.__confirmed)
+        ? "approved"
+        : "not_required"
+    );
     const startedAt = Date.now();
     let dispatched = false;
     let checkpointCapture = null;
@@ -1446,21 +1543,37 @@ export class ToolRegistry {
         tool,
         context
       );
-      if (dispatchAuthority.error) return dispatchAuthority.error;
+      if (dispatchAuthority.error) {
+        markExecutionDecision(receiptState, "dispatch_authority", "blocked");
+        return dispatchAuthority.error;
+      }
+      markExecutionDecision(receiptState, "dispatch_authority", "passed");
       context = dispatchAuthority.context;
       if (context?.__abortSignal?.aborted) {
+        markExecutionDecision(receiptState, "cancellation", "cancelled");
         return semanticToolError(tool, "Turn ended before tool dispatch.", {
           code: "tool_dispatch_cancelled",
           status: "blocked",
           changed: false
         });
       }
-      checkpointCapture = await this.checkpoints?.beforeToolCall?.({
-        toolName: name,
-        args: args ?? {},
-        context
-      });
+      if (this.checkpoints?.beforeToolCall) {
+        try {
+          checkpointCapture = await this.checkpoints.beforeToolCall({
+            toolName: name,
+            args: args ?? {},
+            context
+          });
+          markExecutionDecision(receiptState, "checkpoint", "passed");
+        } catch (error) {
+          markExecutionDecision(receiptState, "checkpoint", "failed");
+          throw error;
+        }
+      } else {
+        markExecutionDecision(receiptState, "checkpoint", "not_required");
+      }
       if (context?.__abortSignal?.aborted) {
+        markExecutionDecision(receiptState, "cancellation", "cancelled");
         const semantic = semanticToolError(tool, "Turn ended before tool dispatch.", {
           code: "tool_dispatch_cancelled",
           status: "blocked",
@@ -1481,6 +1594,7 @@ export class ToolRegistry {
         context
       );
       if (postCheckpointAuthority.error) {
+        markExecutionDecision(receiptState, "authority_refresh", "blocked");
         const blocked = {
           ...postCheckpointAuthority.error,
           evidence: checkpointEvidence(checkpointCapture)
@@ -1492,6 +1606,7 @@ export class ToolRegistry {
         });
         return blocked;
       }
+      markExecutionDecision(receiptState, "authority_refresh", "passed");
       context = postCheckpointAuthority.context;
       if (catastrophicApprovalPassed) {
         context = bindExactCatastrophicApproval(
@@ -1510,17 +1625,33 @@ export class ToolRegistry {
         );
       }
       if (tool.sideEffects && this.jobCoordinator?.acquireToolInvocation) {
-        releaseJobLease = this.jobCoordinator.acquireToolInvocation(
-          tool,
-          args ?? {},
-          context
-        );
+        try {
+          releaseJobLease = this.jobCoordinator.acquireToolInvocation(
+            tool,
+            args ?? {},
+            context
+          );
+          markExecutionDecision(receiptState, "resource_lease", "passed");
+        } catch (error) {
+          markExecutionDecision(receiptState, "resource_lease", "failed");
+          throw error;
+        }
+      } else {
+        markExecutionDecision(receiptState, "resource_lease", "not_required");
       }
       dispatched = true;
-      const receiptState = context?.[EXECUTION_RECEIPT_STATE];
       if (receiptState) receiptState.dispatched = true;
-      const result = await tool.handler(args ?? {}, context);
+      markExecutionDecision(receiptState, "dispatch", "dispatched");
+      let result;
+      try {
+        result = await tool.handler(args ?? {}, context);
+        markExecutionDecision(receiptState, "handler", "passed");
+      } catch (error) {
+        markExecutionDecision(receiptState, "handler", "failed");
+        throw error;
+      }
       if (invocationWasAborted(context) && tool.sideEffects !== false) {
+        markExecutionDecision(receiptState, "cancellation", "cancelled");
         const semantic = cancelledToolEnvelope(tool, {
           dispatched: true,
           evidence: checkpointEvidence(checkpointCapture)
@@ -1538,21 +1669,33 @@ export class ToolRegistry {
         });
         return semantic;
       }
-      let semantic = await semanticToolResult(
-        tool,
-        result,
-        args,
-        context,
-        {
-          evidence: checkpointEvidence(checkpointCapture)
-        }
-      );
+      let semantic;
+      try {
+        semantic = await semanticToolResult(
+          tool,
+          result,
+          args,
+          context,
+          {
+            evidence: checkpointEvidence(checkpointCapture)
+          }
+        );
+        markExecutionDecision(
+          receiptState,
+          "semantic_verification",
+          semantic.ok ? "passed" : "failed"
+        );
+      } catch (error) {
+        markExecutionDecision(receiptState, "semantic_verification", "failed");
+        throw error;
+      }
       if (semantic.ok && tool.outputSchema) {
         const outputValidation = validateToolContractValue(
           tool.outputSchema,
           semantic.result
         );
         if (!outputValidation.ok) {
+          markExecutionDecision(receiptState, "output_contract", "failed");
           semantic = semanticToolError(
             tool,
             `Tool ${name} returned a result that does not match its declared output schema: ${formatToolContractIssues(outputValidation)}.`,
@@ -1562,9 +1705,16 @@ export class ToolRegistry {
               evidence: checkpointEvidence(checkpointCapture)
             }
           );
+        } else {
+          markExecutionDecision(receiptState, "output_contract", "passed");
         }
+      } else if (tool.outputSchema) {
+        markExecutionDecision(receiptState, "output_contract", "not_reached");
+      } else {
+        markExecutionDecision(receiptState, "output_contract", "not_required");
       }
       if (invocationWasAborted(context) && tool.sideEffects !== false) {
+        markExecutionDecision(receiptState, "cancellation", "cancelled");
         semantic = cancelledToolEnvelope(tool, {
           dispatched: true,
           evidence: checkpointEvidence(checkpointCapture)
@@ -1587,6 +1737,11 @@ export class ToolRegistry {
       return semantic;
     } catch (error) {
       const errorDetails = safeToolErrorDetails(error);
+      if (invocationWasAborted(context)) {
+        markExecutionDecision(receiptState, "cancellation", "cancelled");
+      } else if (!receiptState?.decisionBlockedAt) {
+        markExecutionDecision(receiptState, "execution", "failed");
+      }
       const semantic = invocationWasAborted(context)
         ? cancelledToolEnvelope(tool, {
             dispatched,
@@ -1651,7 +1806,8 @@ function normalizeInternalInvocation(token) {
       preToolHooksPassed: true,
       failureTracking: null,
       manualApprovalPassed: false,
-      catastrophicApprovalPassed: false
+      catastrophicApprovalPassed: false,
+      receiptState: null
     };
   }
   if (!token || token[INTERNAL_INVOCATION] !== true) {
@@ -1659,14 +1815,16 @@ function normalizeInternalInvocation(token) {
       preToolHooksPassed: false,
       failureTracking: null,
       manualApprovalPassed: false,
-      catastrophicApprovalPassed: false
+      catastrophicApprovalPassed: false,
+      receiptState: null
     };
   }
   return {
     preToolHooksPassed: token.preToolHooksPassed === true,
     failureTracking: token.failureTracking ?? null,
     manualApprovalPassed: token.manualApprovalPassed === true,
-    catastrophicApprovalPassed: token.catastrophicApprovalPassed === true
+    catastrophicApprovalPassed: token.catastrophicApprovalPassed === true,
+    receiptState: token.receiptState ?? null
   };
 }
 
@@ -1674,14 +1832,16 @@ function makeInternalInvocation({
   preToolHooksPassed = false,
   failureTracking = null,
   manualApprovalPassed = false,
-  catastrophicApprovalPassed = false
+  catastrophicApprovalPassed = false,
+  receiptState = null
 } = {}) {
   return Object.freeze({
     [INTERNAL_INVOCATION]: true,
     preToolHooksPassed: preToolHooksPassed === true,
     failureTracking,
     manualApprovalPassed: manualApprovalPassed === true,
-    catastrophicApprovalPassed: catastrophicApprovalPassed === true
+    catastrophicApprovalPassed: catastrophicApprovalPassed === true,
+    receiptState
   });
 }
 
@@ -1727,11 +1887,72 @@ function createOperationReceipt(scope, fingerprint) {
 }
 
 function createExecutionReceiptState(toolName) {
+  const startedAtMs = Date.now();
   return Object.seal({
     id: createId("receipt"),
     tool: boundedReceiptText(toolName, "unknown_tool"),
-    startedAtMs: Date.now(),
-    dispatched: false
+    startedAtMs,
+    dispatched: false,
+    decisionTrace: [],
+    decisionTraceAtMs: startedAtMs,
+    decisionTraceTruncated: false,
+    decisionBlockedAt: null
+  });
+}
+
+function markExecutionDecision(state, gate, status) {
+  if (!state || !Array.isArray(state.decisionTrace)) return;
+  if (
+    !isExecutionDecisionGate(gate)
+    || !isExecutionDecisionStatus(status)
+  ) {
+    state.decisionTraceTruncated = true;
+    return;
+  }
+  const now = Date.now();
+  const durationMs = Math.max(0, now - state.decisionTraceAtMs);
+  state.decisionTraceAtMs = now;
+  if (gate === "outcome" && status === "succeeded") {
+    state.decisionBlockedAt = null;
+  }
+  if (EXECUTION_DECISION_STOP_STATUSES.has(status) && gate !== "outcome") {
+    state.decisionBlockedAt = gate;
+  }
+  const previous = state.decisionTrace.at(-1);
+  if (previous?.gate === gate && previous?.status === status) {
+    previous.durationMs += durationMs;
+    return;
+  }
+  if (state.decisionTrace.length >= MAX_EXECUTION_DECISION_STAGES) {
+    state.decisionTraceTruncated = true;
+    return;
+  }
+  state.decisionTrace.push({
+    gate,
+    status,
+    durationMs
+  });
+}
+
+function executionOutcomeDecisionStatus(envelope) {
+  const status = String(envelope?.outcome?.status ?? "").trim().toLowerCase();
+  if (isExecutionDecisionStatus(status)) return status;
+  return envelope?.ok ? "succeeded" : "failed";
+}
+
+function freezeExecutionDecision(state) {
+  const stages = state?.decisionTrace ?? [];
+  const slowest = stages.reduce((selected, entry) => (
+    !selected || entry.durationMs > selected.durationMs ? entry : selected
+  ), null);
+  return Object.freeze({
+    version: 1,
+    path: stages.map(({ gate, status }) => `${gate}:${status}`).join(">"),
+    gateCount: stages.length,
+    blockedAt: state?.decisionBlockedAt ?? null,
+    slowestGate: slowest?.gate ?? null,
+    slowestMs: Math.max(0, Math.trunc(slowest?.durationMs ?? 0)),
+    truncated: state?.decisionTraceTruncated === true
   });
 }
 
@@ -1743,6 +1964,7 @@ function attachExecutionReceipt(envelope, toolName, state) {
     && envelope.receipt.status === envelope?.outcome?.status
     && envelope.receipt.code === envelope?.outcome?.code
     && envelope.receipt.dispatched === (safeState.dispatched === true)
+    && envelope.receipt.decision?.version === 1
   ) {
     return envelope;
   }
@@ -1761,7 +1983,8 @@ function attachExecutionReceipt(envelope, toolName, state) {
         : null,
     startedAt: new Date(safeState.startedAtMs).toISOString(),
     finishedAt: new Date(finishedAtMs).toISOString(),
-    durationMs: Math.max(0, finishedAtMs - safeState.startedAtMs)
+    durationMs: Math.max(0, finishedAtMs - safeState.startedAtMs),
+    decision: freezeExecutionDecision(safeState)
   });
   return {
     ...envelope,
@@ -2346,15 +2569,26 @@ function modelToolCap(env = process.env) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 128;
 }
 
-function selectCappedModelTools(tools, max) {
+function selectCappedModelTools(tools, max, preferredNames = null) {
   if (tools.length <= max) return tools;
   if (max <= 0) return [];
 
+  const preferred = preferredNames instanceof Set
+    ? tools.filter((tool) => preferredNames.has(tool.name))
+    : [];
+  if (preferred.length >= max) return preferred.slice(0, max);
+  const preferredSet = new Set(preferred.map((tool) => tool.name));
+  const remaining = preferred.length > 0
+    ? tools.filter((tool) => !preferredSet.has(tool.name))
+    : tools;
+  const remainingBudget = max - preferred.length;
   const core = tools.filter((tool) => tool.source !== "mcp");
-  const mcp = tools.filter((tool) => tool.source === "mcp");
-  const selectedCore = core.slice(0, max);
-  const budget = Math.max(0, max - selectedCore.length);
-  if (budget === 0) return selectedCore;
+  const mcp = remaining.filter((tool) => tool.source === "mcp");
+  const selectedCore = core
+    .filter((tool) => !preferredSet.has(tool.name))
+    .slice(0, remainingBudget);
+  const budget = Math.max(0, remainingBudget - selectedCore.length);
+  if (budget === 0) return [...preferred, ...selectedCore];
 
   const byServer = new Map();
   for (const tool of mcp) {
@@ -2376,7 +2610,7 @@ function selectCappedModelTools(tools, max) {
     }
     cursor += 1;
   }
-  return [...selectedCore, ...picked];
+  return [...preferred, ...selectedCore, ...picked];
 }
 
 function legacyToolCapNotice(all, selected) {
@@ -2851,6 +3085,18 @@ function appendApprovalNote(result, approval) {
 function privateToolEventArgs(tool, args) {
   if (tool?.metadata?.privateInput !== true) return args;
   const safe = sanitizeForAudit(args ?? {});
+  const privateFields = Array.isArray(tool.metadata.privateInputFields)
+    ? tool.metadata.privateInputFields
+    : [];
+  for (const field of privateFields) {
+    if (
+      typeof field === "string"
+      && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(field)
+      && Object.hasOwn(safe, field)
+    ) {
+      safe[field] = "[PRIVATE INPUT OMITTED]";
+    }
+  }
   if (
     safe
     && typeof safe === "object"

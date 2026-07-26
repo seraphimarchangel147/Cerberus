@@ -18,6 +18,7 @@ import {
 import { defaultToolOutputStore } from "./tool-output-store.js";
 import { TOOL_SEARCH_BRIDGE_NAMES, resolveToolSearchMode } from "./tool-search.js";
 import { executeToolBatch } from "./tool-batch-executor.js";
+import { normalizeExecutionDecision } from "./execution-decision.js";
 import {
   CONTEXT_GATEWAY_RATIO,
   contextCompressionTrigger,
@@ -48,6 +49,12 @@ import {
   SecretsStore,
   secretsStoreRedactionSnapshot
 } from "./secrets-store.js";
+import {
+  appendCompletionEvidenceWarning,
+  assessCompletionEvidence,
+  completionEvidenceDecision,
+  completionEvidenceNudge
+} from "./completion-evidence.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
@@ -1941,6 +1948,16 @@ function appendOpenAIContinue(conversationInput) {
   }));
 }
 
+function appendOpenAICompletionEvidenceNudge(conversationInput, report) {
+  conversationInput.push(markLiveContextSyntheticTurn({
+    role: "user",
+    content: [{
+      type: "input_text",
+      text: completionEvidenceNudge(report)
+    }]
+  }));
+}
+
 function appendAnthropicUserText(convo, text, { synthetic = false } = {}) {
   if (synthetic) {
     convo.push(markLiveContextSyntheticTurn({
@@ -1957,6 +1974,24 @@ function appendAnthropicUserText(convo, text, { synthetic = false } = {}) {
   } else {
     const message = { role: "user", content: text };
     convo.push(message);
+  }
+}
+
+function emitCompletionEvidence(context, report, status) {
+  if (!report) return;
+  try {
+    context?.__onToolEvent?.({
+      phase: "completion-evidence",
+      status,
+      kind: report.kind,
+      missing: [...report.missing],
+      mutationCount: report.mutationCount,
+      verificationCount: report.verificationCount,
+      visualCount: report.visualCount,
+      nudges: report.nudges
+    });
+  } catch {
+    // Completion visibility is advisory; the provider decision is authoritative.
   }
 }
 
@@ -2243,14 +2278,20 @@ function compactToolOutcome(outcome) {
 
 function compactExecutionReceipt(receipt) {
   if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return null;
+  const decision = compactExecutionDecision(receipt.decision);
   return {
     id: String(receipt.id ?? "receipt_unknown").slice(0, 200),
     tool: String(receipt.tool ?? "unknown_tool").slice(0, 128),
     status: String(receipt.status ?? "failed").slice(0, 16),
     code: String(receipt.code ?? "tool_error").slice(0, 64),
     dispatched: receipt.dispatched === true,
-    changed: receipt.changed === true ? true : receipt.changed === false ? false : null
+    changed: receipt.changed === true ? true : receipt.changed === false ? false : null,
+    ...(decision ? { decision } : {})
   };
+}
+
+function compactExecutionDecision(decision) {
+  return normalizeExecutionDecision(decision);
 }
 
 function smallestValidTruncation(base, target) {
@@ -3595,11 +3636,25 @@ export class DeterministicModelProvider {
       lines.push(`\n(Running without OPENAI_API_KEY — set it in .openagi/.env to enable real reasoning and tool use.)`);
     }
 
+    const completionEvidence = assessCompletionEvidence(
+      context?.__completionContract,
+      [],
+      toolRegistry
+    );
+    const reply = lines.join("\n");
     return {
       provider: this.name,
       model: "deterministic",
-      text: lines.join("\n"),
-      toolCalls: []
+      text: completionEvidence
+        ? appendCompletionEvidenceWarning(reply, completionEvidence)
+        : reply,
+      toolCalls: [],
+      ...(completionEvidence
+        ? {
+            stopReason: "evidence-incomplete",
+            completionEvidence
+          }
+        : {})
     };
   }
 }
@@ -3688,21 +3743,30 @@ export class OpenAIResponsesProvider {
       const fallback = await tryFallbackProvider(this, generationRequest, error);
       if (fallback.used) return fallback.result;
       if (!isCredentialPoolExhausted(error)) throw error;
+      const completionEvidence = assessCompletionEvidence(
+        context?.__completionContract,
+        [],
+        toolRegistry
+      );
+      const failureText = localPartialSummary({
+        reason: "provider-error",
+        iterations: 0,
+        maxIterations,
+        toolCalls: [],
+        lastText: ""
+      });
       return {
         provider: "openai",
         model,
-        text: localPartialSummary({
-          reason: "provider-error",
-          iterations: 0,
-          maxIterations,
-          toolCalls: [],
-          lastText: ""
-        }),
+        text: completionEvidence
+          ? appendCompletionEvidenceWarning(failureText, completionEvidence)
+          : failureText,
         toolCalls: [],
         iterations: 0,
         maxIterations,
         stopReason: "provider-error",
-        usage: null
+        usage: null,
+        ...(completionEvidence ? { completionEvidence } : {})
       };
     }
 
@@ -3826,6 +3890,13 @@ export class OpenAIResponsesProvider {
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
     const wallClockCheckpointState = { left: this.wallClockCheckpoints };
+    const completionContract = context?.__completionContract ?? null;
+    let completionNudges = 0;
+    let completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry
+    );
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -4031,6 +4102,48 @@ export class OpenAIResponsesProvider {
       const wantsContinuation = openAIWantsContinuation(response, calls)
         || callBatch.notices.length > 0;
       if (!wantsContinuation) {
+        const evidenceDecision = completionEvidenceDecision({
+          contract: completionContract,
+          toolCalls,
+          toolRegistry,
+          assistantText: responseText,
+          nudges: completionNudges,
+          canContinue: iterations < maxIterations && this.now() < deadline
+        });
+        completionEvidence = evidenceDecision.report;
+        if (evidenceDecision.continue) {
+          completionNudges += 1;
+          completionEvidence = assessCompletionEvidence(
+            completionContract,
+            toolCalls,
+            toolRegistry,
+            { nudges: completionNudges }
+          );
+          emitCompletionEvidence(context, completionEvidence, "retry");
+          appendOpenAIAssistantText(conversationInput, response);
+          appendOpenAICompletionEvidenceNudge(
+            conversationInput,
+            completionEvidence
+          );
+          void primeProviderContextLedger(this, conversationInput, {
+            format: "openai",
+            model,
+            context,
+            redactValues: [
+              credentialState.request.lease?.value,
+              credentialState.request.lease?.refreshToken
+            ]
+          });
+          continue;
+        }
+        if (completionEvidence?.status === "incomplete") {
+          stopReason = "evidence-incomplete";
+          emitCompletionEvidence(context, completionEvidence, "incomplete");
+          break;
+        }
+        if (completionEvidence?.status === "verified") {
+          emitCompletionEvidence(context, completionEvidence, "verified");
+        }
         const goalDecision = await evaluateGoalTurn({
           provider: this,
           context,
@@ -4312,6 +4425,15 @@ export class OpenAIResponsesProvider {
     } else if (text === undefined) {
       text = extractResponseText(response) || "(no text)";
     }
+    completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry,
+      { nudges: completionNudges }
+    );
+    if (stopReason === "evidence-incomplete") {
+      text = appendCompletionEvidenceWarning(text, completionEvidence);
+    }
 
     const result = {
       provider: "openai",
@@ -4322,7 +4444,8 @@ export class OpenAIResponsesProvider {
       iterations,
       maxIterations,
       stopReason,
-      usage: finalizedProviderUsage(usageAccumulator)
+      usage: finalizedProviderUsage(usageAccumulator),
+      ...(completionEvidence ? { completionEvidence } : {})
     };
     const finalResponseText = extractResponseText(response);
     const actualCredentialIdentity = openAICredentialIdentity(
@@ -4628,21 +4751,30 @@ export class AnthropicProvider {
       const fallback = await tryFallbackProvider(this, generationRequest, error);
       if (fallback.used) return fallback.result;
       if (!isCredentialPoolExhausted(error)) throw error;
+      const completionEvidence = assessCompletionEvidence(
+        context?.__completionContract,
+        [],
+        toolRegistry
+      );
+      const failureText = localPartialSummary({
+        reason: "provider-error",
+        iterations: 0,
+        maxIterations,
+        toolCalls: [],
+        lastText: ""
+      });
       return {
         provider: "anthropic",
         model,
-        text: localPartialSummary({
-          reason: "provider-error",
-          iterations: 0,
-          maxIterations,
-          toolCalls: [],
-          lastText: ""
-        }),
+        text: completionEvidence
+          ? appendCompletionEvidenceWarning(failureText, completionEvidence)
+          : failureText,
         toolCalls: [],
         iterations: 0,
         maxIterations,
         stopReason: "provider-error",
-        usage: null
+        usage: null,
+        ...(completionEvidence ? { completionEvidence } : {})
       };
     }
 
@@ -4732,6 +4864,13 @@ export class AnthropicProvider {
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
     const wallClockCheckpointState = { left: this.wallClockCheckpoints };
+    const completionContract = context?.__completionContract ?? null;
+    let completionNudges = 0;
+    let completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry
+    );
 
     iterationLoop: while (iterations < maxIterations) {
       if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -4847,6 +4986,48 @@ export class AnthropicProvider {
       if (responseText) lastText = responseText;
       const wantsContinuation = anthropicWantsContinuation(response, toolUses);
       if (!wantsContinuation) {
+        const evidenceDecision = completionEvidenceDecision({
+          contract: completionContract,
+          toolCalls,
+          toolRegistry,
+          assistantText: responseText,
+          nudges: completionNudges,
+          canContinue: iterations < maxIterations && this.now() < deadline
+        });
+        completionEvidence = evidenceDecision.report;
+        if (evidenceDecision.continue) {
+          completionNudges += 1;
+          completionEvidence = assessCompletionEvidence(
+            completionContract,
+            toolCalls,
+            toolRegistry,
+            { nudges: completionNudges }
+          );
+          emitCompletionEvidence(context, completionEvidence, "retry");
+          appendAnthropicUserText(
+            convo,
+            completionEvidenceNudge(completionEvidence),
+            { synthetic: true }
+          );
+          void primeProviderContextLedger(this, convo, {
+            format: "anthropic",
+            model,
+            context,
+            redactValues: [
+              credentialState.request.lease?.value,
+              credentialState.request.lease?.refreshToken
+            ]
+          });
+          continue;
+        }
+        if (completionEvidence?.status === "incomplete") {
+          stopReason = "evidence-incomplete";
+          emitCompletionEvidence(context, completionEvidence, "incomplete");
+          break;
+        }
+        if (completionEvidence?.status === "verified") {
+          emitCompletionEvidence(context, completionEvidence, "verified");
+        }
         const goalDecision = await evaluateGoalTurn({
           provider: this,
           context,
@@ -5108,17 +5289,27 @@ export class AnthropicProvider {
     const emptyReply = thinkingOnly
       ? "Reply truncated before the model produced user-facing text. Retry the request or raise OPENAGI_MAX_TOKENS."
       : "(no text)";
+    completionEvidence = assessCompletionEvidence(
+      completionContract,
+      toolCalls,
+      toolRegistry,
+      { nudges: completionNudges }
+    );
+    const visibleText = stopReason === "evidence-incomplete"
+      ? appendCompletionEvidenceWarning(text || emptyReply, completionEvidence)
+      : text || emptyReply;
 
     return {
       provider: "anthropic",
       model,
       id: response?.id,
-      text: text || emptyReply,
+      text: visibleText,
       toolCalls,
       iterations,
       maxIterations,
       stopReason,
-      usage: finalizedProviderUsage(usageAccumulator)
+      usage: finalizedProviderUsage(usageAccumulator),
+      ...(completionEvidence ? { completionEvidence } : {})
     };
   }
 
@@ -5457,7 +5648,7 @@ Tools available to you (call them when useful):
 - code_write(path, content, expectedTag?, summary?) - atomically create a file, or replace an existing file only with its latest SHA-256 expectedTag
 - code_lint(path?) / code_test(file?) - syntax-check source or run the isolated test lane
 - code_verify(checks) - run a bounded secret-scrubbed evidence gate of syntax and targeted tests in isolated no-shell Node subprocesses
-- coder_start(objective, files, plan, checks) - bind inspected SHA-256 baselines, a concrete plan, mandatory verification, and rollback checkpoints into a durable coding transaction
+- coder_start(objective, files, plan, checks, criteria) - bind inspected SHA-256 baselines, immutable user-intent acceptance criteria, a concrete plan, mandatory syntax/test/qa verification, and rollback checkpoints into a durable coding transaction
 - coder_apply(runId, expectedRevision, operations) / coder_status(runId) - apply exact CAS edits, inspect durable state, and accept completion only when isolated checks pass
 - coder_rollback(runId, expectedRevision) - human-confirmed recovery that refuses to overwrite files no longer matching controller-owned post-edit tags
 - code_shell(command, cwd?) - run a bounded shell command through the normal approval, secret, project, and catastrophic-policy gates
@@ -5469,6 +5660,16 @@ Tools available to you (call them when useful):
 - browser_scroll(ref?, deltaY?) / browser_screenshot(fullPage?) - move through or capture the current page; screenshots require approval
 - browser_download(ref? | url?, filename?) / browser_upload(ref, paths) - transfer project-confined files with approval
 - browser_close() - close only the current project/session browser
+- start_computer_use_session(goal, surface?, url?, maxActions?) - open one approved, bounded browser or desktop control session
+- computer_observe(query?, maxNodes?) - obtain a generation-bound semantic or OCR observation before acting
+- computer_act(action, observationRevision, expectedGeneration, reasoning, ...) - perform one preconditioned semantic-first action and collect automatic post-action evidence; visual coordinates require exact fresh screenshot evidence
+- computer_screenshot(fullPage?, reasoning?) - capture sensitive pixels with a SHA-256 evidence receipt; a full-page capture cannot authorize coordinate actions
+- end_computer_use_session(reason?, aborted?) - close the current project/session control session
+- qa_run(manifestPath?, mode?, routeIds?, sourceRevision?, referenceRunId?) - execute a confirmed project QA manifest with strict control coverage, fixture-safe actions, accessibility, keyboard navigation, console/network diagnostics, human-approved visual comparisons, screenshots, and failure traces; use mode='explore' for bounded breadth-first semantic state exploration, and pass an earlier compatible referenceRunId to require immutable intent comparison before success
+- qa_compare(referenceRunId, candidateRunId) / qa_comparison_status(comparisonId) - compare exact-manifest QA revisions with deterministic intent oracles; keep implementation evidence separate from design intent and inspect intended changes, regressions, improvement candidates, review gates, bug hypotheses, and owned evidence refs
+- qa_benchmark(runId) - derive a content-free quality and efficiency proof from exact QA evidence; require qualified=true before claiming savings, treat screenshot-only latency and bytes as labeled counterfactual estimates, and never invent provider-specific image token counts
+- qa_status(runId) / qa_artifact(runId, ref, includeData?) - inspect revision-bound QA evidence or retrieve a bounded project-owned screenshot, visual diff, or diagnostic artifact
+- qa_approve_baseline(runId, resultIds?) - request exact manual human approval of screenshots from an otherwise-passing run as durable visual baselines; the agent and auto-approve cannot approve them
 - artifact_create(kind, title, content) - create a versioned Markdown or data artifact in the current project's Canvas
 - artifact_list(kind?, limit?) / artifact_show(id, revision?) - discover or read project-contained Canvas artifacts
 - artifact_update(id, expectedRevision, title?, content?) - append a revision; stale expectedRevision values fail instead of overwriting
@@ -5502,8 +5703,11 @@ Guidelines:
 - Call inspect_skill_capabilities before running an imported or uncertain skill; if it reports a partial or text-only scope, do not assume omitted tools are available.
 - Use checkpoints as the fast pre-mutation safety gate. Use timeline_preview before any slower post-mutation timeline recovery.
 - Read before editing. Reuse a code_read/code_search tag only for the exact file version it describes; after any successful write, use the returned tag or read again.
-- For multi-file coding work, use coder_start only after inspection, then coder_apply. Treat only state=passed as complete; a blocked run requires coder_status and explicit recovery.
-- Treat each tool's receipt and semantic outcome as authoritative: dispatched=false means its handler did not run, and changed=null after dispatch requires inspection before retrying.
+- Never claim an implementation request is complete without a successful state-changing receipt and passing verification from the same turn. User-facing UI changes additionally require passing qa_run browser and visual evidence. If evidence is blocked or unavailable, report that limitation instead of claiming success.
+- For multi-file coding work, use coder_start only after inspection. Give every check a stable ASCII id and map each immutable acceptance criterion to its proving checkIds, then call coder_apply. Use the visual oracle for an approved pixel baseline, keyboard for reachability/focus proof, and screenshot only for capture evidence. Treat only state=passed with acceptance.status=passed as complete; deterministic failures cannot be overruled, and a blocked run requires coder_status and explicit recovery.
+- For user-facing web changes, create or update a version-1 qa-manifest.json, classify every interactive control, give each executed action an observable expectation, and run qa_run. For revision comparisons, declare immutable intent criteria plus an explicit fixtureRevision in that manifest and use referenceRunId or qa_compare; a visual change is never self-approved by the model. Missing or changed visual baselines require review, and only a human may approve a new baseline. Never treat a screenshot alone as proof when deterministic QA evidence failed.
+- For interactive computer use, observe before every action and pass back the exact observation revision and generation. Prefer semantic refs. Use visual coordinates only when the target has no usable semantic ref, after a fresh viewport screenshot, and include a concrete fallback reason. Treat the automatic post-action observation as execution evidence, not as proof of the user's broader intent.
+- Treat each tool's receipt and semantic outcome as authoritative: dispatched=false means its handler did not run, changed=null after dispatch requires inspection before retrying, and receipt.decision.path lists the content-free gate path plus the decisive blockedAt gate when execution stopped.
 
 The latest user message may begin with a [context] block assembled by the runtime (scrutiny decision, memory hits). Treat it as trusted background — the user did not type it.`;
 }

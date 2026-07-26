@@ -946,6 +946,9 @@ export class JobManager {
       finishedAt: record.finishedAt ?? null,
       pendingActionId: record.pendingActionId ?? null
     });
+    try { this.runtime.runInspector?.recordJob?.(record); } catch {
+      // Visibility is advisory; the durable job store remains authoritative.
+    }
     const bus = privateState(this).events ?? this.runtime.events;
     try { bus?.emit?.("job", event); } catch { /* advisory */ }
   }

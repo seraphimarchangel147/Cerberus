@@ -97,6 +97,106 @@ Fixes Azazel reporting "I only see ~6 tools" and "no lane to Seraphim from this 
 - **send_message returns a clear `{delivered, status}` envelope.** The Discord transport returns `{text, candidates, successfulCandidates}` where `candidates` are FILE ATTACHMENTS — a plain text message has zero, which the model misread as "nothing delivered" on the first live probe. The handler now wraps every send with an explicit `delivered` boolean + human `status` string (raw transport kept under `transport`).
 - Regression: `test/legion-siblings.test.js` (9 cases: resolve case-insensitive/unknown/env-override/malformed, chat-core send lane present, context block fires only for discord + names channel/server/sibling lane + DM path). Both lanes 1084/1084 green. Homoglyph-clean.
 - **Adjacent root-cause found + fixed (config regression, not from this change):** Azazel's model was dead — every turn 401'd because `ANTHROPIC_BASE_URL` (`https://api.kimi.com/coding/v1`, his Kimi coding endpoint) had been dropped from the secrets snapshot (`~/.openagi/secrets/secrets.json`, source of truth that projects `.env` on boot), so the AnthropicProvider defaulted to `api.anthropic.com` and his Kimi key was rejected. Restored via `POST /setup/save {ANTHROPIC_BASE_URL}` (persists to the snapshot, survives restart). Verified: Kimi online, and Azazel sent his first-ever sibling message to Seraphim's #seraphim-chat over the new lane.
+## 2026-07-25 - Explainable governed tool decisions (Codex)
+
+- Added a bounded, immutable `receipt.decision` to every finalized tool call, covering input snapshot and contracts, project/profile/capability scope, scrutiny, hooks, approval, checkpoints, authority refresh, resource leasing, dispatch, handler outcome, semantic verification, output contracts, and final outcome.
+- Kept the representation token-efficient as one fixed-ASCII path with an explicit gate count and truncation bit, the decisive `blockedAt` gate, and only the slowest gate timing alongside the receipt's existing total duration.
+- Preserved one receipt across tool-search forwarding and approval resume, while keeping pre-tool hooks and every authority boundary fresh.
+- Kept pre-dispatch validation, scope, and preflight failures isolated from lifecycle observers while making their returned receipts explain the rejection.
+- Extended Run Inspector with allowlisted decision path, decisive gate, gate count, truncation, and slowest-gate metadata; invalid or content-bearing fields are dropped rather than persisted.
+- Preserved bounded decision provenance when oversized tool results are compacted for the next model hop, and taught the static system prompt to treat the receipt path as authoritative.
+- Added policy-lane-independent regressions for success, handler failure, hook veto, invalid input, invalid output, forwarding, explicit manual approval, preflight observer isolation, immutability, redaction, durable Run Inspector projection, and compacted model output.
+- Documented a clean-room comparison of Claude Code lifecycle hooks and isolated contexts, Hermes toolsets and progressive disclosure, Cursor diff review and remote-agent security, Agent Zero watchable surfaces, and Cerberus's internal enforcement gap.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1751/1752 tests with zero failures and one intentional platform skip; added lines are ASCII-clean, `git diff --check` passes, and `npm audit --audit-level=high` reports zero vulnerabilities.
+EXPLAINABLE TOOL DECISIONS COMPLETE
+
+## 2026-07-25 - Quality-preserving QA performance proof (Codex)
+
+- Added exact per-result measurements for wall-clock duration, semantic actions, page loads, deterministic replay actions, blind retries, screenshot captures, decoded screenshot bytes, and screenshot capture duration.
+- Added the read-only `qa_benchmark` tool and public performance-proof builder. Proofs are stable, project/session-scoped, content-free, and qualify only when terminal implementation, design, completeness, measurement, and owned-artifact evidence all pass.
+- Compared actual semantic-first evidence with a clearly labeled screenshot-only pre/post-action counterfactual, while separating exact observations from estimated capture bytes and latency. Provider/model image tokens remain explicitly unavailable instead of being fabricated from bytes.
+- Extended Run Inspector with allowlisted numeric QA efficiency counters only; page text, pixels, arguments, intent statements, and hidden reasoning remain excluded.
+- Exercised bounded exploration across forms, navigation, dialogs, tables, accessible canvas controls, and desktop/mobile layouts, with successful completion and capture-reduction assertions.
+- Tightened cancellation at route, control, state, candidate, and replay boundaries so no later semantic action starts after abort and partial evidence cannot qualify.
+- Added durable exact-tuple visual approval claims with JSONL authority and atomic snapshots. Exact retries are idempotent, while project, manifest, source, run, or result substitution fails closed across restart.
+- Isolated throwing Run Inspector and event observers from QA execution, and added hostile page-injection, cross-scope benchmark, path-traversing upload, unsafe filename, malicious download-adapter, approval-replay, restart, cancellation, and redaction regressions alongside existing stale-pixel and secret-reflection coverage.
+- Documented Phase 2 acceptance around semantic-first perception, deterministic correctness, visible evidence, safe recovery, and quality-preserving speed.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1745/1746 tests with zero failures and one intentional platform skip; `npm audit --audit-level=high` reports zero vulnerabilities.
+QUALITY PERFORMANCE PROOF COMPLETE
+
+HIGH ASSURANCE HARNESS PHASE 2 COMPLETE
+
+## 2026-07-25 - Revision-matched intent and differential QA (Codex)
+
+- Added immutable manifest intent criteria for behavior, visual, accessibility, keyboard, diagnostic, and state-graph oracles, with explicit ASCII fixture revisions and exact route, viewport, and control scopes.
+- Added `qa_compare` and `qa_comparison_status`, plus a `referenceRunId` fast path on `qa_run`, so the harness can reuse owned QA evidence without another browser pass or require comparison in the original governed call.
+- Required distinct source revisions and exact manifest, mode, project, session, workspace, fixture contract, and browser execution epoch compatibility before comparison; references must be earlier passing runs and candidates must be terminal.
+- Separated implementation evidence from product intent and classified each criterion as intended, regression, improvement candidate, or review required using deterministic structural metrics rather than model judgment.
+- Kept behavior, visual, accessibility, keyboard, diagnostic, and graph metrics independent; compared salted state graphs without state IDs or raw page content; and emitted concise code-based bug hypotheses with owned screenshot, graph, replay, trace, and diagnostic refs.
+- Extended manual baseline approval to otherwise-passing runs blocked only by missing or changed visuals; an intended visual change passes only when the exact candidate pixels and source revision have a real human approval.
+- Persisted differential reports through bounded fsynced JSONL authority plus atomic snapshots, strict recovery normalization, corrupt-suffix append refusal, bounded journal compaction, project/session containment, and input-digest idempotency.
+- Bound coder QA checks to exact comparison receipts, preserved comparison IDs in revision-matched acceptance evidence, and failed closed when a required comparison is missing, swapped, failed, or review-bound.
+- Extended content-free Run Inspector progress with comparison identity, design status, criterion counts, and the owned report ref; added fake-browser and real Chromium coverage for preserved behavior, regressions, stable graph structure, missing intended changes, improvement review, human-approved visual changes, incompatible epochs, durable recovery, and redaction.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1740/1741 tests with zero failures and one intentional platform skip.
+INTENT DIFFERENTIAL COMPLETE
+
+## 2026-07-25 - Bounded semantic UI state exploration (Codex)
+
+- Extended `qa_run` with an `explore` mode that first proves the route and then builds a bounded breadth-first semantic state graph from fresh-page shortest-path replays.
+- Added configurable state, depth, action, and wall-time budgets; exhausted budgets fail closed as incomplete evidence, cancellation remains explicit, and exploration never presents partial coverage as a pass.
+- Added randomly salted state identities over page and accessible-control signals while persisting only opaque state IDs, control IDs, action kinds, structural counts, status, and owned evidence refs; graph and replay artifacts omit raw page text, input values, and typed content.
+- Added deterministic transition oracles for declared postconditions, route intent, diagnostics, accessibility, keyboard navigation, readiness, busy state, disabled controls, dead controls, unexpected navigation, and expectations that cannot discriminate an action.
+- Excluded destructive controls by default and required both a declared fixture and an explicit exploration opt-in before executing them.
+- Captured screenshots only for material states and failures, retained traces only for failures, and emitted replay artifacts with the shortest known BFS path and exact failure codes.
+- Extended durable QA summaries, public exports, tool schema, static model guidance, and content-free Run Inspector progress with explored states, transitions, actions, failed transitions, truncation, depth, and graph evidence.
+- Added fake-browser and real Chromium coverage for successful graphs, raw-content omission, inert controls, minimized replay, trace retention, destructive-action gating, budget exhaustion, non-discriminating expectations, prompt visibility, and inspector redaction.
+- Stabilized the slow-active OpenAI stream regression under full-suite load while preserving its proof that repeated stream activity resets a shorter stall watchdog.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1731/1732 tests with zero failures and one intentional platform skip.
+STATE SPACE QA COMPLETE
+
+## 2026-07-25 - Unified governed computer use (Codex)
+
+- Added one project/session-scoped computer-use controller over the semantic browser and optional remote desktop node, with approved goals, explicit surfaces, hard mutation budgets, exact observation revisions, generation preconditions, and automatic post-action observations.
+- Added `computer_observe` and `computer_act` as the preferred semantic-first agent path while retaining legacy desktop names for compatibility; every new agent-facing tool is bounded, registry-governed, capability-described, approval-aware, and documented in the static system prompt.
+- Added cryptographic browser screenshot receipts and fail-closed visual coordinate actions that require a fresh viewport capture, exact SHA-256, matching live generation, in-bounds coordinates, and an explicit semantic-fallback reason; full-page and stale captures cannot authorize clicks, and visual fallback cannot initiate top-level navigation.
+- Made unavailable desktop input fail honestly after intent logging, added fresh desktop screenshot verification after real actions, and preserved native image attachment handling for both model providers.
+- Rebuilt computer-use persistence around content-minimized JSONL authority plus atomic snapshots, scoped active sessions, restart-safe observation and action budgets, structural evidence only, and irreversible omission of typed text, selections, screenshot bytes, OCR, and page text.
+- Redacted managed secrets from goals, rationales, errors, node responses, lifecycle events, and audit records; private tool input cannot enter pending-action persistence or live visibility, and low-entropy text hashes are deliberately not retained.
+- Extended Run Inspector with content-free computer strategy, observation revision, and verification status; added setup allowlisting for the missing `OPENAGI_COMPUTER_NODE` endpoint and a measurable two-phase high-assurance harness plan.
+- Added scope, generation, visual freshness, full-page rejection, action-budget replay, managed-secret, private-event, prompt, provider, runtime, approval, red-team, and legacy-compatibility regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1725/1726 tests with zero failures and one intentional platform skip.
+GOVERNED COMPUTER USE COMPLETE
+
+## 2026-07-25 - Live governed Run Inspector (Codex)
+
+- Added one project-scoped operational timeline for agent turns, provider iterations, tool receipts, durable jobs, coder transactions, Web QA progress, verification, acceptance, rollback, and artifact evidence.
+- Persisted a strictly allowlisted content-free event journal through fsynced JSONL plus atomic cache snapshots, with journal-authoritative replay, bounded per-run and global retention, latest-per-run compaction, valid-suffix recovery, hostile snapshot normalization, and same-ID project isolation.
+- Kept observability advisory and fail-open across AgentHost, jobs, coder, and QA so an inspector or listener failure can never change execution; prompts, tool arguments, raw results, error messages, and model reasoning never enter the inspector journal.
+- Added authenticated project-contained list, detail, SSE, and integrity-checked QA artifact endpoints with no-store responses, plus a live dashboard for status, tokens, checks, acceptance contracts, rollback state, screenshots, visual diffs, accessibility, keyboard coverage, traces, and historical durable jobs.
+- Added restart, redaction, observer-failure, project-collision, post-snapshot replay, durable-job discovery, AgentHost lifecycle, SSE, HTTP authorization, and artifact-ownership regressions.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1706/1707 tests with zero failures and one intentional platform skip; added-line ASCII review and `npm audit --audit-level=high` are clean.
+RUN INSPECTOR COMPLETE
+
+## 2026-07-25 - Proof-carrying web QA and visual evidence (Codex)
+
+- Added an opt-in, project-scoped Playwright QA controller that loads bounded version-1 manifests, inventories every interactive control, executes fixture-safe declared behavior in fresh sessions, and rejects unclassified, missing, disabled, expired-exemption, stuck-loading, console, page, and network failures.
+- Added strict axe accessibility and keyboard reachability/focus audits, exact-origin loopback protection for local development servers, fresh-session action isolation, real Chromium coverage, and failure-only Playwright traces.
+- Added content-addressed screenshot, diagnostic, diff, and trace artifacts with project/run authorization, SHA-256 integrity checks, authoritative JSONL bindings, atomic snapshots, 24-hour success retention, 30-day failure retention, and non-expiring approved baselines.
+- Added deterministic PNG comparison with bounded decoded pixels, configurable diff thresholds, capture and strict modes, visual diff artifacts, and a manual-only baseline approval tool that ordinary confirmation and auto-approve cannot satisfy.
+- Extended coder transactions with revision-bound browser, screenshot, accessibility, keyboard, and approved-visual evidence oracles so web failures roll back controller-owned edits rather than being described as success.
+- Wired `qa_run`, `qa_status`, `qa_artifact`, and `qa_approve_baseline` through the governed registry, runtime opt-in, setup allowlist, public exports, and static model guidance. Added Playwright, axe-core, pixelmatch, and pngjs with zero audit findings.
+- Validation: both full policy lanes pass 1700/1701 tests with zero failures and one intentional platform skip; added-line ASCII scan and `npm audit --audit-level=high` are clean.
+PROOF CARRYING WEB QA COMPLETE
+
+## 2026-07-25 - Revision-bound acceptance evidence graph (Codex)
+
+- Extended durable coder transactions with immutable acceptance criteria that carry stable ASCII identities, intent statements, evidence oracles, and exact proving check identities.
+- Bound every accepted criterion to the exact post-edit source digest and canonical verification receipt; stale evidence, incomplete evidence, non-test claims, objective drift, and deterministic failures all fail closed.
+- Added stable check identities throughout the isolated verifier and agent-facing schemas while preserving legacy stored runs through explicit compatibility criteria.
+- Added regressions for exact-revision proof, deterministic failure precedence, homoglyph rejection, intent tampering, unprovable criteria, visual self-certification, persistence, and criterion immutability.
+- Validation: both full policy lanes pass 1683/1684 tests with zero failures and one intentional platform skip.
+ACCEPTANCE EVIDENCE COMPLETE
+
 ## 2026-07-25 - Checkpoint-backed autonomous coder controller (Codex)
 
 - Added a durable `coder_start` -> `coder_apply` -> `coder_status` transaction protocol that binds an objective, plan, inspected SHA-256 baselines, and mandatory checks before editing begins.
@@ -140,6 +240,13 @@ EXECUTION RECEIPTS COMPLETE
 - Added a registry-level defense: if the entire hook callback fails unexpectedly, mutating tools are blocked with `security_hook_unavailable`; declared read-only tools may continue.
 - Added regressions for thrown, timed-out, invalid, optional-extension, and whole-registry failure paths.
 SECURITY HOOK FAILURE MODES COMPLETE
+## 2026-07-22 — Discord session-key migration: recover orphaned transcripts (Seraphim)
+
+- Fixed Bug #1: when the guild session key gained a `:user` segment (`discord:<guild>:<channel>` → `discord:<guild>:<channel>:<user>`), the pre-existing transcript was orphaned. Measured on the live store: `discord_..._1496557186900431100.json` held **63 messages** (stranded on the old key) while the new key started a fresh 4-message history — 63 messages of context went dark with no alias, fallback, or migration anywhere.
+- Added pure exported helper `legacyDiscordKey(sessionId)` in `src/agent-store.js`: anchored regex maps a 4-segment guild key to its 3-segment ancestor, returns `null` for DM keys, already-3-segment keys, and any non-discord key. Unit-testable, no side effects.
+- Added `migrateLegacyKey(newId, legacyId)` on `FileBackedAgentStore`: one-time, idempotent, never-clobbering recovery — if the new key already has messages it's a no-op; else it copies the legacy transcript (preserving `createdAt`, tagging `metadata.migratedFrom`) and leaves the legacy file in place for recovery. Safe to run on every turn.
+- Wired into `src/agent-host.js` right after the sessionId resolves and before the first `appendMessage`: best-effort, `typeof`-guarded (in-memory store unaffected), wrapped in try/catch so a migration failure degrades to a fresh session and never breaks the turn. `sessionKeyFor` in discord-channel.js is deliberately unchanged — the 4-segment key is the intended scheme; we recover the old lineage into it, not revert it.
+- Regression: `test/session-key-migration.test.js` — legacyDiscordKey derivation cases, migrate copy/idempotency/never-clobber/no-crash, and an end-to-end append proving the handleMessage path sees recovered history (N+1). Suite green 692/692 (baseline 682 + 10).
 
 ## 2026-07-22 — Reversible cron job control from the agent loop (Seraphim)
 
@@ -1169,3 +1276,13 @@ Azazel reported "0 failures"; the real suite had **4**, all genuine.
   `?status=done` both returning it, the unfiltered board correctly keeping it
   out of `tasks` and in `completed`, and moving a completed task still refused.
 MERGE REVIEW COMPLETE
+## 2026-07-25 - Evidence-aware routing and quality-preserving preparation (Codex)
+
+- Added bounded completion contracts for code changes, UI changes, code verification, and UI verification while leaving explanation, research, ordinary chat, cron, and autopilot turns unchanged.
+- Both paid provider loops now reject unsupported completion claims, issue at most one compact evidence retry, and label unresolved work incomplete; failed, blocked, pending, unrelated, or uncertain tool calls cannot satisfy the gate.
+- Bound code completion to same-turn project mutation plus passing code evidence, and bound user-facing UI work to passing browser and visual QA. Deterministic and provider-unavailable fallbacks can no longer imply actionable work completed.
+- Added request-local tool preferences that keep coder and QA schemas directly visible through progressive disclosure and model-tool caps without widening project, profile, specialist, read-only, or exact-tool boundaries.
+- Started late-bound context expansion immediately after scrutiny and overlapped it with independent principle and ambient reads, preserving exact prompt bytes while removing avoidable serial latency.
+- Added content-free completion status, evidence counts, and retry visibility to Run Inspector, persisted bounded evidence state with assistant outcomes, and kept MoA reference analysts outside the aggregator's completion contract.
+- Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1717/1718 tests with zero failures and one intentional Windows permission-mode skip.
+EVIDENCE ROUTING COMPLETE

@@ -7,6 +7,7 @@ const MAX_SYNTAX_FILES = 256;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 300_000;
+const CHECK_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const SKIP_DIRECTORIES = new Set([
   ".git",
   ".openagi",
@@ -55,6 +56,7 @@ export class IsolatedCodeVerifier {
         if (files.length === 0) {
           results.push(Object.freeze({
             index,
+            id: check.id,
             type: check.type,
             path: relativePath(root, check.path),
             ok: false,
@@ -90,6 +92,7 @@ export class IsolatedCodeVerifier {
         }
         results.push(Object.freeze({
           index,
+          id: check.id,
           type: check.type,
           path: relativePath(root, check.path),
           ok: failure === null,
@@ -133,6 +136,7 @@ export class IsolatedCodeVerifier {
       );
       results.push(Object.freeze({
         index,
+        id: check.id,
         type: check.type,
         path: check.path ? relativePath(root, check.path) : null,
         ok: execution.ok,
@@ -174,6 +178,10 @@ function normalizeChecks(value, root) {
     if (!["syntax", "test"].includes(type)) {
       throw new TypeError(`Verification check ${index + 1} has an unsupported type.`);
     }
+    const id = String(raw.id ?? `check_${index + 1}`).trim();
+    if (!CHECK_ID_RE.test(id)) {
+      throw new TypeError(`Verification check ${index + 1} has an invalid ASCII id.`);
+    }
     const timeoutMs = boundedInteger(
       raw.timeoutMs,
       DEFAULT_TIMEOUT_MS,
@@ -190,6 +198,7 @@ function normalizeChecks(value, root) {
       throw new Error(`Verification target does not exist or is not a regular file/directory: ${target}`);
     }
     return Object.freeze({
+      id,
       type,
       path: target,
       timeoutMs

@@ -7,6 +7,7 @@ import {
   SemanticBrowserError,
   SemanticBrowserService,
   createOptionalSemanticBrowserService,
+  validateQaNavigationUrl,
   validateNavigationUrl
 } from "../src/semantic-browser.js";
 
@@ -95,6 +96,11 @@ class FakeBrowserAdapter {
     this.actions.push({ kind: "scroll", locator, deltaY });
   }
 
+  async coordinateClick({ x, y, button }) {
+    this.actions.push({ kind: "coordinate-click", x, y, button });
+    this.generation += 1;
+  }
+
   async download(locator, { downloadDir, filename }) {
     const target = path.join(downloadDir, filename ?? "receipt.pdf");
     fs.writeFileSync(target, "receipt");
@@ -120,6 +126,58 @@ class FakeBrowserAdapter {
       mediaType: "image/png",
       width: 800,
       height: 600
+    };
+  }
+
+  configureQa({ allowedOrigin }) {
+    this.qaAllowedOrigin = allowedOrigin;
+  }
+
+  async setViewport(viewport) {
+    this.viewport = viewport;
+  }
+
+  async startTrace() {
+    this.traceActive = true;
+  }
+
+  async stopTrace({ retain }) {
+    this.traceActive = false;
+    return retain
+      ? {
+          mediaType: "application/zip",
+          data: Buffer.from("trace").toString("base64")
+        }
+      : null;
+  }
+
+  async diagnostics() {
+    return { events: [] };
+  }
+
+  async auditAccessibility() {
+    return { supported: true, violations: [], incomplete: [] };
+  }
+
+  async auditKeyboard() {
+    return {
+      supported: true,
+      total: 4,
+      visited: 3,
+      missing: [{ role: "button", name: "Review request" }],
+      focusVisibleFailures: [{ role: "textbox", name: "Destination" }],
+      trapped: false
+    };
+  }
+
+  async pageState() {
+    return {
+      url: this.url,
+      title: "Travel request",
+      bodyText: "Travel request",
+      readyState: "complete",
+      busyCount: 0,
+      active: null
     };
   }
 
@@ -172,6 +230,55 @@ test("semantic browser supports compact untrusted inspect and typed actions", as
   assert.equal(adapter.closed, true);
 });
 
+test("visual clicks require exact fresh viewport screenshot evidence", async () => {
+  const root = workspace();
+  const adapter = new FakeBrowserAdapter();
+  const service = new SemanticBrowserService({
+    adapter,
+    dnsLookup: publicDns
+  });
+  const context = scope(root);
+  await service.open({ url: "https://example.com/canvas" }, context);
+
+  const shot = await service.screenshot({}, context);
+  assert.match(shot.evidence.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(shot.evidence.coordinateEligible, true);
+  const clicked = await service.visualClick({
+    x: 20,
+    y: 30,
+    button: "left",
+    screenshotSha256: shot.evidence.sha256,
+    expectedGeneration: shot.generation,
+    fallbackReason: "Canvas target has no semantic element reference."
+  }, context);
+  assert.equal(clicked.strategy, "visual-fallback");
+  assert.equal(adapter.actions.at(-1).kind, "coordinate-click");
+
+  await assert.rejects(
+    service.visualClick({
+      x: 20,
+      y: 30,
+      screenshotSha256: shot.evidence.sha256,
+      expectedGeneration: shot.generation,
+      fallbackReason: "Retry stale pixels."
+    }, context),
+    (error) => error.code === "browser_visual_evidence_stale"
+  );
+
+  const fullPage = await service.screenshot({ fullPage: true }, context);
+  assert.equal(fullPage.evidence.coordinateEligible, false);
+  await assert.rejects(
+    service.visualClick({
+      x: 20,
+      y: 30,
+      screenshotSha256: fullPage.evidence.sha256,
+      expectedGeneration: fullPage.generation,
+      fallbackReason: "Full page should not authorize coordinates."
+    }, context),
+    (error) => error.code === "browser_visual_evidence_ineligible"
+  );
+});
+
 test("generation-scoped references fail after known and asynchronous DOM changes", async () => {
   const root = workspace();
   const adapter = new FakeBrowserAdapter();
@@ -196,6 +303,66 @@ test("generation-scoped references fail after known and asynchronous DOM changes
   await assert.rejects(
     service.input({ ref: destination.ref, text: "stale" }, context),
     (error) => error.code === "browser_stale_reference"
+  );
+});
+
+test("QA browser permits only an exact literal loopback origin", async () => {
+  const root = workspace();
+  const adapter = new FakeBrowserAdapter();
+  const service = new SemanticBrowserService({
+    adapter,
+    dnsLookup: publicDns
+  });
+  const context = scope(root, {
+    __qaRunId: "qa_0123456789abcdef"
+  });
+  const opened = await service.openForQa({
+    url: "http://127.0.0.1:43111/editor",
+    viewport: { width: 1280, height: 720 }
+  }, context);
+
+  assert.equal(opened.qaRunId, "qa_0123456789abcdef");
+  assert.equal(adapter.qaAllowedOrigin, "http://127.0.0.1:43111");
+  assert.deepEqual(adapter.viewport, { width: 1280, height: 720 });
+  assert.equal((await service.qaAccessibility({}, context)).supported, true);
+  assert.deepEqual(await service.qaKeyboardAudit({}, context), {
+    supported: true,
+    total: 4,
+    visited: 3,
+    missing: [{ role: "button", name: "Review request" }],
+    focusVisibleFailures: [{ role: "textbox", name: "Destination" }],
+    trapped: false
+  });
+  assert.equal((await service.qaDiagnostics({}, context)).events.length, 0);
+  const trace = await service.stopQaTrace({ retain: true }, context);
+  assert.equal(trace.mediaType, "application/zip");
+
+  await assert.rejects(
+    service.qaDiagnostics({}, {
+      ...context,
+      __qaRunId: "qa_fedcba9876543210"
+    }),
+    (error) => error.code === "browser_qa_session_mismatch"
+  );
+  await service.close({}, context);
+
+  assert.equal(
+    await validateQaNavigationUrl("http://127.0.0.1:43111/editor"),
+    "http://127.0.0.1:43111/editor"
+  );
+  await assert.rejects(
+    validateQaNavigationUrl("http://localhost:43111/editor"),
+    (error) => error.code === "browser_private_network_blocked"
+  );
+  await assert.rejects(
+    validateQaNavigationUrl("http://192.168.1.50/editor"),
+    (error) => error.code === "browser_private_network_blocked"
+  );
+  await assert.rejects(
+    validateQaNavigationUrl("http://127.0.0.1:43112/editor", {
+      allowedOrigin: "http://127.0.0.1:43111"
+    }),
+    (error) => error.code === "browser_qa_origin_blocked"
   );
 });
 
@@ -284,9 +451,23 @@ test("uploads and downloads remain inside the project workspace", async () => {
     }, context),
     (error) => error.code === "browser_upload_outside_project"
   );
+  await assert.rejects(
+    service.upload({
+      ref: fileRef,
+      paths: [path.relative(root, path.join(outside, "outside.txt"))]
+    }, context),
+    (error) => error.code === "browser_path_outside_project"
+  );
 
   snapshot = await service.inspect({}, context);
   const submit = snapshot.nodes.find((node) => node.name === "Review request");
+  await assert.rejects(
+    service.download({
+      ref: submit.ref,
+      filename: "../escape.pdf"
+    }, context),
+    (error) => error.code === "browser_invalid_filename"
+  );
   const downloaded = await service.download({
     ref: submit.ref,
     filename: "receipt.pdf"
@@ -295,6 +476,23 @@ test("uploads and downloads remain inside the project workspace", async () => {
   assert.equal(
     fs.readFileSync(path.join(root, downloaded.path), "utf8"),
     "receipt"
+  );
+
+  snapshot = await service.inspect({}, context);
+  const freshSubmit = snapshot.nodes.find(
+    (node) => node.name === "Review request"
+  );
+  adapter.download = async () => {
+    const escaped = path.join(outside, "adapter-escape.pdf");
+    fs.writeFileSync(escaped, "malicious");
+    return { path: escaped, bytes: 9 };
+  };
+  await assert.rejects(
+    service.download({
+      ref: freshSubmit.ref,
+      filename: "safe.pdf"
+    }, context),
+    (error) => error.code === "browser_path_outside_project"
   );
 });
 
