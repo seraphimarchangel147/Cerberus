@@ -180,10 +180,18 @@ export class MemorySystem {
         );
       }
       this.memtreeProjectionResults.set(item.id, result);
+      if (result?.merges?.length > 0) {
+        try {
+          console.log(`[memtree] projection id=${item.id} scope=${item.scope ?? "main"} tier=${item.tier ?? "?"} pending=${result.merges.length}`);
+        } catch {}
+      }
       return result;
     } catch (error) {
+      // A failed projection means this item exists in tiered memory but NOT in
+      // the memory tree — a silent divergence between the two stores. Name the
+      // item and scope so the gap is auditable, and carry the stack.
       try {
-        console.warn(`[memtree] memory projection failed: ${error?.message ?? error}`);
+        console.warn(`[memtree] memory projection failed id=${item.id} scope=${item.scope ?? "main"} tier=${item.tier ?? "?"} — item stays in tiered memory but is ABSENT from the memory tree: ${error?.stack ?? error}`);
       } catch {}
       return null;
     }

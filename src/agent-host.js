@@ -619,9 +619,29 @@ export class AgentHost {
           profileScope
         });
         if (memoryWake.text) sessionMemorySnapshot = memoryWake.text;
-      } catch {
+        if (this._memtreeWakeWarn) this._memtreeWakeWarn.suppressed = 0;
+        if (memoryWake.merges?.length > 0) {
+          console.log(`[memtree] wake scope=${memoryScope} total=${memoryWake.total} pending=${memoryWake.merges.length}`);
+        }
+      } catch (error) {
         memoryWake = null;
         sessionMemorySnapshot = frozenSessionMemorySnapshot;
+        // Hot path: log the first failure, then at most once per 60s, carrying
+        // the suppressed-repeat count so a persistently failing wake (lock
+        // contention, corrupt TREE record, disk full) stays visible without
+        // emitting one line per turn forever.
+        const warnState = this._memtreeWakeWarn ?? (this._memtreeWakeWarn = { lastAt: 0, suppressed: 0 });
+        const now = Date.now();
+        if (now - warnState.lastAt >= 60000) {
+          const suppressedNote = warnState.suppressed > 0 ? ` (suppressed ${warnState.suppressed} repeated failure(s) since last log)` : "";
+          warnState.lastAt = now;
+          warnState.suppressed = 0;
+          try {
+            console.warn(`[memtree] wake failed scope=${memoryScope} — falling back to frozen session memory snapshot${suppressedNote}: ${error?.stack ?? error}`);
+          } catch {}
+        } else {
+          warnState.suppressed += 1;
+        }
       }
     }
 

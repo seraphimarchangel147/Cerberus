@@ -429,14 +429,16 @@ export class AbiRuntime {
     this.memtree = null;
     this.spills = null;
     if (memtreeEnabled(runtimeEnv)) {
+      const memtreeDir = path.join(this.dataDir, "memory", "memtree");
+      const spillDir = path.join(this.dataDir, "spill");
       try {
         this.memtree = options.memtree ?? new ScopedMemTree({
-          dir: path.join(this.dataDir, "memory", "memtree"),
+          dir: memtreeDir,
           env: runtimeEnv,
           ...(options.memtreeOptions ?? {})
         });
         this.spills = options.spills ?? new SpillStore({
-          dir: path.join(this.dataDir, "spill"),
+          dir: spillDir,
           spillBytes: runtimeEnv.OPENAGI_SPILL_BYTES,
           ...(options.spillOptions ?? {})
         });
@@ -445,11 +447,14 @@ export class AbiRuntime {
           : [];
         this.memtree.migrate?.(existingMemory);
         this.memory.bindMemTree?.(this.memtree);
+        try {
+          console.log(`[memtree] enabled — dir=${this.memtree?.dir ?? memtreeDir}, migrated=${existingMemory.length} items, spillDir=${this.spills?.dir ?? spillDir}, spillBytes=${this.spills?.spillBytes ?? "default"}`);
+        } catch {}
       } catch (error) {
         this.memtree = null;
         this.spills = null;
         try {
-          console.warn(`[memtree] disabled after initialization failure: ${error?.message ?? error}`);
+          console.warn(`[memtree] initialization failed — degrading to non-memtree operation (memory tree and spill store disabled for this process): ${error?.stack ?? error}`);
         } catch {}
       }
     }

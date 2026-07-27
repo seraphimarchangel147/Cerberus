@@ -1674,3 +1674,10 @@ UPGRADE BATCH ITEM F COMPLETE
 UPGRADE BATCH PHASE 1 COMPLETE
 
 - 2026-07-27T09:34:01.345Z · **azazel** · edit `CHANGES.md` — Re-apply Azazel changelog additions onto origin/main version during rebase
+- 2026-07-27T10:39:07.440Z · **azazel** · edit `src/pending-actions.js`
+- 2026-07-27T10:39:40.489Z · **azazel** · edit `test/pending-actions-hardening.test.js`
+- 2026-07-27T12:07:09.057Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Refresh header to cover 2026-07-27 planner re-issue of the goal-mode checklist task
+- 2026-07-27T12:16:54.501Z · **azazel** · edit `src/agent-host.js` — memtree observability site 1: bind + rate-limit per-turn wake failures, log merge pressure on success
+- 2026-07-27T12:16:54.517Z · **azazel** · edit `src/abi-runtime.js` — memtree observability site 2: log enabled state with dir/migrated/spill details; failure warn now carries stack and states the degradation
+- 2026-07-27T12:52:00.000Z · **seraphim** · edit `src/memory-system.js` — memtree observability site 3: projection failures now name item id/scope/tier, carry the stack, and state the tiered-memory↔memory-tree divergence; successful projections log pending merge pressure
+- 2026-07-27T12:52:00.000Z · **seraphim** · edit `src/spill-store.js` — memtree observability site 4: spill journal replay no longer falls back silently — snapshot fallback and unrecoverable-truncation paths both warn with sequences/entry counts; snapshot-write failure carries stack and names the degraded recovery posture

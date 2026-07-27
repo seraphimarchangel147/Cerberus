@@ -210,9 +210,17 @@ export class SpillStore {
       sequence = event.sequence;
     }
     if (!healthy && snapshot && snapshot.sequence >= sequence) {
+      try {
+        console.warn(`[spill] journal replay unhealthy — falling back to snapshot: snapshotSeq=${snapshot.sequence} replaySeq=${sequence} snapshotEntries=${snapshot.entries.size} replayEntries=${entries.size} events=${this.eventsPath}`);
+      } catch {}
       this.entries = snapshot.entries;
       this.sequence = snapshot.sequence;
     } else {
+      if (!healthy) {
+        try {
+          console.warn(`[spill] journal replay truncated at sequence=${sequence} and no newer snapshot exists — spill entries after that point are UNRECOVERABLE (${entries.size} entries retained): ${this.eventsPath}`);
+        } catch {}
+      }
       this.entries = entries;
       this.sequence = sequence;
     }
@@ -227,8 +235,11 @@ export class SpillStore {
         entries: [...this.entries.values()]
       });
     } catch (error) {
+      // Non-fatal: the journal is still authoritative. But a persistently
+      // failing snapshot means a future _restore() has to replay the whole
+      // journal and loses its corruption backstop — so log the stack.
       try {
-        console.warn(`[spill] snapshot refresh failed: ${error?.message ?? error}`);
+        console.warn(`[spill] snapshot refresh failed seq=${this.sequence} entries=${this.entries.size} path=${this.snapshotPath} — journal remains authoritative but corruption recovery is degraded: ${error?.stack ?? error}`);
       } catch {}
     }
   }
