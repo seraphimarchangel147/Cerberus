@@ -3,6 +3,26 @@
 // to events the runtime already emits and turns each into one outreach item.
 // Nothing in the observer / miners / planner / stores changes.
 
+function mapSkillCandidate(data) {
+  const evidence = [
+    data.occurrences ? `Observed ${data.occurrences} times` : null,
+    typeof data.confidence === "number"
+      ? `confidence ${data.confidence.toFixed(2)}`
+      : null
+  ].filter(Boolean).join(", ");
+  return {
+    projectId: eventProjectId(data),
+    type: "skill",
+    sourceRef: { kind: "skill-candidate", id: data.id },
+    outcomeId: data.outcomeId ?? null,
+    title: data.title ?? data.name ?? "New skill candidate",
+    summary: data.description ? data.description : evidence,
+    needsDecision: false,
+    actions: ["accept", "dismiss"],
+    dedupeOpen: true
+  };
+}
+
 const MAP = {
   "draft-created": (d) => ({
     projectId: eventProjectId(d),
@@ -44,17 +64,8 @@ const MAP = {
     needsDecision: true,
     actions: ["yes", "no", "in_progress", "dropped"]
   }),
-  "skill-candidate": (d) => ({
-    projectId: eventProjectId(d),
-    type: "skill",
-    sourceRef: { kind: "skill-candidate", id: d.id },
-    outcomeId: d.outcomeId ?? null,
-    title: d.name ?? "New skill candidate",
-    summary: d.description ? d.description : (d.occurrences ? `Observed ${d.occurrences} times` : ""),
-    needsDecision: false,
-    actions: ["accept", "dismiss"],
-    dedupeOpen: true
-  }),
+  "skill-candidate": mapSkillCandidate,
+  "skill-candidate-proposed": mapSkillCandidate,
   // A cron job was mid-run when the daemon died (mid-run boot marker).
   // Durable so Spencer SEES the silent death even if no client was
   // connected at boot; type "suggestion" puts it in the digest rollup.

@@ -305,10 +305,11 @@ export async function improveSkills({
 }
 
 function resolveAutoMaterializeConfig(env) {
+  const autoCurate = String(
+    env.OPENAGI_SKILL_AUTOCURATE ?? "off"
+  ).trim().toLowerCase();
   return {
-    enabled: !["0", "off"].includes(
-      String(env.OPENAGI_SKILL_AUTOCURATE ?? "on").trim().toLowerCase()
-    ),
+    enabled: ["1", "true", "on", "yes"].includes(autoCurate),
     confidence: boundedNumber(
       env.OPENAGI_SKILL_AUTO_CONFIDENCE,
       DEFAULT_AUTO_CONFIDENCE,

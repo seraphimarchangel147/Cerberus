@@ -66,6 +66,7 @@ export function createSkillFromCandidate({ runtime, candidate, lineage = {} }) {
       observedCount: seq.count ?? null,
       observedConfidence: typeof seq.confidence === "number" ? seq.confidence : null,
       sequenceFingerprint: candidate.fingerprint ?? null,
+      editedByOwner: candidate.editedByOwner === true ? true : null,
       ...lineage
     }
   });

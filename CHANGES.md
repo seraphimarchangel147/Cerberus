@@ -1729,8 +1729,11 @@ UPGRADE BATCH PHASE 1 COMPLETE
   logged rather than falling back to a rewrite.
 - The daily curator task and Discord command now run and report the ordered
   materialize, curate, and improve lifecycle as one combined result.
-- `OPENAGI_SKILL_AUTOCURATE` defaults to `on`; when unset, automatic candidate
-  materialization is enabled. `off` or `0` restores the manual-only lane.
+- `OPENAGI_SKILL_AUTOCURATE` now defaults to `off`; when unset, mined
+  candidates remain pending for owner review. Automatic materialization
+  remains available only through an explicit `1`, `true`, `on`, or `yes`.
+  This corrects the earlier agent-authorship design: the agent may author
+  skills at will, while statistical pattern proposals remain human-reviewed.
 - `OPENAGI_SKILL_AUTO_CONFIDENCE` defaults to `0.8`; when unset, candidates
   below 0.8 confidence stay pending.
 - `OPENAGI_SKILL_AUTO_MIN_OCCURRENCES` defaults to `3`; when unset, patterns
@@ -1783,6 +1786,35 @@ UPGRADE BATCH PHASE 1 COMPLETE
   registry, project-boundary, tool-radar, and cap coverage passes 85/85. The
   isolated `node --test --test-concurrency=1` gate passes 1929/1929 with zero
   failures and zero skips in 353.97 seconds.
+
+## 2026-07-27 - Human skill-candidate review queue (Codex)
+
+- Pattern mining now proposes instead of writing by default. The changed
+  `OPENAGI_SKILL_AUTOCURATE` defaults to `off`; unset, blank, `0`, `off`, and
+  unrecognized values leave candidates pending. Explicit `1`, `true`, `on`,
+  or `yes` preserves the opt-in automatic materialization path and its daily
+  cron behavior.
+- Candidate verdicts are validated and now include `deferred`, which is hidden
+  from the default pending view but available through the deferred filter, and
+  `edited`, which persists the owner's revised name and body before
+  materializing it with `editedByOwner: true` lineage.
+- Both dashboard skill surfaces expose Accept, Edit & Accept, Defer, and
+  Discard controls with occurrence and confidence evidence. The Suggestions
+  view can toggle between pending and deferred queues.
+- Pattern proposals emit advisory `skill-candidate-proposed` events with their
+  evidence. The dashboard event stream, durable outreach feed, and Discord
+  activity lane surface the new review request.
+- The legacy pattern-miner Accept endpoint now uses the shared skill
+  materializer, so its writes also call `appendSkillRevision` and remain
+  compatible with `rollback_skill`.
+- No new environment variables, npm dependencies, or package manifest changes
+  were added. Focused lifecycle, HTTP, dashboard-script, project-boundary,
+  miner-event, outreach, and Discord coverage passes 166/166. The complete
+  247-file Windows-compatible `node --test --test-concurrency=1` gate passes
+  1930 tests with zero failures and two pre-existing skips, above the required
+  1901-pass floor. Bare Windows discovery additionally ran the three compatible
+  mailbox tests successfully; its only failure was the untouched POSIX
+  directory-mode assertion (`0700` reads as `0666` on Windows).
 
 - 2026-07-27T09:34:01.345Z · **azazel** · edit `CHANGES.md` — Re-apply Azazel changelog additions onto origin/main version during rebase
 - 2026-07-27T10:39:07.440Z · **azazel** · edit `src/pending-actions.js`

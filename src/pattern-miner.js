@@ -16,6 +16,8 @@ import fs from "node:fs";
 import { ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { createId, nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
+import { createSkillFromCandidate } from "./skill-materialize.js";
+import { resolveSuggestion } from "./suggestion-feed.js";
 
 const DEFAULT_LOOKBACK_DAYS = 14;
 const MIN_OCCURRENCES = 3;
@@ -98,14 +100,17 @@ export class PatternMiner {
       }
       const candidate = this.persistCandidate(seq, proposal, { judgeBypass });
       candidates.push(candidate);
-      this.runtime?.events?.emit?.("skill-candidate", {
-        source: "pattern-miner",
-        id: candidate.id,
-        name: proposal.name,
-        description: proposal.description,
-        occurrences: seq.count,
-        judgeBypass
-      });
+      try {
+        this.runtime?.events?.emit?.("skill-candidate-proposed", {
+          source: "pattern-miner",
+          id: candidate.id,
+          title: proposal.name,
+          occurrences: seq.count,
+          confidence: seq.confidence
+        });
+      } catch {
+        // Candidate persistence is authoritative; notification is advisory.
+      }
     }
     return { mined: sequences.length, scored: scored.length, candidates: candidates.length, items: candidates };
   }
@@ -211,35 +216,24 @@ export class PatternMiner {
   }
 
   /**
-   * Accept a candidate by writing it as a real SKILL.md and removing the
-   * suggestion. Returns the skill's path.
+   * Accept through the shared materializer so creation is revisioned and
+   * remains compatible with rollback_skill.
    */
   accept(id) {
     const file = path.join(this.suggestedDir, `${id}.json`);
     const candidate = readJsonFile(file, null);
     if (!candidate) throw new Error(`Unknown candidate: ${id}`);
-    const skillName = sanitizeSkillName(candidate.proposal.name);
-    const skillsRoot = path.join(this.dataDir, "skills");
-    const skillDir = path.join(skillsRoot, skillName);
-    ensureDir(skillDir);
-    const md = renderSkillMarkdown(candidate, skillName);
-    fs.writeFileSync(path.join(skillDir, "SKILL.md"), md, { mode: 0o600 });
-    candidate.status = "accepted";
-    candidate.acceptedAt = nowIso();
-    writeJsonAtomic(file, candidate);
+    const result = createSkillFromCandidate({
+      runtime: this.runtime,
+      candidate: { ...candidate, source: "pattern-miner" }
+    });
+    resolveSuggestion({ dataDir: this.dataDir }, id, "accepted");
     if (this.runtime?.skills?.reload) this.runtime.skills.reload();
-    return { id, name: skillName, path: path.join(skillDir, "SKILL.md") };
+    return { id, name: result.slug, path: result.path };
   }
 
   reject(id, reason = null) {
-    const file = path.join(this.suggestedDir, `${id}.json`);
-    const candidate = readJsonFile(file, null);
-    if (!candidate) return null;
-    candidate.status = "rejected";
-    candidate.rejectedAt = nowIso();
-    if (reason) candidate.rejectReason = reason;
-    writeJsonAtomic(file, candidate);
-    return candidate;
+    return resolveSuggestion({ dataDir: this.dataDir }, id, "rejected", reason);
   }
 }
 
@@ -377,34 +371,6 @@ function parseProposal(text) {
       scheduleHint: obj.scheduleHint ?? null
     };
   } catch { return null; }
-}
-
-// MARK: — skill rendering
-
-function sanitizeSkillName(raw) {
-  return String(raw ?? "auto-skill")
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60) || "auto-skill";
-}
-
-function renderSkillMarkdown(candidate, skillName) {
-  const { proposal, sequence } = candidate;
-  return `---
-name: ${skillName}
-description: ${proposal.description.replace(/\n/g, " ")}
----
-
-${proposal.body}
-
----
-
-*Auto-derived from a repeating sequence in your activity log.*
-*Sequence: ${sequence.apps.join(" → ")}*
-*Observed ${sequence.count} times around ${pad2(sequence.startHour)}:00.*
-${proposal.scheduleHint ? `*Suggested schedule: ${proposal.scheduleHint}.*` : ""}
-`;
 }
 
 function pad2(n) { return String(n).padStart(2, "0"); }

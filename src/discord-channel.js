@@ -1027,6 +1027,37 @@ export class DiscordChannel {
         footer: "Learning lane"
       }), d);
     });
+    events.on("skill-candidate-proposed", (d) => {
+      const title = String(d?.title ?? "(unnamed)").slice(0, 180);
+      const occurrences = Number.isFinite(Number(d?.occurrences))
+        ? Math.max(0, Math.trunc(Number(d.occurrences)))
+        : 0;
+      const confidence = Number.isFinite(Number(d?.confidence))
+        ? Number(d.confidence)
+        : null;
+      const countText = occurrences === 1
+        ? "once"
+        : `${occurrences} times`;
+      postEmbed(embed({
+        title: "Skill pattern awaiting review",
+        description: `I noticed **${title}** ${countText} - want me to learn it?`,
+        color: COLORS.think,
+        fields: [
+          { name: "Occurrences", value: String(occurrences), inline: true },
+          {
+            name: "Confidence",
+            value: confidence === null ? "unknown" : confidence.toFixed(2),
+            inline: true
+          },
+          {
+            name: "Review",
+            value: "Open the dashboard -> Suggestions",
+            inline: false
+          }
+        ],
+        footer: "Learning review queue"
+      }), d);
+    });
     events.on("background-review", (d) => {
       const details = [
         d?.memoriesAdded ? `${d.memoriesAdded} durable memor${d.memoriesAdded === 1 ? "y" : "ies"}` : null,

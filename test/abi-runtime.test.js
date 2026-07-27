@@ -1156,6 +1156,15 @@ test("pattern miner detects repeating sequences and writes a candidate", async (
     modelProvider: new DeterministicModelProvider(),
     observationOptions: { dir: path.join(dataDir, "observations") }
   });
+  const proposed = [];
+  Object.defineProperty(runtime, "events", {
+    configurable: true,
+    value: {
+      emit(name, payload) {
+        proposed.push({ name, payload });
+      }
+    }
+  });
 
   const days = ["2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04"];
   for (const day of days) {
@@ -1171,6 +1180,15 @@ test("pattern miner detects repeating sequences and writes a candidate", async (
   const list = miner.list();
   assert.ok(list.length >= 1);
   assert.ok(list[0].sequence.apps.length >= 3);
+  const event = proposed.find((item) => (
+    item.name === "skill-candidate-proposed"
+    && item.payload.id === list[0].id
+  ));
+  assert.ok(event, "new pattern candidates emit a review notification");
+  assert.equal(event.payload.id, list[0].id);
+  assert.equal(event.payload.title, list[0].proposal.name);
+  assert.equal(event.payload.occurrences, list[0].sequence.count);
+  assert.equal(event.payload.confidence, list[0].sequence.confidence);
 });
 
 test("skill replay parses frontmatter steps and validates the action vocabulary", async () => {
@@ -1788,7 +1806,11 @@ test("pattern-miner: high-confidence sequence bypasses the judge's pass=true vet
     dataDir: dir,
     observations: fakeObservations,
     agentHost: { modelProvider: fakeProvider },
-    events: { emit: () => {} }
+    events: {
+      emit() {
+        throw new Error("notification bus unavailable");
+      }
+    }
   };
   const miner = new PatternMiner({
     runtime: fakeRuntime,
@@ -1888,6 +1910,37 @@ test("suggestion-feed: aggregates observer + miner candidates, normalizes shape,
   // Original file is updated, not a copy.
   const onDisk = JSON.parse(fs.readFileSync(path.join(minedDir, "sug_pm1.json"), "utf8"));
   assert.equal(onDisk.status, "accepted");
+
+  const deferred = resolveSuggestion(fakeRuntime, "ses_sm1", "deferred");
+  assert.equal(deferred.status, "deferred");
+  assert.ok(deferred.deferredAt);
+  assert.deepEqual(
+    listAllSuggestions(fakeRuntime, { status: "deferred" }).map((item) => item.id),
+    ["ses_sm1"]
+  );
+  assert.deepEqual(
+    listAllSuggestions(fakeRuntime, { status: "pending" }).map((item) => item.id),
+    ["prop_obs1"],
+    "deferred candidates stay out of the default pending view"
+  );
+
+  const edited = resolveSuggestion(fakeRuntime, "ses_sm1", "edited", {
+    name: "owner-refined-recap",
+    body: "1. Use the owner-refined workflow."
+  });
+  assert.equal(edited.status, "edited");
+  assert.equal(edited.editedByOwner, true);
+  assert.ok(edited.editedAt);
+  assert.equal(edited.proposal.name, "owner-refined-recap");
+  assert.match(edited.proposal.body, /owner-refined workflow/u);
+  const editedOnDisk = JSON.parse(
+    fs.readFileSync(path.join(minedDir, "ses_sm1.json"), "utf8")
+  );
+  assert.equal(editedOnDisk.editedByOwner, true);
+  assert.throws(
+    () => resolveSuggestion(fakeRuntime, "ses_sm1", "invented"),
+    /Invalid suggestion status/u
+  );
 
   // status=null returns everything (including resolved).
   const all = listAllSuggestions(fakeRuntime, { status: null });

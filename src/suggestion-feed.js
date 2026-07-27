@@ -18,10 +18,19 @@ import { resolveDataDir } from "./data-dir.js";
 const ENVELOPE_FIELDS = [
   "id", "proposedAt", "category", "title", "rationale", "status",
   "draftBody", "taskQueue", "taskBucket", "mcpId", "mcpRegister",
-  "context", "resolvedAt", "note", "source",
+  "context", "resolvedAt", "deferredAt", "editedAt", "editedByOwner",
+  "note", "source",
   // Miner-only fields surface as-is so the UI can show count + confidence
   "sequence", "fingerprint", "proposal", "judgeBypass", "projectId", "recipe"
 ];
+
+const RESOLUTION_STATUSES = new Set([
+  "accepted",
+  "rejected",
+  "dismissed",
+  "deferred",
+  "edited"
+]);
 
 /// Walk all three source dirs and return suggestions normalized to one
 /// shape. `status` filter follows the proactive-observer convention.
@@ -39,16 +48,62 @@ export function findSuggestion(runtime, id) {
   return listAllSuggestions(runtime, { status: null }).find((s) => s.id === id) ?? null;
 }
 
-/// Write status + resolvedAt back to whichever source file owns this id.
-/// Returns the updated envelope or null when not found.
-export function resolveSuggestion(runtime, id, status, note = null) {
+/// Write a validated owner verdict back to whichever source file owns this
+/// id. `details` remains string-compatible with the old note argument; edited
+/// verdicts accept { name, body, note } and persist the owner-refined proposal
+/// before materialization.
+export function resolveSuggestion(runtime, id, status, details = null) {
+  const normalizedStatus = String(status ?? "").trim().toLowerCase();
+  if (!RESOLUTION_STATUSES.has(normalizedStatus)) {
+    throw new TypeError(
+      `Invalid suggestion status '${status}'. Expected accepted, rejected, `
+      + "dismissed, deferred, or edited."
+    );
+  }
   const file = findSourceFile(runtime, id);
   if (!file) return null;
   const raw = readJsonFile(file, null);
   if (!raw) return null;
-  raw.status = status;
-  raw.resolvedAt = nowIso();
-  if (note) raw.note = note;
+  const options = details && typeof details === "object" && !Array.isArray(details)
+    ? details
+    : { note: details };
+  const resolvedAt = nowIso();
+
+  if (
+    normalizedStatus === "deferred"
+    && (!raw.proposal || typeof raw.proposal !== "object")
+  ) {
+    throw new TypeError("Only a mined skill candidate can be deferred.");
+  }
+  if (normalizedStatus === "edited") {
+    if (!raw.proposal || typeof raw.proposal !== "object") {
+      throw new TypeError("Only a mined skill candidate can be edited and accepted.");
+    }
+    const edit = options.edit && typeof options.edit === "object"
+      ? options.edit
+      : options;
+    if (typeof edit.name !== "string") {
+      throw new TypeError("Edited skill candidate name is required.");
+    }
+    if (typeof edit.body !== "string") {
+      throw new TypeError("Edited skill candidate body is required.");
+    }
+    const name = edit.name.trim();
+    const body = edit.body.trim();
+    if (!name) throw new TypeError("Edited skill candidate name is required.");
+    if (!body) throw new TypeError("Edited skill candidate body is required.");
+    raw.proposal = {
+      ...raw.proposal,
+      name,
+      body
+    };
+    raw.editedAt = resolvedAt;
+    raw.editedByOwner = true;
+  }
+  if (normalizedStatus === "deferred") raw.deferredAt = resolvedAt;
+  raw.status = normalizedStatus;
+  raw.resolvedAt = resolvedAt;
+  if (options.note) raw.note = String(options.note);
   writeJsonAtomic(file, raw);
   return normalize(raw, file);
 }
@@ -121,6 +176,10 @@ function normalize(raw, filePath, forceSource = null) {
     projectId: raw.projectId ?? null,
     recipe: raw.recipe ?? null,
     resolvedAt: raw.resolvedAt ?? null,
+    deferredAt: raw.deferredAt ?? null,
+    editedAt: raw.editedAt ?? null,
+    editedByOwner: raw.editedByOwner ?? false,
+    note: raw.note ?? null,
     source
   });
 }

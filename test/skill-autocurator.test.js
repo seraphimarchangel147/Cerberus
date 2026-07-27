@@ -122,7 +122,7 @@ test("auto-materialize accepts a fully gated candidate with auditable lineage", 
   const result = autoMaterializeCandidates({
     runtime: harness.runtime,
     now: new Date("2026-07-27T13:00:00.000Z"),
-    env: {}
+    env: { OPENAGI_SKILL_AUTOCURATE: "on" }
   });
 
   assert.equal(result.created, 1);
@@ -170,7 +170,10 @@ test("auto-materialize leaves every failed gate pending", (t) => {
   const result = autoMaterializeCandidates({
     runtime: harness.runtime,
     now: new Date("2026-07-27T13:00:00.000Z"),
-    env: { OPENAGI_SKILL_AUTO_MAX_PER_DAY: "10" }
+    env: {
+      OPENAGI_SKILL_AUTOCURATE: "on",
+      OPENAGI_SKILL_AUTO_MAX_PER_DAY: "10"
+    }
   });
 
   assert.equal(result.created, 0);
@@ -193,7 +196,10 @@ test("daily cap blocks the fourth skill and resets on the next UTC date", (t) =>
       proposedAt: `2026-07-27T12:00:0${index}.000Z`
     }));
   }
-  const env = { OPENAGI_SKILL_AUTO_MAX_PER_DAY: "3" };
+  const env = {
+    OPENAGI_SKILL_AUTOCURATE: "on",
+    OPENAGI_SKILL_AUTO_MAX_PER_DAY: "3"
+  };
 
   const first = autoMaterializeCandidates({
     runtime: harness.runtime,
@@ -252,7 +258,7 @@ test("an unlimited auto-creation cap does not block a fourth candidate", (t) => 
   assert.equal(result.skipped.some((entry) => entry.reason === "daily-cap"), false);
 });
 
-test("autocurate off preserves the fully manual pending lane", (t) => {
+test("autocurate defaults off and preserves the human review queue", (t) => {
   const harness = createHarness();
   t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));
   const { filePath } = writeCandidate(harness.dataDir, "sug_manual_only", {
@@ -260,11 +266,27 @@ test("autocurate off preserves the fully manual pending lane", (t) => {
   });
   const result = autoMaterializeCandidates({
     runtime: harness.runtime,
-    env: { OPENAGI_SKILL_AUTOCURATE: "off" }
+    env: {}
   });
   assert.equal(result.created, 0);
   assert.equal(result.reason, "disabled");
   assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).status, "pending");
+});
+
+test("autocurate requires an explicit enable value", (t) => {
+  const enabledValues = ["1", "true", "on", "yes"];
+  for (const value of enabledValues) {
+    const harness = createHarness();
+    t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));
+    writeCandidate(harness.dataDir, `sug_enabled_${value}`, {
+      name: `Enabled ${value}`
+    });
+    const result = autoMaterializeCandidates({
+      runtime: harness.runtime,
+      env: { OPENAGI_SKILL_AUTOCURATE: value }
+    });
+    assert.equal(result.created, 1, value);
+  }
 });
 
 test("scope all transitions an old non-agent-created skill", (t) => {

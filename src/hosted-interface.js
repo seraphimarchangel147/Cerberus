@@ -182,6 +182,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   bindHostedEvent("tunnel", (data) => broadcast("tunnel", data));
   bindHostedEvent("replay", (data) => broadcast("replay", data));
   bindHostedEvent("skill-candidate", (data) => broadcast("skill-candidate", data));
+  bindHostedEvent(
+    "skill-candidate-proposed",
+    (data) => broadcast("skill-candidate-proposed", data)
+  );
   bindHostedEvent("skill-use", (data) => broadcast("skill-use", data));
   bindHostedEvent("skill-edit", (data) => broadcast("skill-edit", data));
   bindHostedEvent("vision", (data) => broadcast("vision", data));
@@ -3761,7 +3765,12 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendJson(res, 200, result);
         } catch (error) { return sendJson(res, 500, { error: error.message }); }
       }
-      if (method === "POST" && pathname.match(/^\/proactive\/suggestions\/[^/]+\/(accept|reject|dismiss)$/)) {
+      if (
+        method === "POST"
+        && pathname.match(
+          /^\/proactive\/suggestions\/[^/]+\/(accept|edit|defer|reject|dismiss)$/
+        )
+      ) {
         const body = await readJson(req).catch(() => ({}));
         requireDefaultRequestProject(
           runtime,
@@ -3773,12 +3782,31 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         const parts = pathname.split("/");
         const id = decodeURIComponent(parts[3]);
         const action = parts[4];
-        const status = action === "accept" ? "accepted" : action === "reject" ? "rejected" : "dismissed";
+        const status = action === "accept"
+          ? "accepted"
+          : action === "edit"
+            ? "edited"
+            : action === "defer"
+              ? "deferred"
+              : action === "reject"
+                ? "rejected"
+                : "dismissed";
         // Story 4: status writes go through the unified feed so they
         // land in the right source file (observer OR miner). Same id
         // namespace; resolveSuggestion locates the file by id.
         const { resolveSuggestion } = await import("./suggestion-feed.js");
-        const candidate = resolveSuggestion(runtime, id, status);
+        let candidate;
+        try {
+          candidate = resolveSuggestion(runtime, id, status, status === "edited"
+            ? {
+                name: body.name,
+                body: body.body,
+                note: body.note ?? null
+              }
+            : (body.note ?? body.reason ?? null));
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
         if (!candidate) return sendJson(res, 404, { error: "unknown suggestion" });
         // Let any open dashboard refresh its Suggestions tab live.
         events.emit("suggestion-resolved", { id, status, category: candidate.category ?? null });
@@ -3811,7 +3839,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // (Story 1 shape — flat title + draftBody), miner candidates use
         // createSkillFromCandidate (Story 6 shape — proposal.body +
         // sequence stats + scheduleHint). Both write to the same dir.
-        if (status === "accepted" && candidate.category === "skill" && runtime.skills?.reload) {
+        if (
+          (status === "accepted" || status === "edited")
+          && candidate.category === "skill"
+          && runtime.skills?.reload
+        ) {
           try {
             const { createSkillFromSuggestion, createSkillFromCandidate } = await import("./skill-materialize.js");
             const isMined = candidate.source === "pattern-miner"
@@ -6570,6 +6602,7 @@ const state = {
   projectDetail: null,
   messages: [],
   health: null,
+  suggestionStatus: "pending",
   kanban: null,
   kanbanTaskId: null,
   runs: [],
@@ -7035,7 +7068,7 @@ async function switchTab(tab) {
     await renderIntegrations();
   } else if (tab === "suggestions") {
     showSidebar(false);
-    await renderSuggestions();
+    await renderSuggestions("pending");
   }
   renderTab();
   cerbMaterialise();
@@ -8449,8 +8482,20 @@ function renderSuggestedDetail(candidate) {
       \${candidate.proposal.triggerHint ? \`<h3>Suggested interaction trigger</h3><p>\${escapeHtml(typeof candidate.proposal.triggerHint === "string" ? candidate.proposal.triggerHint : JSON.stringify(candidate.proposal.triggerHint))}</p>\` : ""}
 
       <div class="row" style="gap:8px;margin-top:14px;">
-        <button id="acceptSug">✓ Accept — write SKILL.md</button>
-        <button class="secondary" id="rejectSug">✗ Reject</button>
+        <button id="acceptSug">Accept</button>
+        <button class="secondary" id="editAcceptSug">Edit & Accept</button>
+        <button class="secondary" id="deferSug">Defer</button>
+        <button class="secondary" id="rejectSug">Discard</button>
+      </div>
+      <div id="suggestedEditPanel" style="display:none;margin-top:12px;">
+        <label>Skill name</label>
+        <input class="ui-input" id="suggestedEditName" value="\${escapeHtml(candidate.proposal.name ?? "")}">
+        <label style="margin-top:8px;">Skill body</label>
+        <textarea class="ui-textarea" id="suggestedEditBody" rows="12">\${escapeHtml(candidate.proposal.body ?? "")}</textarea>
+        <div class="row" style="gap:8px;margin-top:8px;">
+          <button id="submitSuggestedEdit">Save edit & accept</button>
+          <button class="secondary" id="cancelSuggestedEdit">Cancel</button>
+        </div>
       </div>
       <pre id="sugOut" class="ok" style="margin-top:12px;display:none;"></pre>
     </div>
@@ -8463,15 +8508,42 @@ function renderSuggestedDetail(candidate) {
   };
   $("acceptSug").addEventListener("click", async () => {
     try {
-      const result = await postJson(\`/skills/suggested/\${encodeURIComponent(candidate.id)}/accept\`, {});
+      const result = await postJson(\`/proactive/suggestions/\${encodeURIComponent(candidate.id)}/accept\`, {});
       showOut("Accepted: " + JSON.stringify(result, null, 2));
       setTimeout(() => refreshSkills(true), 800);
     } catch (e) { showOut("[err] " + e.message, "err"); }
   });
   $("rejectSug").addEventListener("click", async () => {
-    if (!confirm("Reject this suggestion?")) return;
-    await postJson(\`/skills/suggested/\${encodeURIComponent(candidate.id)}/reject\`, {});
+    if (!confirm("Discard this suggestion?")) return;
+    await postJson(\`/proactive/suggestions/\${encodeURIComponent(candidate.id)}/reject\`, {});
     refreshSkills();
+  });
+  $("deferSug").addEventListener("click", async () => {
+    await postJson(\`/proactive/suggestions/\${encodeURIComponent(candidate.id)}/defer\`, {});
+    showToast("Skill candidate deferred", true);
+    refreshSkills();
+  });
+  $("editAcceptSug").addEventListener("click", () => {
+    $("suggestedEditPanel").style.display = "block";
+    $("suggestedEditBody").focus();
+  });
+  $("cancelSuggestedEdit").addEventListener("click", () => {
+    $("suggestedEditPanel").style.display = "none";
+  });
+  $("submitSuggestedEdit").addEventListener("click", async () => {
+    try {
+      const result = await postJson(
+        \`/proactive/suggestions/\${encodeURIComponent(candidate.id)}/edit\`,
+        {
+          name: $("suggestedEditName").value,
+          body: $("suggestedEditBody").value
+        }
+      );
+      showOut("Edited and accepted: " + JSON.stringify(result, null, 2));
+      setTimeout(() => refreshSkills(true), 800);
+    } catch (e) {
+      showOut("[err] " + e.message, "err");
+    }
   });
 }
 
@@ -9581,17 +9653,32 @@ async function renderHealth() {
   \`;
 }
 
-async function renderSuggestions() {
+async function renderSuggestions(status = state.suggestionStatus ?? "pending") {
   // Live view of everything the proactive observer has proposed and is
   // waiting on the user to accept/reject. Tasks → Tasks tab, MCPs →
   // auto-register, automations → notes, knowledge → just FYI.
   // Plus: pending agent-initiated actions (catalog connects, daemon
   // restarts) that need explicit human approval before they run.
+  const queueStatus = status === "deferred" ? "deferred" : "pending";
+  state.suggestionStatus = queueStatus;
   const [list, pendingActions] = await Promise.all([
-    fetchJson("/proactive/suggestions?status=pending").catch(() => []),
-    fetchJson("/pending-actions?status=pending").catch(() => ({ actions: [] }))
+    fetchJson(\`/proactive/suggestions?status=\${encodeURIComponent(queueStatus)}\`).catch(() => []),
+    queueStatus === "pending"
+      ? fetchJson("/pending-actions?status=pending").catch(() => ({ actions: [] }))
+      : Promise.resolve({ actions: [] })
   ]);
   const actions = pendingActions?.actions ?? [];
+  const alternateStatus = queueStatus === "pending" ? "deferred" : "pending";
+  const queueToggleHtml = \`
+    <button class="secondary" id="suggestionQueueToggle">
+      View \${alternateStatus}
+    </button>
+  \`;
+  const bindQueueToggle = () => {
+    $("suggestionQueueToggle")?.addEventListener("click", () => {
+      renderSuggestions(alternateStatus);
+    });
+  };
 
   const pendingActionsHtml = actions.length === 0 ? "" : \`
     <h3 style="margin-top:8px;">Agent actions awaiting approval <span class="badge">\${actions.length}</span></h3>
@@ -9617,12 +9704,20 @@ async function renderSuggestions() {
   if ((!Array.isArray(list) || list.length === 0) && actions.length === 0) {
     main.innerHTML = \`
       <div class="pane">
-        <h2>Suggestions</h2>
+        <div class="row between">
+          <h2>Suggestions</h2>
+          \${queueToggleHtml}
+        </div>
         <div id="suggestionsPageChat"></div>
-        <p class="muted">Nothing new to surface right now. The proactive observer runs every 10 minutes and proposes one concrete next thing — a task, a skill, an MCP to connect, or a small automation — when it sees something worth saying.</p>
-        <p class="muted">If you want to force a run now: <code>POST /proactive/observe</code>.</p>
+        <p class="muted">\${queueStatus === "deferred"
+          ? "No deferred skill candidates."
+          : "Nothing new to surface right now. The proactive observer and pattern miner will queue worthwhile proposals here."}</p>
+        \${queueStatus === "pending"
+          ? '<p class="muted">If you want to force a run now: <code>POST /proactive/observe</code>.</p>'
+          : ""}
       </div>
     \`;
+    bindQueueToggle();
     renderPageChatComposer(document.getElementById("suggestionsPageChat"), {
       placeholder: 'e.g. "What did you notice today?" or "ignore screenshots from Discord"',
       onAfterSend: async () => { await renderSuggestions(); }
@@ -9633,11 +9728,15 @@ async function renderSuggestions() {
     // Only pending agent actions, no proactive suggestions.
     main.innerHTML = \`
       <div class="pane">
-        <h2>Suggestions</h2>
+        <div class="row between">
+          <h2>Suggestions</h2>
+          \${queueToggleHtml}
+        </div>
         <div id="suggestionsPageChat"></div>
         \${pendingActionsHtml}
       </div>
     \`;
+    bindQueueToggle();
     renderPageChatComposer(document.getElementById("suggestionsPageChat"), {
       placeholder: 'e.g. "approve the Stripe MCP" or "deny it, I changed my mind"',
       onAfterSend: async () => { await renderSuggestions(); }
@@ -9680,6 +9779,37 @@ async function renderSuggestions() {
         : "";
       sequenceMeta = "observed " + s.sequence.count + "× · confidence " + conf + hourPart;
     }
+    const isReviewableSkill = s.category === "skill" && [
+      "pattern-miner",
+      "session-miner",
+      "recipe-memory"
+    ].includes(s.source);
+    const controls = isReviewableSkill
+      ? \`
+        <button data-action="accept">Accept</button>
+        <button data-action="edit-toggle" class="secondary">Edit & Accept</button>
+        <button data-action="defer" class="secondary">Defer</button>
+        <button data-action="reject" class="secondary">Discard</button>
+      \`
+      : \`
+        <button data-action="accept">Accept</button>
+        <button data-action="dismiss" class="secondary">Dismiss</button>
+        <button data-action="reject" class="secondary">Reject</button>
+      \`;
+    const editPanel = isReviewableSkill
+      ? \`
+        <div data-edit-panel style="display:none;margin-top:10px;">
+          <label>Skill name</label>
+          <input class="ui-input" data-edit-name value="\${escapeHtml(s.title ?? "")}">
+          <label style="margin-top:8px;">Skill body</label>
+          <textarea class="ui-textarea" data-edit-body rows="10">\${escapeHtml(s.draftBody ?? "")}</textarea>
+          <div class="row" style="gap:8px;margin-top:8px;">
+            <button data-action="edit-submit">Save edit & accept</button>
+            <button data-action="edit-cancel" class="secondary">Cancel</button>
+          </div>
+        </div>
+      \`
+      : "";
     return \`
       <div class="card" style="padding:14px; margin-bottom:10px;" data-suggestion-id="\${s.id}">
         <div class="row between" style="align-items:flex-start; gap:8px;">
@@ -9698,23 +9828,28 @@ async function renderSuggestions() {
           </div>
         </div>
         <div class="row" style="gap:8px; margin-top:10px;">
-          <button data-action="accept">Accept</button>
-          <button data-action="dismiss" class="secondary">Dismiss</button>
-          <button data-action="reject" class="secondary">Reject</button>
+          \${controls}
         </div>
+        \${editPanel}
       </div>
     \`;
   };
 
   main.innerHTML = \`
     <div class="pane">
-      <h2>Suggestions <span class="badge">\${list.length}</span></h2>
+      <div class="row between">
+        <h2>Suggestions <span class="badge">\${list.length}</span></h2>
+        \${queueToggleHtml}
+      </div>
       <div id="suggestionsPageChat"></div>
-      <p class="muted">Proactive observer proposed these from your recent on-screen activity. Accept routes to the right place — tasks land in the Tasks tab, MCPs auto-register, skills become drafts.</p>
+      <p class="muted">\${queueStatus === "deferred"
+        ? "Deferred skill candidates are held for a later owner decision."
+        : "Review proposals with their occurrence and confidence evidence before accepting, editing, deferring, or discarding them."}</p>
       \${list.map(card).join("")}
       \${pendingActionsHtml}
     </div>
   \`;
+  bindQueueToggle();
   renderPageChatComposer(document.getElementById("suggestionsPageChat"), {
     placeholder: 'Talk to the agent about these…',
     onAfterSend: async () => { await renderSuggestions(); }
@@ -9726,8 +9861,28 @@ async function renderSuggestions() {
     el.querySelectorAll("[data-action]").forEach((b) => {
       b.addEventListener("click", async () => {
         const action = b.dataset.action;
+        const editPanel = el.querySelector("[data-edit-panel]");
+        if (action === "edit-toggle") {
+          editPanel.style.display = "block";
+          editPanel.querySelector("[data-edit-body]")?.focus();
+          return;
+        }
+        if (action === "edit-cancel") {
+          editPanel.style.display = "none";
+          return;
+        }
         try {
-          const res = await postJson(\`/proactive/suggestions/\${id}/\${action}\`, {});
+          const requestAction = action === "edit-submit" ? "edit" : action;
+          const payload = action === "edit-submit"
+            ? {
+                name: editPanel.querySelector("[data-edit-name]")?.value ?? "",
+                body: editPanel.querySelector("[data-edit-body]")?.value ?? ""
+              }
+            : {};
+          const res = await postJson(
+            \`/proactive/suggestions/\${encodeURIComponent(id)}/\${requestAction}\`,
+            payload
+          );
           if (action === "accept" && res.taskId) {
             showToast("✓ Task added — opening Tasks", true);
             setTimeout(() => switchTab("tasks"), 600);
@@ -9736,10 +9891,16 @@ async function renderSuggestions() {
             setTimeout(() => switchTab("mcp"), 600);
           } else if (action === "accept") {
             showToast("✓ Accepted", true);
+          } else if (action === "edit-submit") {
+            showToast("Edited skill accepted", true);
+          } else if (action === "defer") {
+            showToast("Skill candidate deferred", true);
+          } else if (action === "reject" && el.querySelector("[data-edit-panel]")) {
+            showToast("Skill candidate discarded", true);
           } else {
             showToast(\`Suggestion \${action}d\`, true);
           }
-          await renderSuggestions();
+          await renderSuggestions(queueStatus);
         } catch (err) {
           showToast("Action failed: " + err.message, false);
         }
@@ -10559,8 +10720,24 @@ function opsSse(type, rawEvent) {
       "think",
       data.at ?? null
     );
-  } else if (type === "skill-candidate") {
-    opsPush("learning", "Skill candidate: " + String(data.title ?? data.name ?? "untitled"), String(data.rationale ?? data.description ?? "").slice(0, 240), "think");
+  } else if (
+    type === "skill-candidate"
+    || type === "skill-candidate-proposed"
+  ) {
+    const evidence = type === "skill-candidate-proposed"
+      ? [
+          data.occurrences ? "observed " + data.occurrences + " times" : null,
+          typeof data.confidence === "number"
+            ? "confidence " + data.confidence.toFixed(2)
+            : null
+        ].filter(Boolean).join(" / ")
+      : String(data.rationale ?? data.description ?? "").slice(0, 240);
+    opsPush(
+      "learning",
+      "Skill candidate: " + String(data.title ?? data.name ?? "untitled"),
+      evidence,
+      "think"
+    );
   } else if (type === "background-review") {
     const details = [
       data.memoriesAdded ? data.memoriesAdded + " memories" : null,
@@ -11349,17 +11526,26 @@ evt.addEventListener("mcp", (e) => {
 // Refresh the Skills tab if the user is on it; otherwise show a browser
 // notification (the Mac app also fires its own native notification — see
 // AppState SSE handler).
-evt.addEventListener("skill-candidate", (e) => {
-  if (state.tab === "skills") refreshSkills(true);
+const handleSkillCandidateEvent = (e) => {
+  if (state.tab === "skills") refreshSkills();
+  if (state.tab === "suggestions") renderSuggestions("pending");
   try {
     const data = JSON.parse(e.data);
     if ("Notification" in window && Notification.permission === "granted") {
-      new Notification("Cerberus learned a new skill candidate", {
-        body: (data.name || "untitled") + (data.description ? " — " + data.description : "")
+      const evidence = data.occurrences
+        ? " - observed " + data.occurrences + " times"
+          + (typeof data.confidence === "number"
+            ? " at confidence " + data.confidence.toFixed(2)
+            : "")
+        : (data.description ? " - " + data.description : "");
+      new Notification("Cerberus queued a skill candidate", {
+        body: (data.title || data.name || "untitled") + evidence
       });
     }
   } catch {}
-});
+};
+evt.addEventListener("skill-candidate", handleSkillCandidateEvent);
+evt.addEventListener("skill-candidate-proposed", handleSkillCandidateEvent);
 
 // Proactive suggestion — the observer noticed something it can help with.
 // Show as a high-prominence toast (clickable to accept/reject) and fire a

@@ -83,6 +83,24 @@ test("skill-candidate maps to a durable skill outreach item", () => {
   assert.match(items[0].summary, /Morning triage routine/);
 });
 
+test("skill-candidate-proposed maps evidence to the same durable review item", () => {
+  const { events, store } = harness();
+  events.emit("skill-candidate-proposed", {
+    id: "sug_review",
+    title: "Morning triage",
+    occurrences: 7,
+    confidence: 0.93
+  });
+  const item = store.list()[0];
+  assert.equal(item.type, "skill");
+  assert.deepEqual(item.sourceRef, {
+    kind: "skill-candidate",
+    id: "sug_review"
+  });
+  assert.equal(item.title, "Morning triage");
+  assert.match(item.summary, /Observed 7 times, confidence 0\.93/u);
+});
+
 test("re-emitting the same skill-candidate does not create a second open item", () => {
   const { events, store } = harness();
   const payload = { source: "session-miner", id: "ses_dup", name: "weekly-report", description: "Recurring weekly report request", occurrences: 3 };

@@ -65,7 +65,7 @@ function createHarness(t) {
     channel.stop();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  return { channel, tools, pendingActions, executions, restCalls };
+  return { channel, events, tools, pendingActions, executions, restCalls };
 }
 
 async function enqueueCatastrophic(harness, sessionId = "discord:guild:10001") {
@@ -217,4 +217,30 @@ test("Allow for session executes once but never suppresses a later catastrophic 
   });
   assert.equal((await secondInvocation).ok, false);
   assert.equal(approvalPosts(harness).length, 2);
+});
+
+test("skill candidate proposals surface evidence in the Discord review queue", async (t) => {
+  const harness = createHarness(t);
+  harness.events.emit("skill-candidate-proposed", {
+    id: "sug_review",
+    title: "Morning triage",
+    occurrences: 7,
+    confidence: 0.93
+  });
+  await waitFor(() => harness.restCalls.some((call) => (
+    call.body?.embeds?.[0]?.title === "Skill pattern awaiting review"
+  )));
+  const post = harness.restCalls.find((call) => (
+    call.body?.embeds?.[0]?.title === "Skill pattern awaiting review"
+  ));
+  const review = post.body.embeds[0];
+  assert.match(review.description, /Morning triage.*7 times.*want me to learn it/u);
+  assert.deepEqual(
+    review.fields.map((field) => [field.name, field.value]),
+    [
+      ["Occurrences", "7"],
+      ["Confidence", "0.93"],
+      ["Review", "Open the dashboard -> Suggestions"]
+    ]
+  );
 });

@@ -724,6 +724,16 @@ test("hosted projects enforce CRUD, request, session, draft, SSE, and dashboard 
           method: "POST",
           body: {}
         },
+        {
+          route: "/proactive/suggestions/sug-1/edit",
+          method: "POST",
+          body: { name: "cross-project", body: "must not change" }
+        },
+        {
+          route: "/proactive/suggestions/sug-1/defer",
+          method: "POST",
+          body: {}
+        },
         { route: "/budget" },
         { route: "/admin/provider" },
         { route: "/observations/search?q=private" },
