@@ -1,6 +1,6 @@
 # Goal-Mode End-to-End Verification Checklist (DRAFT)
 
-Prepared by daily planner (2026-07-26). Draft only — nothing here has been executed.
+Prepared by daily planner (2026-07-26; re-issued 2026-07-27, same scope — this draft covers both). Draft only — nothing here has been executed.
 Verify each item against the live system; check off as confirmed. Source of truth: `~/openagi` runtime + `goal_status` tool.
 
 ## 0. Pre-flight
