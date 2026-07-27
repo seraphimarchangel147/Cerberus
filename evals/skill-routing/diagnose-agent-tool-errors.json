@@ -1,0 +1,29 @@
+{
+  "skill_name": "diagnose-agent-tool-errors",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Troubleshoot opaque model and tool failures",
+        "top_k": 1
+      },
+      {
+        "prompt": "Find the root cause of runaway agent budget",
+        "top_k": 1
+      },
+      {
+        "prompt": "Why do tool-bearing requests fail while plain replies work",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Connect an OAuth MCP server and expose its tools",
+        "owner": "connect-mcp"
+      },
+      {
+        "prompt": "The agent stopped replying to iMessages",
+        "owner": "diagnose-no-imessage-replies"
+      }
+    ]
+  }
+}

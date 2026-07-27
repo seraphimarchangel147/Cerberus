@@ -1,0 +1,29 @@
+{
+  "skill_name": "remind",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Schedule a one-time reminder to check the build in twenty minutes",
+        "top_k": 1
+      },
+      {
+        "prompt": "Create a single reminder that pings me later",
+        "top_k": 1
+      },
+      {
+        "prompt": "Send an alert back through this channel after a delay",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Schedule a recurring hourly check for new records",
+        "owner": "schedule-recurring-check"
+      },
+      {
+        "prompt": "Produce today's morning calendar and follow-up brief",
+        "owner": "morning-brief"
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "skill_name": "setup-proactive-outreach",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Configure proactive outreach so suggestions do not pile up unseen",
+        "top_k": 1
+      },
+      {
+        "prompt": "Set up digest notifications and inline decisions in the Mac app",
+        "top_k": 3
+      },
+      {
+        "prompt": "Make the main agent surface live decisions and stalled work",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Write a short morning brief for today's calendar",
+        "owner": "morning-brief"
+      },
+      {
+        "prompt": "Create a one-time delayed reminder through my channel",
+        "owner": "remind"
+      }
+    ]
+  }
+}

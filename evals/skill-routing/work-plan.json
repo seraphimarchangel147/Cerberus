@@ -1,0 +1,29 @@
+{
+  "skill_name": "work-plan",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Draft a concrete implementation plan before changing code",
+        "top_k": 1
+      },
+      {
+        "prompt": "Plan the work with exact files and verification steps",
+        "top_k": 1
+      },
+      {
+        "prompt": "Outline the implementation sequence and checks before editing",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Deploy the latest code to the main agent and Mac nodes",
+        "owner": "deploy-update-node"
+      },
+      {
+        "prompt": "Summarize recent sessions and activity in bullets",
+        "owner": "recap"
+      }
+    ]
+  }
+}

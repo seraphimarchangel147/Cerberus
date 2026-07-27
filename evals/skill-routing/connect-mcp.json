@@ -1,0 +1,29 @@
+{
+  "skill_name": "connect-mcp",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Connect a custom MCP server and make its tools available",
+        "top_k": 1
+      },
+      {
+        "prompt": "Register this stdio integration with the agent",
+        "top_k": 3
+      },
+      {
+        "prompt": "Complete OAuth for an MCP endpoint on a headless host",
+        "top_k": 1
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Troubleshoot an opaque model tool failure and runaway budget",
+        "owner": "diagnose-agent-tool-errors"
+      },
+      {
+        "prompt": "Set an hourly recurring check that acts only on new calls",
+        "owner": "schedule-recurring-check"
+      }
+    ]
+  }
+}

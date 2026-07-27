@@ -320,7 +320,9 @@ On connect, each MCP tool becomes a first-class agent tool (`mcp_filesystem_read
 
 ## Skills
 
-Skills are markdown templates the agent can run as sub-prompts. Three are bundled (`recap`, `morning-brief`, `remind`). Add your own at `.openagi/skills/<name>/SKILL.md`:
+Skills are markdown templates the agent can run as sub-prompts. Thirteen are
+bundled under `examples/skills`; add your own at
+`.openagi/skills/<name>/SKILL.md`:
 
 ```markdown
 ---
@@ -342,6 +344,20 @@ User asked: {{input}}
 ```
 
 The skill becomes the `skill_weekly_review` tool and is also runnable from the UI's **Skills** tab. The `replay:` block (optional) makes it executable on the Mac via `replay_skill` with a confirmation modal.
+
+The bundled catalog has deterministic trigger and collision coverage:
+
+```bash
+node scripts/run-skill-routing-evals.js --min-rank1 80
+```
+
+Every bundled skill needs a matching JSON case under `evals/skill-routing`
+with at least three realistic positive prompts and two owner-labeled negative
+prompts. The zero-dependency evaluator ranks prompts against descriptions with
+TF-IDF, rejects ambiguous high-similarity descriptions, and fails CI if the
+unambiguous rank-1 rate drops below 80%. Pass `--skills-dir` and `--cases-dir`
+to audit another catalog. `OPENAGI_SKILL_ROUTING_EVAL=0` is the CI/manual
+kill switch; it has no runtime effect.
 
 ---
 

@@ -1,0 +1,29 @@
+{
+  "skill_name": "recap",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Recap my most recent sessions and memory",
+        "top_k": 1
+      },
+      {
+        "prompt": "Summarize the latest agent activity in a tight bullet list",
+        "top_k": 1
+      },
+      {
+        "prompt": "Give me a recent activity summary across sessions and memory",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Prepare a morning brief with today's calendar and follow-ups",
+        "owner": "morning-brief"
+      },
+      {
+        "prompt": "Draft an implementation plan naming files and verification",
+        "owner": "work-plan"
+      }
+    ]
+  }
+}

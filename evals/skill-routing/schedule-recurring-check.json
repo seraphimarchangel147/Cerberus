@@ -1,0 +1,29 @@
+{
+  "skill_name": "schedule-recurring-check",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Schedule a recurring hourly check that only acts on new items",
+        "top_k": 1
+      },
+      {
+        "prompt": "Set up a daily monitor without spending tokens when nothing changed",
+        "top_k": 3
+      },
+      {
+        "prompt": "Poll for updates on an interval and process only the delta",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Remind me once after a thirty minute delay",
+        "owner": "remind"
+      },
+      {
+        "prompt": "Summarize today's scheduled jobs in a morning brief",
+        "owner": "morning-brief"
+      }
+    ]
+  }
+}

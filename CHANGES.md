@@ -2,6 +2,31 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-27 - Upgrade batch work item D: skill-routing evals (Codex)
+
+Added a deterministic, runtime-decoupled quality gate for the growing skill
+catalog:
+
+- Adapted only the MIT `addyosmani/agent-skills` Tier-2 evaluation design,
+  pinned the inspected source commit in attribution headers, and included its
+  full MIT notice. No upstream skill body or command file was imported.
+- Added zero-dependency, description-only TF-IDF routing with light stemming,
+  deterministic ordering, and tie-aware rank-1 scoring.
+- Added strict one-case-per-skill coverage, realistic positive triggers,
+  non-vacuous owner-labeled negatives, duplicate-prompt rejection, and
+  configurable warning/error thresholds for description collisions.
+- Added 65 trigger checks across all 13 bundled skills. The measured baseline
+  is 87.2% unambiguous rank-1 (34/39), with no catalog collision warnings.
+- Added a dedicated GitHub Actions ratchet at `--min-rank1 80`, with no package
+  installation step, and the pre-I/O `OPENAGI_SKILL_ROUTING_EVAL=0` kill
+  switch for manual/CI rollback.
+- Added no dependency, behavioral model runner, runtime hook, upstream skill,
+  or upstream command surface.
+
+Verification: deterministic catalog gate 65 passed, 0 failed; focused harness
+lane 13 passed, 0 failed; full isolated `node --test --test-concurrency=1`
+lane on Node 25.5.0: 1867 passed, 0 failed.
+
 ## 2026-07-27 - Upgrade batch work item B.3: provider error classifier (Codex)
 
 Made provider recovery distinguish congestion, exhausted quota, and silent

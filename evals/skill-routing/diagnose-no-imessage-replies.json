@@ -1,0 +1,29 @@
+{
+  "skill_name": "diagnose-no-imessage-replies",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Troubleshoot why the agent stopped replying to iMessages",
+        "top_k": 1
+      },
+      {
+        "prompt": "My texts reach the Mac but the assistant sends no replies",
+        "top_k": 3
+      },
+      {
+        "prompt": "Troubleshoot the agent after it stopped replying to iMessages",
+        "top_k": 1
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Set up a Mac to relay incoming iMessage texts",
+        "owner": "setup-imessage-node"
+      },
+      {
+        "prompt": "Create a one-shot reminder that pings me later",
+        "owner": "remind"
+      }
+    ]
+  }
+}

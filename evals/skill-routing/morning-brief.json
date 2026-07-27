@@ -1,0 +1,29 @@
+{
+  "skill_name": "morning-brief",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Give me a short morning brief for today",
+        "top_k": 1
+      },
+      {
+        "prompt": "What is on the calendar and what follow-ups are open today",
+        "top_k": 1
+      },
+      {
+        "prompt": "Summarize today's cron jobs and recently remembered items",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Recap the most recent sessions and memory in tight bullets",
+        "owner": "recap"
+      },
+      {
+        "prompt": "Ping me once in twenty minutes",
+        "owner": "remind"
+      }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+name: Skill routing evals
+
+on:
+  pull_request:
+    paths:
+      - "examples/skills/**"
+      - "evals/skill-routing/**"
+      - "scripts/skill-routing-eval.js"
+      - "scripts/run-skill-routing-evals.js"
+      - ".github/workflows/skill-routing-evals.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "examples/skills/**"
+      - "evals/skill-routing/**"
+      - "scripts/skill-routing-eval.js"
+      - "scripts/run-skill-routing-evals.js"
+      - ".github/workflows/skill-routing-evals.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-routing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Enforce skill trigger and collision floor
+        run: node scripts/run-skill-routing-evals.js --min-rank1 80
