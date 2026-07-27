@@ -5540,6 +5540,12 @@ function renderApp() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cerberus</title>
   <link rel="icon" href="${cerbFavicon()}">
+  <!-- Theme typefaces — loaded once, referenced by name from each theme's
+       --font-display / --font-body / --font-mono stacks. The stacks always
+       end in a system fallback, so the UI never breaks offline. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Chakra+Petch:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: light dark;
@@ -5569,6 +5575,7 @@ function renderApp() {
       --holo-dim: rgba(255, 43, 43, 0.35);
       --chamfer: 10px;
       --font-display: "Bahnschrift", "DIN Alternate", "Franklin Gothic Medium", "Arial Narrow", "Segoe UI", sans-serif;
+      --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       --glow-sm: 0 0 6px rgba(255, 43, 43, 0.45);
       --glow-md: 0 0 14px rgba(255, 43, 43, 0.35);
@@ -5616,12 +5623,67 @@ function renderApp() {
       --shadow-sm: 0 1px 2px rgba(0,0,0,.5);
       --shadow: 0 4px 16px rgba(0,0,0,.55);
     }
+
+    /* ─── Theme skins ──────────────────────────────────────────────────────
+       Each theme overrides the token layer above via html[data-theme].
+       "ares" (the default) is simply :root — no override needed, so the
+       shipped look is untouched. New skins only redefine tokens; they never
+       touch component rules, so they can't drift from the base layout.
+       Type pairings travel with the theme: each skin carries its own
+       --font-display / --font-body / --font-mono stacks (Google Fonts with
+       system fallbacks, so nothing breaks offline). */
+    html[data-theme="cyberpunk"] {
+      /* Neon duotone — hot magenta primary over a deep indigo-black ground,
+         with cyan as the live/success accent. Deliberately NOT the default
+         "black + one neon" cliché: two saturated hues + warm text keep it
+         readable and give the rail real depth. */
+      --bg: #06060f;
+      --panel: #0b0b1c;
+      --panel-2: #131329;
+      --text: #eae6f7;
+      --muted: #8b87b8;
+      --line: #23234a;
+      --accent: #ff2d95;
+      --accent-soft: rgba(255, 45, 149, 0.10);
+      --user: #190d22;
+      --assistant: #12102a;
+      --warn: #ffb454;
+      --err: #ff4d6d;
+      --accent-glow: #ff5cb1;
+      --accent-deep: #7a0b4a;
+      --accent-line: #3a0f2e;
+      --line-hot: #3a0f2e;
+      --holo: #2de2ff;
+      --holo-dim: rgba(45, 226, 255, 0.35);
+      --glow-sm: 0 0 6px rgba(255, 45, 149, 0.5);
+      --glow-md: 0 0 14px rgba(255, 45, 149, 0.38);
+      --primary: var(--accent);
+      --primary-foreground: #14020c;
+      --popover: #131329;
+      --ring: rgba(255, 45, 149, 0.5);
+      --destructive: #ff4d6d;
+      --destructive-foreground: #ffe3ea;
+      /* Type pairing: Orbitron (geometric sci-fi display) over Rajdhani
+         (angular, legible body) with Share Tech Mono for data. */
+      --font-display: "Orbitron", "Bahnschrift", "DIN Alternate", "Segoe UI", sans-serif;
+      --font-body: "Rajdhani", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      --font-mono: "Share Tech Mono", "Cascadia Code", ui-monospace, Menlo, Consolas, monospace;
+    }
+    html[data-theme="cyberpunk"] .railnav nav button.active {
+      /* Active tab rides the cyan edge so the duotone reads across the rail. */
+      box-shadow: inset 2px 0 0 var(--holo);
+      text-shadow: 0 0 8px var(--holo-dim);
+    }
+    html[data-theme="cyberpunk"] .railnav nav button.active::after {
+      background: linear-gradient(180deg, transparent 0%, var(--holo) 50%, transparent 100%);
+    }
+
     * { box-sizing: border-box; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--text);
-      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      font: 14px/1.45 var(--font-body);
       height: 100vh;
       overflow: hidden;
     }
@@ -5708,6 +5770,26 @@ function renderApp() {
       font-size: 13px; font-family: inherit;
     }
     #setupBtn:hover { color: var(--text); border-color: var(--accent); }
+
+    /* Theme switcher — pinned in the rail footer above Setup. Two swatch
+       buttons; the active one carries the accent ring + glow. The label row
+       collapses with the rest of the rail text on narrow viewports. */
+    #themeSwitch { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    #themeSwitch .theme-label {
+      font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.22em;
+      text-transform: uppercase; color: var(--muted); margin-right: auto;
+    }
+    .theme-btn {
+      width: 26px; height: 26px; border-radius: var(--radius-sm); cursor: pointer;
+      border: 1px solid var(--line); padding: 0; flex: 0 0 auto;
+      transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+    }
+    .theme-btn:hover { transform: translateY(-1px); border-color: var(--muted); }
+    .theme-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .theme-btn.active { border-color: var(--accent); box-shadow: 0 0 8px var(--glow-sm), inset 0 0 0 1px var(--accent); }
+    .theme-btn[data-theme="ares"] { background: linear-gradient(135deg, #0a0a0c 0 50%, #ff2b2b 50% 100%); }
+    .theme-btn[data-theme="cyberpunk"] { background: linear-gradient(135deg, #0b0b1c 0 50%, #ff2d95 50% 68%, #2de2ff 68% 100%); }
+    @media (max-width: 820px) { #themeSwitch .theme-label { display: none; } #themeSwitch { justify-content: center; } }
 
     /* Gateway controls pinned in the rail footer — always reachable, not
        buried in the Models tab. Restart is destructive (drops in-flight
@@ -6380,6 +6462,11 @@ function renderApp() {
       <button data-tab="scrutiny" title="Directional Adaptive Scrutiny — the 7-axis scorer's calibration + recent verdicts."><span class="nav-ico">${hudIcon("scrutiny")}</span><span>Scrutiny</span></button>
     </nav>
     <div class="rail-footer">
+      <div id="themeSwitch" role="group" aria-label="Interface theme">
+        <span class="theme-label">Theme</span>
+        <button class="theme-btn" data-theme="ares" title="TRON:ARES — emissive red over near-black" aria-label="TRON:ARES theme"></button>
+        <button class="theme-btn" data-theme="cyberpunk" title="Cyberpunk — neon magenta / cyan duotone" aria-label="Cyberpunk theme"></button>
+      </div>
       <div class="rail-gw">
         <button id="railUpdate" title="Pull the latest gateway code (git). Requires a restart to take effect."><span class="nav-ico">${hudIcon("update")}</span><span>Update</span></button>
         <button id="railRestart" title="Restart the gateway process. In-flight turns are dropped."><span class="nav-ico">${hudIcon("restart")}</span><span>Restart</span></button>
@@ -6442,6 +6529,34 @@ document.querySelectorAll("nav button[data-tab]").forEach((btn) => {
 document.getElementById("setupBtn")?.addEventListener("click", () => {
   window.location.href = "/setup";
 });
+
+// ── Theme switcher ────────────────────────────────────────────────────
+// Skins are pure CSS token overrides keyed off html[data-theme]; this just
+// flips the attribute and persists the choice. "ares" is the shipped default
+// (no override block), so a fresh load and a cleared preference look identical.
+(() => {
+  const KEY = "openagi.theme";
+  const VALID = ["ares", "cyberpunk"];
+  let theme = "ares";
+  try { theme = localStorage.getItem(KEY) || "ares"; } catch {}
+  if (!VALID.includes(theme)) theme = "ares";
+  const apply = (t) => {
+    document.documentElement.setAttribute("data-theme", t);
+    document.querySelectorAll("#themeSwitch .theme-btn").forEach((b) => {
+      const on = b.dataset.theme === t;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  };
+  apply(theme);
+  document.querySelectorAll("#themeSwitch .theme-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      theme = b.dataset.theme;
+      apply(theme);
+      try { localStorage.setItem(KEY, theme); } catch {}
+    });
+  });
+})();
 
 // ── Rail-footer gateway controls ──────────────────────────────────────
 // Same /gateway/* routes the Models tab uses, surfaced globally so the
