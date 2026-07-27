@@ -183,11 +183,28 @@ export class SkillRegistry {
     const entry = this.usage.get(name) ?? { views: 0, runs: 0, lastUsedAt: null };
     if (mode === "view") entry.views += 1;
     else entry.runs += 1;
-    entry.lastUsedAt = nowIso();
+    const at = nowIso();
+    entry.lastUsedAt = at;
     this.usage.set(name, entry);
     try {
-      appendJsonLine(this.usageLogPath, { skill: name, mode, at: entry.lastUsedAt });
+      appendJsonLine(this.usageLogPath, { skill: name, mode, at });
     } catch { /* telemetry must never break the skill itself */ }
+    // Live observability lane: dashboard + Discord feed can show exactly
+    // when a skill was loaded or executed. Advisory only — listeners must
+    // never break the underlying skill action.
+    try {
+      this.runtime?.events?.emit?.("skill-use", { skill: name, mode, at });
+    } catch { /* advisory */ }
+  }
+
+  logEdit(entry) {
+    const record = { at: nowIso(), ...entry };
+    try {
+      appendJsonLine(this.editLogPath, record);
+    } catch { /* ignore */ }
+    try {
+      this.runtime?.events?.emit?.("skill-edit", record);
+    } catch { /* advisory */ }
   }
 
   logEdit(entry) {

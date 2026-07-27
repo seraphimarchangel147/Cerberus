@@ -2,6 +2,24 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-26 — Wall-clock stops now report consumed checkpoint extensions (Azazel)
+
+The soft-checkpoint guard worked invisibly: a turn that ran the base budget plus all
+configured extensions ended with the same "wall-clock guard was reached" message as
+the old hard stop, so from the outside the feature looked unshipped (Creator flagged
+it after a long build turn ended with what looked like the legacy stop).
+
+- `forceAnswerPrompt` and `localPartialSummary` now accept the turn's checkpoint
+  state (`{ total, left }`); the turn-timeout text names the consumed extensions
+  ("All N checkpoint extensions were consumed before this stop (the base window plus
+  N extensions ran).") on both the forced-answer and canned-summary paths, in the
+  OpenAI and Anthropic lanes alike.
+- No behavior change to the guard itself: ping → extend → continue; exhaustion →
+  graceful stop with a forced answer. Only the reporting changed.
+- Regression: `checkpoint exhaustion summary names the consumed extensions` — the
+  forced answer yields no text, so the canned summary must name the extension.
+  Suite: 42/42 in `test/model-provider-iterations.test.js`, syntax gate green.
+
 ## 2026-07-27 - Upgrade batch work item D: skill-routing evals (Codex)
 
 Added a deterministic, runtime-decoupled quality gate for the growing skill
@@ -1530,6 +1548,19 @@ MERGE REVIEW COMPLETE
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1717/1718 tests with zero failures and one intentional Windows permission-mode skip.
 EVIDENCE ROUTING COMPLETE
 
+- 2026-07-27T04:00:19.94Z · **azazel** · edit `src/skills.js` — Emit live skill-use and skill-edit observability events from the skill registry
+- 2026-07-27T04:04:38.65Z · **azazel** · edit `src/discord-channel.js` — Prepare Discord channel for throttled rich activity cards
+- 2026-07-27T04:07:38.2Z · **azazel** · edit `src/discord-channel.js` — Add rich Discord observability cards and tool-lane visuals for skills, learning, vision, computer-use, and debug activity
+- 2026-07-27T04:07:50.9Z · **azazel** · edit `src/hosted-interface.js` — Broadcast skill, learning, and vision telemetry to the dashboard SSE lane
+- 2026-07-27T04:08:36.96Z · **azazel** · edit `src/hosted-interface.js` — Add Ops tab structure, navigation, state, and styling to the dashboard
+- 2026-07-27T04:12:09.262Z · **azazel** · edit `src/hosted-interface.js` — Implement the unified Ops dashboard feed and event classifier
+- 2026-07-27T04:23:46.84Z · **azazel** · edit `src/model-provider.js`
+- 2026-07-27T04:24:07.748Z · **azazel** · edit `src/model-provider.js`
+- 2026-07-27T04:26:05.37Z · **azazel** · edit `test/model-provider-iterations.test.js`
+- 2026-07-27T04:27:27.72Z · **azazel** · edit `CHANGES.md`
+- 2026-07-27T04:49:48.20Z · **azazel** · edit `src/agent-host.js`
+- 2026-07-27T04:49:48.26Z · **azazel** · edit `src/discord-channel.js`
+
 ## 2026-07-27 - Upgrade batch Item C: budgeted memory and structured spill (Codex)
 
 - Added a clean-room, append-only memory tree with 320-byte log records,
@@ -1641,3 +1672,5 @@ UPGRADE BATCH ITEM F COMPLETE
   `node --test --test-concurrency=1` passes 1900/1900 with zero failures and
   zero skips.
 UPGRADE BATCH PHASE 1 COMPLETE
+
+- 2026-07-27T09:34:01.345Z · **azazel** · edit `CHANGES.md` — Re-apply Azazel changelog additions onto origin/main version during rebase

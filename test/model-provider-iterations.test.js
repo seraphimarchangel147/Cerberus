@@ -1176,6 +1176,31 @@ test("checkpoint budget exhaustion still hard-stops with turn-timeout", async ()
   );
 });
 
+test("checkpoint exhaustion summary names the consumed extensions", async () => {
+  const provider = new OpenAIResponsesProvider({
+    apiKey: "test-key",
+    maxIterations: 5,
+    maxTurnSeconds: 0.01,
+    wallClockCheckpoints: 1
+  });
+  let calls = 0;
+  provider.postResponses = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The forced final answer yields no text, so the turn must fall back to
+    // the canned wall-clock summary — which now reports checkpoint usage.
+    if (calls >= 3) return { id: "forced", output: [] };
+    return { id: "late", output_text: "still working", output: [] };
+  };
+  const result = await provider.generate({ input: "always slow", agent });
+  assert.equal(result.stopReason, "turn-timeout");
+  assert.match(
+    result.text,
+    /All 1 checkpoint extension were consumed/,
+    `expected the summary to name the consumed extension, got: ${result.text}`
+  );
+});
+
 // REGRESSION: a single slow model request (fetch exceeds the per-request
 // timeout) must NOT kill the whole turn with a raw undici "This operation was
 // aborted". It must be normalized and surface a graceful reply. This is the

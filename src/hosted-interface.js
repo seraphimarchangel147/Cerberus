@@ -181,6 +181,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
   bindHostedEvent("tunnel", (data) => broadcast("tunnel", data));
   bindHostedEvent("replay", (data) => broadcast("replay", data));
   bindHostedEvent("skill-candidate", (data) => broadcast("skill-candidate", data));
+  bindHostedEvent("skill-use", (data) => broadcast("skill-use", data));
+  bindHostedEvent("skill-edit", (data) => broadcast("skill-edit", data));
+  bindHostedEvent("vision", (data) => broadcast("vision", data));
   bindHostedEvent("miner-result", (data) => broadcast("miner-result", data));
   bindHostedEvent("cron-catchup", (data) => broadcast("cron-catchup", data));
   bindHostedEvent("cron-job-timeout", (data) => broadcast("cron-job-timeout", data));
@@ -5494,7 +5497,7 @@ function cerbMarkSVG(size, opts = {}) {
     '" stroke-linejoin="miter" stroke-linecap="square" aria-hidden="true">' + inner + "</svg>";
 }
 
-/* 19 nav glyphs + setup — minimal line-art HUD icons (24 grid, currentColor). */
+/* 20 nav glyphs + setup — minimal line-art HUD icons (24 grid, currentColor). */
 const HUD_ICONS = {
   chat: '<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   tasks: '<path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>',
@@ -5517,6 +5520,7 @@ const HUD_ICONS = {
   outcomes: '<circle cx="12" cy="9" r="6"/><path d="M8.5 14L7 22l5-3 5 3-1.5-8"/>',
   health: '<path d="M20.8 6.6a5.5 5.5 0 0 0-8.8-1.6A5.5 5.5 0 0 0 3.2 6.6c-1.6 3.7 2.2 7.4 8.8 12.4 6.6-5 10.4-8.7 8.8-12.4z"/>',
   scrutiny: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  ops: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>',
   setup: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
   update: '<path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
   restart: '<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v5h-5"/>',
@@ -6422,6 +6426,26 @@ function renderApp() {
     .qa-shot { width:100%; max-height:280px; object-fit:contain; background:var(--input); border:1px solid var(--border); border-radius:var(--radius-sm); margin-top:var(--space-2); }
     .qa-result-failed { border-color:rgba(240,128,128,.5); }
     @media (max-width:900px) { .run-layout { grid-template-columns:1fr; } .run-list { max-height:40vh; } }
+
+    /* Ops: unified live observability for skills, learning, tools, vision,
+       computer-use, and debug/runtime events. */
+    .ops-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:var(--space-3); margin-bottom:var(--space-4); }
+    .ops-stat { padding:var(--space-3); border:1px solid var(--border); background:var(--card); border-radius:var(--radius); }
+    .ops-stat .ops-num { font-family:var(--font-display); font-size:24px; color:var(--primary); line-height:1; }
+    .ops-stat .ops-label { margin-top:6px; color:var(--muted-foreground); font-size:var(--font-size-xs); text-transform:uppercase; letter-spacing:.08em; }
+    .ops-toolbar { display:flex; gap:var(--space-2); align-items:center; flex-wrap:wrap; margin-bottom:var(--space-3); }
+    .ops-filter { border:1px solid var(--border); background:var(--input); color:var(--foreground); border-radius:999px; padding:4px 10px; font-size:var(--font-size-xs); cursor:pointer; }
+    .ops-filter.active { border-color:var(--primary); color:var(--primary); background:var(--accent-soft); }
+    .ops-feed { display:flex; flex-direction:column; gap:var(--space-2); max-height:58vh; overflow:auto; }
+    .ops-event { display:grid; grid-template-columns:132px 1fr; gap:var(--space-3); padding:var(--space-3); border:1px solid var(--border); background:var(--card); border-radius:var(--radius); }
+    .ops-event .ops-time { color:var(--muted-foreground); font-family:var(--font-mono); font-size:var(--font-size-xs); }
+    .ops-event .ops-title { font-weight:650; }
+    .ops-event .ops-detail { margin-top:4px; color:var(--muted-foreground); font-size:var(--font-size-sm); white-space:pre-wrap; }
+    .ops-cat { display:inline-flex; align-items:center; gap:4px; margin-right:8px; color:var(--primary); font-size:var(--font-size-xs); text-transform:uppercase; letter-spacing:.07em; }
+    .ops-event[data-tone="err"] { border-color:rgba(240,128,128,.55); }
+    .ops-event[data-tone="ok"] { border-color:rgba(80,200,120,.35); }
+    .ops-event[data-tone="think"] { border-color:rgba(155,89,182,.45); }
+    @media (max-width:760px) { .ops-event { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
@@ -6452,6 +6476,7 @@ function renderApp() {
       <button data-tab="nodes" title="Which machines are paired, which one is main, and who's online right now."><span class="nav-ico">${hudIcon("nodes")}</span><span>Nodes</span></button>
 
       <div class="nav-group-label">Diagnostics</div>
+      <button data-tab="ops" title="Live operations — skill use, learning, edits, computer-use, vision, tools, and debug events."><span class="nav-ico">${hudIcon("ops")}</span><span>Ops</span></button>
       <button data-tab="today" title="What you got done today — completed tasks, skills run, actions approved, time tracked, themes."><span class="nav-ico">${hudIcon("today")}</span><span>Today</span></button>
       <button data-tab="activity" title="Ambient capture log — what you were doing on screen (if capture is enabled)."><span class="nav-ico">${hudIcon("activity")}</span><span>Activity</span></button>
       <button data-tab="computer-use" title="Computer use (beta) — every action the agent intended to take, with the reasoning it gave."><span class="nav-ico">${hudIcon("computer-use")}</span><span>Computer Use</span></button>
@@ -6511,7 +6536,14 @@ const state = {
   kanbanTaskId: null,
   runs: [],
   runKind: "",
-  runSelected: null
+  runSelected: null,
+  ops: {
+    events: [],
+    filter: "all",
+    paused: false,
+    seeded: false,
+    deferred: 0
+  }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -6942,6 +6974,9 @@ async function switchTab(tab) {
   } else if (tab === "health") {
     showSidebar(false);
     await renderHealth();
+  } else if (tab === "ops") {
+    showSidebar(false);
+    await renderOps();
   } else if (tab === "activity") {
     showSidebar(false);
     await renderActivity();
@@ -10237,6 +10272,244 @@ async function renderToday() {
     });
   });
 }
+
+const OPS_CATEGORY_META = {
+  skills: { icon: "🧰", label: "skills" },
+  learning: { icon: "🧠", label: "learning" },
+  tools: { icon: "⚙️", label: "tools" },
+  "computer-use": { icon: "🖥️", label: "computer use" },
+  vision: { icon: "👁️", label: "vision" },
+  debug: { icon: "🧪", label: "debug" },
+  system: { icon: "📡", label: "system" }
+};
+const OPS_FILTERS = ["all", "skills", "learning", "tools", "computer-use", "vision", "debug", "system"];
+
+function opsMeta(category) {
+  return OPS_CATEGORY_META[category] ?? OPS_CATEGORY_META.system;
+}
+
+function opsMakeEvent(category, title, detail = "", tone = "info", at = null) {
+  return {
+    id: String(Date.now()) + "-" + Math.random().toString(16).slice(2),
+    at: at ?? new Date().toISOString(),
+    category,
+    title: String(title ?? ""),
+    detail: String(detail ?? ""),
+    tone
+  };
+}
+
+function opsPush(category, title, detail = "", tone = "info", at = null) {
+  if (state.ops.paused) {
+    state.ops.deferred += 1;
+    if (state.tab === "ops") paintOps();
+    return;
+  }
+  state.ops.events.unshift(opsMakeEvent(category, title, detail, tone, at));
+  if (state.ops.events.length > 180) state.ops.events.length = 180;
+  if (state.tab === "ops") paintOps();
+}
+
+async function seedOps() {
+  const [skills, history, computer, runs] = await Promise.all([
+    fetchJson("/skills").catch(() => []),
+    fetchJson("/skills/history?limit=30").catch(() => ({ edits: [] })),
+    fetchJson("/computer-use/log?limit=50").catch(() => ({ sessions: [], actions: [], stats: {} })),
+    fetchJson("/runs?limit=25").catch(() => ({ runs: [] }))
+  ]);
+  const seeded = [];
+  const add = (category, title, detail, tone, at) => {
+    seeded.push(opsMakeEvent(category, title, detail, tone, at));
+  };
+
+  if (Array.isArray(skills) && skills.length > 0) {
+    const used = skills.filter((skill) => ((skill.stats?.runs ?? 0) + (skill.stats?.views ?? 0)) > 0).length;
+    add("skills", skills.length + " skills loaded", used + " have recorded usage; Skills tab has full bodies, stats, and edit history.", "info");
+  }
+  for (const edit of history.edits ?? []) {
+    add(
+      "learning",
+      "Skill " + String(edit.action ?? "edited") + ": " + String(edit.skill ?? "unknown"),
+      [edit.by ? "by " + edit.by : null, edit.summary ?? null].filter(Boolean).join(" · "),
+      "think",
+      edit.at ?? null
+    );
+  }
+  for (const session of computer.sessions ?? []) {
+    add(
+      "computer-use",
+      "Computer-use session " + String(session.status ?? "recorded"),
+      [session.goal ?? null, session.surface ? "surface: " + session.surface : null].filter(Boolean).join(" · "),
+      session.status === "aborted" ? "err" : session.status === "active" ? "think" : "ok",
+      session.endedAt ?? session.startedAt ?? null
+    );
+  }
+  for (const action of (computer.actions ?? []).slice(-30)) {
+    add(
+      "computer-use",
+      "Computer-use " + String(action.kind ?? "action"),
+      [action.status ?? null, action.reasoning ?? null].filter(Boolean).join(" · "),
+      action.status === "failed" ? "err" : action.mutating ? "think" : "info",
+      action.executedAt ?? action.createdAt ?? null
+    );
+  }
+  for (const run of runs.runs ?? []) {
+    add(
+      "debug",
+      "Run " + String(run.kind ?? "event") + ": " + String(run.status ?? "recorded"),
+      [run.name ?? null, run.id ?? null, run.summary ?? null].filter(Boolean).join(" · "),
+      run.status === "failed" || run.status === "error" ? "err" : "info",
+      run.startedAt ?? run.at ?? run.createdAt ?? null
+    );
+  }
+  seeded.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  state.ops.events = seeded.slice(0, 180);
+}
+
+async function renderOps() {
+  if (!state.ops.seeded) {
+    state.ops.seeded = true;
+    await seedOps().catch(() => {});
+  }
+  paintOps();
+}
+
+function opsStat(value, label) {
+  return '<div class="ops-stat"><div class="ops-num">' + escapeHtml(value) + '</div><div class="ops-label">' + escapeHtml(label) + '</div></div>';
+}
+
+function opsEventHtml(event) {
+  const meta = opsMeta(event.category);
+  const when = (() => {
+    const date = new Date(event.at);
+    return Number.isNaN(date.getTime()) ? String(event.at ?? "") : date.toLocaleTimeString();
+  })();
+  return '<div class="ops-event" data-tone="' + escapeHtml(event.tone) + '">'
+    + '<div class="ops-time">' + escapeHtml(when) + '</div>'
+    + '<div><span class="ops-cat">' + meta.icon + ' ' + escapeHtml(meta.label) + '</span>'
+    + '<span class="ops-title">' + escapeHtml(event.title) + '</span>'
+    + (event.detail ? '<div class="ops-detail">' + escapeHtml(event.detail) + '</div>' : "")
+    + '</div></div>';
+}
+
+function paintOps() {
+  if (state.tab !== "ops") return;
+  const filter = state.ops.filter;
+  const events = state.ops.events.filter((event) => filter === "all" || event.category === filter);
+  const count = (category) => state.ops.events.filter((event) => event.category === category).length;
+  const filterButtons = OPS_FILTERS.map((name) => {
+    const meta = name === "all" ? { icon: "✦", label: "all" } : opsMeta(name);
+    const cls = name === filter ? "ops-filter active" : "ops-filter";
+    return '<button type="button" class="' + cls + '" data-ops-filter="' + escapeHtml(name) + '">' + meta.icon + ' ' + escapeHtml(meta.label) + '</button>';
+  }).join("");
+  main.innerHTML = '<div class="pane">'
+    + '<div class="row between" style="align-items:flex-start;gap:16px;">'
+    + '<div><h2>Ops</h2><p class="muted">Live visibility into skill use, learning, edits, computer-use, vision, tools, and debug/runtime events.</p></div>'
+    + '<div class="row" style="gap:8px;flex-wrap:wrap;">'
+    + '<button type="button" class="ui-btn ui-btn-sm" id="opsPause">' + (state.ops.paused ? "▶ Resume" : "⏸ Pause") + '</button>'
+    + '<button type="button" class="ui-btn ui-btn-sm" id="opsRefresh">↻ Reseed</button>'
+    + '<button type="button" class="ui-btn ui-btn-sm ui-btn-destructive" id="opsClear">Clear</button>'
+    + '</div></div>'
+    + '<div class="ops-grid">'
+    + opsStat(state.ops.events.length, "buffered events")
+    + opsStat(count("skills") + count("learning"), "skill + learning")
+    + opsStat(count("computer-use") + count("vision"), "computer + vision")
+    + opsStat(count("debug"), "debug")
+    + opsStat(state.ops.paused ? state.ops.deferred : 0, "paused events")
+    + '</div>'
+    + '<div class="ops-toolbar">' + filterButtons + '</div>'
+    + '<div class="ops-feed" id="opsFeed">'
+    + (events.length > 0
+      ? events.map(opsEventHtml).join("")
+      : '<div class="empty">No events in this lane yet. Run a skill, attach an image, start computer-use, or trigger a tool turn.</div>')
+    + '</div></div>';
+  document.querySelectorAll("[data-ops-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.ops.filter = btn.dataset.opsFilter ?? "all";
+      paintOps();
+    });
+  });
+  $("opsPause")?.addEventListener("click", () => {
+    state.ops.paused = !state.ops.paused;
+    if (!state.ops.paused) state.ops.deferred = 0;
+    paintOps();
+  });
+  $("opsRefresh")?.addEventListener("click", async () => {
+    state.ops.seeded = false;
+    state.ops.events = [];
+    state.ops.deferred = 0;
+    await renderOps();
+  });
+  $("opsClear")?.addEventListener("click", () => {
+    state.ops.events = [];
+    state.ops.deferred = 0;
+    paintOps();
+  });
+}
+
+function opsSse(type, rawEvent) {
+  let data = {};
+  try { data = JSON.parse(rawEvent.data); } catch { return; }
+  if (type === "skill-use") {
+    const skill = String(data.skill ?? "unknown");
+    const mode = data.mode === "run" ? "run" : "view";
+    opsPush("skills", "Skill " + (mode === "run" ? "run" : "loaded") + ": " + skill, data.at ?? null, mode === "run" ? "ok" : "info", data.at ?? null);
+  } else if (type === "skill-edit") {
+    opsPush(
+      "learning",
+      "Skill " + String(data.action ?? "edited") + ": " + String(data.skill ?? "unknown"),
+      [data.by ? "by " + data.by : null, data.summary ?? null].filter(Boolean).join(" · "),
+      "think",
+      data.at ?? null
+    );
+  } else if (type === "skill-candidate") {
+    opsPush("learning", "Skill candidate: " + String(data.title ?? data.name ?? "untitled"), String(data.rationale ?? data.description ?? "").slice(0, 240), "think");
+  } else if (type === "background-review") {
+    const details = [
+      data.memoriesAdded ? data.memoriesAdded + " memories" : null,
+      data.duplicatesSkipped ? data.duplicatesSkipped + " duplicates merged" : null,
+      data.skillPending ? "skill proposal: " + (data.skillTitle ?? "untitled") : null
+    ].filter(Boolean).join(" · ");
+    if (details) opsPush("learning", "Background review", details, "info");
+  } else if (type === "vision") {
+    const count = Number(data.count) || 1;
+    opsPush("vision", "Vision input received", count + " image" + (count === 1 ? "" : "s") + (data.source ? " · " + data.source : ""), "info", data.at ?? null);
+  } else if (type === "computer-use") {
+    if (data.kind === "session-start") {
+      const session = data.session ?? {};
+      opsPush("computer-use", "Computer-use session started", [session.goal ?? null, session.surface ? "surface: " + session.surface : null].filter(Boolean).join(" · "), "think");
+    } else if (data.kind === "session-end") {
+      const session = data.session ?? {};
+      opsPush("computer-use", "Computer-use session " + String(session.status ?? "ended"), session.endReason ?? "", session.status === "aborted" ? "err" : "ok", session.endedAt ?? null);
+    } else if (data.kind === "action-record" && data.action?.mutating) {
+      opsPush("computer-use", "Computer-use action: " + String(data.action.kind ?? "unknown"), data.action.reasoning ?? "", "think", data.action.createdAt ?? null);
+    } else if (data.kind === "action-result") {
+      const action = data.action ?? {};
+      if (action.status === "failed" || action.mutating) {
+        opsPush("computer-use", "Computer-use " + String(action.kind ?? "action") + ": " + String(action.status ?? "finished"), action.error ?? action.reasoning ?? "", action.status === "failed" ? "err" : "ok", action.executedAt ?? null);
+      }
+    }
+  } else if (type === "agent-activity") {
+    if (data.phase === "start" && data.name) {
+      opsPush("tools", "Tool started: " + String(data.name), [data.channel ?? null, data.agentId ? "agent: " + data.agentId : null].filter(Boolean).join(" · "), "think");
+    } else if (data.phase === "end" && data.ok === false) {
+      opsPush("tools", "Tool failed: " + String(data.name ?? "unknown"), data.channel ?? "", "err");
+    } else if (data.phase === "verdict") {
+      opsPush("debug", "Scrutiny verdict: " + String(data.action ?? data.name ?? "unknown"), data.score != null ? "score " + Number(data.score).toFixed(2) : "", "info");
+    } else if (data.phase === "subagent") {
+      opsPush("debug", "Delegation active", [data.n != null && data.total != null ? data.n + "/" + data.total : null, data.name ?? null].filter(Boolean).join(" · "), "think");
+    } else if (data.phase === "awaiting-approval") {
+      opsPush("debug", "Approval requested", data.name ?? data.toolName ?? "", "think");
+    }
+  } else if (type === "run-inspector") {
+    opsPush("debug", "Run inspector: " + String(data.kind ?? data.phase ?? "event"), [data.status ?? null, data.name ?? null, data.runId ?? null].filter(Boolean).join(" · "), data.status === "failed" || data.ok === false ? "err" : "info");
+  } else if (type === "pending-action" || type === "pending-action-decided") {
+    opsPush("debug", type === "pending-action" ? "Pending action" : "Pending action decided", [data.toolName ?? null, data.summary ?? null, data.status ?? null].filter(Boolean).join(" · "), type === "pending-action" ? "think" : "info");
+  } else if (type === "cron" || type === "mcp") {
+    opsPush("system", type === "cron" ? "Cron event" : "MCP event", [data.op ?? null, data.id ?? null, data.name ?? null].filter(Boolean).join(" · "), "info");
+  }
+}
+
 
 async function renderComputerUse() {
   // Computer-use beta — the agent's intent + reasoning log. Shows every

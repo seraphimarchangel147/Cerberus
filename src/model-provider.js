@@ -3676,7 +3676,7 @@ async function prepareProviderConversation(providerInstance, conversation, {
 // The system prompt appended to the final "force an answer" call when a turn is
 // cut short. Tells the model to stop, not call tools, and answer from work so
 // far — the reason tunes the guidance so the reply names the right knob.
-function forceAnswerPrompt(reason, iterations, maxIterations) {
+function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
   const base = "[system] Stop here and answer the user now. Do NOT call any tools. Using the conversation and any tool results above, give the best complete answer you can with what you have.";
   if (reason === "iteration-cap") {
     return `${base} The turn reached its iteration limit after ${iterations}/${maxIterations} steps; if work remains, say briefly what's left and note OPENAGI_MAX_ITERATIONS can be raised.`;
@@ -3691,10 +3691,10 @@ function forceAnswerPrompt(reason, iterations, maxIterations) {
     return `${base} The provider stayed unavailable after bounded retries; summarise completed work and give your best current answer.`;
   }
   // turn-timeout
-  return `${base} The overall time budget is nearly spent; be concise and note OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS can be raised.`;
+  return `${base} The overall time budget is ${wallClock?.total > 0 ? `spent after the base window plus all ${wallClock.total} wall-clock checkpoint extension${wallClock.total === 1 ? "" : "s"}` : "nearly spent"}; be concise and note OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS can be raised.`;
 }
 
-function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText }) {
+function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText, wallClock }) {
   const completed = toolCalls.length;
   const recent = toolCalls.slice(-5).map((call) => call.name).join(", ");
   const detail = completed > 0
@@ -3702,7 +3702,7 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
     : "No tool calls completed.";
   const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
   if (reason === "turn-timeout") {
-    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached. ${detail} Raise OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS if this task needs more time.${prior}`;
+    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached.${wallClock?.total > 0 ? ` All ${wallClock.total} checkpoint extension${wallClock.total === 1 ? "" : "s"} were consumed before this stop (the base window plus ${wallClock.total} extension${wallClock.total === 1 ? "" : "s"} ran).` : ""} ${detail} Raise OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS if this task needs more time.${prior}`;
   }
   if (reason === "stalled") {
     return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model went silent (no output for the stall window) and could not be revived. ${detail} This usually means a transient provider hiccup — retry the request. OPENAGI_STALL_TIMEOUT_MS tunes how long silence is tolerated.${prior}`;
@@ -4528,7 +4528,7 @@ export class OpenAIResponsesProvider {
       continuationUsedForcedAnswer = true;
       reconcileOrphanedToolCalls(conversationInput, "openai");
       appendOpenAIContinue(conversationInput);
-      conversationInput.at(-1).content[0].text = forceAnswerPrompt(stopReason, iterations, maxIterations);
+      conversationInput.at(-1).content[0].text = forceAnswerPrompt(stopReason, iterations, maxIterations, { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left });
       try {
         checkRequestBudget(this, turnBudget);
         const preparation = await prepareProviderConversation(this, conversationInput, {
@@ -4579,9 +4579,9 @@ export class OpenAIResponsesProvider {
     }
 
     if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error" || stopReason === "context-too-large")) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
     } else if (stopReason === "iteration-cap" && !text) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
     } else if (text === undefined) {
       text = extractResponseText(response) || "(no text)";
     }
@@ -5433,7 +5433,7 @@ export class AnthropicProvider {
       && claimTurnForcedAnswer(turnBudget)
     ) {
       reconcileOrphanedToolCalls(convo, "anthropic");
-      appendAnthropicUserText(convo, forceAnswerPrompt(stopReason, iterations, maxIterations));
+      appendAnthropicUserText(convo, forceAnswerPrompt(stopReason, iterations, maxIterations, { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left }));
       try {
         checkRequestBudget(this, turnBudget);
         const preparation = await prepareProviderConversation(this, convo, {
@@ -5480,9 +5480,9 @@ export class AnthropicProvider {
     }
 
     if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error" || stopReason === "context-too-large")) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
     } else if (stopReason === "iteration-cap" && !text) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText });
+      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
     } else if (text === undefined) {
       text = extractAnthropicText(response);
     }

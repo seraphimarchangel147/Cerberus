@@ -114,6 +114,9 @@ export class DiscordChannel {
     // skill candidates, self-updates) posted to a home channel.
     this.activityChannel = options.activityChannel ?? process.env.DISCORD_ACTIVITY_CHANNEL ?? null;
     this.feedBound = false;
+    // Per-event-kind throttle keeps high-signal telemetry visible without
+    // flooding the channel when a single turn loads several skills.
+    this.feedThrottle = new Map();
     // Slash commands + component interactions (/status, /provider drop-down,
     // approve/deny buttons). Registered at READY.
     this.applicationId = null;
@@ -454,7 +457,18 @@ export class DiscordChannel {
       const authorName = message.member?.nick ?? message.author?.global_name ?? message.author?.username ?? "user";
       // Download any image attachments so a vision model can see them.
       const images = await fetchDiscordImages(message, (e) => this.log(e));
-      if (images.length > 0) this.log({ op: "inbound-images", count: images.length, channel: message.channel_id });
+      if (images.length > 0) {
+        this.log({ op: "inbound-images", count: images.length, channel: message.channel_id });
+        try {
+          this.agentHost?.runtime?.events?.emit?.("vision", {
+            count: images.length,
+            source: "discord-attachment",
+            channelId: message.channel_id,
+            sessionId: this.sessionKeyFor(message),
+            at: nowIso()
+          });
+        } catch { /* advisory */ }
+      }
       const result = await this.agentHost.handleMessage({
         channel: "discord",
         from: message.author?.id ?? "unknown",
@@ -601,6 +615,7 @@ export class DiscordChannel {
     if (replyToId && discordReplyEnabled()) {
       body.message_reference = { message_id: replyToId, fail_if_not_exists: false };
     }
+    body.allowed_mentions = { parse: [], users: [] };
     return this.rest(`/channels/${channelId}/messages`, { method: "POST", body });
   }
 
@@ -868,6 +883,25 @@ export class DiscordChannel {
       // Fire-and-forget: the feed must never break the runtime.
       this.sendMessage(chan, text).catch((error) => this.log({ op: "feed-error", error: error.message }));
     };
+    const postEmbed = (embedObj, d = null) => {
+      const chan = this.activityChannelFor(d?.sessionId ?? d?.session?.agentSessionId ?? d?.agentSessionId);
+      if (!chan) return;
+      this.sendEmbed(chan, embedObj).catch((error) => this.log({ op: "feed-error", error: error.message }));
+    };
+    const throttled = (key, ms = 8000) => {
+      if (!key) return true;
+      const now = Date.now();
+      const last = this.feedThrottle.get(key) ?? 0;
+      if (now - last < ms) return false;
+      this.feedThrottle.set(key, now);
+      if (this.feedThrottle.size > 200) {
+        for (const oldKey of this.feedThrottle.keys()) {
+          this.feedThrottle.delete(oldKey);
+          if (this.feedThrottle.size <= 200) break;
+        }
+      }
+      return true;
+    };
     events.on("proactive-suggestion", (d) => {
       post(`💡 **Observer suggestion** _(scrutiny-gated, nothing fired)_\n**${d.title ?? "(untitled)"}** · category: \`${d.category ?? "?"}\`\n${(d.rationale ?? "").slice(0, 400)}`);
     });
@@ -902,16 +936,111 @@ export class DiscordChannel {
         ? "🟢 **Auto-approve enabled** — gated actions now run without manual approval."
         : "🔴 **Auto-approve disabled** — gated actions will queue for manual approval.");
     });
+    events.on("skill-use", (d) => {
+      if ((process.env.DISCORD_ACTIVITY_SKILLS ?? "1") === "0") return;
+      const skill = String(d?.skill ?? "unknown");
+      const mode = d?.mode === "run" ? "run" : "view";
+      if (!throttled(`skill-use:${skill}:${mode}`, 8000)) return;
+      postEmbed(embed({
+        title: mode === "run" ? "🧰 Skill executed" : "📖 Skill loaded",
+        description: `\`${skill}\` ${mode === "run" ? "ran as an isolated sub-generation" : "was loaded into context"}.`,
+        color: mode === "run" ? COLORS.ok : COLORS.info,
+        fields: [
+          { name: "Mode", value: mode, inline: true },
+          { name: "At", value: String(d?.at ?? nowIso()), inline: true }
+        ],
+        footer: "Azazel skill telemetry"
+      }), d);
+    });
+    events.on("skill-edit", (d) => {
+      const skill = String(d?.skill ?? "unknown");
+      postEmbed(embed({
+        title: "✍️ Skill updated",
+        description: `**${skill}** — ${String(d?.action ?? "edited")}${d?.summary ? `\n${String(d.summary).slice(0, 300)}` : ""}`,
+        color: COLORS.think,
+        fields: [
+          { name: "By", value: String(d?.by ?? "agent"), inline: true },
+          { name: "At", value: String(d?.at ?? nowIso()), inline: true }
+        ],
+        footer: "Skill learning / curation lane"
+      }), d);
+    });
+    events.on("vision", (d) => {
+      const count = Number(d?.count) || 1;
+      postEmbed(embed({
+        title: "👁️ Vision input",
+        description: `${count} image${count === 1 ? "" : "s"} attached for visual analysis.`,
+        color: COLORS.info,
+        fields: [
+          { name: "Source", value: String(d?.source ?? "discord-attachment"), inline: true },
+          { name: "Channel", value: d?.channelId ? `<#${d.channelId}>` : "unknown", inline: true }
+        ],
+        footer: "Vision lane"
+      }), d);
+    });
+    events.on("computer-use", (d) => {
+      if (d?.kind === "session-start") {
+        const session = d.session ?? {};
+        postEmbed(embed({
+          title: "🖥️ Computer-use session started",
+          description: `**${String(session.goal ?? "(no goal stated)").slice(0, 500)}**`,
+          color: COLORS.think,
+          fields: [
+            { name: "Surface", value: String(session.surface ?? "desktop"), inline: true },
+            { name: "Session", value: `\`${session.id ?? "?"}\``, inline: true },
+            { name: "Approved by", value: String(session.approvedBy ?? "user"), inline: true }
+          ],
+          footer: "Computer-use lane"
+        }), d);
+      } else if (d?.kind === "session-end") {
+        const session = d.session ?? {};
+        const aborted = session.status === "aborted";
+        postEmbed(embed({
+          title: aborted ? "🖥️ Computer-use session aborted" : "🖥️ Computer-use session ended",
+          description: session.endReason ? String(session.endReason).slice(0, 500) : "Session closed.",
+          color: aborted ? COLORS.err : COLORS.ok,
+          fields: [
+            { name: "Session", value: `\`${session.id ?? "?"}\``, inline: true },
+            { name: "Actions", value: String(session.actionIds?.length ?? 0), inline: true }
+          ],
+          footer: "Computer-use lane"
+        }), d);
+      } else if (d?.kind === "action-result" && d.action?.status === "failed") {
+        const action = d.action;
+        postEmbed(embed({
+          title: "🖥️ Computer-use action failed",
+          description: `**${String(action.kind ?? "unknown")}**${action.error ? `\n${String(action.error).slice(0, 500)}` : ""}`,
+          color: COLORS.err,
+          fields: action.reasoning ? [{ name: "Reasoning", value: String(action.reasoning).slice(0, 500) }] : [],
+          footer: "Computer-use lane"
+        }), d);
+      }
+    });
     events.on("skill-candidate", (d) => {
-      post(`🧪 **Skill candidate mined** — ${d.title ?? d.name ?? "(unnamed)"}\n${(d.rationale ?? d.description ?? "").slice(0, 300)}`);
+      const title = String(d?.title ?? d?.name ?? "(unnamed)");
+      const rationale = String(d?.rationale ?? d?.description ?? "").slice(0, 600);
+      postEmbed(embed({
+        title: "🧪 Skill candidate mined",
+        description: `**${title}**${rationale ? `\n${rationale}` : ""}`,
+        color: COLORS.think,
+        fields: [{ name: "Review", value: "Open the dashboard → Skills tab", inline: true }],
+        footer: "Learning lane"
+      }), d);
     });
     events.on("background-review", (d) => {
       const details = [
-        d.memoriesAdded ? `${d.memoriesAdded} durable memor${d.memoriesAdded === 1 ? "y" : "ies"}` : null,
-        d.duplicatesSkipped ? `${d.duplicatesSkipped} duplicate${d.duplicatesSkipped === 1 ? "" : "s"} merged` : null,
-        d.skillPending ? `skill proposal pending: **${d.skillTitle ?? "untitled"}**` : null
+        d?.memoriesAdded ? `${d.memoriesAdded} durable memor${d.memoriesAdded === 1 ? "y" : "ies"}` : null,
+        d?.duplicatesSkipped ? `${d.duplicatesSkipped} duplicate${d.duplicatesSkipped === 1 ? "" : "s"} merged` : null,
+        d?.skillPending ? `skill proposal pending: **${d.skillTitle ?? "untitled"}**` : null
       ].filter(Boolean);
-      if (details.length > 0) post(`🧠 **Background review** — ${details.join(" · ")}`, d);
+      if (details.length > 0) {
+        postEmbed(embed({
+          title: "🧠 Background review",
+          description: details.join("\n"),
+          color: COLORS.info,
+          footer: "Learning lane"
+        }), d);
+      }
     });
     events.on("suggestion-resolved", (d) => {
       post(`✅ Suggestion \`${d.id}\` resolved: **${d.status}**${d.category ? ` (${d.category})` : ""}`);
@@ -933,6 +1062,64 @@ export class DiscordChannel {
     });
     events.on("daily-recap", (d) => {
       if (d?.summary) post(`🌙 **Daily recap**\n${String(d.summary).slice(0, 1500)}`);
+    });
+    // Tool-lane visibility: high-signal slices of agent-activity. Every turn
+    // emits these, so only notable tools, failures, delegate progress, and
+    // long-turn health signals post — heavily throttled, env-gated.
+    const NOTABLE_FEED_TOOLS = new Set([
+      "delegate_task", "job_start", "run_mcp_tool", "coder_start",
+      "qa_run", "schedule_message", "send_message"
+    ]);
+    events.on("agent-activity", (d) => {
+      if ((process.env.DISCORD_ACTIVITY_TOOLS ?? "1") === "0") return;
+      if (d?.phase === "subagent") {
+        const state = String(d?.state ?? "");
+        if (state !== "starting" && state !== "completed" && state !== "failed") return;
+        if (!throttled(`agent-activity:subagent:${state}`, 30000)) return;
+        const emoji = state === "failed" ? "❌" : state === "completed" ? "✅" : "🤝";
+        post(`${emoji} **Delegate ${state}** — subtask ${d.n ?? "?"}/${d.total ?? "?"}`, d);
+        return;
+      }
+      if (d?.phase === "wall-clock-checkpoint") {
+        if (!throttled("agent-activity:wall-clock", 60000)) return;
+        post(`⏱️ **Wall-clock checkpoint** — long turn still working (${d.extensionsLeft ?? "?"} extensions left)`, d);
+        return;
+      }
+      if (d?.phase === "context-compression") {
+        if (!throttled("agent-activity:compression", 120000)) return;
+        post("🗜️ **Context compression** — long session compacted to preserve continuity", d);
+        return;
+      }
+      const name = String(d?.name ?? "");
+      if (!NOTABLE_FEED_TOOLS.has(name)) return;
+      if (d?.phase === "start") {
+        if (!throttled(`agent-activity:start:${name}`, 60000)) return;
+        post(`🔧 **Tool started** — \`${name}\``, d);
+      } else if (d?.phase === "end" && d?.ok === false) {
+        if (!throttled(`agent-activity:fail:${name}`, 60000)) return;
+        post(`⚠️ **Tool failed** — \`${name}\``, d);
+      }
+    });
+    events.on("job", (d) => {
+      if ((process.env.DISCORD_ACTIVITY_JOBS ?? "1") === "0") return;
+      const job = d?.job ?? d?.record ?? {};
+      const name = String(job.name ?? job.toolName ?? job.id ?? d?.jobId ?? "job");
+      const op = String(d?.op ?? job.status ?? "update");
+      if (!throttled(`job:${name}:${op}`, 30000)) return;
+      const emoji = op === "start" ? "🚀" : /fail|error/i.test(op) ? "❌" : "📦";
+      post(`${emoji} **Job ${op}** — \`${name}\``, d);
+    });
+    events.on("mcp", (d) => {
+      if ((process.env.DISCORD_ACTIVITY_MCP ?? "1") === "0") return;
+      const op = String(d?.op ?? "");
+      if (op === "connect-all") return; // batch summary is dashboard noise
+      const name = String(d?.name ?? "server");
+      if (!throttled(`mcp:${name}:${op}`, 15000)) return;
+      if (op === "connecting") post(`🔌 **MCP connecting** — \`${name}\``, d);
+      else if (op === "disconnect") post(`🔌 **MCP disconnected** — \`${name}\``, d);
+      else if (op === "oauth-required") {
+        post(`🔐 **MCP OAuth required** — \`${name}\`${d?.url ? `\nAuthorize: ${d.url}` : ""}`, d);
+      }
     });
     this.log({ op: "activity-feed-bound", channel: this.activityChannel ?? "(dynamic)", mode: "follow-session" });
   }
@@ -1361,6 +1548,30 @@ export class DiscordReplyStream {
 const VERDICT_EMOJI = { act: "⚡", ask: "❓", watch: "👁️", ignore: "💤", propagate: "🧬" };
 const VERDICT_COLOR = { act: COLORS.ok, ask: COLORS.warn, watch: COLORS.info, ignore: 0x95a5a6, propagate: COLORS.think };
 const STATUS_EDIT_MIN_MS = 1500;
+const TOOL_LANES = [
+  { icon: "🧰", label: "skills", re: /(?:^|_)(?:use|run|edit|patch|delete|list)_skill|skill/iu },
+  { icon: "🖥️", label: "computer", re: /computer|cua_|cursor|window|mouse|keyboard|desktop|page_/iu },
+  { icon: "👁️", label: "vision", re: /vision|image|ocr|screenshot/iu },
+  { icon: "🧪", label: "debug", re: /debug|diagnos|audit|verify|test|lint|qa_/iu },
+  { icon: "🛠️", label: "build", re: /code_|artifact|deploy|git|shell|search|read|write|edit/iu },
+  { icon: "🧬", label: "delegate", re: /delegate|subagent/iu }
+];
+const DEFAULT_TOOL_LANE = { icon: "⚙️", label: "tools" };
+function laneForTool(name) {
+  const text = String(name ?? "");
+  return TOOL_LANES.find((lane) => lane.re.test(text)) ?? DEFAULT_TOOL_LANE;
+}
+function laneSummary(steps) {
+  const counts = new Map();
+  for (const step of steps) {
+    const lane = laneForTool(step.name);
+    counts.set(lane.label, (counts.get(lane.label) ?? 0) + 1);
+  }
+  return TOOL_LANES
+    .filter((lane) => counts.has(lane.label))
+    .map((lane) => `${lane.icon} ${lane.label} ×${counts.get(lane.label)}`)
+    .join(" · ");
+}
 // Heavy turns (≥ this many tool calls) spawn a thread and stream the trace
 // there so the channel stays clean. Env: DISCORD_THREAD_TASKS=0 disables.
 const THREAD_AFTER_STEPS = 6;
@@ -1457,7 +1668,7 @@ export class LiveStatus {
       const dur = s.ms != null ? ` ${ANSI.gray}${(s.ms / 1000).toFixed(1)}s` : "";
       const args = s.args ? ` ${ANSI.cyan}${s.args.replace(/_/g, "")}` : "";
       const err = s.error ? ` ${ANSI.red}${s.error}` : "";
-      rows.push(`${icon} ${ANSI.bold}${ANSI.white}${s.name}${ANSI.reset}${args}${dur}${err}${ANSI.reset}`);
+      rows.push(`${icon} ${laneForTool(s.name).icon} ${ANSI.bold}${ANSI.white}${s.name}${ANSI.reset}${args}${dur}${err}${ANSI.reset}`);
     }
     return "```ansi\n" + rows.join("\n").slice(0, 3500) + "\n```";
   }
@@ -1478,11 +1689,13 @@ export class LiveStatus {
     const doneCount = this.steps.filter((s) => s.state !== "run").length;
     const total = this.steps.length;
     const progress = total > 0 ? `\n${"▰".repeat(Math.round((doneCount / total) * 10))}${"▱".repeat(10 - Math.round((doneCount / total) * 10))} ${doneCount}/${total}` : "";
+    const lanes = laneSummary(this.steps);
+    const lanePart = lanes ? `\n${lanes}` : "";
     // Spotlight: the tool currently executing, bolded above the ladder.
     const running = this.steps.findLast?.((s) => s.state === "run") ?? [...this.steps].reverse().find((s) => s.state === "run");
     const spotlight = !this.done && running ? `\n${spinner} **${running.name}**${running.args ? ` · ${running.args}` : ""}` : "";
     const label = this.taskLabel ? `📌 \`${this.taskLabel.slice(0, 80)}\`\n` : "";
-    const parts = [label + head + iteration + delegation + clockPart + spotlight + progress];
+    const parts = [label + head + iteration + delegation + clockPart + spotlight + progress + lanePart];
     if (total > 0) parts.push(this.renderAnsi());
     if (this.threadId) parts.push(`🧵 full trace: <#${this.threadId}>`);
     if (suffix) parts.push(suffix);

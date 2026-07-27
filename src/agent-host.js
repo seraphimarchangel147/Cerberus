@@ -1137,7 +1137,13 @@ export class AgentHost {
           name: event?.name ?? event?.toolName ?? null,
           ok: event?.ok ?? null,
           n: event?.n ?? null,
-          max: event?.max ?? null
+          max: event?.max ?? null,
+          // Extra advisory fields so bus consumers (Discord activity feed,
+          // dashboard Ops tab) can render delegate progress and wall-clock
+          // checkpoint state instead of only bare tool start/end.
+          state: event?.state ?? null,
+          total: event?.total ?? null,
+          extensionsLeft: event?.extensionsLeft ?? null
         });
       } catch { /* advisory */ }
       if (lifecycle && event?.phase === "iteration") {
