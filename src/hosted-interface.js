@@ -11729,6 +11729,34 @@ switchTab(initialTab);
       ctx.fillRect(x-half, y, half*2+1, 1);
     }
   }
+  /* sinuous flame tongue — per-column phase-offset horizontal sine displacement
+     so adjacent tongues lean opposite ways instead of marching in lockstep;
+     width tapers full-at-base to 1px-at-tip (a constant-width tongue is a bar).
+     A secondary sine wave creates an S-curve so the tongue whips, not just leans.
+     amp = lateral sway amplitude, phase = per-column offset, time = flick*speed. */
+  function flameTongueSin(ctx, bx, by, h, w, amp, phase, time, seed, pal) {
+    pal = pal || PAL;
+    /* amplitude scales with height so the tallest tongues whip the most */
+    var a = amp * (0.6 + 0.4 * (h / 80));
+    for (var i = 0; i < h; i++) {
+      var t = i/h;
+      var y = Math.round(by - i);
+      /* primary wave + secondary wave (S-curve); amplitude grows toward the tip
+         so the base stays planted while the top whips. */
+      var dx = a * (Math.sin(t*3.2 + phase + time) + 0.45*Math.sin(t*7.1 + phase*1.3 + time*1.7)) * (0.2 + 0.8*t);
+      var x = Math.round(bx + dx);
+      var half = Math.max(0, Math.round((w/2) * (1 - t*0.92)));
+      if (t > 0.82 && ((i + seed) % 3 === 0)) half = Math.max(0, half-1);
+      var color;
+      if (t < 0.14) color = pal.flameCore;
+      else if (t < 0.34) color = pal.flameYel;
+      else if (t < 0.58) color = pal.flameOrg;
+      else if (t < 0.82) color = pal.flameRed;
+      else color = pal.flameDeep;
+      ctx.fillStyle = color;
+      ctx.fillRect(x-half, y, half*2+1, 1);
+    }
+  }
 
   /* ── generic head (PUP / PRIME share this with palette + size) ── */
   function drawHead(ctx, cx, cy, o, pal) {
@@ -12340,23 +12368,38 @@ switchTab(initialTab);
     band.addColorStop(0.7, "rgba(160,40,8,0.20)");
     band.addColorStop(1, "rgba(120,24,4,0)");
     ctx.fillStyle = band; ctx.fillRect(0, Math.round(H*0.42), W, groundY-H*0.42);
-    /* discrete tongues — each with its own phase + advection speed so the wall
-       rises organically rather than scrolling as a texture. Black gaps between tips. */
+    /* discrete sinuous tongues — each with its own phase offset (col*0.7) so
+       neighbours lean opposite ways, its own advection speed, and a seeded
+       height (stable across frames — no strobing). Width tapers to 1px at the
+       tip. Black negative space survives between the tips. */
     for (var i=0;i<13;i++){
-      var fx = 4 + i*((W-8)/12);
-      var ph = i*1.7;
+      var fx = 4 + i*((W-8)/12) + ((i%3)-1)*2;   /* stagger bases off-axis */
+      var ph = i*1.2;                              /* larger phase gap → neighbours lean opposite */
       var spd = 0.10 + (i%4)*0.03;
       var cBoost = 1 + 0.45*Math.cos(((fx-W/2)/(W/2))*Math.PI/2);   /* taller at center */
       var hgt = (42 + 30*Math.abs(Math.sin(i*2.3+1)) + 8*Math.sin(flick*spd+ph)) * flameI * cBoost;
-      var sway = Math.sin(flick*0.13+ph)*3.2;
-      flameTongue5(ctx, fx, groundY, Math.max(10, Math.round(hgt)), 7, sway, i*7, pal);
+      hgt = Math.max(10, Math.round(hgt));
+      flameTongueSin(ctx, fx, groundY, hgt, 12, 9, ph, flick*spd, i*7, pal);
+      /* a few tongues shed free-floating embers above their tips */
+      if (i % 3 === 0) {
+        var tipX = Math.round(fx + 4.5*Math.sin(1 + ph + flick*spd));
+        var tipY = groundY - hgt;
+        for (var em=0; em<2; em++) {
+          var ey2 = tipY - 4 - em*5 - ((Math.round(flick*0.6)+i*3+em*7) % 6);
+          var ex2 = tipX + Math.round(Math.sin(flick*0.15 + i + em*2.4)*2);
+          ctx.globalAlpha = 0.35 + 0.4*Math.sin(flick*0.2 + i + em*1.7);
+          pxRect(ctx, ex2, ey2, 1, 1, em%2?pal.flameOrg:pal.flameYel);
+        }
+        ctx.globalAlpha = 1;
+      }
     }
     /* inner hotter layer, offset from the outer tongues for depth */
     for (var j=0;j<8;j++){
       var fx2 = 14 + j*((W-28)/7);
-      var ph2 = j*2.3+4;
+      var ph2 = j*0.7+3.1;
       var hgt2 = (28 + 20*Math.abs(Math.sin(j*3.1)) + 6*Math.sin(flick*(0.12+(j%3)*0.04)+ph2)) * flameI;
-      flameTongue5(ctx, fx2, groundY, Math.max(8, Math.round(hgt2)), 5, Math.sin(flick*0.16+ph2)*2.4, j*11+3, pal);
+      hgt2 = Math.max(8, Math.round(hgt2));
+      flameTongueSin(ctx, fx2, groundY, hgt2, 7, 4.5, ph2, flick*(0.12+(j%3)*0.04), j*11+3, pal);
     }
     /* embers drifting in the black zone above the flames (behind the silhouette) */
     for (var e=0;e<16;e++){
@@ -12409,17 +12452,26 @@ switchTab(initialTab);
     ctx.globalAlpha = 1;
   }
 
-  /* ── hide: sculpted scale plates, each rim-lit from below (lava is the light) ── */
+  /* ── hide: sculpted scale plates, each rim-lit from below (lava is the light) ──
+     Contrast lives at the plate boundary: a bright under-rim (lava light from
+     below) sits directly above a dark seam groove, so each plate reads as a
+     separate layered shape instead of blending into the mass. */
   function omegaScales(ctx, cx, cy, cols, rows, cell, pal) {
     for (var r=0;r<rows;r++){
       var off = (r%2)? cell/2 : 0;   /* staggered brick layout */
       for (var c=0;c<cols;c++){
         var px = cx - (cols*cell)/2 + c*cell + off;
-        var py = cy + r*(cell*0.8);
+        var py = cy + r*(cell*0.85);
+        /* plate body — dark base with a lighter top facet */
         pxEllipse(ctx, px+cell/2, py+cell*0.4, cell*0.55, cell*0.42, pal.furDark);
-        pxEllipse(ctx, px+cell/2, py+cell*0.28, cell*0.38, cell*0.2, pal.furMid);
-        pxLine(ctx, px+cell*0.15, py+cell*0.75, px+cell*0.85, py+cell*0.75, 1, pal.lava2);
-        pxRect(ctx, Math.round(px+cell*0.4), Math.round(py+cell*0.78), 1,1, pal.lava3);
+        pxEllipse(ctx, px+cell/2, py+cell*0.28, cell*0.42, cell*0.26, pal.furMid);
+        /* bright under-rim — the lava is the key light, so the bottom edge glows */
+        pxLine(ctx, px+cell*0.1, py+cell*0.64, px+cell*0.9, py+cell*0.64, 1, pal.lava4);
+        pxRect(ctx, Math.round(px+cell*0.3), Math.round(py+cell*0.66), 3, 1, pal.lava5);
+        /* dark seam groove just below the rim — separates this plate from the next */
+        pxLine(ctx, px+cell*0.06, py+cell*0.8, px+cell*0.94, py+cell*0.8, 1, pal.furDeep);
+        /* top highlight — catches the rim light from above */
+        pxRect(ctx, Math.round(px+cell*0.35), Math.round(py+cell*0.18), 2, 1, pal.furLight);
       }
     }
   }
@@ -12555,31 +12607,34 @@ switchTab(initialTab);
     pxLine(ctx, cx-hw+1, cy-hh+2, cx-hw-3, cy-hh-earH, 1, pal.gold);
     pxLine(ctx, cx+hw-1, cy-hh+2, cx+hw+3, cy-hh-earH, 1, pal.gold);
     pxEllipse(ctx, cx, cy, hw, hh, pal.furMid);
-    pxEllipse(ctx, cx-1, cy-hh+3, hw-4, 3, pal.furLight);
-    pxEllipse(ctx, cx-2, cy-hh+4, hw-7, 1, pal.furHi);
+    /* subtle rounded skull highlight — NOT a flat band (that read as a crown);
+       the flame mane below rises from the skull top */
+    pxEllipse(ctx, cx, cy-hh+4, hw-5, 2, pal.furLight);
     /* cheek lava veins */
     pxLine(ctx, cx-Math.round(hw*0.7), cy+1, cx-Math.round(hw*0.35), cy+4, 1, pal.lava3);
     pxLine(ctx, cx+Math.round(hw*0.7), cy+1, cx+Math.round(hw*0.35), cy+4, 1, pal.lava3);
     pxRect(ctx, cx-Math.round(hw*0.35), cy+4, 1,1, pal.lava5);
     pxRect(ctx, cx+Math.round(hw*0.35), cy+4, 1,1, pal.lava5);
-    /* crest — a fan of individually shaped flame-spikes of varying height, each
-       outlined + gold-bodied + white-hot tipped, flickering on its own phase */
-    var spikes = 7;
+    /* crest — a feral mane of sinuous flame tongues (reuses flameTongueSin),
+       not a gold crown: fire-colored, varied heights, tips breaking the
+       silhouette and whipping on independent phases. Center head keeps its
+       gold scimitar horns + diamond on top (drawn below). */
+    var spikes = 9;
+    var baseY = cy - hh + 2;
     for (var k=0; k<spikes; k++){
       var u = (k/(spikes-1)) - 0.5;
-      var baseX = cx + Math.round(u*hw*1.6);
-      var centerBoost = 1 + 0.6*Math.cos(u*Math.PI);
-      var hgt = Math.round((7 + 4*Math.sin(k*1.9+0.7)) * s * centerBoost);
-      var flickTip = 0.6 + 0.4*Math.sin(crestFlick*0.3 + k*2.1);
-      var tipX = baseX + Math.round(u*4);
-      var tipY = cy - hh - hgt;
-      pxTri(ctx, tipX, tipY, baseX-3, cy-hh+2, baseX+3, cy-hh+2, pal.outline);
-      pxTri(ctx, tipX, tipY+1, baseX-2, cy-hh+2, baseX+2, cy-hh+2, pal.gold);
-      ctx.globalAlpha = flickTip;
-      pxRect(ctx, tipX, tipY+1, 1, 3, pal.goldHi);
-      pxRect(ctx, tipX, tipY, 1, 1, "#fff4d0");
-      ctx.globalAlpha = 1;
+      var baseX = cx + Math.round(u*hw*1.8);
+      var centerBoost = 1 + 0.8*Math.cos(u*Math.PI);
+      var hgt = Math.round((7 + 7*Math.abs(Math.sin(k*2.1+0.5))) * s * centerBoost);
+      hgt = Math.max(5, hgt);
+      flameTongueSin(ctx, baseX, baseY, hgt, 5, 3.5, k*0.8, crestFlick*(0.24+(k%3)*0.08), k*5, pal);
     }
+    /* outer mane flames leaning hard outward for a feral silhouette */
+    flameTongueSin(ctx, cx-hw-2, baseY+1, Math.round(7*s), 4, 3.0, 4.4, crestFlick*0.22, 31, pal);
+    flameTongueSin(ctx, cx+hw+2, baseY+1, Math.round(7*s), 4, 3.0, 1.2, crestFlick*0.22, 47, pal);
+    /* short tufts at the very edges */
+    flameTongueSin(ctx, cx-hw-4, baseY+3, Math.round(4*s), 3, 2.0, 2.8, crestFlick*0.26, 53, pal);
+    flameTongueSin(ctx, cx+hw+4, baseY+3, Math.round(4*s), 3, 2.0, 5.1, crestFlick*0.26, 61, pal);
     if (dir === 0) {
       /* center head: two long curved scimitar horns + forehead diamond emblem */
       var hornH = Math.round(14*s);
@@ -12708,6 +12763,31 @@ switchTab(initialTab);
     ctx.globalAlpha = 1;
   }
 
+  /* ── neck: tapered muscular column with scale texture + warm rim-light ──
+     Drawn from the shoulder (bx,by, wide) to the head base (tx,ty, narrow).
+     Dark seams + a warm under-rim every few rows so it reads as layered hide,
+     not a smooth tube; edges catch the lava backlight. */
+  function omegaNeck(ctx, bx, by, tx, ty, bw, tw, flick, pal) {
+    var steps = 16;
+    for (var i=0; i<=steps; i++) {
+      var t = i/steps;
+      var x = Math.round(bx + (tx-bx)*t);
+      var y = Math.round(by + (ty-by)*t);
+      var w = Math.round(bw + (tw-bw)*t);   /* tapers toward the head */
+      var half = Math.floor(w/2);
+      pxLine(ctx, x-half, y, x+half, y, 1, pal.furDark);
+      if (w > 5) pxRect(ctx, x-1, y, 2, 1, pal.furMid);   /* throat plane */
+      /* scale seam + warm under-rim every few rows */
+      if (i % 3 === 2 && i < steps) {
+        pxLine(ctx, x-half, y, x+half, y, 1, pal.furDeep);
+        if (w > 4) pxLine(ctx, x-half+1, y+1, x+half-1, y+1, 1, pal.lava3);
+      }
+    }
+    /* warm rim-light on both edges (lava backlight) */
+    pxLine(ctx, bx-Math.floor(bw/2), by, tx-Math.floor(tw/2), ty, 1, pal.lava2);
+    pxLine(ctx, bx+Math.floor(bw/2), by, tx+Math.floor(tw/2), ty, 1, pal.lava2);
+  }
+
   function drawOmegaFront(ctx, P) {
     var W=160,H=160; ctx.clearRect(0,0,W,H);
     var pal=PAL4, bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
@@ -12737,18 +12817,21 @@ switchTab(initialTab);
     pxEllipse(ctx, 98, 100+breathe, 13, 11, pal.furMid);
     pxEllipse(ctx, 60, 96+breathe, 7, 5, pal.furLight);
     pxEllipse(ctx, 100, 96+breathe, 7, 5, pal.furLight);
-    /* sculpted scale plates across the shoulders + upper chest */
-    omegaScales(ctx, 80, 86+breathe*0.5, 6, 2, 10, pal);
     omegaVeins(ctx, 80, 104+breathe*0.5, flick, pal);
 
     /* forelimbs — massive, planted, angled outward */
     omegaForelimb(ctx, 46, 104+shoulderB, -1, flick, pal, clawFlex);
     omegaForelimb(ctx, 114, 104+shoulderB, 1, flick, pal, clawFlex);
 
-    /* necks — thick columns fanning up to the three heads */
-    pxLine(ctx, 48+hl+yawL, 66+bob*0.8+droop-headLift, 62, 96+breathe*0.5, 12, pal.furDark);
-    pxLine(ctx, 80+hc+yawC, 54+bob+droop*0.5-headLift, 80, 94+breathe*0.5, 14, pal.furDark);
-    pxLine(ctx, 112+hr+yawR, 66+bob*0.8+droop-headLift, 98, 96+breathe*0.5, 12, pal.furDark);
+    /* necks — tapered columns fanning up to the three heads, with scale texture
+       and warm rim-light so they read as muscular hide, not smooth tubes */
+    omegaNeck(ctx, 62, 96+breathe*0.5, 48+hl+yawL, 66+bob*0.8+droop-headLift, 12, 7, flick, pal);
+    omegaNeck(ctx, 80, 94+breathe*0.5, 80+hc+yawC, 54+bob+droop*0.5-headLift, 14, 8, flick, pal);
+    omegaNeck(ctx, 98, 96+breathe*0.5, 112+hr+yawR, 66+bob*0.8+droop-headLift, 12, 7, flick, pal);
+
+    /* sculpted scale plates across the shoulders + upper chest — drawn AFTER
+       the necks so they sit on top and read as separate layered shapes */
+    omegaScales(ctx, 80, 84+breathe*0.5, 7, 3, 12, pal);
 
     /* ornate breastplate — drawn after the necks so the gem sits in front */
     omegaChestPlate(ctx, 80, 96+breathe*0.5, flick, pal, P.runeFlare, breathe*0.5);
@@ -12823,7 +12906,6 @@ switchTab(initialTab);
     omegaHead(ctx,70+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal);
     if (walk) for (var ei=0;ei<6;ei++){var ex=118+((flick*0.8+ei*9)%30),ey=60+((ei*7+flick*0.3)%30);ctx.fillStyle=ei%2?pal.flameOrg:pal.goldHi;ctx.globalAlpha=0.8-(ex-118)/36;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
   }
-
 
   /* ── post-processing ── */
   function applyRim(ctx, W, H, pal) {
