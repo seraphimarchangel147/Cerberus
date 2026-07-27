@@ -2,6 +2,35 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-27 - Upgrade batch work items B.1/B.2: complexity routing (Codex)
+
+Added an opt-in, floor-only runtime complexity layer to model routing:
+
+- Added the MIT-attributed OmniRoute-inspired additive classifier across code,
+  context size, carried tools, reasoning, math, and domain vocabulary.
+- Reproduced the specified defect red-first: the naive scorer routed a roughly
+  50k-token plain payload to `nano` (0 passed, 1 failed) because context's
+  additive contribution capped below the `mini` threshold.
+- Added explicit 32k-token-class `base` and medium-context `mini` floors plus
+  the mandatory any-tool `mini` floor. `escalateTier` is monotone and the
+  classifier fails open to the static profile.
+- Threaded the outgoing request shape through both paid provider loops.
+  Explicit model/task pins remain authoritative; static task profiles are the
+  baseline; runtime complexity may only choose a more capable tier.
+- Added the setup-allowlisted `AGENT_ROUTING=static` default/kill switch.
+  `AGENT_ROUTING=auto` is the only mode that enables runtime classification.
+- Added an `OPENAGI_DEV_WARN=1` warning for genuine unknown router task names
+  without changing the unrelated cron `task: "prompt"` discriminator.
+- In auto mode, the model plan leaves Anthropic mini unset instead of
+  recommending the nano model for memory-writing jobs. No model env was set
+  because the source-listed IDs were not verified against a live API.
+- Added no dependency and did not port OmniRoute's bandit, ELO, SLA, or
+  questionable free-endpoint machinery.
+
+Verification: focused classifier/router/provider lane 63 passed, 0 failed;
+full isolated `node --test --test-concurrency=2` lane on Node 25.5.0:
+1845 passed, 0 failed.
+
 ## 2026-07-27 - Upgrade batch work item B.0: routing ledger enrichment (Codex)
 
 Made the per-provider-call budget ledger usable for later routing analysis:

@@ -1047,6 +1047,28 @@ function providerRequestEfficiency({
   };
 }
 
+function modelRoutingRequest({
+  input,
+  instructions,
+  turnContext,
+  sessionMemorySnapshot,
+  messages,
+  tools,
+  images,
+  context
+}) {
+  return {
+    input,
+    instructions,
+    turnContext,
+    sessionMemorySnapshot,
+    messages,
+    tools,
+    images,
+    requestShape: context?.__requestShape
+  };
+}
+
 function openAIWantsContinuation(response, calls) {
   return calls.length > 0
     || response?.status === "incomplete"
@@ -3688,7 +3710,11 @@ export class OpenAIResponsesProvider {
     // Per-task model tiering. Defaults to base for everything until tier env
     // vars are set, so this is a no-op until the user opts in.
     this.ownsRouter = !options.router;
-    this.router = options.router ?? new ModelRouter({ envPrefix: "OPENAI", baseModel: this.model });
+    this.router = options.router ?? new ModelRouter({
+      envPrefix: "OPENAI",
+      baseModel: this.model,
+      env: options.env ?? process.env
+    });
     configureProviderCredentialPool(this, options, {
       providerName: "openai",
       envSecretName: "OPENAI_API_KEY"
@@ -3701,10 +3727,10 @@ export class OpenAIResponsesProvider {
 
   // Resolve which model a call should use: explicit `model` wins, then a named
   // `task` (routed via the configured tiers), then a raw `tier`, else the base.
-  resolveModel({ model, tier, task } = {}) {
+  resolveModel({ model, tier, task, request } = {}) {
     if (model) return model;
     if (this.ownsRouter && this.router && "baseModel" in this.router) this.router.baseModel = this.model;
-    if (task) return this.router.resolve(task);
+    if (task) return this.router.resolve(task, request);
     if (tier) return this.router.tierModel(tier);
     return this.model;
   }
@@ -3737,7 +3763,21 @@ export class OpenAIResponsesProvider {
 
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     const generationRequest = arguments[0] ?? {};
-    const model = this.resolveModel({ model: modelOverride, tier, task });
+    const model = this.resolveModel({
+      model: modelOverride,
+      tier,
+      task,
+      request: modelRoutingRequest({
+        input,
+        instructions,
+        turnContext,
+        sessionMemorySnapshot,
+        messages,
+        tools,
+        images,
+        context
+      })
+    });
     if (!this.isConfigured()) throw new Error("OPENAI_API_KEY is not configured.");
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
@@ -4718,7 +4758,11 @@ export class AnthropicProvider {
     this.budgetGuard = options.budgetGuard ?? null;
     this.secretsStore = options.secretsStore ?? options.secrets ?? null;
     this.ownsRouter = !options.router;
-    this.router = options.router ?? new ModelRouter({ envPrefix: "ANTHROPIC", baseModel: this.model });
+    this.router = options.router ?? new ModelRouter({
+      envPrefix: "ANTHROPIC",
+      baseModel: this.model,
+      env: options.env ?? process.env
+    });
     configureProviderCredentialPool(this, options, {
       providerName: "anthropic",
       envSecretName: "ANTHROPIC_API_KEY"
@@ -4729,10 +4773,10 @@ export class AnthropicProvider {
     return providerHasCredentials(this);
   }
 
-  resolveModel({ model, tier, task } = {}) {
+  resolveModel({ model, tier, task, request } = {}) {
     if (model) return model;
     if (this.ownsRouter && this.router && "baseModel" in this.router) this.router.baseModel = this.model;
-    if (task) return this.router.resolve(task);
+    if (task) return this.router.resolve(task, request);
     if (tier) return this.router.tierModel(tier);
     return this.model;
   }
@@ -4760,7 +4804,21 @@ export class AnthropicProvider {
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools: requestTools, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     const generationRequest = arguments[0] ?? {};
     if (!this.isConfigured()) throw new Error("ANTHROPIC_API_KEY is not configured.");
-    const model = this.resolveModel({ model: modelOverride, tier, task });
+    const model = this.resolveModel({
+      model: modelOverride,
+      tier,
+      task,
+      request: modelRoutingRequest({
+        input,
+        instructions,
+        turnContext,
+        sessionMemorySnapshot,
+        messages,
+        tools: requestTools,
+        images,
+        context
+      })
+    });
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
     const usageAccumulator = createProviderUsageAccumulator();

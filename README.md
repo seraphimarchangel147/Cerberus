@@ -453,6 +453,17 @@ You set **one base model** for everything (`OPENAI_MODEL` / `ANTHROPIC_MODEL`). 
 
 Run `openagi models` to see the plan — which job runs on which model, why each is safe to shrink, and exactly what to set to start saving.
 
+Complexity floors are staged behind `AGENT_ROUTING=auto`. In auto mode, a
+tool-bearing request is never routed below `mini`, medium contexts are floored
+at `mini`, and contexts around 32k tokens or larger are floored at `base`.
+Escalation is one-way: it cannot downgrade a task below its static profile,
+and explicit model/task pins still win. The default and kill switch is
+`AGENT_ROUTING=static`, which preserves the static router exactly.
+
+No Anthropic tier model is configured automatically. Verify a model ID against
+the live provider before setting it, and leave `ANTHROPIC_MODEL_MINI` unset
+until a distinct model is judged safe for memory-writing jobs.
+
 | Variable | What it does |
 |---|---|
 | `OPENAI_MODEL` / `ANTHROPIC_MODEL` | Base model — handles chat + autopilot (real reasoning). Default `gpt-5` / `claude-sonnet-4-6`. |

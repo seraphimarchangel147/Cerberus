@@ -1,4 +1,8 @@
 // Model tiering / routing.
+import {
+  classifyTaskComplexity,
+  escalateTier
+} from "./task-complexity.js";
 //
 // One "base" model handles everything by default. Lighter, cheaper models can
 // take the small, frequent background jobs — you do NOT need a top model for
@@ -77,14 +81,28 @@ export class ModelRouter {
   }
 
   // Model for a named task: explicit task pin > task's recommended tier > base.
-  resolve(task) {
+  resolve(task, request = null) {
     if (!task) return this.baseModel;
     const taskPin =
       this.overrides.tasks?.[task] ||
       this.env[`${this.envPrefix}_MODEL_TASK_${task.toUpperCase()}`];
     if (taskPin) return taskPin;
     const profile = TASK_PROFILES[task];
-    return this.tierModel(profile?.tier ?? "base");
+    if (!profile && this.env.OPENAGI_DEV_WARN === "1") {
+      console.warn(
+        `[model-router] unknown task "${task}" -> falling back to base model`
+      );
+    }
+    const staticTier = profile?.tier ?? "base";
+    if (String(this.env.AGENT_ROUTING ?? "static").trim().toLowerCase() !== "auto") {
+      return this.tierModel(staticTier);
+    }
+    try {
+      const runtimeFloor = classifyTaskComplexity(request ?? {});
+      return this.tierModel(escalateTier(staticTier, runtimeFloor));
+    } catch {
+      return this.tierModel(staticTier);
+    }
   }
 
   // Which models are actually wired up (base + any configured tiers).
@@ -137,13 +155,29 @@ export function renderModelPlan(router, { provider } = {}) {
   const onBase = router.describe().filter((r) => r.onBase && r.tier !== "base");
   if (onBase.length > 0) {
     const prefix = router.envPrefix;
+    const autoRouting = String(
+      router.env?.AGENT_ROUTING ?? "static"
+    ).trim().toLowerCase() === "auto";
     lines.push("");
     lines.push("Recommended savings — set these to use cheaper models for small jobs:");
     if (router.describe().some((r) => r.tier === "nano" && r.onBase)) {
-      lines.push(`  ${prefix}_MODEL_NANO=${prefix === "OPENAI" ? "gpt-5-nano" : "claude-haiku-4-5"}   # observer, scrutiny judges`);
+      const nano = prefix === "OPENAI"
+        ? "gpt-5-nano"
+        : "claude-haiku-4-5";
+      const verification = prefix === "ANTHROPIC" && autoRouting
+        ? " (verify the live model id first)"
+        : "";
+      lines.push(`  ${prefix}_MODEL_NANO=${nano}   # observer, scrutiny judges${verification}`);
     }
     if (router.describe().some((r) => r.tier === "mini" && r.onBase)) {
-      lines.push(`  ${prefix}_MODEL_MINI=${prefix === "OPENAI" ? "gpt-5-mini" : "claude-haiku-4-5"}   # condensing, mining, daily recap`);
+      if (prefix === "ANTHROPIC" && autoRouting) {
+        lines.push(
+          "  ANTHROPIC_MODEL_MINI=(leave unset)"
+          + "   # memory-writing jobs stay on base until a distinct model is verified"
+        );
+      } else {
+        lines.push(`  ${prefix}_MODEL_MINI=${prefix === "OPENAI" ? "gpt-5-mini" : "claude-haiku-4-5"}   # condensing, mining, daily recap`);
+      }
     }
   }
   return lines.join("\n");

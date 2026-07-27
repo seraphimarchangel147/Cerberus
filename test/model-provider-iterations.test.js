@@ -57,6 +57,76 @@ test("providers default to 25 iterations and a 900-second turn guard", (t) => {
   }
 });
 
+for (const spec of [
+  {
+    name: "OpenAI",
+    make: (env) => new OpenAIResponsesProvider({
+      apiKey: "test-key",
+      model: "openai-base",
+      env,
+      maxIterations: 1,
+      contextCompactChars: 1_000_000
+    }),
+    stub(provider, models) {
+      provider.postResponses = async (body) => {
+        models.push(body.model);
+        return {
+          id: "routing-openai",
+          status: "completed",
+          output_text: "done",
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1 }
+        };
+      };
+    }
+  },
+  {
+    name: "Anthropic",
+    make: (env) => new AnthropicProvider({
+      apiKey: "test-key",
+      model: "anthropic-base",
+      env,
+      maxIterations: 1,
+      contextCompactChars: 1_000_000,
+      stallTimeoutMs: 0
+    }),
+    stub(provider, models) {
+      provider.postMessages = async (body) => {
+        models.push(body.model);
+        return {
+          id: "routing-anthropic",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "done" }],
+          usage: { input_tokens: 1, output_tokens: 1 }
+        };
+      };
+    }
+  }
+]) {
+  test(`${spec.name} generate routes a huge request through the base floor`, async () => {
+    const env = {
+      AGENT_ROUTING: "auto",
+      OPENAI_MODEL_NANO: "openai-nano",
+      OPENAI_MODEL_MINI: "openai-mini",
+      ANTHROPIC_MODEL_NANO: "anthropic-nano",
+      ANTHROPIC_MODEL_MINI: "anthropic-mini"
+    };
+    const provider = spec.make(env);
+    const models = [];
+    spec.stub(provider, models);
+    const result = await provider.generate({
+      input: "plain ".repeat(50_000),
+      agent,
+      task: "observer",
+      tools: []
+    });
+    assert.deepEqual(models, [
+      spec.name === "OpenAI" ? "openai-base" : "anthropic-base"
+    ]);
+    assert.equal(result.model, models[0]);
+  });
+}
+
 test("OPENAGI_MAX_ITERATIONS overrides the deprecated tool-hop alias", (t) => {
   isolateIterationEnv(t);
   process.env.OPENAGI_MAX_ITERATIONS = "9";
