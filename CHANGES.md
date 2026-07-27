@@ -1673,6 +1673,43 @@ UPGRADE BATCH ITEM F COMPLETE
   zero skips.
 UPGRADE BATCH PHASE 1 COMPLETE
 
+## 2026-07-27 - Autonomous skills and budget phase baseline (Codex)
+
+- Required untouched Linux/WSL baseline:
+  `node --test --test-concurrency=1` passed 1904/1904 with zero failures and
+  zero skips in 373.98 seconds.
+- The initial native-Windows `node --test` diagnostic passed 1898/1904 with
+  four failures and two skips: two concurrent writers contended on the shared
+  default outcome snapshot, one mailbox byte-count assertion observed CRLF
+  sizing, and one checkpoint timing assertion flaked.
+- A native serial diagnostic passed 1901/1904 with only the platform-specific
+  mailbox byte-count assertion failing and two platform skips. The required
+  implementation gates use the green, isolated Linux/WSL lane above.
+
+## 2026-07-27 - Optional budget guard and live limit control (Codex)
+
+- `OPENAGI_DAILY_USD_LIMIT` now has an explicit uncapped state. Its default is
+  `10` USD/day when unset or blank. `off`, `none`, `unlimited`, and `disabled`
+  disable enforcement while retaining complete spend accounting. Zero,
+  negative, infinite, and nonnumeric values now throw with instructions to use
+  `off`, preventing both a bricked daemon and an accidental NaN bypass.
+- Added the published Kimi K3 rates as of 2026-07-27: $3/MTok cache-miss
+  input, $0.30/MTok cache-hit input, and $15/MTok output.
+- Unknown model ids now emit one estimate warning per model and are exposed as
+  `unpricedModels` in budget status. Exact and longest-prefix price matches do
+  not warn.
+- Added authenticated `POST /budget/limit`, which shares the environment
+  resolver, persists through the existing secrets-backed setup allowlist, and
+  updates the running guard only after persistence succeeds.
+- The Credits pane now has explicit Enabled and Disabled controls, shows
+  uncapped spend safely, and surfaces estimated-pricing warnings. Dashboard
+  health, Discord budget output, and introspection also understand the
+  disabled state.
+- No new environment variables and no npm dependencies were added. Focused
+  syntax, budget, ledger, HTTP, and dashboard coverage passes 14/14. The
+  required isolated `node --test --test-concurrency=1` gate passes 1910/1910
+  with zero failures and zero skips.
+
 - 2026-07-27T09:34:01.345Z · **azazel** · edit `CHANGES.md` — Re-apply Azazel changelog additions onto origin/main version during rebase
 - 2026-07-27T10:39:07.440Z · **azazel** · edit `src/pending-actions.js`
 - 2026-07-27T10:39:40.489Z · **azazel** · edit `test/pending-actions-hardening.test.js`

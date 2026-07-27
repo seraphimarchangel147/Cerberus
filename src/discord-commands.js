@@ -956,16 +956,26 @@ export class DiscordCommands {
     const status = this.runtime?.budget?.status?.() ?? null;
     if (!status) return this.respond(interaction, { content: "💰 No budget guard configured." });
     await this.defer(interaction);
-    const frac = status.dailyUsdLimit > 0 ? status.spentUsd / status.dailyUsdLimit : 0;
+    const capped = status.enabled !== false && status.dailyUsdLimit !== null;
+    const frac = capped ? status.spentUsd / status.dailyUsdLimit : 0;
     const color = frac >= 0.9 ? COLORS.err : frac >= 0.6 ? COLORS.warn : COLORS.ok;
     const budgetEmbed = embed({
       title: "💰 Budget",
       color,
       fields: [
-        { name: "Today", value: `$${status.spentUsd} / $${status.dailyUsdLimit}\n${bar(frac)} ${(frac * 100).toFixed(0)}%` },
+        {
+          name: "Today",
+          value: capped
+            ? `$${status.spentUsd} / $${status.dailyUsdLimit}\n${bar(frac)} ${(frac * 100).toFixed(0)}%`
+            : `$${status.spentUsd} / uncapped`
+        },
         { name: "Calls", value: String(status.calls), inline: true },
         { name: "Tokens in/out", value: `${status.tokens?.input ?? 0} / ${status.tokens?.output ?? 0}`, inline: true },
-        { name: "Remaining", value: `$${status.remainingUsd}`, inline: true }
+        {
+          name: "Remaining",
+          value: capped ? `$${status.remainingUsd}` : "No cap",
+          inline: true
+        }
       ],
       footer: "spend per day, last 14 days →"
     });

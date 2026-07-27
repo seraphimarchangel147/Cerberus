@@ -10,6 +10,8 @@ const DEFAULT_PRICES = {
   "claude-sonnet-4-6": { in: 3, out: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   "claude-opus-4-7": { in: 15, out: 75, cacheRead: 1.5, cacheWrite: 18.75 },
   "claude-haiku-4-5": { in: 1, out: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+  // Published Kimi platform rates retrieved 2026-07-27.
+  "kimi-k3": { in: 3, out: 15, cacheRead: 0.3, cacheWrite: 0 },
   "gpt-5.5": { in: 5, out: 30, cacheRead: 0.5, cacheWrite: 0 },
   "gpt-5.4-mini": { in: 0.75, out: 4.5, cacheRead: 0.075, cacheWrite: 0 },
   "gpt-5.4-nano": { in: 0.2, out: 1.25, cacheRead: 0.02, cacheWrite: 0 },
@@ -19,15 +21,52 @@ const DEFAULT_PRICES = {
   default: { in: 3, out: 15, cacheRead: 0.3, cacheWrite: 3.75 }
 };
 
+const DISABLED_LIMITS = new Set(["off", "none", "unlimited", "disabled"]);
+
+export function resolveDailyLimit(raw) {
+  if (raw === undefined || (typeof raw === "string" && raw.trim() === "")) {
+    return 10;
+  }
+  if (typeof raw === "string" && DISABLED_LIMITS.has(raw.trim().toLowerCase())) {
+    return null;
+  }
+  const parsed = (
+    typeof raw === "number"
+    || (typeof raw === "string" && raw.trim() !== "")
+  )
+    ? Number(raw)
+    : Number.NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  throw new TypeError(
+    "OPENAGI_DAILY_USD_LIMIT must be a finite number greater than 0; "
+    + "use 'off' to disable the budget guard."
+  );
+}
+
 export class BudgetGuard {
   constructor(options = {}) {
     this.storePath = options.storePath ?? path.join(resolveDataDir(), "budget", "usage.json");
-    this.dailyUsdLimit = options.dailyUsdLimit ?? Number.parseFloat(process.env.OPENAGI_DAILY_USD_LIMIT ?? "10");
-    this.prices = { ...DEFAULT_PRICES, ...(options.prices ?? {}) };
     this.env = options.env ?? process.env;
+    const configuredLimit = Object.hasOwn(options, "dailyUsdLimit")
+      ? options.dailyUsdLimit
+      : this.env.OPENAGI_DAILY_USD_LIMIT;
+    this.dailyUsdLimit = resolveDailyLimit(configuredLimit);
+    this.prices = { ...DEFAULT_PRICES, ...(options.prices ?? {}) };
+    this.warn = typeof options.warn === "function" ? options.warn : console.warn;
+    this.unpricedModels = new Set();
+    this.priceResolutions = new Map();
     ensureDir(path.dirname(this.storePath));
     this.state = readJsonFile(this.storePath, { version: 1, days: {} });
     this.ledger = options.ledger ?? new CreditLedger({ storePath: path.join(path.dirname(this.storePath), "ledger.jsonl") });
+  }
+
+  get enabled() {
+    return this.dailyUsdLimit !== null;
+  }
+
+  setDailyLimit(raw) {
+    this.dailyUsdLimit = resolveDailyLimit(raw);
+    return this.dailyUsdLimit;
   }
 
   todayKey() {
@@ -39,11 +78,15 @@ export class BudgetGuard {
     const day = this.state.days[today] ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, usd: 0, calls: 0 };
     return {
       today,
+      enabled: this.enabled,
       dailyUsdLimit: this.dailyUsdLimit,
       spentUsd: Number(day.usd.toFixed(4)),
-      remainingUsd: Number((this.dailyUsdLimit - day.usd).toFixed(4)),
+      remainingUsd: this.enabled
+        ? Number((this.dailyUsdLimit - day.usd).toFixed(4))
+        : null,
       calls: day.calls,
       tokens: { input: day.input, output: day.output, cacheRead: day.cacheRead, cacheWrite: day.cacheWrite },
+      unpricedModels: [...this.unpricedModels].sort(),
       history: Object.entries(this.state.days)
         .sort(([a], [b]) => b.localeCompare(a))
         .slice(0, 14)
@@ -52,6 +95,7 @@ export class BudgetGuard {
   }
 
   check() {
+    if (!this.enabled) return;
     const today = this.todayKey();
     const day = this.state.days[today] ?? { usd: 0 };
     if (day.usd >= this.dailyUsdLimit) {
@@ -131,16 +175,40 @@ export class BudgetGuard {
   }
 
   priceFor(model) {
-    if (!model) return this.prices.default;
-    const exact = this.prices[model];
-    if (exact) return exact;
+    const modelId = String(model ?? "").trim();
+    if (!modelId) {
+      this.priceResolutions.set(modelId, { mode: "default", key: "default" });
+      return this.prices.default;
+    }
+    const exact = this.prices[modelId];
+    if (exact) {
+      this.priceResolutions.set(modelId, { mode: "exact", key: modelId });
+      return exact;
+    }
     // Longest matching prefix wins, so "gpt-5.4-nano" resolves to the nano
     // price, not "gpt-5" (flagship). A short prefix like "gpt-5" must never
     // shadow a more specific variant.
     const prefix = Object.keys(this.prices)
-      .filter((key) => key !== "default" && model.startsWith(key))
+      .filter((key) => key !== "default" && modelId.startsWith(key))
       .sort((a, b) => b.length - a.length)[0];
-    return prefix ? this.prices[prefix] : this.prices.default;
+    if (prefix) {
+      this.priceResolutions.set(modelId, { mode: "prefix", key: prefix });
+      return this.prices[prefix];
+    }
+    this.priceResolutions.set(modelId, { mode: "default", key: "default" });
+    if (!this.unpricedModels.has(modelId)) {
+      this.unpricedModels.add(modelId);
+      try {
+        this.warn(
+          `[budget] model '${modelId}' has no price entry; billing at default rates `
+          + "(in $3/out $15 per 1M). Recorded spend for this model is an ESTIMATE "
+          + "and may be wildly wrong. Add it to DEFAULT_PRICES in src/budget-guard.js."
+        );
+      } catch {
+        // Diagnostics must never interrupt usage accounting.
+      }
+    }
+    return this.prices.default;
   }
 
   persist() {

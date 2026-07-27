@@ -33,6 +33,7 @@ import {
   activeProviderPreset
 } from "./provider-presets.js";
 import { projectAllows, projectMemoryScope } from "./project-store.js";
+import { resolveDailyLimit } from "./budget-guard.js";
 
 const MAX_JOB_HTTP_BODY_BYTES = 256 * 1024;
 const MAX_JOB_HTTP_LIST_LIMIT = 100;
@@ -1977,6 +1978,43 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       if (method === "GET" && pathname === "/budget") {
         requireDefaultRequestProject(runtime, req, url, null, "Budget administration");
         return sendJson(res, 200, runtime.budget?.status?.() ?? { error: "no-budget" });
+      }
+      if (method === "POST" && pathname === "/budget/limit") {
+        const body = await readJson(req).catch(() => ({}));
+        requireDefaultRequestProject(runtime, req, url, body, "Budget administration");
+        if (!runtime.budget) {
+          return sendJson(res, 503, { error: "no-budget" });
+        }
+        let resolved;
+        try {
+          resolved = resolveDailyLimit(
+            Object.hasOwn(body, "limit") ? body.limit : null
+          );
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+        const persisted = resolved === null ? "off" : String(resolved);
+        try {
+          saveEnv({
+            dataDir,
+            values: { OPENAGI_DAILY_USD_LIMIT: persisted },
+            store: runtime.secrets,
+            decidedBy: "http:/budget/limit"
+          });
+        } catch {
+          return sendJson(res, 500, { error: "configuration persistence failed" });
+        }
+        if (typeof runtime.budget.setDailyLimit === "function") {
+          runtime.budget.setDailyLimit(persisted);
+        } else {
+          runtime.budget.dailyUsdLimit = resolved;
+        }
+        const status = runtime.budget.status?.() ?? {
+          enabled: resolved !== null,
+          dailyUsdLimit: resolved
+        };
+        events.emit("budget-limit", status);
+        return sendJson(res, 200, status);
       }
       if (method === "GET" && pathname === "/budget/ledger") {
         requireDefaultRequestProject(runtime, req, url, null, "Budget administration");
@@ -9215,26 +9253,46 @@ async function renderChannels() {
 
 async function renderBudget() {
   const b = await fetchJson("/budget");
-  const pct = Math.min(100, (b.spentUsd / Math.max(b.dailyUsdLimit, 0.0001)) * 100);
-  const stateClass = pct > 90 ? "err" : pct > 70 ? "warn" : "ok";
+  const capped = b.enabled !== false && b.dailyUsdLimit !== null;
+  const pct = capped
+    ? Math.min(100, (b.spentUsd / Math.max(b.dailyUsdLimit, 0.0001)) * 100)
+    : 0;
+  const stateClass = capped && pct > 90
+    ? "err"
+    : capped && pct > 70
+      ? "warn"
+      : "ok";
+  const unpriced = Array.isArray(b.unpricedModels) ? b.unpricedModels : [];
+  const unpricedWarning = unpriced.length
+    ? \`<div class="card" style="margin-top:12px;">
+        <div class="row between">
+          <span class="name">Estimated model pricing</span>
+          <span class="badge warn">\${unpriced.length} unpriced</span>
+        </div>
+        <div class="desc" style="margin-top:6px;">
+          Default rates are being used for: \${escapeHtml(unpriced.join(", "))}
+        </div>
+      </div>\`
+    : "";
   main.innerHTML = \`
     <div class="pane">
       <h2>Credits</h2>
       <div class="card">
         <div class="row between" style="align-items:center;">
           <span class="name">Today · \${escapeHtml(b.today)}</span>
-          <span class="badge \${stateClass}">\${pct.toFixed(0)}% of limit</span>
+          <span class="badge \${stateClass}">\${capped ? pct.toFixed(0) + "% of limit" : "Guard disabled"}</span>
         </div>
         <div style="margin-top:10px;height:8px;background:var(--panel-2);border-radius:4px;overflow:hidden;">
           <div style="width:\${pct}%;height:100%;background:var(--accent);transition:width .3s;"></div>
         </div>
       </div>
+      \${unpricedWarning}
 
       <h3>Today</h3>
       <div class="grid stats">
         <div class="card"><span class="desc">Spent</span><div class="stat-value">$\${b.spentUsd.toFixed(4)}</div></div>
-        <div class="card"><span class="desc">Remaining</span><div class="stat-value">$\${b.remainingUsd.toFixed(4)}</div></div>
-        <div class="card"><span class="desc">Daily limit</span><div class="stat-value">$\${b.dailyUsdLimit.toFixed(2)}</div></div>
+        <div class="card"><span class="desc">Remaining</span><div class="stat-value">\${capped ? "$" + b.remainingUsd.toFixed(4) : "No cap"}</div></div>
+        <div class="card"><span class="desc">Daily limit</span><div class="stat-value">\${capped ? "$" + b.dailyUsdLimit.toFixed(2) : "Disabled"}</div></div>
         <div class="card"><span class="desc">Calls</span><div class="stat-value">\${b.calls}</div></div>
         <div class="card"><span class="desc">Input tokens</span><div class="stat-value">\${b.tokens.input.toLocaleString()}</div></div>
         <div class="card"><span class="desc">Output tokens</span><div class="stat-value">\${b.tokens.output.toLocaleString()}</div></div>
@@ -9242,9 +9300,29 @@ async function renderBudget() {
         <div class="card"><span class="desc">Cache write</span><div class="stat-value">\${b.tokens.cacheWrite.toLocaleString()}</div></div>
       </div>
 
+      <h3>Daily guard</h3>
+      <form id="budgetLimitForm" class="card">
+        <div class="row" style="align-items:center;gap:16px;flex-wrap:wrap;">
+          <label class="row" style="align-items:center;gap:6px;">
+            <input type="radio" name="budgetLimitMode" value="limit" \${capped ? "checked" : ""}>
+            Enabled
+          </label>
+          <input id="budgetLimitInput" class="ui-input" type="number" min="0.01" step="0.01"
+            value="\${escapeHtml(String(capped ? b.dailyUsdLimit : 10))}" \${capped ? "" : "disabled"}
+            aria-label="Daily budget limit in USD" style="max-width:180px;">
+          <label class="row" style="align-items:center;gap:6px;">
+            <input type="radio" name="budgetLimitMode" value="off" \${capped ? "" : "checked"}>
+            Disabled
+          </label>
+          <button class="secondary" type="submit">Save limit</button>
+        </div>
+        <div id="budgetLimitMessage" class="desc" style="margin-top:8px;">
+          Spend remains tracked when the guard is disabled.
+        </div>
+      </form>
+
       <h3>Last 14 days</h3>
       <div id="budgetHistory" class="grid"></div>
-      <p class="desc" style="margin-top:12px;">Limit is set via <code>OPENAGI_DAILY_USD_LIMIT</code> in <code>.openagi/.env</code>.</p>
       <h3>Spend over time (30 days)</h3>
       <div id="creditChart" class="card"></div>
       <h3>By activity (30 days)</h3>
@@ -9255,6 +9333,25 @@ async function renderBudget() {
       <div id="creditLog"></div>
     </div>
   \`;
+  const limitInput = $("budgetLimitInput");
+  for (const radio of document.querySelectorAll('input[name="budgetLimitMode"]')) {
+    radio.addEventListener("change", () => {
+      limitInput.disabled = radio.value === "off" && radio.checked;
+    });
+  }
+  $("budgetLimitForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const message = $("budgetLimitMessage");
+    const mode = document.querySelector('input[name="budgetLimitMode"]:checked')?.value;
+    const limit = mode === "off" ? "off" : Number(limitInput.value);
+    try {
+      message.textContent = "Saving...";
+      await postJson("/budget/limit", { limit });
+      await renderBudget();
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  });
   const hist = $("budgetHistory");
   for (const d of (b.history ?? [])) {
     const c = document.createElement("div");
@@ -11100,7 +11197,11 @@ async function refreshHealth() {
     const model = h.status.agentHost?.providerModel ?? "";
     const configured = h.status.agentHost?.providerConfigured;
     const providerLabel = model ? \`\${provider} · \${model}\` : provider;
-    const budgetLabel = b ? \`$\${b.spentUsd.toFixed(2)} / $\${b.dailyUsdLimit.toFixed(2)}\` : "";
+    const budgetLabel = b
+      ? b.enabled === false
+        ? \`$\${b.spentUsd.toFixed(2)} / uncapped\`
+        : \`$\${b.spentUsd.toFixed(2)} / $\${b.dailyUsdLimit.toFixed(2)}\`
+      : "";
     // Render as discrete nowrap pills so the header wraps cleanly between
     // pieces instead of breaking mid-pill (which produced the orphaned
     // "· $0.07 / $10.00" line in the old textContent layout).
