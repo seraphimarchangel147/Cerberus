@@ -2,6 +2,77 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-26 — Changelog backfill: six undocumented commits (Seraphim)
+
+Audited the last 30 commits against this file and found **six that shipped code with no entry**.
+Recorded below so the ledger matches the tree. Method: for each commit,
+`git show --stat | grep CHANGES.md` — anything answering NO is an undocumented change.
+
+Also correcting a stale claim in Azazel's status report: the OAuth wave is **already live**, not
+waiting on a restart. He was restarted twice on 2026-07-26 (PATH fix, then attribution), so the
+runtime is current — `GET /providers` returns `"oauth": true` on the Anthropic preset and the env
+resolves `OPENAGI_MAX_TURN_SECONDS=1200` / `OPENAGI_WALL_CLOCK_CHECKPOINTS=3`. Nothing pending.
+
+### Discord `chunkText` infinite loop — daemon-wedging (05ed650, Seraphim, 2026-07-25)
+
+A live hang, not a cosmetic bug. `preferredChunkCut()` used `text.lastIndexOf(needle, limit)`,
+which **can match at `limit` itself** — so a boundary found there returned `limit+1`/`limit+2`, a
+cut LARGER than the limit it was asked to respect. `chunkText`'s re-fit loop then requested
+`min(limit, cut-1)`, got the same oversized cut back, and never converged: a hard infinite loop
+pegging the event loop at 100% CPU and wedging the whole daemon. Triggered by any reply with a
+blank line at exactly char 1990.
+
+- Scan from `limit - 1` and clamp every branch so the result is always `<= limit`, guaranteeing
+  the re-fit loop makes progress.
+- Defense in depth: a guard counter in the re-fit loop falls back to a hard slice rather than spin,
+  plus a `cut <= 0` floor so the outer loop's `rest` strictly shrinks.
+- Regression: `test/discord-streaming-chunking.test.js`.
+
+### QA harness kept zero-dependency at boot (f182f69, Codex, 2026-07-26)
+
+The Playwright QA wave added `axe-core`, `pixelmatch`, `playwright`, `pngjs` as hard
+`dependencies` — but `src/web-qa.js` imported `pixelmatch`/`pngjs` at module top level, so booting
+the runtime would fail outright if the optional packages weren't installed. Cerberus's
+zero-dependency boot guarantee is load-bearing.
+
+- Moved all four to `optionalDependencies`; `dependencies` is `{}` again.
+- Added `loadVisualComparator()` — lazy, memoised dynamic import that returns `null` instead of
+  throwing when the packages are absent.
+- Also fixed a Node permission-model bug in `code_test`: `node --permission
+  --allow-fs-read=<dir> --test <dir>/x.test.js` reports "Could not find" even when the directory is
+  readable. Resolve/validate the path absolutely (traversal still rejected), then hand the runner
+  the workspace-relative form.
+
+### Playwright QA skip-guard completed for `axe-core` (22a683e + merge 1391cc9, Seraphim, 2026-07-26)
+
+Found by running Azazel's suite after the above. The guard above was incomplete: `axe-core` is
+optional too, but when it alone is missing **the browser still works**, so the run gets far enough
+to fail `accessibility_unavailable` rather than failing navigation — different code, same root
+cause, guard didn't catch it. Added that code to `playwrightUnavailableReason()`. Verified both
+directions: with deps the test genuinely **executes** (1 pass, 0 skipped — not silently skipping),
+without them it skips cleanly. Post-merge suite: 1821 tests, 1797 pass, 0 fail.
+
+### Cerberus pet evolution ladder — dashboard companion (Seraphim, 2026-07-25/26)
+
+Four commits, all in `src/hosted-interface.js`, none previously logged. Purely cosmetic — no
+runtime, API or agent-loop surface touched.
+
+- **`19aeb1e` — PRIME CERBERUS + settings panel.** Second form (80x64, 24-bit palette, chest rune,
+  gold pauldrons, horns) with its own idle/thinking/working animations. Gear panel toggles the pet,
+  size, glow and auto-evolution; stage + XP persist via `localStorage`.
+- **`279f9f4` — 4-tier ladder + evolution animation + form switcher.** PUP → PRIME (100 XP) →
+  ULTRA (300, 96x76 lava-cracked obsidian, gold crown crest, starburst chest gem, spiked bracers,
+  dual tails) → OMEGA (700, 112x88, the apex form). XP is awarded per tool-call type the harness
+  actually reports, so the ladder tracks real work.
+- **`7872883` — ULTRA/OMEGA detail pass.** Removed the box border; golden V-chevron breastplate
+  drawn after the necks/heads so the arms read as a plate; OMEGA-only CRT scanline overlay.
+- **`a012492` — OMEGA molten overhaul.** New `PAL4` palette (molten obsidian + gold inlay, ember
+  veins beneath the hide), contained radial fire halo with rising embers, ornate gold breastplate
+  with chain arcs converging on a white-hot gem core.
+
+Pairs with the two entries already logged for this feature (`PET ACTIVITY LANE COMPLETE`,
+`PET EVOLUTION HUD COMPLETE`), which covered the reactivity lane and HUD but not the artwork.
+
 ## 2026-07-26 — Per-agent commit attribution + Legion-wide gh PATH audit (Seraphim)
 
 Follow-up to the PATH fix below. Two things, both env-only.
