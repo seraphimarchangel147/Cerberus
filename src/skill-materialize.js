@@ -13,7 +13,7 @@ import { nowIso, stableHash } from "./utils.js";
 // surface, and makes the slug/dedupe/frontmatter logic individually
 // testable.
 
-export function createSkillFromSuggestion({ runtime, suggestion }) {
+export function createSkillFromSuggestion({ runtime, suggestion, lineage = {} }) {
   if (!suggestion?.title) throw new Error("suggestion has no title");
   if (!suggestion?.draftBody) throw new Error("suggestion has no draftBody — observer must have proposed an automation, not a skill");
   return writeSkillFile({
@@ -21,7 +21,11 @@ export function createSkillFromSuggestion({ runtime, suggestion }) {
     title: suggestion.title,
     description: suggestion.rationale,
     body: suggestion.draftBody,
-    lineage: { sourceSuggestionId: suggestion.id, createdBy: "proactive-observer" }
+    lineage: {
+      sourceSuggestionId: suggestion.id,
+      createdBy: "proactive-observer",
+      ...lineage
+    }
   });
 }
 
@@ -31,7 +35,7 @@ export function createSkillFromSuggestion({ runtime, suggestion }) {
 /// the shared writer with miner-specific lineage stamps. Returns
 /// { slug, path, scheduleHint } so the caller can ask the user
 /// whether to also create a cron job at the hinted time.
-export function createSkillFromCandidate({ runtime, candidate }) {
+export function createSkillFromCandidate({ runtime, candidate, lineage = {} }) {
   const proposal = candidate?.proposal ?? null;
   if (!proposal?.name && !candidate?.title) throw new Error("candidate has no proposal.name or title");
   if (!proposal?.body && !candidate?.draftBody) throw new Error("candidate has no proposal.body — cannot materialize");
@@ -61,7 +65,8 @@ export function createSkillFromCandidate({ runtime, candidate }) {
           : "pattern-miner",
       observedCount: seq.count ?? null,
       observedConfidence: typeof seq.confidence === "number" ? seq.confidence : null,
-      sequenceFingerprint: candidate.fingerprint ?? null
+      sequenceFingerprint: candidate.fingerprint ?? null,
+      ...lineage
     }
   });
   return { ...result, scheduleHint: proposal?.scheduleHint ?? null };

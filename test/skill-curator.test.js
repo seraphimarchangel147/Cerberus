@@ -75,7 +75,7 @@ test("skill curator ages agent-created skills without deleting and can restore a
   assert.equal(registry.mustGet("age-me").state, "active", "restoration resets the age baseline");
 });
 
-test("skill curator exempts bundled, pinned, and non-agent skills and honors recent usage", () => {
+test("skill curator honors bundled, pinned, agent-created scope, and recent usage", () => {
   const dataDir = makeTmp();
   const bundled = makeTmp();
   const user = makeTmp();
@@ -91,7 +91,12 @@ test("skill curator exempts bundled, pinned, and non-agent skills and honors rec
   );
   const registry = new SkillRegistry({ dirs: [bundled, user], dataDir, autoLoad: false });
   registry.reload();
-  const result = registry.curate({ now: "2026-04-05T00:00:00.000Z", staleDays: 30, archiveDays: 90 });
+  const result = registry.curate({
+    now: "2026-04-05T00:00:00.000Z",
+    staleDays: 30,
+    archiveDays: 90,
+    env: { OPENAGI_CURATOR_SCOPE: "agent-created" }
+  });
 
   assert.equal(result.changed, 0);
   for (const name of ["bundled-old", "pinned-old", "human-old", "recently-used"]) {
@@ -102,6 +107,7 @@ test("skill curator exempts bundled, pinned, and non-agent skills and honors rec
   const report = fs.readFileSync(result.reportPath, "utf8");
   assert.match(report, /exempt: bundled/);
   assert.match(report, /exempt: pinned/);
+  assert.match(report, /exempt: scope/);
 });
 
 test("archived skills leave the default model surface but remain restorable", () => {
@@ -170,5 +176,8 @@ test("durable runtime registers and dispatches the curator job", async () => {
   const results = await runtime.tick(now);
   assert.equal(results.length, 1);
   assert.equal(results[0].job.id, "daily-skill-curator");
+  assert.ok(results[0].result.materialized);
+  assert.ok(results[0].result.curated);
+  assert.ok(results[0].result.improved);
   assert.ok(fs.existsSync(path.join(dataDir, "curator", "REPORT.md")));
 });

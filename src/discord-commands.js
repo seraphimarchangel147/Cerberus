@@ -1038,14 +1038,37 @@ export class DiscordCommands {
 
       if (action === "curate") {
         await this.defer(interaction);
-        const report = await registry.curate({ now: new Date() });
-        const changed = Array.isArray(report?.changed) ? report.changed : [];
+        const report = typeof this.runtime?.runSkillCurator === "function"
+          ? await this.runtime.runSkillCurator({ now: new Date() })
+          : {
+              materialized: { created: 0 },
+              curated: await registry.curate({ now: new Date() }),
+              improved: { improved: 0 }
+            };
+        const curated = report.curated ?? report;
+        const changed = (curated?.rows ?? [])
+          .filter((row) => row.result === "transitioned")
+          .map((row) => ({
+            name: row.name,
+            from: row.before,
+            to: row.after
+          }));
         const summary = changed.length === 0
           ? "Curator ran — no skills changed state."
           : `Curator ran — ${changed.length} skill(s) changed state:\n${changed
               .map((c) => `- ${c.name ?? c.skill}: ${c.from ?? "?"} → ${c.to ?? c.state ?? "?"}`)
               .join("\n")}`;
-        return this.followUp(interaction, { content: summary.slice(0, 1900) });
+        const materialized = Number(report.materialized?.created ?? 0);
+        const improved = Number(report.improved?.improved ?? 0);
+        const seeded = Number(curated?.seeded ?? 0);
+        const exemptions = curated?.exemptions ?? {};
+        const counts = [
+          `${materialized} materialized, ${changed.length} transitioned, ${improved} improved.`,
+          `Seeded ${seeded}; exemptions pinned=${exemptions.pinned ?? 0}, bundled=${exemptions.bundled ?? 0}, scope=${exemptions.scope ?? 0}, cron=${exemptions.cron ?? 0}.`
+        ].join("\n");
+        return this.followUp(interaction, {
+          content: `${counts}\n${summary}`.slice(0, 1900)
+        });
       }
 
       if (action === "delete") {
