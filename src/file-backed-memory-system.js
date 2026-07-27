@@ -49,7 +49,13 @@ export class FileBackedMemorySystem extends MemorySystem {
 
   remember(observation, context = {}) {
     return this._mutate(() => {
-      const item = super.remember(observation, context);
+      this.deferMemTreeProjection += 1;
+      let item;
+      try {
+        item = super.remember(observation, context);
+      } finally {
+        this.deferMemTreeProjection -= 1;
+      }
       const correction = context.persistenceOp === "correct";
       this.persist(correction ? "correct" : "remember", correction
         ? {
@@ -57,7 +63,8 @@ export class FileBackedMemorySystem extends MemorySystem {
             correctedId: item.id,
             superseded: item.metadata?.corrects ?? []
           }
-        : { item });
+          : { item });
+      this.projectMemoryItem(item);
       return item;
     });
   }

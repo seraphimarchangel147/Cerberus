@@ -56,6 +56,11 @@ import {
   completionEvidenceNudge
 } from "./completion-evidence.js";
 import { classifyProviderOutcome } from "./error-classifier.js";
+import {
+  consumeMemoryRequestMetrics,
+  incrementMemoryRequestMetric
+} from "./memory-request-metrics.js";
+import { memtreeEnabled } from "../lib/memtree.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
@@ -1071,6 +1076,7 @@ function providerRequestEfficiency({
     format,
     toolOutcomeSeenSet(context, format)
   );
+  const memoryMetrics = consumeMemoryRequestMetrics(context);
   return {
     provider: format,
     requestBytes: Buffer.byteLength(serializedBody, "utf8"),
@@ -1092,7 +1098,8 @@ function providerRequestEfficiency({
     compression: compression?.compressed === true,
     latencyMs: nonnegativeMetric(latencyMs),
     stopReason,
-    ...toolOutcomes
+    ...toolOutcomes,
+    ...(memoryMetrics ?? {})
   };
 }
 
@@ -2427,6 +2434,11 @@ function toolOutputStore(context) {
 }
 
 function modelToolOutput(provider, context, value) {
+  const spilled = spillModelToolOutput(value, {
+    context,
+    maxChars: provider.maxToolOutputChars
+  });
+  if (spilled !== null) return spilled;
   return capToolOutput(value, {
     maxChars: provider.maxToolOutputChars,
     store: toolOutputStore(context),
@@ -2434,6 +2446,50 @@ function modelToolOutput(provider, context, value) {
     ownerType: context?.__jobId ? "job" : "turn",
     ownerId: context?.__jobId ?? context?.turnId ?? context?.__turnId ?? null
   }).output;
+}
+
+export function spillModelToolOutput(value, {
+  context,
+  maxChars = DEFAULT_MAX_TOOL_OUTPUT_CHARS
+} = {}) {
+  const store = context?.runtime?.spills;
+  if (!store?.put) return null;
+  try {
+    const spill = store.put(value, {
+      projectId: context?.__projectId ?? context?.projectId ?? "default"
+    });
+    if (!spill) return null;
+    incrementMemoryRequestMetric(context, "spillCount");
+    return encodeSpillSkeleton(spill, maxChars);
+  } catch {
+    return null;
+  }
+}
+
+function encodeSpillSkeleton(spill, maxChars) {
+  const limit = Math.max(
+    MIN_TRUNCATED_TOOL_OUTPUT_CHARS,
+    Number.isSafeInteger(Number(maxChars))
+      ? Number(maxChars)
+      : DEFAULT_MAX_TOOL_OUTPUT_CHARS
+  );
+  const segments = [...(spill.segments ?? [])];
+  let omitted = 0;
+  for (;;) {
+    const value = {
+      spilled: true,
+      id: spill.id,
+      bytes: spill.bytes,
+      lines: spill.lines,
+      instruction: "Call read_spill with this id and an exact segment line range.",
+      segments,
+      ...(omitted > 0 ? { segmentsOmitted: omitted } : {})
+    };
+    const encoded = JSON.stringify(value);
+    if (encoded.length <= limit || segments.length === 0) return encoded;
+    segments.pop();
+    omitted += 1;
+  }
 }
 
 function providerToolImage(value) {
@@ -3894,7 +3950,10 @@ export class OpenAIResponsesProvider {
     ];
 
     const baseInstructions = appendSessionMemorySnapshot(
-      instructions ?? buildDefaultInstructions({ agent }),
+      instructions ?? buildDefaultInstructions({
+        agent,
+        budgetedMemory: Boolean(context?.runtime?.memtree)
+      }),
       sessionMemorySnapshot
     );
     const toolList = tools.length > 0
@@ -4956,7 +5015,10 @@ export class AnthropicProvider {
       {
         type: "text",
         text: appendSessionMemorySnapshot(
-          instructions ?? buildDefaultInstructions({ agent }),
+          instructions ?? buildDefaultInstructions({
+            agent,
+            budgetedMemory: Boolean(context?.runtime?.memtree)
+          }),
           sessionMemorySnapshot
         ),
         cache_control: { type: "ephemeral" }
@@ -5753,7 +5815,13 @@ export function createModelProvider(options = {}) {
 // same agent — the Anthropic cache_control marker on the system block only
 // produces cache hits when the prefix never changes. Per-turn state (memory
 // hits, scrutiny) travels via buildTurnContext on the user turn instead.
-export function buildDefaultInstructions({ agent }) {
+export function buildDefaultInstructions({
+  agent,
+  budgetedMemory = memtreeEnabled(process.env)
+}) {
+  const budgetedMemoryTools = budgetedMemory
+    ? "\n- memory_wake(budget?) / memory_zoom(scope, lo, hi, budget?) / memory_merge(scope, lo, hi, line) / memory_tree_recall(regex, limit?) - navigate the bounded append-only memory tree and complete in-band summary requests\n- read_spill(id, range) - read an exact inclusive line slice from a structured oversized tool result"
+    : "";
   return `You are ${agent?.name ?? "an OpenAGI agent"}, an always-on local assistant.
 
 Tools available to you (call them when useful):
@@ -5762,7 +5830,7 @@ Tools available to you (call them when useful):
 - capability_bundle_list / capability_bundle_create / capability_bundle_update / capability_bundle_enable / capability_bundle_revoke / capability_audit - manage disabled-by-default, project-scoped, revocable capability bundles with explicit filesystem, network, secret, subprocess, API, UI, and hook declarations
 - skill_import_list / skill_import_stage / skill_import_review / skill_import_approve / skill_import_reject - quarantine, inspect, and explicitly approve bounded ZIP or local-Git skill packages; staging never runs imported code
 - remember(content, tags?, importance?, memoryClass?, replaceIds?) - save a durable note and mirror it to the optional external user model; use memoryClass='preference' only for stable user-specific preferences, otherwise keep the default project fact scope; after a capacity error, consolidate overlapping recall results marked replaceable
-- recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope
+- recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope${budgetedMemoryTools}
 - memory_details(id) - inspect one local memory's bounded provenance, confidence, and correction/replacement status without changing its strength; use before relying on uncertain memory for an action
 - correct_memory(correction, query? | id?, tags?, memoryClass?) - supersede a wrong memory with the corrected fact and mirror the correction to the optional external user model; use memoryClass='preference' only when correcting a recalled user-profile preference
 - Post-session review memories are only proposals: they are screened, shown as pending actions, and require an explicit human approval before they can become durable memory.

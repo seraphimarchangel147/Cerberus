@@ -51,10 +51,24 @@ export class MemorySystem {
       DEFAULT_PROFILE_MEMORY_MAX_CHARS
     );
     this.vectors = null;
+    this.memtree = null;
+    this.memtreeProjectionResults = new Map();
+    this.deferMemTreeProjection = 0;
   }
 
   bindVectorStore(vectorStore) {
     this.vectors = vectorStore;
+  }
+
+  bindMemTree(memtree) {
+    this.memtree = memtree ?? null;
+  }
+
+  takeMemTreeProjection(id) {
+    const memoryId = String(id ?? "");
+    const result = this.memtreeProjectionResults.get(memoryId) ?? null;
+    this.memtreeProjectionResults.delete(memoryId);
+    return result;
   }
 
   dropPrincipleVector(id) {
@@ -150,7 +164,29 @@ export class MemorySystem {
       item.metadata.replaces = replacementItems.map((entry) => entry.id);
     }
     this.enforceLimits(tier);
+    if (this.deferMemTreeProjection < 1) this.projectMemoryItem(item);
     return item;
+  }
+
+  projectMemoryItem(item) {
+    if (!this.memtree?.note || !item) return null;
+    try {
+      const result = this.memtree.note(item.content, {
+        scope: item.scope ?? "main"
+      });
+      if (this.memtreeProjectionResults.size >= 1000) {
+        this.memtreeProjectionResults.delete(
+          this.memtreeProjectionResults.keys().next().value
+        );
+      }
+      this.memtreeProjectionResults.set(item.id, result);
+      return result;
+    } catch (error) {
+      try {
+        console.warn(`[memtree] memory projection failed: ${error?.message ?? error}`);
+      } catch {}
+      return null;
+    }
   }
 
   retrieve(query, options = {}) {

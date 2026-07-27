@@ -125,6 +125,36 @@ test("analytics summarizes token and content-free efficiency totals", () => {
   });
 });
 
+test("memory request counters persist and aggregate only when emitted", () => {
+  const L = tmpLedger();
+  const now = new Date("2026-06-06T12:00:00.000Z");
+  const row = L.record(entry({
+    at: "2026-06-06T10:00:00.000Z",
+    efficiency: {
+      memoryBytesInjected: 4096,
+      spillCount: 2,
+      mergesRequested: 3,
+      mergesCompleted: 1
+    }
+  }), { now });
+
+  assert.deepEqual(
+    {
+      memoryBytesInjected: row.efficiency.memoryBytesInjected,
+      spillCount: row.efficiency.spillCount,
+      mergesRequested: row.efficiency.mergesRequested,
+      mergesCompleted: row.efficiency.mergesCompleted
+    },
+    {
+      memoryBytesInjected: 4096,
+      spillCount: 2,
+      mergesRequested: 3,
+      mergesCompleted: 1
+    }
+  );
+  assert.equal(L.analytics({ days: 30, now }).efficiency.memoryBytesInjected, 4096);
+});
+
 test("efficiency rows are bounded, typed, and ignore arbitrary content", () => {
   const L = tmpLedger();
   const row = L.record(entry({

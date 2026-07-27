@@ -62,6 +62,8 @@ import {
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
+import { SpillStore } from "./spill-store.js";
+import { memtreeEnabled, ScopedMemTree } from "../lib/memtree.js";
 import { JobStore } from "./job-store.js";
 import { JobManager, registerJobTools } from "./job-manager.js";
 import { ComputerUseLog } from "./computer-use-log.js";
@@ -403,6 +405,7 @@ function resolveWebQa(runtime, options, {
 
 export class AbiRuntime {
   constructor(options = {}) {
+    const runtimeEnv = options.env ?? process.env;
     this.context = {
       name: "OpenAGI ABI",
       goalAlignment: 0.8,
@@ -419,6 +422,33 @@ export class AbiRuntime {
     this.dataDir = options.dataDir ?? options.mcpOptions?.dataDir ?? resolveDataDir();
     this.workflows = options.workflows ?? registerDefaultWorkflows(new WorkflowRegistry());
     this.memory = options.memory ?? new MemorySystem(options.memoryOptions);
+    this.memtree = null;
+    this.spills = null;
+    if (memtreeEnabled(runtimeEnv)) {
+      try {
+        this.memtree = options.memtree ?? new ScopedMemTree({
+          dir: path.join(this.dataDir, "memory", "memtree"),
+          env: runtimeEnv,
+          ...(options.memtreeOptions ?? {})
+        });
+        this.spills = options.spills ?? new SpillStore({
+          dir: path.join(this.dataDir, "spill"),
+          spillBytes: runtimeEnv.OPENAGI_SPILL_BYTES,
+          ...(options.spillOptions ?? {})
+        });
+        const existingMemory = typeof this.memory?.items?.values === "function"
+          ? [...this.memory.items.values()]
+          : [];
+        this.memtree.migrate?.(existingMemory);
+        this.memory.bindMemTree?.(this.memtree);
+      } catch (error) {
+        this.memtree = null;
+        this.spills = null;
+        try {
+          console.warn(`[memtree] disabled after initialization failure: ${error?.message ?? error}`);
+        } catch {}
+      }
+    }
     this.externalMemoryProvider = resolveExternalMemoryProvider(options);
     const secretsDataDir = options.dataDir
       ?? options.mcpOptions?.dataDir

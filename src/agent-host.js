@@ -27,6 +27,10 @@ import {
   completionToolPreferences,
   createCompletionContract
 } from "./completion-evidence.js";
+import {
+  incrementMemoryRequestMetric,
+  initializeMemoryRequestMetrics
+} from "./memory-request-metrics.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -35,6 +39,13 @@ const SPECIALIST_CORE_TOOLS = [
   "recall", "remember",
   "list_tasks", "agent_pick_next", "complete_task", "move_task", "save_draft"
 ];
+const BUDGETED_MEMORY_CORE_TOOLS = Object.freeze([
+  "memory_wake",
+  "memory_zoom",
+  "memory_merge",
+  "memory_tree_recall",
+  "read_spill"
+]);
 
 export const CHAT_CORE_TOOLS = Object.freeze([
   "recall",
@@ -593,12 +604,26 @@ export class AgentHost {
         // Continuation metadata is an optimization; chat remains stateless.
       }
     }
-    const sessionMemorySnapshot = await this.sessionMemorySnapshotFor(
+    const frozenSessionMemorySnapshot = await this.sessionMemorySnapshotFor(
       sessionId,
       memoryScope,
       agentId,
       { ephemeral, profileScope }
     );
+    let sessionMemorySnapshot = frozenSessionMemorySnapshot;
+    let memoryWake = null;
+    if (this.runtime.memtree?.wake) {
+      try {
+        memoryWake = this.runtime.memtree.wake({
+          scope: memoryScope,
+          profileScope
+        });
+        if (memoryWake.text) sessionMemorySnapshot = memoryWake.text;
+      } catch {
+        memoryWake = null;
+        sessionMemorySnapshot = frozenSessionMemorySnapshot;
+      }
+    }
 
     // A real inbound user message always wins over an automated goal loop.
     // Discord also performs this at enqueue time so a queued message can stop
@@ -910,6 +935,12 @@ export class AgentHost {
     const resumedGoalTurn = input.goalContinuation === true
       && this.runtime.goals?.get?.(sessionId)?.status === "active";
     const toolRegistry = this.runtime.tools;
+    const chatCoreTools = this.runtime.memtree
+      ? [...CHAT_CORE_TOOLS, ...BUDGETED_MEMORY_CORE_TOOLS]
+      : CHAT_CORE_TOOLS;
+    const specialistCoreTools = this.runtime.memtree
+      ? [...SPECIALIST_CORE_TOOLS, ...BUDGETED_MEMORY_CORE_TOOLS]
+      : SPECIALIST_CORE_TOOLS;
     const completionContract = createCompletionContract(text, {
       channel,
       referenceOnly: input.metadata?.moaReference === true
@@ -937,7 +968,7 @@ export class AgentHost {
       : requestedAllowedToolNames;
     if (isSpecialist) {
       const scoped = agent.metadata?.specialist?.allowedTools ?? [];
-      const specialistAllowed = [...new Set([...SPECIALIST_CORE_TOOLS, ...scoped])];
+      const specialistAllowed = [...new Set([...specialistCoreTools, ...scoped])];
       // Project, request, and specialist restrictions are cumulative. The
       // specialist scope must never replace a narrower project allowlist.
       allowedToolNames = allowedToolNames
@@ -974,7 +1005,7 @@ export class AgentHost {
           conversational
             ? {
                 ...preferencePlan,
-                only: CHAT_CORE_TOOLS,
+                only: chatCoreTools,
                 readOnly: toolPolicy === "read-only",
                 context: {
                   ...projectToolPlanContext,
@@ -1010,7 +1041,7 @@ export class AgentHost {
 
     if (allowedToolNames) {
       const scopedNames = conversational && !chatCoreUnavailable
-        ? CHAT_CORE_TOOLS.filter((name) => allowedToolNames.includes(name))
+        ? chatCoreTools.filter((name) => allowedToolNames.includes(name))
         : allowedToolNames;
       toolPlan = toolPolicy === "none" && !conversational
         ? { active: false, tools: [], omittedNames: Object.freeze([]), notice: null }
@@ -1140,7 +1171,7 @@ export class AgentHost {
       __allowedTools: allowedToolNames,
       // Provider-side schema shaping only; ToolRegistry.invoke deliberately
       // does not read this field.
-      __advertisedTools: conversational && !chatCoreUnavailable ? CHAT_CORE_TOOLS : null,
+      __advertisedTools: conversational && !chatCoreUnavailable ? chatCoreTools : null,
       __toolSearchActive: toolSearchActive,
       __completionContract: completionContract,
       // Exact request-local radar universe used to build `tools` above.
@@ -1191,6 +1222,16 @@ export class AgentHost {
       // mirrors activity onto the runtime bus for dashboard/pet reactivity.
       __onToolEvent: forwardToolEvent
     };
+    if (memoryWake) {
+      initializeMemoryRequestMetrics(modelContext, {
+        memoryBytesInjected: Buffer.byteLength(sessionMemorySnapshot, "utf8")
+      });
+      incrementMemoryRequestMetric(
+        modelContext,
+        "mergesRequested",
+        memoryWake.merges.length
+      );
+    }
 
     let modelResult;
     try {
@@ -2039,6 +2080,9 @@ export class AgentHost {
         return "";
       }
     })();
+    const budgetedMemoryBlock = this.runtime?.memtree
+      ? "\n\nBudgeted memory tools: use memory_wake to refresh the age-decayed cover, memory_zoom and memory_merge to satisfy in-band summary requests, memory_tree_recall for exact regex lookup, and read_spill for exact line ranges from oversized tool results."
+      : "";
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
 Your job is to help through the ABI loop:
@@ -2046,7 +2090,7 @@ Your job is to help through the ABI loop:
 2. Use memory deliberately. When the user CORRECTS something you previously stored or said (a time, a name, a decision, a preference), call correct_memory with the corrected fact — never just remember a second conflicting version.
 3. Propagate bounded specialists only when repeated or novel high-risk work justifies it.
 
-Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}${skillBlock}`;
+Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}${skillBlock}${budgetedMemoryBlock}`;
   }
 
   // Per-turn [context] block prepended to the latest user message (see
@@ -2105,7 +2149,10 @@ Answer the user plainly. If a specialist was created, mention its name and scope
 
   ensureSpecialistAgent(specialist, parentId) {
     // Matches the enforced allowlist in handleMessage: core set + scoped tools.
-    const allowedToolList = [...new Set([...SPECIALIST_CORE_TOOLS, ...(specialist.allowedTools ?? [])])].join(", ");
+    const coreTools = this.runtime.memtree
+      ? [...SPECIALIST_CORE_TOOLS, ...BUDGETED_MEMORY_CORE_TOOLS]
+      : SPECIALIST_CORE_TOOLS;
+    const allowedToolList = [...new Set([...coreTools, ...(specialist.allowedTools ?? [])])].join(", ");
     return this.store.ensureAgent({
       id: specialist.id,
       name: specialist.name,

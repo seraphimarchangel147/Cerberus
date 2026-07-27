@@ -170,6 +170,13 @@ export class CreditLedger {
       latencyMs: 0,
       stopReasons: {}
     };
+    const memoryEfficiency = {
+      memoryBytesInjected: 0,
+      spillCount: 0,
+      mergesRequested: 0,
+      mergesCompleted: 0
+    };
+    let memoryMetricsSeen = false;
     for (const r of rows) {
       const day = (r.at ?? "").slice(0, 10);
       const provider = r.provider ?? "unknown";
@@ -213,6 +220,12 @@ export class CreditLedger {
       efficiency.visibleToolCount = safeAdd(efficiency.visibleToolCount, measured.visibleToolCount);
       efficiency.deferredToolCount = safeAdd(efficiency.deferredToolCount, measured.deferredToolCount);
       efficiency.latencyMs = safeAdd(efficiency.latencyMs, measured.latencyMs);
+      if (hasMemoryMetrics(measured)) {
+        memoryMetricsSeen = true;
+        for (const name of Object.keys(memoryEfficiency)) {
+          memoryEfficiency[name] = safeAdd(memoryEfficiency[name], measured[name]);
+        }
+      }
       if (measured.compression) {
         efficiency.compression = safeAdd(efficiency.compression, 1);
       }
@@ -228,7 +241,9 @@ export class CreditLedger {
       totalUsd: Number(totalUsd.toFixed(4)),
       totalCalls,
       tokens,
-      efficiency,
+      efficiency: memoryMetricsSeen
+        ? { ...efficiency, ...memoryEfficiency }
+        : efficiency,
       byDay: Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date)).map(round),
       byProvider: Object.values(byProvider)
         .sort((a, b) => (b.usd - a.usd) || a.provider.localeCompare(b.provider))
@@ -256,6 +271,7 @@ function normalizeEfficiency(value, { fallbackToolCount = 0 } = {}) {
   const inferredToolCount = safeAdd(toolSuccessCount, toolFailureCount)
     || fallbackToolCount;
   const inferredToolSchemaBytes = safeAdd(visibleSchemaBytes, deferredSchemaBytes);
+  const memoryMetrics = normalizedMemoryMetrics(source);
   return {
     requestBytes: boundedNonnegativeInteger(source.requestBytes, MAX_REQUEST_BYTES),
     toolCount: Object.hasOwn(source, "toolCount")
@@ -272,8 +288,33 @@ function normalizeEfficiency(value, { fallbackToolCount = 0 } = {}) {
     deferredToolCount: boundedNonnegativeInteger(source.deferredToolCount, MAX_TOOL_COUNT),
     compression: source.compression === true,
     stopReason: normalizeStopReason(source.stopReason),
-    latencyMs: boundedNonnegativeInteger(source.latencyMs, MAX_LATENCY_MS)
+    latencyMs: boundedNonnegativeInteger(source.latencyMs, MAX_LATENCY_MS),
+    ...(memoryMetrics ?? {})
   };
+}
+
+function normalizedMemoryMetrics(source) {
+  if (![
+    "memoryBytesInjected",
+    "spillCount",
+    "mergesRequested",
+    "mergesCompleted"
+  ].some((name) => Object.hasOwn(source, name))) {
+    return null;
+  }
+  return {
+    memoryBytesInjected: boundedNonnegativeInteger(
+      source.memoryBytesInjected,
+      MAX_REQUEST_BYTES
+    ),
+    spillCount: boundedNonnegativeInteger(source.spillCount, MAX_TOOL_COUNT),
+    mergesRequested: boundedNonnegativeInteger(source.mergesRequested, MAX_TOOL_COUNT),
+    mergesCompleted: boundedNonnegativeInteger(source.mergesCompleted, MAX_TOOL_COUNT)
+  };
+}
+
+function hasMemoryMetrics(value) {
+  return value && Object.hasOwn(value, "memoryBytesInjected");
 }
 
 function normalizeStopReason(value) {

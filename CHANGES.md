@@ -1529,3 +1529,34 @@ MERGE REVIEW COMPLETE
 - Added content-free completion status, evidence counts, and retry visibility to Run Inspector, persisted bounded evidence state with assistant outcomes, and kept MoA reference analysts outside the aggregator's completion contract.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1717/1718 tests with zero failures and one intentional Windows permission-mode skip.
 EVIDENCE ROUTING COMPLETE
+
+## 2026-07-27 - Upgrade batch Item C: budgeted memory and structured spill (Codex)
+
+- Added a clean-room, append-only memory tree with 320-byte log records,
+  288-byte positional summary records, age-decayed budget covers, in-band merge
+  requests, bounded wake/zoom/merge/regex-recall commands, and oldest-first
+  migration from the existing durable memory state. No OptMem source was
+  inspected, fetched, copied, or vendored.
+- Preserved project, specialist, and profile isolation with one independently
+  indexed tree per memory scope. Existing durable memory remains authoritative;
+  the summary tree is a rebuildable cache and projection failures fail open.
+- Added PageIndex-inspired, MIT-attributed structural spill indexing for tool
+  results over the configured threshold. Markdown headings are code-fence
+  aware, then diff boundaries, paragraphs, and bounded line windows provide
+  exact `read_spill` retrieval without retaining oversized results in context.
+- Added agent-visible `memory_wake`, `memory_zoom`, `memory_merge`,
+  `memory_tree_recall`, and `read_spill` tools, including conditional prompt
+  documentation and chat/specialist visibility only while the feature is on.
+- Added per-request `memoryBytesInjected`, `spillCount`, `mergesRequested`, and
+  `mergesCompleted` ledger counters without changing historical row shape when
+  the feature is off.
+- Kill switch: `OPENAGI_MEMTREE` is default-off; any value other than `1`
+  restores the prior memory injection, tool-output truncation, tool catalog,
+  and prompt bytes. `OPENAGI_WAKE_BUDGET`, `OPENAGI_SPILL_BYTES`, and
+  `OPENAGI_MEMORY_ENTRY_CHARS` are setup-wizard allowlisted.
+- Added zero npm dependencies. Added-line byte scan found zero non-ASCII lines;
+  package manifests are unchanged.
+- Validation: focused memory/provider/tool regressions pass 119/119. Required
+  full `node --test --test-concurrency=1` passes 1883/1883 with zero failures
+  and zero skips.
+UPGRADE BATCH ITEM C COMPLETE
