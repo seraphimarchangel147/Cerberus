@@ -131,6 +131,30 @@ test("/skill pin with state=unpin unpins", async () => {
   assert.equal(sent.find((s) => s.call === "setPinned").args[1], false);
 });
 
+test("/skill curate reports the combined autonomous lifecycle counts", async () => {
+  const { cmds, sent, channel } = harness();
+  channel.runtime.runSkillCurator = async () => ({
+    materialized: { created: 2 },
+    curated: {
+      changed: 1,
+      seeded: 3,
+      exemptions: { pinned: 1, bundled: 4, scope: 2, cron: 1 },
+      rows: [{
+        name: "old-skill",
+        before: "active",
+        after: "stale",
+        result: "transitioned"
+      }]
+    },
+    improved: { improved: 1 }
+  });
+
+  await cmds.cmdSkill(interaction("skill", "curate"));
+  assert.match(sent.at(-1).content, /2 materialized, 1 transitioned, 1 improved/u);
+  assert.match(sent.at(-1).content, /Seeded 3/u);
+  assert.match(sent.at(-1).content, /bundled=4/u);
+});
+
 test("/gateway restart refuses when no supervisor is declared", async () => {
   delete process.env.OPENAGI_SUPERVISED;
   const { cmds, sent } = harness();

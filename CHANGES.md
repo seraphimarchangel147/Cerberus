@@ -1673,6 +1673,84 @@ UPGRADE BATCH ITEM F COMPLETE
   zero skips.
 UPGRADE BATCH PHASE 1 COMPLETE
 
+## 2026-07-27 - Autonomous skills and budget phase baseline (Codex)
+
+- Required untouched Linux/WSL baseline:
+  `node --test --test-concurrency=1` passed 1904/1904 with zero failures and
+  zero skips in 373.98 seconds.
+- The initial native-Windows `node --test` diagnostic passed 1898/1904 with
+  four failures and two skips: two concurrent writers contended on the shared
+  default outcome snapshot, one mailbox byte-count assertion observed CRLF
+  sizing, and one checkpoint timing assertion flaked.
+- A native serial diagnostic passed 1901/1904 with only the platform-specific
+  mailbox byte-count assertion failing and two platform skips. The required
+  implementation gates use the green, isolated Linux/WSL lane above.
+
+## 2026-07-27 - Optional budget guard and live limit control (Codex)
+
+- `OPENAGI_DAILY_USD_LIMIT` now has an explicit uncapped state. Its default is
+  `10` USD/day when unset or blank. `off`, `none`, `unlimited`, and `disabled`
+  disable enforcement while retaining complete spend accounting. Zero,
+  negative, infinite, and nonnumeric values now throw with instructions to use
+  `off`, preventing both a bricked daemon and an accidental NaN bypass.
+- Added the published Kimi K3 rates as of 2026-07-27: $3/MTok cache-miss
+  input, $0.30/MTok cache-hit input, and $15/MTok output.
+- Unknown model ids now emit one estimate warning per model and are exposed as
+  `unpricedModels` in budget status. Exact and longest-prefix price matches do
+  not warn.
+- Added authenticated `POST /budget/limit`, which shares the environment
+  resolver, persists through the existing secrets-backed setup allowlist, and
+  updates the running guard only after persistence succeeds.
+- The Credits pane now has explicit Enabled and Disabled controls, shows
+  uncapped spend safely, and surfaces estimated-pricing warnings. Dashboard
+  health, Discord budget output, and introspection also understand the
+  disabled state.
+- No new environment variables and no npm dependencies were added. Focused
+  syntax, budget, ledger, HTTP, and dashboard coverage passes 14/14. The
+  required isolated `node --test --test-concurrency=1` gate passes 1910/1910
+  with zero failures and zero skips.
+
+## 2026-07-27 - Autonomous skill lifecycle (Codex)
+
+- High-confidence mined skill candidates now materialize without a dashboard
+  click through the existing candidate/suggestion writers. Every creation keeps
+  revision history, records its gate values and `skill-autocurator` lineage,
+  reloads the registry, honors a durable UTC daily cap, leaves failed gates
+  pending, and emits `skill-autocreated` for visibility.
+- The curator now defaults to useful coverage, seeds missing activity instead
+  of exempting it forever, gives never-used skills a grace floor, protects
+  every pinned or cron-referenced skill, and reports seeded and per-exemption
+  counts. Bundled pruning and agent-only scope remain explicit overrides.
+- Usage JSONL rows now record backward-compatible `ok` or `error` outcomes for
+  both loaded and executed skills. Eligible unpinned skills receive at most one
+  focused model patch per attempt; patches apply only through `patchSkill`, so
+  `appendSkillRevision` and `rollback_skill` cover every autonomous edit.
+  Invalid, ambiguous, and no-op patches leave the skill untouched and are
+  logged rather than falling back to a rewrite.
+- The daily curator task and Discord command now run and report the ordered
+  materialize, curate, and improve lifecycle as one combined result.
+- `OPENAGI_SKILL_AUTOCURATE` defaults to `on`; when unset, automatic candidate
+  materialization is enabled. `off` or `0` restores the manual-only lane.
+- `OPENAGI_SKILL_AUTO_CONFIDENCE` defaults to `0.8`; when unset, candidates
+  below 0.8 confidence stay pending.
+- `OPENAGI_SKILL_AUTO_MIN_OCCURRENCES` defaults to `3`; when unset, patterns
+  seen fewer than three times stay pending.
+- `OPENAGI_SKILL_AUTO_MAX_PER_DAY` defaults to `3`; when unset, at most three
+  candidates materialize per UTC day. Setting it to `0` stops auto-creation.
+- `OPENAGI_CURATOR_PRUNE_BUNDLED` defaults to `off`; when unset, bundled skills
+  are always exempt from transitions.
+- `OPENAGI_CURATOR_SCOPE` defaults to `all`; when unset, every unpinned,
+  non-exempt skill is curated. `agent-created` preserves the narrower scope.
+- `OPENAGI_SKILL_IMPROVE_MIN_USES` defaults to `5`; when unset, five
+  post-revision uses or one recorded failure makes a skill eligible.
+- `OPENAGI_SKILL_IMPROVE_MAX_PER_RUN` defaults to `2`; when unset, at most two
+  skills are attempted per pass. Setting it to `0` disables improvements.
+- All eight fields use the setup allowlist. No npm dependency or package
+  manifest changed. Focused lifecycle, registry, runtime, and Discord coverage
+  passes 60/60. The required isolated
+  `node --test --test-concurrency=1` gate passes 1925/1925 with zero failures
+  and zero skips in 363.55 seconds.
+
 - 2026-07-27T09:34:01.345Z · **azazel** · edit `CHANGES.md` — Re-apply Azazel changelog additions onto origin/main version during rebase
 - 2026-07-27T10:39:07.440Z · **azazel** · edit `src/pending-actions.js`
 - 2026-07-27T10:39:40.489Z · **azazel** · edit `test/pending-actions-hardening.test.js`

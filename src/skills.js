@@ -31,6 +31,16 @@ export function resolveCuratorThresholds(env = process.env) {
   return { staleDays, archiveDays: Math.max(staleDays, archiveDays) };
 }
 
+export function resolveCuratorPolicy(env = process.env) {
+  return {
+    pruneBundled: enabledSetting(env.OPENAGI_CURATOR_PRUNE_BUNDLED, false),
+    scope: String(env.OPENAGI_CURATOR_SCOPE ?? "all").trim().toLowerCase()
+      === "agent-created"
+      ? "agent-created"
+      : "all"
+  };
+}
+
 export function classifySkillAge({ state = "active", ageDays, staleDays, archiveDays }) {
   const current = normalizeSkillState(state);
   if (current === "archived") return "archived";
@@ -177,24 +187,62 @@ export class SkillRegistry {
 
   // MARK: — telemetry
 
-  recordUse(name, mode) {
+  recordUse(name, mode, outcome = "ok", at = nowIso()) {
     assertSkillSlug(name);
     if (mode !== "view" && mode !== "run") throw new Error(`Invalid skill usage mode: ${mode}`);
-    const entry = this.usage.get(name) ?? { views: 0, runs: 0, lastUsedAt: null };
+    if (outcome !== "ok" && outcome !== "error") {
+      throw new Error(`Invalid skill usage outcome: ${outcome}`);
+    }
+    const entry = this.usage.get(name) ?? emptyUsage();
     if (mode === "view") entry.views += 1;
     else entry.runs += 1;
-    const at = nowIso();
     entry.lastUsedAt = at;
+    entry.events.push({ mode, outcome, at });
     this.usage.set(name, entry);
     try {
-      appendJsonLine(this.usageLogPath, { skill: name, mode, at });
+      appendJsonLine(this.usageLogPath, { skill: name, mode, outcome, at });
     } catch { /* telemetry must never break the skill itself */ }
     // Live observability lane: dashboard + Discord feed can show exactly
     // when a skill was loaded or executed. Advisory only — listeners must
     // never break the underlying skill action.
     try {
-      this.runtime?.events?.emit?.("skill-use", { skill: name, mode, at });
+      this.runtime?.events?.emit?.("skill-use", { skill: name, mode, outcome, at });
     } catch { /* advisory */ }
+  }
+
+  seedActivity(name, at) {
+    assertSkillSlug(name);
+    if (this.usage.has(name)) return false;
+    const timestamp = validDate(at, "skill activity seed time").toISOString();
+    const entry = emptyUsage();
+    entry.lastUsedAt = timestamp;
+    entry.events.push({ mode: "seed", outcome: "ok", at: timestamp });
+    this.usage.set(name, entry);
+    try {
+      appendJsonLine(this.usageLogPath, {
+        skill: name,
+        mode: "seed",
+        outcome: "ok",
+        at: timestamp
+      });
+    } catch { /* telemetry must never break curation */ }
+    return true;
+  }
+
+  reloadUsage() {
+    this.usage = loadUsage(this.usageLogPath);
+    return this.usage;
+  }
+
+  usageFor(name) {
+    assertSkillSlug(name);
+    const entry = this.usage.get(name) ?? emptyUsage();
+    return {
+      views: entry.views,
+      runs: entry.runs,
+      lastUsedAt: entry.lastUsedAt,
+      events: entry.events.map((event) => ({ ...event }))
+    };
   }
 
   logEdit(entry) {
@@ -205,12 +253,6 @@ export class SkillRegistry {
     try {
       this.runtime?.events?.emit?.("skill-edit", record);
     } catch { /* advisory */ }
-  }
-
-  logEdit(entry) {
-    try {
-      appendJsonLine(this.editLogPath, { at: nowIso(), ...entry });
-    } catch { /* ignore */ }
   }
 
   /**
@@ -352,10 +394,21 @@ export class SkillRegistry {
   view(name, file = null) {
     const skill = this.mustGet(name);
     if (file) {
-      const resolved = resolveLinkedFile(skill.dir, file);
-      return { skill: name, file, content: readUtf8FileCapped(resolved, MAX_LINKED_FILE_BYTES, "linked file") };
+      try {
+        const resolved = resolveLinkedFile(skill.dir, file);
+        const result = {
+          skill: name,
+          file,
+          content: readUtf8FileCapped(resolved, MAX_LINKED_FILE_BYTES, "linked file")
+        };
+        this.recordUse(name, "view", "ok");
+        return result;
+      } catch (error) {
+        this.recordUse(name, "view", "error");
+        throw error;
+      }
     }
-    this.recordUse(name, "view");
+    this.recordUse(name, "view", "ok");
     return {
       name: skill.name,
       description: skill.description,
@@ -526,7 +579,9 @@ export class SkillRegistry {
 
   curate(options = {}) {
     const now = validDate(options.now ?? new Date(), "curator time");
-    const configured = resolveCuratorThresholds(options.env ?? process.env);
+    const env = options.env ?? process.env;
+    const configured = resolveCuratorThresholds(env);
+    const policy = resolveCuratorPolicy(env);
     const staleDays = options.staleDays === undefined
       ? configured.staleDays
       : positiveDays(options.staleDays, null);
@@ -538,26 +593,48 @@ export class SkillRegistry {
     }
 
     // Other processes can append telemetry after this registry was created.
-    this.usage = loadUsage(this.usageLogPath);
+    this.reloadUsage();
+    const cronReferenced = collectCronReferencedSkills(this.runtime?.cron);
     const rows = [];
+    const exemptions = {
+      pinned: 0,
+      bundled: 0,
+      scope: 0,
+      cron: 0
+    };
     let changed = 0;
+    let seeded = 0;
     for (const skill of this.skills.values()) {
       const before = normalizeSkillState(skill.state);
-      const activityAt = latestActivityAt(skill, this.usage.get(skill.name));
+      const usage = this.usage.get(skill.name);
+      const activityAt = latestActivityAt(skill, usage);
       const ageDays = activityAt ? Math.max(0, (now.getTime() - activityAt.getTime()) / DAY_MS) : null;
       let after = before;
       let result = "unchanged";
 
-      if (skill.bundled) {
-        result = "exempt: bundled";
-      } else if (skill.pinned) {
+      if (skill.pinned) {
+        exemptions.pinned += 1;
         result = "exempt: pinned";
-      } else if (!isAgentCreated(skill)) {
-        result = "exempt: not agent-created";
+      } else if (cronReferenced.has(skill.name)) {
+        exemptions.cron += 1;
+        result = "exempt: cron reference";
+      } else if (skill.bundled && !policy.pruneBundled) {
+        exemptions.bundled += 1;
+        result = "exempt: bundled";
+      } else if (policy.scope === "agent-created" && !isAgentCreated(skill)) {
+        exemptions.scope += 1;
+        result = "exempt: scope";
       } else if (!activityAt) {
-        result = "exempt: no activity timestamp";
+        if (this.seedActivity(skill.name, now)) seeded += 1;
+        result = "seeded: activity baseline";
       } else {
-        after = classifySkillAge({ state: before, ageDays, staleDays, archiveDays });
+        const neverUsed = (usage?.views ?? 0) + (usage?.runs ?? 0) === 0;
+        if (neverUsed && ageDays < staleDays) {
+          after = before === "stale" ? "active" : before;
+          result = "grace: never used";
+        } else {
+          after = classifySkillAge({ state: before, ageDays, staleDays, archiveDays });
+        }
         if (after !== before) {
           const text = fs.readFileSync(skill.path, "utf8");
           const next = updateFrontmatter(text, { state: after });
@@ -568,7 +645,13 @@ export class SkillRegistry {
             by: "skill-curator",
             before: text,
             after: next,
-            metadata: { ageDays, staleDays, archiveDays }
+            metadata: {
+              ageDays,
+              staleDays,
+              archiveDays,
+              scope: policy.scope,
+              pruneBundled: policy.pruneBundled
+            }
           });
           this.logEdit({ skill: skill.name, action: `curator-${after}`, by: "skill-curator" });
           changed += 1;
@@ -586,8 +669,29 @@ export class SkillRegistry {
     }
 
     if (changed > 0) this.reload();
-    writeTextAtomic(this.curatorReportPath, renderCuratorReport({ now, staleDays, archiveDays, rows, changed }));
-    return { at: now.toISOString(), staleDays, archiveDays, changed, rows, reportPath: this.curatorReportPath };
+    writeTextAtomic(this.curatorReportPath, renderCuratorReport({
+      now,
+      staleDays,
+      archiveDays,
+      policy,
+      rows,
+      changed,
+      seeded,
+      exemptions
+    }));
+    return {
+      at: now.toISOString(),
+      staleDays,
+      archiveDays,
+      scope: policy.scope,
+      pruneBundled: policy.pruneBundled,
+      changed,
+      seeded,
+      skippedBundled: exemptions.bundled,
+      exemptions,
+      rows,
+      reportPath: this.curatorReportPath
+    };
   }
 
   // MARK: — model-facing tools
@@ -894,10 +998,12 @@ export class SkillRegistry {
     if (skill.state === "archived") {
       throw new Error(`Skill '${name}' is archived; call restore_skill before using it.`);
     }
-    this.recordUse(name, "run");
     const rendered = renderTemplate(skill.body, { input, args });
     const provider = this.runtime?.agentHost?.modelProvider;
-    if (!provider) throw new Error("No model provider available for skill execution.");
+    if (!provider) {
+      this.recordUse(name, "run", "error");
+      throw new Error("No model provider available for skill execution.");
+    }
     const agentName = `skill:${skill.name}`;
     const instructions = skill.systemPrompt ||
       `You are executing the "${skill.name}" skill. ${skill.description}\nReturn only the user-visible output. Use tools when helpful.`;
@@ -958,6 +1064,7 @@ export class SkillRegistry {
         const completionScore = calls.length > 0 ? scoreFromToolCalls(calls) : 0.7;
         this.runtime.outcomes.resolve(outcome.id, completionScore, "skill-completed");
       }
+      this.recordUse(name, "run", "ok");
       return {
         skill: skill.name,
         output: result.text,
@@ -965,6 +1072,7 @@ export class SkillRegistry {
         toolScope: publicSkillToolScope(toolScope)
       };
     } catch (error) {
+      this.recordUse(name, "run", "error");
       if (outcome) this.runtime.outcomes.resolve(outcome.id, 0.1, "skill-failed", error.message);
       throw error;
     }
@@ -1338,14 +1446,27 @@ function availableSkillToolNames(toolRegistry) {
 function loadUsage(filePath) {
   const map = new Map();
   for (const e of readJsonl(filePath)) {
-    if (!isValidSkillSlug(e.skill) || (e.mode !== "view" && e.mode !== "run")) continue;
-    const entry = map.get(e.skill) ?? { views: 0, runs: 0, lastUsedAt: null };
+    if (
+      !isValidSkillSlug(e.skill)
+      || (e.mode !== "view" && e.mode !== "run" && e.mode !== "seed")
+    ) {
+      continue;
+    }
+    const entry = map.get(e.skill) ?? emptyUsage();
     if (e.mode === "view") entry.views += 1;
-    else entry.runs += 1;
-    if (typeof e.at === "string" && (!entry.lastUsedAt || e.at > entry.lastUsedAt)) entry.lastUsedAt = e.at;
+    else if (e.mode === "run") entry.runs += 1;
+    const outcome = e.outcome === "error" ? "error" : "ok";
+    if (typeof e.at === "string") {
+      entry.events.push({ mode: e.mode, outcome, at: e.at });
+      if (!entry.lastUsedAt || e.at > entry.lastUsedAt) entry.lastUsedAt = e.at;
+    }
     map.set(e.skill, entry);
   }
   return map;
+}
+
+function emptyUsage() {
+  return { views: 0, runs: 0, lastUsedAt: null, events: [] };
 }
 
 function readJsonl(filePath) {
@@ -1426,6 +1547,11 @@ function safeLstat(p) {
   }
 }
 
+function enabledSetting(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "on", "yes"].includes(String(value).trim().toLowerCase());
+}
+
 function positiveDays(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
@@ -1466,13 +1592,83 @@ function isAgentCreated(skill) {
   return !["user", "human", "dashboard"].includes(skill.createdBy.trim().toLowerCase());
 }
 
-function renderCuratorReport({ now, staleDays, archiveDays, rows, changed }) {
+export function collectCronReferencedSkills(cron) {
+  const referenced = new Set();
+  let jobs = [];
+  try {
+    jobs = cron?.listJobs?.() ?? [];
+  } catch {
+    return referenced;
+  }
+  let visited = 0;
+  const seen = new Set();
+  const visit = (value, key = "", depth = 0) => {
+    if (depth > 12 || visited >= 10_000 || value === null || value === undefined) return;
+    visited += 1;
+    if (typeof value === "string") {
+      if (
+        (key === "skill" || key === "skillname" || key === "skill_name")
+        && isValidSkillSlug(value)
+      ) {
+        referenced.add(value);
+      }
+      collectPromptSkillReferences(value, referenced);
+      return;
+    }
+    if (typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, key, depth + 1);
+      return;
+    }
+    for (const [childKey, child] of Object.entries(value)) {
+      visit(child, childKey.toLowerCase(), depth + 1);
+    }
+  };
+  for (const job of jobs) {
+    try {
+      collectPromptSkillReferences(JSON.stringify(job), referenced);
+    } catch {
+      // The bounded field walker below still handles non-serializable jobs.
+    }
+    visit(job);
+  }
+  return referenced;
+}
+
+function collectPromptSkillReferences(text, referenced) {
+  const patterns = [
+    /\b(?:use_skill|run_skill)\s*\(\s*(?:\{\s*)?(?:name\s*[:=]\s*)?["'`]?([a-z0-9]+(?:-[a-z0-9]+)*)/giu,
+    /\b(?:use_skill|run_skill)\s+(?:name\s*[:=]\s*)?["'`]?([a-z0-9]+(?:-[a-z0-9]+)*)/giu,
+    /\b(?:use_skill|run_skill)\b[\s\S]{0,160}?\bname\b\s*["']?\s*[:=]\s*["'`]?([a-z0-9]+(?:-[a-z0-9]+)*)/giu
+  ];
+  for (const pattern of patterns) {
+    for (const match of String(text).matchAll(pattern)) {
+      if (isValidSkillSlug(match[1])) referenced.add(match[1]);
+    }
+  }
+}
+
+function renderCuratorReport({
+  now,
+  staleDays,
+  archiveDays,
+  policy,
+  rows,
+  changed,
+  seeded,
+  exemptions
+}) {
   return [
     "# Skill curator report",
     "",
     `Generated: ${now.toISOString()}`,
     `Thresholds: stale after ${staleDays} days; archived after ${archiveDays} days.`,
+    `Policy: scope=${policy.scope}; prune bundled=${policy.pruneBundled}.`,
     `Skills checked: ${rows.length}; transitions: ${changed}.`,
+    `Seeded activity baselines: ${seeded}.`,
+    `Skipped bundled: ${exemptions.bundled}.`,
+    `Exemptions: pinned=${exemptions.pinned}; bundled=${exemptions.bundled}; scope=${exemptions.scope}; cron=${exemptions.cron}.`,
     "",
     "| Skill | Before | After | Age (days) | Result |",
     "| --- | --- | --- | ---: | --- |",

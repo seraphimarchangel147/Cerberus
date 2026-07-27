@@ -49,7 +49,17 @@ export class Introspector {
     if (memSaturation.long > 0.85) findings.push({ severity: "warn", area: "memory", note: "long tier > 85% — consider raising limit or curating principles." });
     if (dormant.length > 0) findings.push({ severity: "info", area: "specialists", note: `${dormant.length} specialist(s) dormant >14d — retirement-sweep will handle at 30d.` });
     if (lowQuality.length > 0) findings.push({ severity: "warn", area: "specialists", note: `${lowQuality.length} specialist(s) under-performing (<0.4 mean quality).` });
-    if (budget && budget.spentUsd / Math.max(budget.dailyUsdLimit, 0.0001) > 0.7) findings.push({ severity: "warn", area: "budget", note: `today's spend > 70% of daily cap.` });
+    if (
+      budget?.enabled !== false
+      && budget
+      && budget.spentUsd / Math.max(budget.dailyUsdLimit, 0.0001) > 0.7
+    ) {
+      findings.push({
+        severity: "warn",
+        area: "budget",
+        note: "today's spend > 70% of daily cap."
+      });
+    }
     if (outcomeAgg7 && outcomeAgg7.avgQuality !== null && outcomeAgg7.avgQuality < 0.45) findings.push({ severity: "warn", area: "outcomes", note: `7-day avg outcome quality is ${outcomeAgg7.avgQuality}.` });
 
     // Stale today-bucket tasks. If a task has been in 'today' >3 days

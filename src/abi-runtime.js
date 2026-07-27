@@ -92,6 +92,10 @@ import { MemorySystem } from "./memory-system.js";
 import { PropagationController } from "./propagation-controller.js";
 import { SkillRegistry } from "./skills.js";
 import {
+  autoMaterializeCandidates,
+  improveSkills
+} from "./skill-autocurator.js";
+import {
   registerCoreTools,
   registerCapabilityProfileTools,
   registerSolutionRecipeTools,
@@ -1129,6 +1133,28 @@ export class AbiRuntime {
     }
   }
 
+  async runSkillCurator({ now = new Date(), env = process.env } = {}) {
+    if (!this.skills?.curate) {
+      return {
+        materialized: { created: 0, skipped: [], reason: "skills disabled" },
+        curated: { skipped: true, reason: "skills disabled" },
+        improved: { improved: 0, skipped: [], reason: "skills disabled" }
+      };
+    }
+    const materialized = autoMaterializeCandidates({
+      runtime: this,
+      now,
+      env
+    });
+    const curated = this.skills.curate({ now, env });
+    const improved = await improveSkills({
+      runtime: this,
+      now,
+      env
+    });
+    return { materialized, curated, improved };
+  }
+
   async _tickOnce(now = new Date()) {
     this.memory.decay(now);
 
@@ -1171,8 +1197,7 @@ export class AbiRuntime {
         return this.condenser.condense({ now });
       }
       if (job.task === "skill-curator") {
-        if (!this.skills?.curate) return { skipped: true, reason: "skills disabled" };
-        return this.skills.curate({ now });
+        return this.runSkillCurator({ now });
       }
       if (job.task === "self-update") {
         const { applyUpdate } = await import("./self-update.js");
