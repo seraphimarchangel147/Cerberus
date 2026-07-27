@@ -3722,7 +3722,13 @@ export class OpenAIResponsesProvider {
       }),
       instructions: GOAL_JUDGE_INSTRUCTIONS,
       input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
-    }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
+    }, context, {
+      timeoutMs: remainingMs,
+      turnBudget,
+      credentialRequest,
+      task: "goal",
+      attempt: 1
+    }), context);
     addProviderUsage(usageAccumulator, response?.usage);
     const verdict = parseGoalJudgeVerdict(extractResponseText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
@@ -3994,6 +4000,8 @@ export class OpenAIResponsesProvider {
             turnBudget,
             credentialRequest: credentialState.request,
             compression: preparation,
+            task,
+            attempt: iterations,
             onDelta,
             expectedContinuationCredentialIdentity: continuationAvailable
               ? continuationCredentialIdentity
@@ -4034,6 +4042,8 @@ export class OpenAIResponsesProvider {
                 turnBudget,
                 credentialRequest: credentialState.request,
                 compression: preparation,
+                task,
+                attempt: iterations,
                 onDelta
               })
             ), context);
@@ -4405,7 +4415,9 @@ export class OpenAIResponsesProvider {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
             credentialRequest: credentialState.request,
-            compression: preparation
+            compression: preparation,
+            task,
+            attempt: iterations + 1
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractResponseText(response);
@@ -4669,6 +4681,8 @@ export class OpenAIResponsesProvider {
         tools: callTools,
         toolSuccessCount: efficiency.toolSuccessCount,
         toolFailureCount: efficiency.toolFailureCount,
+        task: options.task,
+        attempt: options.attempt,
         efficiency
       });
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
@@ -4730,7 +4744,13 @@ export class AnthropicProvider {
       max_tokens: GOAL_JUDGE_MAX_TOKENS,
       system: GOAL_JUDGE_INSTRUCTIONS,
       messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
-    }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
+    }, context, {
+      timeoutMs: remainingMs,
+      turnBudget,
+      credentialRequest,
+      task: "goal",
+      attempt: 1
+    }), context);
     addProviderUsage(usageAccumulator, response?.usage);
     const verdict = parseGoalJudgeVerdict(extractAnthropicText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
@@ -4939,7 +4959,9 @@ export class AnthropicProvider {
           turnBudget,
           onDelta,
           credentialRequest: credentialState.request,
-          compression: preparation
+          compression: preparation,
+          task,
+          attempt: iterations
         }), context);
       } catch (error) {
         if (budgetExceeded(error)) {
@@ -5261,7 +5283,9 @@ export class AnthropicProvider {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
             credentialRequest: credentialState.request,
-            compression: preparation
+            compression: preparation,
+            task,
+            attempt: iterations + 1
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractAnthropicText(response);
@@ -5408,6 +5432,8 @@ export class AnthropicProvider {
         tools: callTools,
         toolSuccessCount: efficiency.toolSuccessCount,
         toolFailureCount: efficiency.toolFailureCount,
+        task: options.task,
+        attempt: options.attempt,
         efficiency
       });
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);

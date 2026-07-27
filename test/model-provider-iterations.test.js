@@ -500,10 +500,14 @@ test("provider budget records receive content-free request efficiency metrics", 
     };
 
     await spec.post(provider, spec.body, requestContext, {
-      compression: { compressed: true }
+      compression: { compressed: true },
+      task: "condense",
+      attempt: 2
     });
     await spec.post(provider, spec.body, requestContext, {
-      compression: { compressed: true }
+      compression: { compressed: true },
+      task: "condense",
+      attempt: 3
     });
 
     const firstRecord = recorded[0];
@@ -520,6 +524,8 @@ test("provider budget records receive content-free request efficiency metrics", 
     assert.equal(firstRecord.efficiency.compression, true);
     assert.equal(firstRecord.efficiency.latencyMs, 37);
     assert.equal(firstRecord.efficiency.stopReason, "completed");
+    assert.equal(firstRecord.task, "condense");
+    assert.equal(firstRecord.attempt, 2);
     assert.equal(firstRecord.efficiency.toolSuccessCount, 1);
     assert.equal(firstRecord.efficiency.toolFailureCount, 1);
     assert.ok(firstRecord.efficiency.toolSchemaBytes > 0);
@@ -537,8 +543,8 @@ for (const spec of [
       budgetGuard
     }),
     stub(provider, onRequest) {
-      provider.postResponses = async () => {
-        const n = onRequest();
+      provider.postResponses = async (_body, _context, options) => {
+        const n = onRequest(options);
         return {
           id: `resp_${n}`,
           output: [{ type: "function_call", call_id: `call_${n}`, name: "step", arguments: "{}" }]
@@ -555,8 +561,8 @@ for (const spec of [
       budgetGuard
     }),
     stub(provider, onRequest) {
-      provider.postMessages = async () => {
-        const n = onRequest();
+      provider.postMessages = async (_body, _context, options) => {
+        const n = onRequest(options);
         return {
           id: `msg_${n}`,
           stop_reason: "tool_use",
@@ -570,6 +576,7 @@ for (const spec of [
   test(`${spec.name} re-checks the budget before every iteration and stops locally`, async () => {
     let checks = 0;
     let requests = 0;
+    const requestMeta = [];
     const budgetGuard = {
       check() {
         checks += 1;
@@ -581,12 +588,16 @@ for (const spec of [
       }
     };
     const provider = spec.make(budgetGuard);
-    spec.stub(provider, () => ++requests);
+    spec.stub(provider, (options) => {
+      requestMeta.push({ task: options.task, attempt: options.attempt });
+      return ++requests;
+    });
     const events = [];
 
     const result = await provider.generate({
       input: "keep spending until stopped",
       agent,
+      task: "autopilot",
       toolRegistry: spec.registry(),
       context: { __onToolEvent: (event) => events.push(event) }
     });
@@ -596,6 +607,10 @@ for (const spec of [
     assert.equal(result.toolCalls.length, 2);
     assert.equal(requests, 2, "the request whose preflight check failed never reaches the provider");
     assert.equal(checks, 3);
+    assert.deepEqual(requestMeta, [
+      { task: "autopilot", attempt: 1 },
+      { task: "autopilot", attempt: 2 }
+    ]);
     assert.match(result.text, /OPENAGI_MAX_TURN_USD|budget cap/i);
     assert.deepEqual(events, [
       { phase: "iteration", n: 1, max: 6 },

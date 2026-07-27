@@ -128,6 +128,10 @@ test("analytics summarizes token and content-free efficiency totals", () => {
 test("efficiency rows are bounded, typed, and ignore arbitrary content", () => {
   const L = tmpLedger();
   const row = L.record(entry({
+    task: "secret user-supplied text",
+    attempt: 10 ** 15,
+    inputTokens: 10 ** 15,
+    outputTokens: -5,
     efficiency: {
       requestBytes: -1,
       toolCount: Number.POSITIVE_INFINITY,
@@ -158,7 +162,12 @@ test("efficiency rows are bounded, typed, and ignore arbitrary content", () => {
   assert.equal(row.efficiency.stopReason, null);
   assert.ok(Number.isSafeInteger(row.efficiency.latencyMs));
   assert.ok(row.efficiency.latencyMs > 0);
+  assert.equal(row.task, null);
+  assert.equal(row.attempt, 1_000_000);
+  assert.ok(Number.isSafeInteger(row.inputTokens));
+  assert.equal(row.outputTokens, 0);
   assert.doesNotMatch(JSON.stringify(row.efficiency), /must never|secret user/);
+  assert.doesNotMatch(JSON.stringify(row), /secret user/);
 });
 
 test("analytics keeps pre-efficiency ledger rows compatible", () => {

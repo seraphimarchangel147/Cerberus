@@ -2,6 +2,27 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-27 - Upgrade batch work item B.0: routing ledger enrichment (Codex)
+
+Made the per-provider-call budget ledger usable for later routing analysis:
+
+- Added top-level `latencyMs`, `stopReason`, `task`, `attempt`, `inputTokens`,
+  and `outputTokens` to new ledger rows while retaining the existing
+  content-free efficiency and cost envelopes.
+- Threaded task identity and one-based model-loop attempts through OpenAI,
+  Anthropic, forced-answer, fallback, and goal-judge request paths.
+- Input totals correctly include mutually exclusive cached-input buckets for
+  OpenAI and the additive cache read/write buckets reported by Anthropic.
+- Bounded every numeric field and restricted task labels to identifiers so
+  user prompt text cannot enter the ledger.
+- Added the setup-allowlisted `OPENAGI_LEDGER_ENRICHMENT=0` kill switch, which
+  omits all six fields and preserves the previous JSONL row shape.
+- Added no dependency and did not change the package manifest.
+
+Verification: focused ledger/provider lane 62 passed, 0 failed, 1 skipped;
+full isolated `node --test --test-concurrency=4` lane on Node 25.5.0:
+1830 passed, 0 failed.
+
 ## 2026-07-27 - Upgrade batch work item A: Legion-wide desktop lease (Codex)
 
 Closed the live correctness hazard where separate agent sessions could both

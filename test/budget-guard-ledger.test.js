@@ -60,6 +60,8 @@ test("OpenAI cached input is split from the total instead of double-charged", ()
     cacheRead: 400,
     cacheWrite: 0
   });
+  assert.equal(row.inputTokens, 1000);
+  assert.equal(row.outputTokens, 0);
   assert.ok(Math.abs(result.added - 0.0032) < 1e-12);
   assert.deepEqual(guard.status().tokens, {
     input: 600,
@@ -94,12 +96,15 @@ test("Anthropic cache read/write fields remain additive to input_tokens", () => 
     cache_creation_input_tokens: 30
   }, "claude-sonnet-4-6");
 
-  assert.deepEqual(ledger.query({ days: 1 })[0].tokens, {
+  const [row] = ledger.query({ days: 1 });
+  assert.deepEqual(row.tokens, {
     input: 100,
     output: 25,
     cacheRead: 40,
     cacheWrite: 30
   });
+  assert.equal(row.inputTokens, 170);
+  assert.equal(row.outputTokens, 25);
 });
 
 test("record forwards only normalized content-free efficiency metadata", () => {
@@ -121,7 +126,9 @@ test("record forwards only normalized content-free efficiency metadata", () => {
       stopReason: "completed",
       latencyMs: 250,
       prompt: "this content must not be persisted"
-    }
+    },
+    task: "condense",
+    attempt: 3
   });
 
   const [row] = ledger.query({ days: 1 });
@@ -141,6 +148,47 @@ test("record forwards only normalized content-free efficiency metadata", () => {
     latencyMs: 250
   });
   assert.doesNotMatch(JSON.stringify(row.efficiency), /this content/);
+  assert.deepEqual({
+    latencyMs: row.latencyMs,
+    stopReason: row.stopReason,
+    task: row.task,
+    attempt: row.attempt,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens
+  }, {
+    latencyMs: 250,
+    stopReason: "completed",
+    task: "condense",
+    attempt: 3,
+    inputTokens: 10,
+    outputTokens: 2
+  });
+});
+
+test("ledger enrichment kill switch preserves the legacy row shape", () => {
+  const { guard, ledger } = tmp({
+    env: { OPENAGI_LEDGER_ENRICHMENT: "0" }
+  });
+  guard.record({ input_tokens: 10, output_tokens: 2 }, "gpt-5", {
+    task: "chat",
+    attempt: 1,
+    efficiency: {
+      latencyMs: 25,
+      stopReason: "completed"
+    }
+  });
+
+  const [row] = ledger.query({ days: 1 });
+  for (const field of [
+    "latencyMs",
+    "stopReason",
+    "task",
+    "attempt",
+    "inputTokens",
+    "outputTokens"
+  ]) {
+    assert.equal(Object.hasOwn(row, field), false, field);
+  }
 });
 
 test("priceFor bills nano/mini variants at their own rate, not flagship (longest-prefix)", () => {

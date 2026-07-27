@@ -10,6 +10,7 @@ const MAX_REQUEST_BYTES = 1024 * 1024 * 1024;
 const MAX_TOOL_SCHEMA_BYTES = 1024 * 1024 * 1024;
 const MAX_TOOL_COUNT = 10000;
 const MAX_LATENCY_MS = 24 * 60 * 60 * 1000;
+const MAX_ATTEMPT = 1_000_000;
 const STOP_REASONS = new Set([
   "completed",
   "provider-error",
@@ -73,6 +74,9 @@ export class CreditLedger {
 
   record(entry = {}, { now = new Date() } = {}) {
     const tools = Array.isArray(entry.tools) ? entry.tools : [];
+    const efficiency = normalizeEfficiency(entry.efficiency, {
+      fallbackToolCount: tools.length
+    });
     const row = {
       at: entry.at ?? now.toISOString(),
       provider: entry.provider ?? null,
@@ -84,10 +88,23 @@ export class CreditLedger {
       sessionId: entry.sessionId ?? null,
       from: entry.from ?? null,
       tools,
-      efficiency: normalizeEfficiency(entry.efficiency, {
-        fallbackToolCount: tools.length
-      })
+      efficiency
     };
+    if (Object.hasOwn(entry, "inputTokens")) {
+      Object.assign(row, {
+        latencyMs: boundedNonnegativeInteger(
+          entry.latencyMs ?? efficiency.latencyMs,
+          MAX_LATENCY_MS
+        ),
+        stopReason: normalizeStopReason(
+          entry.stopReason ?? efficiency.stopReason
+        ),
+        task: normalizeTask(entry.task),
+        attempt: boundedNonnegativeInteger(entry.attempt, MAX_ATTEMPT),
+        inputTokens: tokenValue(entry.inputTokens),
+        outputTokens: tokenValue(entry.outputTokens)
+      });
+    }
     fs.appendFileSync(this.storePath, JSON.stringify(row) + "\n", { mode: 0o600 });
     this._maybeMaintain(now);
     return row;
@@ -262,6 +279,13 @@ function normalizeEfficiency(value, { fallbackToolCount = 0 } = {}) {
 function normalizeStopReason(value) {
   const reason = typeof value === "string" ? value.trim().toLowerCase() : "";
   return STOP_REASONS.has(reason) ? reason : null;
+}
+
+function normalizeTask(value) {
+  const task = typeof value === "string"
+    ? value.trim().toLowerCase()
+    : "";
+  return /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(task) ? task : null;
 }
 
 function boundedNonnegativeInteger(value, maximum) {

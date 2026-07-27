@@ -24,6 +24,7 @@ export class BudgetGuard {
     this.storePath = options.storePath ?? path.join(resolveDataDir(), "budget", "usage.json");
     this.dailyUsdLimit = options.dailyUsdLimit ?? Number.parseFloat(process.env.OPENAGI_DAILY_USD_LIMIT ?? "10");
     this.prices = { ...DEFAULT_PRICES, ...(options.prices ?? {}) };
+    this.env = options.env ?? process.env;
     ensureDir(path.dirname(this.storePath));
     this.state = readJsonFile(this.storePath, { version: 1, days: {} });
     this.ledger = options.ledger ?? new CreditLedger({ storePath: path.join(path.dirname(this.storePath), "ledger.jsonl") });
@@ -85,7 +86,21 @@ export class BudgetGuard {
     day.calls += 1;
 
     try {
-      this.ledger?.record({
+      const efficiency = meta.efficiency ?? {
+        requestBytes: meta.requestBytes,
+        toolCount: meta.toolCount,
+        toolSuccessCount: meta.toolSuccessCount,
+        toolFailureCount: meta.toolFailureCount,
+        toolSchemaBytes: meta.toolSchemaBytes,
+        visibleSchemaBytes: meta.visibleSchemaBytes,
+        deferredSchemaBytes: meta.deferredSchemaBytes,
+        visibleToolCount: meta.visibleToolCount,
+        deferredToolCount: meta.deferredToolCount,
+        compression: meta.compression,
+        stopReason: meta.stopReason,
+        latencyMs: meta.latencyMs
+      };
+      const entry = {
         at: nowIso(),
         provider: meta.provider ?? null,
         model,
@@ -96,21 +111,19 @@ export class BudgetGuard {
         sessionId: meta.sessionId ?? null,
         from: meta.from ?? null,
         tools: Array.isArray(meta.tools) ? meta.tools : [],
-        efficiency: meta.efficiency ?? {
-          requestBytes: meta.requestBytes,
-          toolCount: meta.toolCount,
-          toolSuccessCount: meta.toolSuccessCount,
-          toolFailureCount: meta.toolFailureCount,
-          toolSchemaBytes: meta.toolSchemaBytes,
-          visibleSchemaBytes: meta.visibleSchemaBytes,
-          deferredSchemaBytes: meta.deferredSchemaBytes,
-          visibleToolCount: meta.visibleToolCount,
-          deferredToolCount: meta.deferredToolCount,
-          compression: meta.compression,
-          stopReason: meta.stopReason,
-          latencyMs: meta.latencyMs
-        }
-      });
+        efficiency
+      };
+      if (String(this.env.OPENAGI_LEDGER_ENRICHMENT ?? "").trim() !== "0") {
+        Object.assign(entry, {
+          latencyMs: efficiency?.latencyMs ?? meta.latencyMs,
+          stopReason: efficiency?.stopReason ?? meta.stopReason,
+          task: meta.task ?? null,
+          attempt: meta.attempt ?? 0,
+          inputTokens: tokens.input + tokens.cacheRead + tokens.cacheWrite,
+          outputTokens: tokens.output
+        });
+      }
+      this.ledger?.record(entry);
     } catch { /* ledger is best-effort; never break a reply over it */ }
 
     this.persist();
