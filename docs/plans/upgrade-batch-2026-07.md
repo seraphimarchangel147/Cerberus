@@ -427,4 +427,6 @@ Do not batch these into one PR. One PR per work item, each independently reverta
 When every work item you attempted is committed, green, and pushed, append the literal line below
 as the LAST line of this file and include it in your final commit:
 
+Completion recorded 2026-07-27: items A-F were committed, full-suite green, and pushed; none skipped.
+
 UPGRADE BATCH PHASE 1 COMPLETE

@@ -1626,3 +1626,18 @@ UPGRADE BATCH ITEM E COMPLETE
   `node --test --test-concurrency=1` passes 1900/1900 with zero failures and
   zero skips.
 UPGRADE BATCH ITEM F COMPLETE
+
+## 2026-07-27 - Upgrade batch Phase 1 completion (Codex)
+
+- Completed and independently committed work items A, B.0, B.1/B.2, B.3, D,
+  C, E, and F in the required dependency order. No work item was skipped.
+- Every implementation commit was full-suite green before push and was pushed
+  to `origin/codex/upgrade-batch-2026-07`.
+- The branch adds no npm dependency or package-manifest change, leaves the
+  verified `task: "prompt"` cron discriminator untouched, and contains the
+  required MIT notices plus explicit clean-room boundaries for both
+  all-rights-reserved references.
+- Final implementation-tree validation:
+  `node --test --test-concurrency=1` passes 1900/1900 with zero failures and
+  zero skips.
+UPGRADE BATCH PHASE 1 COMPLETE
