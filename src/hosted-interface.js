@@ -5774,13 +5774,13 @@ function renderApp() {
     /* Theme switcher — pinned in the rail footer above Setup. Two swatch
        buttons; the active one carries the accent ring + glow. The label row
        collapses with the rest of the rail text on narrow viewports. */
-    #themeSwitch { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    #themeSwitch { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
     #themeSwitch .theme-label {
       font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.22em;
       text-transform: uppercase; color: var(--muted); margin-right: auto;
     }
     .theme-btn {
-      width: 26px; height: 26px; border-radius: var(--radius-sm); cursor: pointer;
+      width: 22px; height: 22px; border-radius: var(--radius-sm); cursor: pointer;
       border: 1px solid var(--line); padding: 0; flex: 0 0 auto;
       transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
     }
@@ -11592,10 +11592,10 @@ switchTab(initialTab);
 
   /* ── geometry per form ── */
   var FORMS = [
-    { key:"pup",   name:"PUP",            w:64,  h:52, xpMax:100, flame:1.00, pal:0 },
-    { key:"prime", name:"PRIME CERBERUS", w:80,  h:64, xpMax:300, flame:1.18, pal:1 },
-    { key:"ultra", name:"ULTRA CERBERUS", w:96,  h:76, xpMax:700, flame:1.40, pal:2 },
-    { key:"omega", name:"OMEGA CERBERUS", w:112, h:88, xpMax:0,   flame:1.65, pal:3 }
+    { key:"pup",   name:"PUP",            w:64,  h:52, xpMax:100, flame:1.00, pal:0, res:1 },
+    { key:"prime", name:"PRIME CERBERUS", w:80,  h:64, xpMax:300, flame:1.18, pal:1, res:1 },
+    { key:"ultra", name:"ULTRA CERBERUS", w:96,  h:76, xpMax:700, flame:1.40, pal:2, res:1 },
+    { key:"omega", name:"OMEGA CERBERUS", w:112, h:88, xpMax:0,   flame:1.65, pal:3, res:2 }
   ];
   var FPS = 15, FRAME_MS = 1000 / FPS;
   var TICKS_PER_FRAME = Math.round(60 / FPS);
@@ -11646,7 +11646,7 @@ switchTab(initialTab);
   var bufs = [];
   for (var bi=0; bi<FORMS.length; bi++) {
     var c = document.createElement("canvas");
-    c.width = FORMS[bi].w; c.height = FORMS[bi].h;
+    c.width = FORMS[bi].w * (FORMS[bi].res||1); c.height = FORMS[bi].h * (FORMS[bi].res||1);
     bufs.push({ canvas:c, ctx:c.getContext("2d", { willReadFrequently:true }) });
   }
 
