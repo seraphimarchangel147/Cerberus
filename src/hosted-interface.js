@@ -11868,7 +11868,8 @@ switchTab(initialTab);
     { key:"pup",   name:"PUP",            w:64,  h:52, xpMax:100, flame:1.00, pal:0, res:1 },
     { key:"prime", name:"PRIME CERBERUS", w:80,  h:64, xpMax:300, flame:1.18, pal:1, res:1 },
     { key:"ultra", name:"ULTRA CERBERUS", w:96,  h:76, xpMax:700, flame:1.40, pal:2, res:1 },
-    { key:"omega", name:"OMEGA CERBERUS", w:160, h:160, xpMax:0,  flame:1.65, pal:3, res:3 }
+    { key:"omega", name:"OMEGA CERBERUS", w:160, h:160, xpMax:1500, flame:1.65, pal:3, res:3 },
+    { key:"alpha", name:"ALPHA CERBERUS", w:160, h:160, xpMax:0,  flame:1.95, pal:4, res:3 }
   ];
   var FPS = 15, FRAME_MS = 1000 / FPS;
   var TICKS_PER_FRAME = Math.round(60 / FPS);
@@ -11917,7 +11918,21 @@ switchTab(initialTab);
     mouth:"#3a1018", tongue:"#a83a4a", nose:"#0a0c10", earIn:"#1b1f24",
     aura:"#ff5a1e"
   };
-  var PALS = [PAL, PAL2, PAL3, PAL4];
+  var PAL5 = {  /* ALPHA — ascended: white-gold plasma, the ember veins burned through to daylight */
+    /* the hide has gone from cooling charcoal to sun-bleached bone-ash: the
+       heat is no longer *under* the skin, it IS the skin. Cyan-white core
+       against gold, so ALPHA reads instantly different from OMEGA's red. */
+    outline:"#1a0f04", furDeep:"#241608", furDark:"#3a2410", furMid:"#5c3c1a",
+    furLight:"#8f6428", furHi:"#c99a48", rim:"#ffd878", rimHot:"#fffbe8",
+    gold:"#ffca55", goldHi:"#fffbe8", goldDk:"#b07a24",
+    gem:"#7fe8ff", gemCore:"#ffffff", gemHalo:"#1a6a8a",
+    lava1:"#8a4a00", lava2:"#ff9a1e", lava3:"#ffd24a", lava4:"#fff0b0", lava5:"#ffffff",
+    flameCore:"#ffffff", flameYel:"#fff4c0", flameOrg:"#ffc24a", flameRed:"#ff8a1e", flameDeep:"#a34a00",
+    eye:"#9ff0ff", eyeCore:"#ffffff", fang:"#ffffff", claw:"#ffd878", clawHi:"#ffffff",
+    mouth:"#5a2410", tongue:"#e08a6a", nose:"#1a1408", earIn:"#3a2a18",
+    aura:"#ffd878"
+  };
+  var PALS = [PAL, PAL2, PAL3, PAL4, PAL5];
 
   /* ── off-screen buffers, one per form ── */
   var bufs = [];
@@ -13115,29 +13130,161 @@ switchTab(initialTab);
      Pipeline: ~/cerb-sprite/bake5.py — re-run if the art changes. */
   var OMEGA_SPRITE_SRC = "data:image/png;base64,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";
   var omegaSprite = null, omegaSpriteReady = false;
+  /* ALPHA reuses the SAME baked raster, recoloured once at load into ascended
+     white-gold plasma. Zero extra bytes on the wire and the silhouette/detail
+     match OMEGA exactly, which is the point: ALPHA is the same beast burning
+     hotter, not a different creature. */
+  var alphaSprite = null;
+  function buildAlphaSprite(img) {
+    try {
+      var c = document.createElement("canvas");
+      c.width = img.width; c.height = img.height;
+      var g = c.getContext("2d", { willReadFrequently:true });
+      g.imageSmoothingEnabled = false;
+      g.drawImage(img, 0, 0);
+      var id = g.getImageData(0, 0, c.width, c.height), d = id.data;
+      for (var i = 0; i < d.length; i += 4) {
+        if (d[i+3] === 0) continue;
+        var r = d[i], gg = d[i+1], b = d[i+2];
+        /* luminance drives a bone-ash -> gold -> white-plasma ramp. The dark
+           charcoal hide lifts to warm bone; the lava veins blow out to white. */
+        var L = (r * 0.36 + gg * 0.5 + b * 0.14) / 255;
+        /* Gamma-lift the shadows only. A naive linear remap washed the hide out
+           to flat mustard and destroyed the plate/scale definition that makes
+           the art read -- the dark values ARE the detail. Curving with L^1.35
+           keeps shadows dark and separated while still tinting them gold. */
+        var nr, ng, nb;
+        if (L < 0.55) {                     /* hide: keep contrast, tint gold */
+          var t = Math.pow(L / 0.55, 1.35);
+          nr = 14 + t * 196; ng = 9 + t * 150; nb = 4 + t * 58;
+        } else {                            /* veins/flame: gold -> white-hot  */
+          var u = (L - 0.55) / 0.45;
+          nr = 210 + u * 45; ng = 159 + u * 96; nb = 62 + u * 193;
+        }
+        d[i]   = nr > 255 ? 255 : nr;
+        d[i+1] = ng > 255 ? 255 : ng;
+        d[i+2] = nb > 255 ? 255 : nb;
+      }
+      g.putImageData(id, 0, 0);
+      alphaSprite = c;
+    } catch (e) { alphaSprite = null; }   /* tainted-canvas safe: fall back to OMEGA art */
+  }
   (function () {
     var im = new Image();
-    im.onload = function () { omegaSprite = im; omegaSpriteReady = true; };
+    im.onload = function () { omegaSprite = im; omegaSpriteReady = true; buildAlphaSprite(im); };
     im.src = OMEGA_SPRITE_SRC;
   })();
 
-  /* Blit the baked body. bob / gaze are the same pose offsets the procedural
-     rig used -- now applied to the whole sprite instead of per-part.
-     Returns false until the sprite decodes, so the caller can fall back to
-     the old procedural path for the first frame or two. */
-  function drawOmegaSprite(ctx, P) {
+  /* ── column-shear animation rig ────────────────────────────────────────
+     Blitting the baked PNG as one raster gives high fidelity but ZERO per-part
+     motion: a whole-image translate cannot deform a silhouette. Blitting it as
+     independently-posed body-part rectangles gives motion but tears the art,
+     because the parts overlap and share pixels.
+
+     This does neither. The sprite is drawn as 160 vertical columns, each split
+     into 6 vertical segments, and every segment gets its own integer (dx,dy).
+     The offsets are a smooth function of (column x, height y), so adjacent
+     segments differ by 0-1px: no seams, no holes, every baked pixel preserved
+     -- and the outline genuinely deforms, because the heads shear against the
+     chest while the paws stay pinned to the ground.
+
+     Cost control: columns whose rounded offsets are identical are merged into
+     one drawImage (runs are long, since the offset function is smooth), so a
+     frame costs ~40-70 blits rather than 960. */
+  var OMEGA_CTRL = [0, 28, 56, 84, 112, 136, 160];   /* segment boundaries */
+  var OMEGA_NSEG = OMEGA_CTRL.length - 1;
+  /* per-column head influence weights, precomputed once (gaussian falloff so a
+     head's sway blends into the mane instead of cutting at a hard edge) */
+  var OMEGA_WT = (function () {
+    var t = [], HL = 30, HC = 80, HR = 130, SIG = 30;
+    function g(x, c) { var d = (x - c) / SIG; return Math.exp(-d * d); }
+    for (var x = 0; x < 160; x++) {
+      var wl = g(x, HL), wc = g(x, HC), wr = g(x, HR), s = wl + wc + wr + 1e-6;
+      t.push([wl / s, wc / s, wr / s]);
+    }
+    return t;
+  })();
+
+  /* Fill dst[0..NSEG] with the (dx,dy) of each control height for column x.
+     bob is folded in here rather than added to the whole blit, so it decays
+     with height like everything else -- otherwise the global bob translates the
+     paws too and the beast looks like it is hovering. */
+  function omegaColumnOffsets(x, t, amp, bob, dst) {
+    var w = OMEGA_WT[x];
+    var sway = w[0] * Math.sin(t * 0.043 + 1.0) * 2.6
+             + w[1] * Math.sin(t * 0.030 + 5.0) * 1.5
+             + w[2] * Math.sin(t * 0.037 + 3.0) * 2.6;
+    var nod  = w[0] * Math.sin(t * 0.110 + 0.4) * 1.3
+             + w[1] * Math.sin(t * 0.070) * 0.9
+             + w[2] * Math.sin(t * 0.090 + 2.1) * 1.3;
+    var breathe  = Math.sin(t * 0.09) * 2.0;
+    var shoulder = Math.sin(t * 0.09 + 0.8) * 1.0;
+    sway *= amp; nod *= amp; breathe *= amp; shoulder *= amp;
+    /* skull + crest -> full sway; jaw/neck -> half; chest -> breathing;
+       belly -> damped; paws -> pinned at zero so the beast stays grounded */
+    dst[0] = sway;        dst[7]  = nod + breathe * 0.25 + bob;
+    dst[1] = sway * 0.85; dst[8]  = nod * 0.85 + breathe * 0.25 + bob;
+    dst[2] = sway * 0.45; dst[9]  = nod * 0.5 + breathe * 0.5 + bob * 0.8;
+    dst[3] = sway * 0.12; dst[10] = breathe + shoulder * 0.3 + bob * 0.5;
+    dst[4] = 0;           dst[11] = breathe * 0.45 + bob * 0.2;
+    dst[5] = 0;           dst[12] = 0;
+    dst[6] = 0;           dst[13] = 0;
+  }
+
+  var _omgA = new Float64Array(14), _omgB = new Float64Array(14);
+  var _omgDX = new Int16Array(OMEGA_NSEG), _omgDY = new Int16Array(OMEGA_NSEG);
+  var _runDX = new Int16Array(OMEGA_NSEG), _runDY = new Int16Array(OMEGA_NSEG);
+
+  /* Returns false until the sprite decodes, so the caller can fall back to the
+     procedural rig for the first frame or two. */
+  function drawOmegaSprite(ctx, P, useAlpha) {
     if (!omegaSpriteReady) return false;
-    var bob = Math.round(P.bob || 0);
+    var img = (useAlpha && alphaSprite) ? alphaSprite : omegaSprite;
+    var t   = P.flick || 0;
+    var amp = reduced ? 0 : 1;                       /* honour reduced-motion */
+    /* ALPHA is more agitated than OMEGA: faster, wider sway. */
+    if (useAlpha) { t *= 1.35; amp *= 1.4; }
+    var bob = (P.bob || 0) * amp;
     var gx  = Math.round((P.gazeX || 0) * 0.35);
     var gy  = Math.round((P.gazeY || 0) * 0.25);
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(omegaSprite, gx, bob + gy);
+
+    var runStart = 0, s;
+    for (var x = 0; x <= 160; x++) {
+      var changed = (x === 160);
+      if (!changed) {
+        omegaColumnOffsets(x, t, amp, bob, _omgA);
+        for (s = 0; s < OMEGA_NSEG; s++) {
+          /* midpoint of the segment, rounded: whole pixels only, or the
+             nearest-neighbour art shimmers between frames */
+          _omgDX[s] = Math.round((_omgA[s] + _omgA[s + 1]) * 0.5);
+          _omgDY[s] = Math.round((_omgA[s + 7] + _omgA[s + 8]) * 0.5);
+        }
+        if (x === runStart) {
+          for (s = 0; s < OMEGA_NSEG; s++) { _runDX[s] = _omgDX[s]; _runDY[s] = _omgDY[s]; }
+        } else {
+          for (s = 0; s < OMEGA_NSEG; s++) {
+            if (_omgDX[s] !== _runDX[s] || _omgDY[s] !== _runDY[s]) { changed = true; break; }
+          }
+        }
+      }
+      if (changed) {
+        var wRun = x - runStart;
+        for (s = 0; s < OMEGA_NSEG; s++) {
+          var y0 = OMEGA_CTRL[s], hSeg = OMEGA_CTRL[s + 1] - y0;
+          ctx.drawImage(img, runStart, y0, wRun, hSeg,
+                        runStart + _runDX[s] + gx, y0 + _runDY[s] + bob + gy, wRun, hSeg);
+        }
+        runStart = x;
+        if (x < 160) for (s = 0; s < OMEGA_NSEG; s++) { _runDX[s] = _omgDX[s]; _runDY[s] = _omgDY[s]; }
+      }
+    }
     return true;
   }
 
-  function drawOmegaFront(ctx, P) {
+  function drawOmegaFront(ctx, P, isAlpha) {
     var W=160,H=160; ctx.clearRect(0,0,W,H);
-    var pal=PAL4, bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
+    var pal=isAlpha?PAL5:PAL4, bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
     var gx=P.gazeX||0, gy=P.gazeY||0, sad=P.sad||0, droop=sad*3, howl=P.howl||0;
     var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*8;
     /* per-part idle phases — all independent, all derived from flick */
@@ -13161,11 +13308,11 @@ switchTab(initialTab);
     pxEllipse(ctx, 40, 150, 17, 6, pal.outline);
     pxEllipse(ctx, 118, 150, 17, 6, pal.outline);
 
-    /* Procedural animated body — the baked PNG sprite (drawOmegaSprite) renders
-       a static raster that only translates as a whole, killing all per-part
-       motion (breathing, jaw chatter, head sway, blinks, claw flex). Creator
-       wants the whole thing animated, so the procedural rig is authoritative. */
-    if (true) {
+    /* Baked sprite driven by the column-shear rig (drawOmegaSprite): keeps the
+       high-fidelity pixel art AND animates it per-part -- heads sway/nod on
+       independent phases, chest breathes, paws stay pinned. Falls back to the
+       procedural rig for the frame or two before the PNG decodes. */
+    if (!drawOmegaSprite(ctx, P, isAlpha)) {
 
     /* torso — broad inverted trapezoid, chest out, cropped at the forelimbs */
     pxEllipse(ctx, 80, 108+breathe*0.5, 44, 26, pal.furDark);
@@ -13243,9 +13390,9 @@ switchTab(initialTab);
     ctx.globalAlpha = 1;
   }
 
-  function drawOmegaSide(ctx, P) {
+  function drawOmegaSide(ctx, P, isAlpha) {
     var W=160,H=160; ctx.clearRect(0,0,W,H);
-    var pal=PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
+    var pal=isAlpha?PAL5:PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
     var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
     var clawFlex = reduced?0:(0.5+0.5*Math.sin(flick*0.06));
     omegaFlameWall(ctx, W, H, flick, pal, flameI);
@@ -13291,6 +13438,44 @@ switchTab(initialTab);
     omegaHead(ctx,52+nl,54+bob+droop*0.5+(lean?1:0),{dir:-1,size:1.25,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal);
     omegaHead(ctx,70+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal);
     if (walk) for (var ei=0;ei<6;ei++){var ex=118+((flick*0.8+ei*9)%30),ey=60+((ei*7+flick*0.3)%30);ctx.fillStyle=ei%2?pal.flameOrg:pal.goldHi;ctx.globalAlpha=0.8-(ex-118)/36;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
+  }
+
+  /* ── ALPHA — ascended OMEGA ─────────────────────────────────────────────
+     Same rig, same baked raster (recoloured), plus an ascension corona: a
+     rotating halo of plasma motes and vertical updraft that OMEGA never has,
+     so the two forms are unmistakable at a glance even at 1x scale. */
+  function alphaCorona(ctx, W, H, flick, pal) {
+    if (reduced) return;
+    var i, ang, r, x, y;
+    /* halo ring orbiting the heads */
+    for (i = 0; i < 18; i++) {
+      ang = flick * 0.035 + i * (Math.PI * 2 / 18);
+      r = 62 + Math.sin(flick * 0.08 + i) * 3;
+      x = Math.round(80 + Math.cos(ang) * r);
+      y = Math.round(52 + Math.sin(ang) * r * 0.34);
+      ctx.globalAlpha = 0.30 + 0.30 * Math.sin(flick * 0.11 + i * 0.7);
+      ctx.fillStyle = (i % 3 === 0) ? pal.gemCore : (i % 3 === 1 ? pal.goldHi : pal.gem);
+      ctx.fillRect(x, y, 2, 2);
+    }
+    /* updraft: motes rising off the body, opposite to OMEGA's falling embers */
+    for (i = 0; i < 22; i++) {
+      var seed = i * 37;
+      x = Math.round(24 + ((seed * 7) % 112));
+      y = Math.round(150 - ((flick * 1.7 + seed * 3) % 140));
+      ctx.globalAlpha = 0.55 * (y / 150);
+      ctx.fillStyle = (i % 2) ? pal.flameCore : pal.goldHi;
+      ctx.fillRect(x, y, 1, (i % 4 === 0) ? 2 : 1);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawAlphaFront(ctx, P) {
+    drawOmegaFront(ctx, P, true);
+    alphaCorona(ctx, 160, 160, P.flick || 0, PAL5);
+  }
+  function drawAlphaSide(ctx, P) {
+    drawOmegaSide(ctx, P, true);
+    alphaCorona(ctx, 160, 160, P.flick || 0, PAL5);
   }
 
   /* ── post-processing ── */
@@ -13363,7 +13548,7 @@ switchTab(initialTab);
     var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
     if (saved) for (var k in settings) if (saved[k] !== undefined) settings[k] = saved[k];
   } catch (e) {}
-  if (settings.stage < 0 || settings.stage > 3) settings.stage = 0;
+  if (settings.stage < 0 || settings.stage >= FORMS.length) settings.stage = 0;
   function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {} }
 
   /* ── canvas element ── */
@@ -13407,13 +13592,13 @@ switchTab(initialTab);
     idle:["#6b5a52","idle"], running:["#ff8a1e","working"], review:["#ffd24a","thinking"],
     waving:["#7ddc7d","done"], jumping:["#7ddc7d","done"], failed:["#e0451a","error"], waiting:["#8d7e72","waiting"]
   };
-  var FORM_COLOR = ["#ffd97a", "#fff4d0", "#ff9a2a", "#ffd878"];
+  var FORM_COLOR = ["#ffd97a", "#fff4d0", "#ff9a2a", "#ffd878", "#fffbe8"];
 
   function updateHud() {
     if (!hud) return;
     hud.style.display = settings.enabled ? "block" : "none";
     var F = FORMS[settings.stage];
-    var maxed = settings.stage >= 3;
+    var maxed = settings.stage >= FORMS.length - 1;
     var pct = maxed ? 100 : Math.max(0, Math.min(100, (settings.xp / F.xpMax) * 100));
     var bar = document.getElementById("cerbHudBar");
     var xpEl = document.getElementById("cerbHudXP");
@@ -13458,24 +13643,24 @@ switchTab(initialTab);
   var evolveT = 0;
 
   function gainXP(n) {
-    if (settings.stage >= 3) return;   /* OMEGA is the apex */
+    if (settings.stage >= FORMS.length - 1) return;   /* ALPHA is the apex */
     settings.xp += n;
     var F = FORMS[settings.stage];
     if (settings.autoEvolve && settings.xp >= F.xpMax) doEvolve();
     saveSettings(); updatePanel(); updateHud();
   }
   function doEvolve() {
-    if (settings.stage >= 3 || evolving) return;
+    if (settings.stage >= FORMS.length - 1 || evolving) return;
     evolving = true; evolveT = 0;
   }
   function finishEvolve() {
-    settings.stage = Math.min(3, settings.stage + 1);
+    settings.stage = Math.min(FORMS.length - 1, settings.stage + 1);
     settings.xp = 0;
     evolving = false; evolveT = 0;
     saveSettings(); applyCanvasStyle(); updatePanel(); updateHud();
   }
   function setForm(stage) {
-    stage = Math.max(0, Math.min(3, stage|0));
+    stage = Math.max(0, Math.min(FORMS.length - 1, stage|0));
     settings.stage = stage; settings.xp = 0; evolving = false; evolveT = 0;
     saveSettings(); applyCanvasStyle(); updatePanel(); updateHud();
   }
@@ -13487,12 +13672,13 @@ switchTab(initialTab);
   var EGG_DURATION = 4 * FPS;
   var nextEggIn = EGG_INTERVAL;
 
-  /* per-form egg pools — ULTRA/OMEGA get 5 cooler eggs each */
+  /* per-form egg pools — ULTRA/OMEGA/ALPHA get 5 cooler eggs each */
   var EGGS = {
     0: ["play","fire","howl"],
     1: ["play","fire","howl"],
     2: ["inferno","crownflare","lavasurge","triplehowl","meteor"],
-    3: ["omegaflare","goldnova","realmgate","omegahowl","extinction"]
+    3: ["omegaflare","goldnova","realmgate","omegahowl","extinction"],
+    4: ["omegaflare","goldnova","realmgate","omegahowl","extinction"]
   };
 
   window.addEventListener("mousemove", function (e) { mouseX = e.clientX; mouseY = e.clientY; });
@@ -13604,14 +13790,14 @@ switchTab(initialTab);
     xpBar.style.cssText = "height:100%;width:0%;background:linear-gradient(90deg,#e0451a,#ff8a1e,#ffd24a);border-radius:3px;transition:width .3s;";
     xpWrap.appendChild(xpBar); panel.appendChild(xpWrap);
 
-    /* form switcher — 4 buttons, manual select */
+    /* form switcher — one button per form, manual select */
     var formLabel = document.createElement("div");
     formLabel.textContent = "Form"; formLabel.style.cssText = "color:#c9beb0;margin:8px 0 4px;";
     panel.appendChild(formLabel);
     var formRow = document.createElement("div");
     formRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:4px;";
-    var shortNames = ["Pup","Prime","Ultra","Omega"];
-    for (var fi=0; fi<4; fi++) {
+    var shortNames = ["Pup","Prime","Ultra","Omega","Alpha"];
+    for (var fi=0; fi<FORMS.length; fi++) {
       (function(idx){
         var b = document.createElement("button");
         b.textContent = shortNames[idx];
@@ -13649,10 +13835,10 @@ switchTab(initialTab);
     var xpEl = document.getElementById("cerbPetXP");
     var F = FORMS[settings.stage];
     if (stageEl) {
-      if (settings.stage >= 3) stageEl.innerHTML = "Form: <b style='color:#ffd878;'>OMEGA CERBERUS</b> &nbsp;·&nbsp; MAX";
+      if (settings.stage >= FORMS.length - 1) stageEl.innerHTML = "Form: <b style='color:#fffbe8;'>ALPHA CERBERUS</b> &nbsp;·&nbsp; MAX";
       else stageEl.innerHTML = "Form: <b style='color:" + FORM_COLOR[settings.stage] + ";'>" + F.name + "</b> &nbsp;·&nbsp; XP " + Math.floor(settings.xp) + "/" + F.xpMax;
     }
-    if (xpEl) xpEl.style.width = (settings.stage>=3 ? 100 : Math.min(100, (settings.xp/F.xpMax)*100)) + "%";
+    if (xpEl) xpEl.style.width = (settings.stage>=FORMS.length-1 ? 100 : Math.min(100, (settings.xp/F.xpMax)*100)) + "%";
     var sizeBtns = panel.querySelectorAll("[data-size]");
     for (var i=0;i<sizeBtns.length;i++) {
       var on = parseInt(sizeBtns[i].getAttribute("data-size")) === settings.scale;
@@ -13730,7 +13916,8 @@ switchTab(initialTab);
     if (stage === 0) { if (P.view==="front") drawPupFront(octx,P); else drawPupSide(octx,P); }
     else if (stage === 1) { if (P.view==="front") drawPrimeFront(octx,P); else drawPrimeSide(octx,P); }
     else if (stage === 2) { if (P.view==="front") drawUltraFront(octx,P); else drawUltraSide(octx,P); }
-    else { if (P.view==="front") drawOmegaFront(octx,P); else drawOmegaSide(octx,P); }
+    else if (stage === 3) { if (P.view==="front") drawOmegaFront(octx,P); else drawOmegaSide(octx,P); }
+    else { if (P.view==="front") drawAlphaFront(octx,P); else drawAlphaSide(octx,P); }
     if (res > 1) octx.restore();
     applyRim(octx, Fm.w*res, Fm.h*res, pal);
     applyOutline(octx, Fm.w*res, Fm.h*res, pal.outline);
@@ -13748,7 +13935,7 @@ switchTab(initialTab);
     var F = FORMS[settings.stage];
 
     /* evolution: uptime timer + random chance while working */
-    if (!evolving && settings.stage < 3 && settings.autoEvolve) {
+    if (!evolving && settings.stage < FORMS.length - 1 && settings.autoEvolve) {
       if (Date.now() - bornAt > EVOLVE_MS) doEvolve();
       else if ((state === "running" || state === "review") && Math.random() < 0.0006) doEvolve();
     }
@@ -13852,7 +14039,7 @@ switchTab(initialTab);
          new form emerges with thick expanding shockwave rings + outward burst.
          Effects are deliberately bold so the moment reads at any scale. */
       var oldStage = settings.stage;
-      var newStage = Math.min(3, settings.stage + 1);
+      var newStage = Math.min(FORMS.length - 1, settings.stage + 1);
       var Fnew = FORMS[newStage];
       var resNew = Fnew.res||1;
       /* Size the display canvas to the EMERGING form's buffer for the duration
@@ -13983,7 +14170,7 @@ switchTab(initialTab);
     drawEmbers(nctx, P, DW, DH, res, pal);
 
     /* OMEGA gets the CRT scanline + vignette overlay on top */
-    if (settings.stage === 3 && !evolving) applyScanlines(nctx, DW, DH, res);
+    if (settings.stage >= 3 && !evolving) applyScanlines(nctx, DW, DH, res);
 
     var sc = settings.scale;
     var dispW = F.w*sc, dispH = F.h*sc;
