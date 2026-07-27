@@ -945,7 +945,13 @@ export class AbiRuntime {
       const userDir = options.skillsDir ?? null;
       const dirs = [bundled];
       if (userDir) dirs.push(userDir);
-      this.skills = new SkillRegistry({ runtime: this, dirs, dataDir: options.dataDir });
+      this.skills = new SkillRegistry({
+        runtime: this,
+        dirs,
+        dataDir: options.dataDir,
+        env: options.env ?? process.env,
+        learningsDir: options.learningsDir
+      });
     }
 
     if (options.integrations !== false) {

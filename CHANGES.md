@@ -1560,3 +1560,32 @@ EVIDENCE ROUTING COMPLETE
   full `node --test --test-concurrency=1` passes 1883/1883 with zero failures
   and zero skips.
 UPGRADE BATCH ITEM C COMPLETE
+
+## 2026-07-27 - Upgrade batch Item E: per-domain browser learnings (Codex)
+
+- Added a bounded, notes-only `learnings/<site>/manifest.json` plane that
+  matches exact hostnames and `*.` subdomain patterns, then injects local
+  procedural guidance only when the semantic browser's existing
+  `domainChanged` result is true.
+- Wired the store through `SkillRegistry` so browser guidance and reusable
+  skills share one procedural-memory boundary. Open, explicit navigation, and
+  activation-driven navigation use the same fail-open hook; ordinary inspect
+  and same-origin navigation retain their prior response shape.
+- Copied ego-lite's security-relevant `relativeSitePath()` helper verbatim and
+  added its MIT attribution and full license notice. Manifest, directory,
+  note-count, per-note, and aggregate-byte bounds are enforced; malformed
+  files, traversal, absolute paths, symlinks, and containment escapes are
+  skipped without breaking navigation.
+- Deliberately excluded ego-lite's executable `nodeTools` and `browserTools`
+  plane. Those fields are never imported, loaded, advertised, or returned, and
+  a regression test proves a declared executable module cannot run.
+- Kill switch: `OPENAGI_DOMAIN_LEARNINGS` is setup-wizard allowlisted and
+  default-off. Any value other than `1` avoids store creation and preserves the
+  previous semantic-browser output shape.
+- Added zero npm dependencies. Added-line byte scan found zero non-ASCII lines;
+  package manifests are unchanged.
+- Validation: focused domain-learning, semantic-browser, and skill-registry
+  coverage passes 43/43. Required fresh, isolated
+  `node --test --test-concurrency=1` passes 1890/1890 with zero failures and
+  zero skips.
+UPGRADE BATCH ITEM E COMPLETE
