@@ -11632,8 +11632,10 @@ switchTab(initialTab);
     mouth:"#5a1210", tongue:"#c24a3a", nose:"#0a0a10", earIn:"#7a2010"
   };
   var PAL4 = {  /* OMEGA — molten obsidian + gold inlay (ember veins beneath the hide) */
-    outline:"#0e1116", furDeep:"#14171b", furDark:"#1b1f24", furMid:"#2e343b",
-    furLight:"#4b535c", furHi:"#6a727b", rim:"#e8641e", rimHot:"#ffb04a",
+    /* fur ramp is WARM near-black charcoal (red>b>g), never cool blue-gray —
+       the blue cast read as mech armor. Plate separation comes from heat, not value. */
+    outline:"#0a0806", furDeep:"#100c0a", furDark:"#171210", furMid:"#221a15",
+    furLight:"#3a2a1e", furHi:"#5a3a22", rim:"#e8641e", rimHot:"#ffb04a",
     gold:"#d99a3a", goldHi:"#ffd878", goldDk:"#8a5a1e",
     gem:"#e0461a", gemCore:"#ffd24a", gemHalo:"#7a1400",
     lava1:"#7a1400", lava2:"#c83000", lava3:"#ff5a14", lava4:"#ffd24a", lava5:"#ffe680",
@@ -12452,27 +12454,49 @@ switchTab(initialTab);
     ctx.globalAlpha = 1;
   }
 
-  /* ── hide: sculpted scale plates, each rim-lit from below (lava is the light) ──
-     Contrast lives at the plate boundary: a bright under-rim (lava light from
-     below) sits directly above a dark seam groove, so each plate reads as a
-     separate layered shape instead of blending into the mass. */
+  /* ── hide: overlapping molten muscle lobes — near-black warm charcoal bodies
+     separated entirely by heat (gold/ember seams), never by gray value steps ── */
   function omegaScales(ctx, cx, cy, cols, rows, cell, pal) {
+    /* overlapping molten muscle lobes, NOT a brick grid. Two passes so the seams
+       are never overdrawn: (1) lay down every warm-charcoal plate body, then
+       (2) paint the valley seams as GLOWING ember lines on top. Plate separation
+       is defined entirely by heat — no gray-on-gray edges anywhere. */
+    var plates = [];
     for (var r=0;r<rows;r++){
-      var off = (r%2)? cell/2 : 0;   /* staggered brick layout */
+      var off = (r%2)? cell*0.55 : 0;
       for (var c=0;c<cols;c++){
-        var px = cx - (cols*cell)/2 + c*cell + off;
-        var py = cy + r*(cell*0.85);
-        /* plate body — dark base with a lighter top facet */
-        pxEllipse(ctx, px+cell/2, py+cell*0.4, cell*0.55, cell*0.42, pal.furDark);
-        pxEllipse(ctx, px+cell/2, py+cell*0.28, cell*0.42, cell*0.26, pal.furMid);
-        /* bright under-rim — the lava is the key light, so the bottom edge glows */
-        pxLine(ctx, px+cell*0.1, py+cell*0.64, px+cell*0.9, py+cell*0.64, 1, pal.lava4);
-        pxRect(ctx, Math.round(px+cell*0.3), Math.round(py+cell*0.66), 3, 1, pal.lava5);
-        /* dark seam groove just below the rim — separates this plate from the next */
-        pxLine(ctx, px+cell*0.06, py+cell*0.8, px+cell*0.94, py+cell*0.8, 1, pal.furDeep);
-        /* top highlight — catches the rim light from above */
-        pxRect(ctx, Math.round(px+cell*0.35), Math.round(py+cell*0.18), 2, 1, pal.furLight);
+        var sd = r*13 + c*7 + 3;
+        var wob = ((sd*2654435761)>>>0) % 100 / 100;
+        var wJit = 0.82 + wob*0.36;
+        var xJit = (wob-0.5)*cell*0.5;
+        var yJit = (((sd*40503)>>>0)%100/100 - 0.5)*cell*0.3;
+        plates.push({
+          x: cx - (cols*cell)/2 + c*cell + off + xJit,
+          y: cy + r*(cell*0.85) + yJit,
+          rw: cell*0.55*wJit, rh: cell*0.42, cell: cell
+        });
       }
+    }
+    /* pass 1 — warm near-black charcoal bodies with a warm top facet */
+    for (var p=0;p<plates.length;p++){
+      var pl = plates[p];
+      pxEllipse(ctx, pl.x+pl.cell/2, pl.y+pl.cell*0.4, pl.rw, pl.rh, pal.furDark);
+      pxEllipse(ctx, pl.x+pl.cell/2, pl.y+pl.cell*0.28, pl.rw*0.72, pl.rh*0.6, pal.furMid);
+    }
+    /* pass 2 — molten valley seams (drawn on top so they always read).
+       Each seam: red halo -> orange -> gold -> hot core, like lava bleeding
+       through a crack. Plus a faint warm top rim-light on each lobe. */
+    for (var q=0;q<plates.length;q++){
+      var pl2 = plates[q];
+      var lx0 = pl2.x+pl2.cell*0.06, lx1 = pl2.x+pl2.cell*0.94;
+      var sy = pl2.y+pl2.cell*0.66;
+      pxLine(ctx, lx0, sy+2, lx1, sy+2, 1, pal.lava1);      /* deep red halo */
+      pxLine(ctx, lx0, sy+1, lx1, sy+1, 1, pal.lava2);      /* ember */
+      pxLine(ctx, lx0+1, sy, lx1-1, sy, 1, pal.lava3);      /* orange */
+      pxLine(ctx, lx0+2, sy-1, lx1-2, sy-1, 1, pal.lava4);  /* gold */
+      pxRect(ctx, Math.round(pl2.x+pl2.cell*0.4), Math.round(sy-1), 3, 1, pal.lava5); /* hot core */
+      /* top rim-light catching the fire from above */
+      pxLine(ctx, pl2.x+pl2.cell*0.3, pl2.y+pl2.cell*0.12, pl2.x+pl2.cell*0.7, pl2.y+pl2.cell*0.12, 1, pal.furHi);
     }
   }
 
@@ -12678,9 +12702,31 @@ switchTab(initialTab);
     pxEllipse(ctx, mx, cy+2, 4, 2, pal.furHi);
     pxRect(ctx, mx-4, cy+3, 2, 3, pal.furDark);
     pxRect(ctx, mx+3, cy+3, 2, 3, pal.furDark);
-    pxRect(ctx, mx + dir*4 - 1, cy+2, 3, 2, pal.nose);
-    pxRect(ctx, mx + dir*4 - 1, cy+2, 1, 1, "#000000");
-    pxRect(ctx, mx + dir*4 + 1, cy+2, 1, 1, "#000000");
+    /* center head: nose on the bridge; side heads: a protruding snout mass so
+       they read as wolves in 3/4, not flat masks with a fang slot */
+    if (dir === 0) {
+      pxRect(ctx, mx - 1, cy+2, 3, 2, pal.nose);
+      pxRect(ctx, mx - 1, cy+2, 1, 1, "#000000");
+      pxRect(ctx, mx + 1, cy+2, 1, 1, "#000000");
+    } else {
+      /* side head: a LIGHTER, projecting muzzle that breaks the head silhouette
+         so it reads as a wolf in 3/4, not a flat mask. Three cues: value contrast
+         (light muzzle on dark skull), silhouette break (projects past the cheek),
+         and a defined dark nose tip. */
+      var sx2 = mx + dir*7;                                  /* muzzle projects well past the cheek */
+      pxEllipse(ctx, sx2, cy+3, 7, 5, pal.outline);          /* outline breaks the silhouette */
+      pxEllipse(ctx, sx2, cy+3, 6, 4, pal.furLight);         /* LIGHTER muzzle patch */
+      pxEllipse(ctx, sx2, cy+2, 5, 2, pal.furHi);            /* lit bridge */
+      /* warm rim-light along the muzzle (fire from below) */
+      pxLine(ctx, sx2 - dir*4, cy+1, sx2 + dir*4, cy+1, 1, pal.lava2);
+      /* defined nose tip at the very end */
+      pxRect(ctx, sx2 + dir*6 - 1, cy+2, 3, 3, pal.nose);
+      pxRect(ctx, sx2 + dir*6 - 1, cy+2, 1, 1, "#000000");
+      pxRect(ctx, sx2 + dir*6 + 1, cy+2, 1, 1, "#000000");
+      /* heavy brow ridge over the muzzle, casting the eye into shadow */
+      pxLine(ctx, sx2 - dir*8, cy-1, sx2 + dir*2, cy, 2, pal.furDeep);
+      pxLine(ctx, sx2 - dir*7, cy-2, sx2 + dir*2, cy-1, 1, pal.lava2);
+    }
     /* jaw + fangs — full upper and lower rows, interlocking, canines longer.
        jaw adds extra gape for chatter / roar. */
     var gape = (roar?6:2) + jaw;
@@ -12812,6 +12858,13 @@ switchTab(initialTab);
     pxEllipse(ctx, 80, 108+breathe*0.5, 44, 26, pal.furDark);
     pxEllipse(ctx, 80, 100+breathe*0.5, 36, 24, pal.furMid);
     pxEllipse(ctx, 80, 92+breathe*0.5, 26, 16, pal.furLight);
+    /* warm inner glow — the chest radiates heat from within, so the hide reads
+       as cracked-over-molten-rock rather than a flat dark blob */
+    ctx.globalAlpha = 0.16 + 0.05*Math.sin(flick*0.1);
+    pxEllipse(ctx, 80, 100+breathe*0.5, 30, 20, pal.gemHalo);
+    ctx.globalAlpha = 0.10;
+    pxEllipse(ctx, 80, 102+breathe*0.5, 20, 13, pal.lava2);
+    ctx.globalAlpha = 1;
     /* two distinct pec masses flanking the chest gem */
     pxEllipse(ctx, 62, 100+breathe, 13, 11, pal.furMid);
     pxEllipse(ctx, 98, 100+breathe, 13, 11, pal.furMid);
