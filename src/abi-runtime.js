@@ -35,6 +35,10 @@ import { MemoryCondenser } from "./memory-condenser.js";
 import { ObservationStore } from "./observation-store.js";
 import { buildAmbientDigest } from "./ambient-digest.js";
 import { OutcomeStore } from "./outcome-store.js";
+import {
+  createOptionalSelfOptimizationController,
+  selfOptimizationEnabled
+} from "./self-optimization.js";
 import { SessionIndex } from "./session-index.js";
 import { Introspector } from "./introspector.js";
 import { PatternMiner } from "./pattern-miner.js";
@@ -62,6 +66,8 @@ import {
 import { HookRegistry } from "./hook-registry.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
+import { SpillStore } from "./spill-store.js";
+import { memtreeEnabled, ScopedMemTree } from "../lib/memtree.js";
 import { JobStore } from "./job-store.js";
 import { JobManager, registerJobTools } from "./job-manager.js";
 import { ComputerUseLog } from "./computer-use-log.js";
@@ -403,6 +409,7 @@ function resolveWebQa(runtime, options, {
 
 export class AbiRuntime {
   constructor(options = {}) {
+    const runtimeEnv = options.env ?? process.env;
     this.context = {
       name: "OpenAGI ABI",
       goalAlignment: 0.8,
@@ -419,6 +426,33 @@ export class AbiRuntime {
     this.dataDir = options.dataDir ?? options.mcpOptions?.dataDir ?? resolveDataDir();
     this.workflows = options.workflows ?? registerDefaultWorkflows(new WorkflowRegistry());
     this.memory = options.memory ?? new MemorySystem(options.memoryOptions);
+    this.memtree = null;
+    this.spills = null;
+    if (memtreeEnabled(runtimeEnv)) {
+      try {
+        this.memtree = options.memtree ?? new ScopedMemTree({
+          dir: path.join(this.dataDir, "memory", "memtree"),
+          env: runtimeEnv,
+          ...(options.memtreeOptions ?? {})
+        });
+        this.spills = options.spills ?? new SpillStore({
+          dir: path.join(this.dataDir, "spill"),
+          spillBytes: runtimeEnv.OPENAGI_SPILL_BYTES,
+          ...(options.spillOptions ?? {})
+        });
+        const existingMemory = typeof this.memory?.items?.values === "function"
+          ? [...this.memory.items.values()]
+          : [];
+        this.memtree.migrate?.(existingMemory);
+        this.memory.bindMemTree?.(this.memtree);
+      } catch (error) {
+        this.memtree = null;
+        this.spills = null;
+        try {
+          console.warn(`[memtree] disabled after initialization failure: ${error?.message ?? error}`);
+        } catch {}
+      }
+    }
     this.externalMemoryProvider = resolveExternalMemoryProvider(options);
     const secretsDataDir = options.dataDir
       ?? options.mcpOptions?.dataDir
@@ -534,6 +568,10 @@ export class AbiRuntime {
     this.skills = options.skills ?? null;
     this.budget = options.budget ?? new BudgetGuard(options.budgetOptions ?? {});
     this.outcomes = options.outcomes ?? new OutcomeStore(options.outcomeOptions ?? {});
+    this.selfOptimization = selfOptimizationEnabled(runtimeEnv)
+      ? options.selfOptimization
+        ?? createOptionalSelfOptimizationController({ env: runtimeEnv })
+      : null;
     this.observations = options.observations ?? new ObservationStore(options.observationOptions ?? {});
     // FTS5 index over the agent's own chat transcripts, so search_sessions can
     // answer "what did we decide about X?" from the raw conversation record.
@@ -915,7 +953,13 @@ export class AbiRuntime {
       const userDir = options.skillsDir ?? null;
       const dirs = [bundled];
       if (userDir) dirs.push(userDir);
-      this.skills = new SkillRegistry({ runtime: this, dirs, dataDir: options.dataDir });
+      this.skills = new SkillRegistry({
+        runtime: this,
+        dirs,
+        dataDir: options.dataDir,
+        env: options.env ?? process.env,
+        learningsDir: options.learningsDir
+      });
     }
 
     if (options.integrations !== false) {

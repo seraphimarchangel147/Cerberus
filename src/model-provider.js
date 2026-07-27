@@ -55,6 +55,12 @@ import {
   completionEvidenceDecision,
   completionEvidenceNudge
 } from "./completion-evidence.js";
+import { classifyProviderOutcome } from "./error-classifier.js";
+import {
+  consumeMemoryRequestMetrics,
+  incrementMemoryRequestMetric
+} from "./memory-request-metrics.js";
+import { memtreeEnabled } from "../lib/memtree.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
@@ -146,6 +152,7 @@ export class ProviderError extends Error {
     retryAfterMs = null,
     providerCode = null,
     providerType = null,
+    failureKind = null,
     cause = null
   } = {}) {
     super(message, cause ? { cause } : undefined);
@@ -154,6 +161,10 @@ export class ProviderError extends Error {
     this.retryAfterMs = Number.isFinite(retryAfterMs) ? retryAfterMs : null;
     this.providerCode = typeof providerCode === "string" ? providerCode : null;
     this.providerType = typeof providerType === "string" ? providerType : null;
+    if (typeof failureKind === "string" && failureKind) {
+      this.failureKind = failureKind;
+      this.classification = failureKind;
+    }
   }
 }
 
@@ -189,16 +200,24 @@ function isRetryableNetworkError(error) {
     || ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ENETUNREACH", "ETIMEDOUT"].includes(error.code);
 }
 
-async function responseProviderError(response) {
+async function responseProviderError(response, options = {}) {
   const body = await response.json().catch(() => ({}));
   const detail = body?.error && typeof body.error === "object" ? body.error : {};
+  const classification = classifyProviderOutcome({
+    status: response.status,
+    body,
+    headers: response.headers,
+    now: typeof options.now === "function" ? options.now() : Date.now(),
+    env: options.env
+  });
   return new ProviderError(
     detail.message ?? `Provider request failed with ${response.status}`,
     {
       status: response.status,
-      retryAfterMs: retryAfterMs(response),
+      retryAfterMs: classification?.retryAfterMs ?? retryAfterMs(response),
       providerCode: detail.code,
-      providerType: detail.type
+      providerType: detail.type,
+      failureKind: classification?.kind
     }
   );
 }
@@ -236,11 +255,12 @@ export async function requestWithRetry(doRequest, options = {}) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       const response = await doRequest(attempt);
-      if (response?.ok === false) throw await responseProviderError(response);
+      if (response?.ok === false) throw await responseProviderError(response, options);
       return response;
     } catch (error) {
       const retryable = error instanceof ProviderError
         ? RETRYABLE_PROVIDER_STATUSES.has(error.status)
+          || error.failureKind === "silent-failure"
         : isRetryableNetworkError(error);
       let retryApproved = retryable;
       if (retryable && typeof options.shouldRetry === "function") {
@@ -260,7 +280,9 @@ export async function requestWithRetry(doRequest, options = {}) {
       const jittered = Math.floor(Math.max(0, Math.min(1, Number(random()) || 0)) * jitterCap);
       const delayMs = error.retryAfterMs === null
         ? jittered
-        : Math.min(MAX_PROVIDER_RETRY_DELAY_MS, error.retryAfterMs);
+        : ["quota-exhausted", "rate-limit"].includes(error.failureKind)
+          ? Math.max(0, error.retryAfterMs)
+          : Math.min(MAX_PROVIDER_RETRY_DELAY_MS, error.retryAfterMs);
       try { options.onRetry?.({ attempt: attempt + 1, delayMs, error }); } catch { /* advisory */ }
       await wait(delayMs);
     }
@@ -313,6 +335,7 @@ function resolveMaxIterations(options) {
 }
 
 function applyIterationSettings(provider, options) {
+  provider.env = options.env ?? process.env;
   provider.maxIterations = resolveMaxIterations(options);
   // Tests and embedders may provide both names while migrating: in that case
   // maxIterations is the outer cap and the old option remains the inner hop
@@ -387,6 +410,8 @@ function providerRetryOptions(provider, context, signal) {
     baseDelayMs: provider.providerRetryBaseMs,
     sleep: provider.retrySleep ?? ((ms) => sleepWithSignal(ms, signal)),
     random: provider.retryRandom,
+    env: provider.env,
+    now: provider.now,
     onRetry: ({ attempt, delayMs, error }) => {
       try {
         context?.__onToolEvent?.({
@@ -400,6 +425,31 @@ function providerRetryOptions(provider, context, signal) {
       }
     }
   };
+}
+
+function assertProviderContent(provider, response, body) {
+  const classification = classifyProviderOutcome({
+    status: response?.status ?? 200,
+    body,
+    headers: response?.headers,
+    now: provider.now(),
+    env: provider.env
+  });
+  if (classification?.kind !== "silent-failure") return;
+  throw new ProviderError("Provider returned HTTP 200 without model content.", {
+    status: 200,
+    retryAfterMs: classification.retryAfterMs,
+    providerCode: "silent_response",
+    providerType: "silent_failure",
+    failureKind: classification.kind
+  });
+}
+
+async function requestWithSilentResponseRetry(provider, context, signal, request) {
+  return requestWithRetry(request, {
+    ...providerRetryOptions(provider, context, signal),
+    shouldRetry: ({ error }) => error?.failureKind === "silent-failure"
+  });
 }
 
 const MANAGED_CREDENTIAL_STATUSES = new Set([401, 402, 429]);
@@ -482,7 +532,8 @@ async function requestWithProviderCredential(provider, credentialRequest, {
   context,
   signal,
   model,
-  request
+  request,
+  transform = null
 }) {
   const active = credentialRequest ?? beginProviderCredentialRequest(provider).request;
   let previousId = active.lease?.id ?? null;
@@ -504,13 +555,16 @@ async function requestWithProviderCredential(provider, credentialRequest, {
       context
     });
     try {
-      return await requestWithRetry(
+      const response = await requestWithRetry(
         () => request(lease.value, lease),
         {
           ...providerRetryOptions(provider, context, signal),
           shouldRetry: managedCredentialRetry
         }
       );
+      return typeof transform === "function"
+        ? await transform(response)
+        : response;
     } catch (error) {
       previousStatus = Number.isInteger(error?.status) ? error.status : null;
       throw error;
@@ -1022,6 +1076,7 @@ function providerRequestEfficiency({
     format,
     toolOutcomeSeenSet(context, format)
   );
+  const memoryMetrics = consumeMemoryRequestMetrics(context);
   return {
     provider: format,
     requestBytes: Buffer.byteLength(serializedBody, "utf8"),
@@ -1043,7 +1098,30 @@ function providerRequestEfficiency({
     compression: compression?.compressed === true,
     latencyMs: nonnegativeMetric(latencyMs),
     stopReason,
-    ...toolOutcomes
+    ...toolOutcomes,
+    ...(memoryMetrics ?? {})
+  };
+}
+
+function modelRoutingRequest({
+  input,
+  instructions,
+  turnContext,
+  sessionMemorySnapshot,
+  messages,
+  tools,
+  images,
+  context
+}) {
+  return {
+    input,
+    instructions,
+    turnContext,
+    sessionMemorySnapshot,
+    messages,
+    tools,
+    images,
+    requestShape: context?.__requestShape
   };
 }
 
@@ -2356,6 +2434,11 @@ function toolOutputStore(context) {
 }
 
 function modelToolOutput(provider, context, value) {
+  const spilled = spillModelToolOutput(value, {
+    context,
+    maxChars: provider.maxToolOutputChars
+  });
+  if (spilled !== null) return spilled;
   return capToolOutput(value, {
     maxChars: provider.maxToolOutputChars,
     store: toolOutputStore(context),
@@ -2363,6 +2446,50 @@ function modelToolOutput(provider, context, value) {
     ownerType: context?.__jobId ? "job" : "turn",
     ownerId: context?.__jobId ?? context?.turnId ?? context?.__turnId ?? null
   }).output;
+}
+
+export function spillModelToolOutput(value, {
+  context,
+  maxChars = DEFAULT_MAX_TOOL_OUTPUT_CHARS
+} = {}) {
+  const store = context?.runtime?.spills;
+  if (!store?.put) return null;
+  try {
+    const spill = store.put(value, {
+      projectId: context?.__projectId ?? context?.projectId ?? "default"
+    });
+    if (!spill) return null;
+    incrementMemoryRequestMetric(context, "spillCount");
+    return encodeSpillSkeleton(spill, maxChars);
+  } catch {
+    return null;
+  }
+}
+
+function encodeSpillSkeleton(spill, maxChars) {
+  const limit = Math.max(
+    MIN_TRUNCATED_TOOL_OUTPUT_CHARS,
+    Number.isSafeInteger(Number(maxChars))
+      ? Number(maxChars)
+      : DEFAULT_MAX_TOOL_OUTPUT_CHARS
+  );
+  const segments = [...(spill.segments ?? [])];
+  let omitted = 0;
+  for (;;) {
+    const value = {
+      spilled: true,
+      id: spill.id,
+      bytes: spill.bytes,
+      lines: spill.lines,
+      instruction: "Call read_spill with this id and an exact segment line range.",
+      segments,
+      ...(omitted > 0 ? { segmentsOmitted: omitted } : {})
+    };
+    const encoded = JSON.stringify(value);
+    if (encoded.length <= limit || segments.length === 0) return encoded;
+    segments.pop();
+    omitted += 1;
+  }
 }
 
 function providerToolImage(value) {
@@ -3688,7 +3815,11 @@ export class OpenAIResponsesProvider {
     // Per-task model tiering. Defaults to base for everything until tier env
     // vars are set, so this is a no-op until the user opts in.
     this.ownsRouter = !options.router;
-    this.router = options.router ?? new ModelRouter({ envPrefix: "OPENAI", baseModel: this.model });
+    this.router = options.router ?? new ModelRouter({
+      envPrefix: "OPENAI",
+      baseModel: this.model,
+      env: options.env ?? process.env
+    });
     configureProviderCredentialPool(this, options, {
       providerName: "openai",
       envSecretName: "OPENAI_API_KEY"
@@ -3701,10 +3832,10 @@ export class OpenAIResponsesProvider {
 
   // Resolve which model a call should use: explicit `model` wins, then a named
   // `task` (routed via the configured tiers), then a raw `tier`, else the base.
-  resolveModel({ model, tier, task } = {}) {
+  resolveModel({ model, tier, task, request } = {}) {
     if (model) return model;
     if (this.ownsRouter && this.router && "baseModel" in this.router) this.router.baseModel = this.model;
-    if (task) return this.router.resolve(task);
+    if (task) return this.router.resolve(task, request);
     if (tier) return this.router.tierModel(tier);
     return this.model;
   }
@@ -3722,7 +3853,13 @@ export class OpenAIResponsesProvider {
       }),
       instructions: GOAL_JUDGE_INSTRUCTIONS,
       input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
-    }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
+    }, context, {
+      timeoutMs: remainingMs,
+      turnBudget,
+      credentialRequest,
+      task: "goal",
+      attempt: 1
+    }), context);
     addProviderUsage(usageAccumulator, response?.usage);
     const verdict = parseGoalJudgeVerdict(extractResponseText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
@@ -3731,7 +3868,21 @@ export class OpenAIResponsesProvider {
 
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     const generationRequest = arguments[0] ?? {};
-    const model = this.resolveModel({ model: modelOverride, tier, task });
+    const model = this.resolveModel({
+      model: modelOverride,
+      tier,
+      task,
+      request: modelRoutingRequest({
+        input,
+        instructions,
+        turnContext,
+        sessionMemorySnapshot,
+        messages,
+        tools,
+        images,
+        context
+      })
+    });
     if (!this.isConfigured()) throw new Error("OPENAI_API_KEY is not configured.");
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
@@ -3799,7 +3950,10 @@ export class OpenAIResponsesProvider {
     ];
 
     const baseInstructions = appendSessionMemorySnapshot(
-      instructions ?? buildDefaultInstructions({ agent }),
+      instructions ?? buildDefaultInstructions({
+        agent,
+        budgetedMemory: Boolean(context?.runtime?.memtree)
+      }),
       sessionMemorySnapshot
     );
     const toolList = tools.length > 0
@@ -3994,6 +4148,8 @@ export class OpenAIResponsesProvider {
             turnBudget,
             credentialRequest: credentialState.request,
             compression: preparation,
+            task,
+            attempt: iterations,
             onDelta,
             expectedContinuationCredentialIdentity: continuationAvailable
               ? continuationCredentialIdentity
@@ -4034,6 +4190,8 @@ export class OpenAIResponsesProvider {
                 turnBudget,
                 credentialRequest: credentialState.request,
                 compression: preparation,
+                task,
+                attempt: iterations,
                 onDelta
               })
             ), context);
@@ -4405,7 +4563,9 @@ export class OpenAIResponsesProvider {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
             credentialRequest: credentialState.request,
-            compression: preparation
+            compression: preparation,
+            task,
+            attempt: iterations + 1
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractResponseText(response);
@@ -4606,46 +4766,57 @@ export class OpenAIResponsesProvider {
     const serializedBody = JSON.stringify(routedBody);
     const startedAt = this.now();
     try {
-      const response = await requestWithProviderCredential(
+      const { json } = await requestWithSilentResponseRetry(
         this,
-        options.credentialRequest,
-        {
-          context,
-          signal: controller.signal,
-          model: body.model,
-          request: (credential, lease) => {
-            const expectedCredentialIdentity = options.expectedContinuationCredentialIdentity;
-            if (expectedCredentialIdentity) {
-              const actualCredentialIdentity = openAICredentialIdentity(this, lease);
-              if (
-                !actualCredentialIdentity
-                || actualCredentialIdentity !== expectedCredentialIdentity
-              ) {
-                throw new ContinuationCredentialChangedError();
+        context,
+        controller.signal,
+        () => requestWithProviderCredential(
+          this,
+          options.credentialRequest,
+          {
+            context,
+            signal: controller.signal,
+            model: body.model,
+            request: (credential, lease) => {
+              const expectedCredentialIdentity = options.expectedContinuationCredentialIdentity;
+              if (expectedCredentialIdentity) {
+                const actualCredentialIdentity = openAICredentialIdentity(this, lease);
+                if (
+                  !actualCredentialIdentity
+                  || actualCredentialIdentity !== expectedCredentialIdentity
+                ) {
+                  throw new ContinuationCredentialChangedError();
+                }
               }
+              return fetch(openAIResponsesUrl(this.baseUrl), {
+                method: "POST",
+                signal: controller.signal,
+                headers: {
+                  "content-type": "application/json",
+                  authorization: `Bearer ${credential}`
+                },
+                body: serializedBody
+              });
+            },
+            transform: async (response) => {
+              const contentType = response.headers?.get?.("content-type") ?? "";
+              const streamResponse = streaming && /text\/event-stream/i.test(contentType);
+              if (streamResponse) armStallTimeout();
+              const parsed = streamResponse
+                ? await readOpenAIEventStream(response, {
+                    onDelta: options.onDelta,
+                    onActivity,
+                    signal: controller.signal
+                  })
+                : await response.json().catch(() => ({}));
+              if (parsed?.status !== "failed" && !parsed?.error) {
+                assertProviderContent(this, response, parsed);
+              }
+              return { response, json: parsed };
             }
-            return fetch(openAIResponsesUrl(this.baseUrl), {
-              method: "POST",
-              signal: controller.signal,
-              headers: {
-                "content-type": "application/json",
-                authorization: `Bearer ${credential}`
-              },
-              body: serializedBody
-            });
           }
-        }
+        )
       );
-      const contentType = response.headers?.get?.("content-type") ?? "";
-      const streamResponse = streaming && /text\/event-stream/i.test(contentType);
-      if (streamResponse) armStallTimeout();
-      const json = streamResponse
-        ? await readOpenAIEventStream(response, {
-            onDelta: options.onDelta,
-            onActivity,
-            signal: controller.signal
-          })
-        : await response.json().catch(() => ({}));
       if (json?.status === "failed" || json?.error) {
         throw openAIStreamError({ response: json }, "OpenAI failed to generate a response.");
       }
@@ -4669,6 +4840,8 @@ export class OpenAIResponsesProvider {
         tools: callTools,
         toolSuccessCount: efficiency.toolSuccessCount,
         toolFailureCount: efficiency.toolFailureCount,
+        task: options.task,
+        attempt: options.attempt,
         efficiency
       });
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
@@ -4704,7 +4877,11 @@ export class AnthropicProvider {
     this.budgetGuard = options.budgetGuard ?? null;
     this.secretsStore = options.secretsStore ?? options.secrets ?? null;
     this.ownsRouter = !options.router;
-    this.router = options.router ?? new ModelRouter({ envPrefix: "ANTHROPIC", baseModel: this.model });
+    this.router = options.router ?? new ModelRouter({
+      envPrefix: "ANTHROPIC",
+      baseModel: this.model,
+      env: options.env ?? process.env
+    });
     configureProviderCredentialPool(this, options, {
       providerName: "anthropic",
       envSecretName: "ANTHROPIC_API_KEY"
@@ -4715,10 +4892,10 @@ export class AnthropicProvider {
     return providerHasCredentials(this);
   }
 
-  resolveModel({ model, tier, task } = {}) {
+  resolveModel({ model, tier, task, request } = {}) {
     if (model) return model;
     if (this.ownsRouter && this.router && "baseModel" in this.router) this.router.baseModel = this.model;
-    if (task) return this.router.resolve(task);
+    if (task) return this.router.resolve(task, request);
     if (tier) return this.router.tierModel(tier);
     return this.model;
   }
@@ -4730,7 +4907,13 @@ export class AnthropicProvider {
       max_tokens: GOAL_JUDGE_MAX_TOKENS,
       system: GOAL_JUDGE_INSTRUCTIONS,
       messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
-    }, context, { timeoutMs: remainingMs, turnBudget, credentialRequest }), context);
+    }, context, {
+      timeoutMs: remainingMs,
+      turnBudget,
+      credentialRequest,
+      task: "goal",
+      attempt: 1
+    }), context);
     addProviderUsage(usageAccumulator, response?.usage);
     const verdict = parseGoalJudgeVerdict(extractAnthropicText(response));
     if (!verdict) throw new Error("Goal judge returned invalid JSON.");
@@ -4740,7 +4923,21 @@ export class AnthropicProvider {
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools: requestTools, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
     const generationRequest = arguments[0] ?? {};
     if (!this.isConfigured()) throw new Error("ANTHROPIC_API_KEY is not configured.");
-    const model = this.resolveModel({ model: modelOverride, tier, task });
+    const model = this.resolveModel({
+      model: modelOverride,
+      tier,
+      task,
+      request: modelRoutingRequest({
+        input,
+        instructions,
+        turnContext,
+        sessionMemorySnapshot,
+        messages,
+        tools: requestTools,
+        images,
+        context
+      })
+    });
     const maxIterations = positiveInteger(maxIterationsOverride, this.maxIterations);
     const maxTurnSeconds = positiveNumber(maxTurnSecondsOverride, this.maxTurnSeconds);
     const usageAccumulator = createProviderUsageAccumulator();
@@ -4818,7 +5015,10 @@ export class AnthropicProvider {
       {
         type: "text",
         text: appendSessionMemorySnapshot(
-          instructions ?? buildDefaultInstructions({ agent }),
+          instructions ?? buildDefaultInstructions({
+            agent,
+            budgetedMemory: Boolean(context?.runtime?.memtree)
+          }),
           sessionMemorySnapshot
         ),
         cache_control: { type: "ephemeral" }
@@ -4939,7 +5139,9 @@ export class AnthropicProvider {
           turnBudget,
           onDelta,
           credentialRequest: credentialState.request,
-          compression: preparation
+          compression: preparation,
+          task,
+          attempt: iterations
         }), context);
       } catch (error) {
         if (budgetExceeded(error)) {
@@ -5261,7 +5463,9 @@ export class AnthropicProvider {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
             credentialRequest: credentialState.request,
-            compression: preparation
+            compression: preparation,
+            task,
+            attempt: iterations + 1
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractAnthropicText(response);
@@ -5361,33 +5565,45 @@ export class AnthropicProvider {
     const serializedBody = JSON.stringify(routedBody);
     const startedAt = this.now();
     try {
-      const response = await requestWithProviderCredential(
+      const { json } = await requestWithSilentResponseRetry(
         this,
-        options.credentialRequest,
-        {
-          context,
-          signal: controller.signal,
-          model: body.model,
-          request: (credential, lease) => {
-            const headers = {
-              "content-type": "application/json",
-              "anthropic-version": this.version
-            };
-            if (lease.type === "oauth") headers.authorization = `Bearer ${credential}`;
-            else headers["x-api-key"] = credential;
-            return fetch(`${this.baseUrl}/messages`, {
-              method: "POST",
-              signal: controller.signal,
-              headers,
-              body: serializedBody
-            });
+        context,
+        controller.signal,
+        () => requestWithProviderCredential(
+          this,
+          options.credentialRequest,
+          {
+            context,
+            signal: controller.signal,
+            model: body.model,
+            request: (credential, lease) => {
+              const headers = {
+                "content-type": "application/json",
+                "anthropic-version": this.version
+              };
+              if (lease.type === "oauth") headers.authorization = `Bearer ${credential}`;
+              else headers["x-api-key"] = credential;
+              return fetch(`${this.baseUrl}/messages`, {
+                method: "POST",
+                signal: controller.signal,
+                headers,
+                body: serializedBody
+              });
+            },
+            transform: async (response) => {
+              const contentType = response.headers?.get?.("content-type") ?? "";
+              const parsed = streaming && /text\/event-stream/i.test(contentType)
+                ? await readAnthropicEventStream(response, {
+                    onDelta: options.onDelta,
+                    onActivity
+                  })
+                : await response.json().catch(() => ({}));
+              assertProviderContent(this, response, parsed);
+              return { response, json: parsed };
+            }
           }
-        }
+        )
       );
-      const contentType = response.headers?.get?.("content-type") ?? "";
-      const json = streaming && /text\/event-stream/i.test(contentType)
-        ? await readAnthropicEventStream(response, { onDelta: options.onDelta, onActivity })
-        : await response.json().catch(() => ({}));
       const latencyMs = Math.max(0, this.now() - startedAt);
       const callTools = (json.content ?? []).filter((b) => b.type === "tool_use").map((b) => b.name);
       const efficiency = providerRequestEfficiency({
@@ -5408,6 +5624,8 @@ export class AnthropicProvider {
         tools: callTools,
         toolSuccessCount: efficiency.toolSuccessCount,
         toolFailureCount: efficiency.toolFailureCount,
+        task: options.task,
+        attempt: options.attempt,
         efficiency
       });
       if (options.turnBudget) recordTurnSpend(options.turnBudget, budgetRecord);
@@ -5597,7 +5815,13 @@ export function createModelProvider(options = {}) {
 // same agent — the Anthropic cache_control marker on the system block only
 // produces cache hits when the prefix never changes. Per-turn state (memory
 // hits, scrutiny) travels via buildTurnContext on the user turn instead.
-export function buildDefaultInstructions({ agent }) {
+export function buildDefaultInstructions({
+  agent,
+  budgetedMemory = memtreeEnabled(process.env)
+}) {
+  const budgetedMemoryTools = budgetedMemory
+    ? "\n- memory_wake(budget?) / memory_zoom(scope, lo, hi, budget?) / memory_merge(scope, lo, hi, line) / memory_tree_recall(regex, limit?) - navigate the bounded append-only memory tree and complete in-band summary requests\n- read_spill(id, range) - read an exact inclusive line slice from a structured oversized tool result"
+    : "";
   return `You are ${agent?.name ?? "an OpenAGI agent"}, an always-on local assistant.
 
 Tools available to you (call them when useful):
@@ -5606,7 +5830,7 @@ Tools available to you (call them when useful):
 - capability_bundle_list / capability_bundle_create / capability_bundle_update / capability_bundle_enable / capability_bundle_revoke / capability_audit - manage disabled-by-default, project-scoped, revocable capability bundles with explicit filesystem, network, secret, subprocess, API, UI, and hook declarations
 - skill_import_list / skill_import_stage / skill_import_review / skill_import_approve / skill_import_reject - quarantine, inspect, and explicitly approve bounded ZIP or local-Git skill packages; staging never runs imported code
 - remember(content, tags?, importance?, memoryClass?, replaceIds?) - save a durable note and mirror it to the optional external user model; use memoryClass='preference' only for stable user-specific preferences, otherwise keep the default project fact scope; after a capacity error, consolidate overlapping recall results marked replaceable
-- recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope
+- recall(query, limit?) - search built-in memory and the optional external user model; identify curated results that are replaceable in the current scope${budgetedMemoryTools}
 - memory_details(id) - inspect one local memory's bounded provenance, confidence, and correction/replacement status without changing its strength; use before relying on uncertain memory for an action
 - correct_memory(correction, query? | id?, tags?, memoryClass?) - supersede a wrong memory with the corrected fact and mirror the correction to the optional external user model; use memoryClass='preference' only when correcting a recalled user-profile preference
 - Post-session review memories are only proposals: they are screened, shown as pending actions, and require an explicit human approval before they can become durable memory.

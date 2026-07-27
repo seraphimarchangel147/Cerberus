@@ -90,6 +90,13 @@ export class ScrutinyFitter {
    * judge in weight-history.jsonl ("why did my agent's judgment change").
    */
   _applyAndPersist(proposals, { source, cycle, at = nowIso() } = {}) {
+    const optimizer = this.runtime?.selfOptimization;
+    if (
+      typeof optimizer?.applyDelta === "function"
+      && typeof optimizer?.hashSurface === "function"
+    ) {
+      return this._applyHashGuarded(proposals, { source, cycle, at });
+    }
     const judges = this.runtime?.scrutiny?.judges ?? {};
     const applied = {};
     for (const [judgeName, proposal] of Object.entries(proposals)) {
@@ -112,6 +119,69 @@ export class ScrutinyFitter {
     return applied;
   }
 
+  _applyHashGuarded(proposals, { source, cycle, at }) {
+    const optimizer = this.runtime.selfOptimization;
+    const judges = this.runtime?.scrutiny?.judges ?? {};
+    const entries = Object.entries(proposals);
+    const result = optimizer.applyDelta({
+      deltas: entries.map(([judgeName, proposal]) => ({
+        target: `scrutiny:${judgeName}`,
+        expectedHash: proposal.expectedHash,
+        value: normalizeWeightSurface(proposal.to)
+      })),
+      resolveSurface: (target) => {
+        const judgeName = String(target).startsWith("scrutiny:")
+          ? String(target).slice("scrutiny:".length)
+          : "";
+        const judge = judges[judgeName];
+        if (!judge) throw new Error(`Unknown scrutiny surface: ${target}`);
+        return {
+          id: `scrutiny:${judgeName}`,
+          kind: "scrutiny-weights",
+          value: normalizeWeightSurface(judge.weights)
+        };
+      },
+      commit: (prepared) => {
+        const applied = {};
+        for (const entry of prepared) {
+          const judgeName = entry.identity.surfaceId.slice("scrutiny:".length);
+          applied[judgeName] = normalizeWeightSurface(entry.nextValue);
+        }
+        // Persist the complete new vector set before changing live judges.
+        // A failed atomic write therefore leaves every live surface untouched.
+        writeJsonAtomic(this.weightsPath, {
+          version: 1,
+          appliedAt: at,
+          source,
+          cycle,
+          judges: applied
+        });
+        for (const [judgeName, weights] of Object.entries(applied)) {
+          judges[judgeName].weights = { ...weights };
+        }
+        for (const entry of prepared) {
+          const judgeName = entry.identity.surfaceId.slice("scrutiny:".length);
+          try {
+            appendJsonLine(this.historyPath, {
+              at,
+              source,
+              cycle,
+              judge: judgeName,
+              from: entry.previousValue,
+              to: entry.nextValue,
+              previousHash: entry.previousHash,
+              nextHash: entry.nextHash
+            });
+          } catch {
+            // The atomic state is authoritative; audit append is advisory.
+          }
+        }
+        return applied;
+      }
+    });
+    return result.commitResult;
+  }
+
   addJudgeSignal({ judge, deltas, note = null, source = "llm-judge" }) {
     if (!judge || !deltas) return null;
     const entry = { judge, deltas, note, source, at: nowIso() };
@@ -130,8 +200,16 @@ export class ScrutinyFitter {
       return { skipped: true, reason: "scrutiny is not a panel; nothing to fit" };
     }
 
+    const optimizer = this.runtime?.selfOptimization;
     const outcomes = this.runtime.outcomes
       .recent(5000)
+      .map((outcome) => {
+        const reward = optimizer?.rewardForOutcome?.(outcome);
+        if (typeof reward === "number" && Number.isFinite(reward)) {
+          return { ...outcome, resolved: true, qualityScore: reward };
+        }
+        return outcome;
+      })
       .filter((o) => o.resolved && typeof o.qualityScore === "number" && o.scrutinyDimensions);
     if (outcomes.length < this.minSamples) {
       return { skipped: true, reason: `${outcomes.length} resolved outcomes, need ${this.minSamples}` };
@@ -144,7 +222,14 @@ export class ScrutinyFitter {
       const judgeSignal = aggregateJudgeSignals(this.state.judgeSignals, judgeName, this.maxDeltaPerCycle);
       const merged = mergeDeltas(correlationDeltas, judgeSignal);
       const proposed = applyDeltas(judge.weights, merged, this.maxDeltaPerCycle);
-      proposals[judgeName] = { from: { ...judge.weights }, to: proposed, deltas: merged };
+      proposals[judgeName] = {
+        from: { ...judge.weights },
+        to: proposed,
+        deltas: merged,
+        ...(typeof optimizer?.hashSurface === "function"
+          ? { expectedHash: optimizer.hashSurface(judge.weights) }
+          : {})
+      };
     }
 
     this.state.cycles += 1;
@@ -258,6 +343,31 @@ function applyDeltas(weights, deltas, maxDelta) {
     for (const dim of DIMENSIONS) next[dim] = next[dim] / total;
   }
   return next;
+}
+
+function normalizeWeightSurface(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Scrutiny weight surface must be an object.");
+  }
+  const keys = Object.keys(value).sort();
+  const expected = [...DIMENSIONS].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new TypeError("Scrutiny weight surface has unexpected fields.");
+  }
+  const normalized = {};
+  let total = 0;
+  for (const dimension of DIMENSIONS) {
+    const weight = Number(value[dimension]);
+    if (!Number.isFinite(weight) || weight < 0.02 || weight > 1) {
+      throw new TypeError(`Invalid scrutiny weight for ${dimension}.`);
+    }
+    normalized[dimension] = weight;
+    total += weight;
+  }
+  if (Math.abs(total - 1) > 1e-6) {
+    throw new TypeError("Scrutiny weight surface must sum to 1.");
+  }
+  return normalized;
 }
 
 function clampDelta(value, maxDelta) {

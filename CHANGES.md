@@ -2,6 +2,127 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-27 - Upgrade batch work item D: skill-routing evals (Codex)
+
+Added a deterministic, runtime-decoupled quality gate for the growing skill
+catalog:
+
+- Adapted only the MIT `addyosmani/agent-skills` Tier-2 evaluation design,
+  pinned the inspected source commit in attribution headers, and included its
+  full MIT notice. No upstream skill body or command file was imported.
+- Added zero-dependency, description-only TF-IDF routing with light stemming,
+  deterministic ordering, and tie-aware rank-1 scoring.
+- Added strict one-case-per-skill coverage, realistic positive triggers,
+  non-vacuous owner-labeled negatives, duplicate-prompt rejection, and
+  configurable warning/error thresholds for description collisions.
+- Added 65 trigger checks across all 13 bundled skills. The measured baseline
+  is 87.2% unambiguous rank-1 (34/39), with no catalog collision warnings.
+- Added a dedicated GitHub Actions ratchet at `--min-rank1 80`, with no package
+  installation step, and the pre-I/O `OPENAGI_SKILL_ROUTING_EVAL=0` kill
+  switch for manual/CI rollback.
+- Added no dependency, behavioral model runner, runtime hook, upstream skill,
+  or upstream command surface.
+
+Verification: deterministic catalog gate 65 passed, 0 failed; focused harness
+lane 13 passed, 0 failed; full isolated `node --test --test-concurrency=1`
+lane on Node 25.5.0: 1867 passed, 0 failed.
+
+## 2026-07-27 - Upgrade batch work item B.3: provider error classifier (Codex)
+
+Made provider recovery distinguish congestion, exhausted quota, and silent
+HTTP success without moving retries above the side-effecting tool loop:
+
+- Added the MIT-attributed, zero-dependency provider outcome classifier using
+  both HTTP status and bounded body text.
+- Quota/billing 429s now carry a one-hour backoff, overridden by a valid reset
+  header; other 429s carry a 60-second backoff.
+- Credential pools persist those classified delays as per-key cooldowns and
+  rotate immediately to another eligible key instead of retrying a cooled key.
+- OpenAI and Anthropic HTTP 200 responses with no model content now retry
+  below tool execution. `max_tokens` and `tool_use` empty stops remain valid.
+- Added the setup-allowlisted `OPENAGI_ERROR_CLASSIFIER=0` kill switch. It
+  restores the former jittered 429 retry and empty-response behavior.
+- Added no dependency and did not change the package manifest.
+
+Verification: focused error/provider lane 28 passed, 0 failed; full isolated
+`node --test --test-concurrency=1` lane on Node 25.5.0: 1854 passed, 0 failed.
+
+## 2026-07-27 - Upgrade batch work items B.1/B.2: complexity routing (Codex)
+
+Added an opt-in, floor-only runtime complexity layer to model routing:
+
+- Added the MIT-attributed OmniRoute-inspired additive classifier across code,
+  context size, carried tools, reasoning, math, and domain vocabulary.
+- Reproduced the specified defect red-first: the naive scorer routed a roughly
+  50k-token plain payload to `nano` (0 passed, 1 failed) because context's
+  additive contribution capped below the `mini` threshold.
+- Added explicit 32k-token-class `base` and medium-context `mini` floors plus
+  the mandatory any-tool `mini` floor. `escalateTier` is monotone and the
+  classifier fails open to the static profile.
+- Threaded the outgoing request shape through both paid provider loops.
+  Explicit model/task pins remain authoritative; static task profiles are the
+  baseline; runtime complexity may only choose a more capable tier.
+- Added the setup-allowlisted `AGENT_ROUTING=static` default/kill switch.
+  `AGENT_ROUTING=auto` is the only mode that enables runtime classification.
+- Added an `OPENAGI_DEV_WARN=1` warning for genuine unknown router task names
+  without changing the unrelated cron `task: "prompt"` discriminator.
+- In auto mode, the model plan leaves Anthropic mini unset instead of
+  recommending the nano model for memory-writing jobs. No model env was set
+  because the source-listed IDs were not verified against a live API.
+- Added no dependency and did not port OmniRoute's bandit, ELO, SLA, or
+  questionable free-endpoint machinery.
+
+Verification: focused classifier/router/provider lane 63 passed, 0 failed;
+full isolated `node --test --test-concurrency=2` lane on Node 25.5.0:
+1845 passed, 0 failed.
+
+## 2026-07-27 - Upgrade batch work item B.0: routing ledger enrichment (Codex)
+
+Made the per-provider-call budget ledger usable for later routing analysis:
+
+- Added top-level `latencyMs`, `stopReason`, `task`, `attempt`, `inputTokens`,
+  and `outputTokens` to new ledger rows while retaining the existing
+  content-free efficiency and cost envelopes.
+- Threaded task identity and one-based model-loop attempts through OpenAI,
+  Anthropic, forced-answer, fallback, and goal-judge request paths.
+- Input totals correctly include mutually exclusive cached-input buckets for
+  OpenAI and the additive cache read/write buckets reported by Anthropic.
+- Bounded every numeric field and restricted task labels to identifiers so
+  user prompt text cannot enter the ledger.
+- Added the setup-allowlisted `OPENAGI_LEDGER_ENRICHMENT=0` kill switch, which
+  omits all six fields and preserves the previous JSONL row shape.
+- Added no dependency and did not change the package manifest.
+
+Verification: focused ledger/provider lane 62 passed, 0 failed, 1 skipped;
+full isolated `node --test --test-concurrency=4` lane on Node 25.5.0:
+1830 passed, 0 failed.
+
+## 2026-07-27 - Upgrade batch work item A: Legion-wide desktop lease (Codex)
+
+Closed the live correctness hazard where separate agent sessions could both
+pass their local computer-use guard and drive one shared physical desktop:
+
+- Added a host-wide, atomic desktop lease with actionable agent/session
+  identity, TTL and same-host PID liveness recovery, re-entrant acquisition,
+  generation-counted takeover, and structured contention/lost-lease errors.
+- Desktop sessions acquire before their durable session record, renew before
+  every controller action, abort immediately if ownership changed, and release
+  idempotently on normal end or startup failure.
+- Lease acquisition, renewal, release, takeover, and contention now use the
+  existing `ComputerUseLog` JSONL event channel. Browser-only sessions retain
+  their prior behavior.
+- Added setup-allowlisted configuration for
+  `OPENAGI_DESKTOP_LEASE`, `OPENAGI_DESKTOP_LEASE_TTL_MS`,
+  `OPENAGI_DESKTOP_LEASE_PATH`, and `OPENAGI_AGENT_NAME`; setting the first to
+  `0` is the exact-behavior kill switch.
+- Documented cross-WSL/Windows shared-path requirements and added the seven
+  required lease regressions plus a no-orphan/audit integration check.
+- No package manifest changed and no dependency was added.
+
+Verification: focused computer-use/lease/ABI lane 129 passed, 0 failed; full
+isolated `node --test --test-concurrency=4` lane on Node 25.5.0: 1829 passed,
+0 failed.
+
 ## 2026-07-26 — Changelog backfill: six undocumented commits (Seraphim)
 
 Audited the last 30 commits against this file and found **six that shipped code with no entry**.
@@ -1408,3 +1529,115 @@ MERGE REVIEW COMPLETE
 - Added content-free completion status, evidence counts, and retry visibility to Run Inspector, persisted bounded evidence state with assistant outcomes, and kept MoA reference analysts outside the aggregator's completion contract.
 - Validation: `OPENAGI_AUTO_APPROVE=0 npm test` and `OPENAGI_AUTO_APPROVE=1 npm run test:prod-policy` each pass 1717/1718 tests with zero failures and one intentional Windows permission-mode skip.
 EVIDENCE ROUTING COMPLETE
+
+## 2026-07-27 - Upgrade batch Item C: budgeted memory and structured spill (Codex)
+
+- Added a clean-room, append-only memory tree with 320-byte log records,
+  288-byte positional summary records, age-decayed budget covers, in-band merge
+  requests, bounded wake/zoom/merge/regex-recall commands, and oldest-first
+  migration from the existing durable memory state. No OptMem source was
+  inspected, fetched, copied, or vendored.
+- Preserved project, specialist, and profile isolation with one independently
+  indexed tree per memory scope. Existing durable memory remains authoritative;
+  the summary tree is a rebuildable cache and projection failures fail open.
+- Added PageIndex-inspired, MIT-attributed structural spill indexing for tool
+  results over the configured threshold. Markdown headings are code-fence
+  aware, then diff boundaries, paragraphs, and bounded line windows provide
+  exact `read_spill` retrieval without retaining oversized results in context.
+- Added agent-visible `memory_wake`, `memory_zoom`, `memory_merge`,
+  `memory_tree_recall`, and `read_spill` tools, including conditional prompt
+  documentation and chat/specialist visibility only while the feature is on.
+- Added per-request `memoryBytesInjected`, `spillCount`, `mergesRequested`, and
+  `mergesCompleted` ledger counters without changing historical row shape when
+  the feature is off.
+- Kill switch: `OPENAGI_MEMTREE` is default-off; any value other than `1`
+  restores the prior memory injection, tool-output truncation, tool catalog,
+  and prompt bytes. `OPENAGI_WAKE_BUDGET`, `OPENAGI_SPILL_BYTES`, and
+  `OPENAGI_MEMORY_ENTRY_CHARS` are setup-wizard allowlisted.
+- Added zero npm dependencies. Added-line byte scan found zero non-ASCII lines;
+  package manifests are unchanged.
+- Validation: focused memory/provider/tool regressions pass 119/119. Required
+  full `node --test --test-concurrency=1` passes 1883/1883 with zero failures
+  and zero skips.
+UPGRADE BATCH ITEM C COMPLETE
+
+## 2026-07-27 - Upgrade batch Item E: per-domain browser learnings (Codex)
+
+- Added a bounded, notes-only `learnings/<site>/manifest.json` plane that
+  matches exact hostnames and `*.` subdomain patterns, then injects local
+  procedural guidance only when the semantic browser's existing
+  `domainChanged` result is true.
+- Wired the store through `SkillRegistry` so browser guidance and reusable
+  skills share one procedural-memory boundary. Open, explicit navigation, and
+  activation-driven navigation use the same fail-open hook; ordinary inspect
+  and same-origin navigation retain their prior response shape.
+- Copied ego-lite's security-relevant `relativeSitePath()` helper verbatim and
+  added its MIT attribution and full license notice. Manifest, directory,
+  note-count, per-note, and aggregate-byte bounds are enforced; malformed
+  files, traversal, absolute paths, symlinks, and containment escapes are
+  skipped without breaking navigation.
+- Deliberately excluded ego-lite's executable `nodeTools` and `browserTools`
+  plane. Those fields are never imported, loaded, advertised, or returned, and
+  a regression test proves a declared executable module cannot run.
+- Kill switch: `OPENAGI_DOMAIN_LEARNINGS` is setup-wizard allowlisted and
+  default-off. Any value other than `1` avoids store creation and preserves the
+  previous semantic-browser output shape.
+- Added zero npm dependencies. Added-line byte scan found zero non-ASCII lines;
+  package manifests are unchanged.
+- Validation: focused domain-learning, semantic-browser, and skill-registry
+  coverage passes 43/43. Required fresh, isolated
+  `node --test --test-concurrency=1` passes 1890/1890 with zero failures and
+  zero skips.
+UPGRADE BATCH ITEM E COMPLETE
+
+## 2026-07-27 - Upgrade batch Item F: self-optimization safety patterns (Codex)
+
+- Added a clean-room, Node-stdlib-only self-optimization controller from the
+  four behavioral requirements in the local plan. No
+  world-model-optimizer source was cloned, fetched, inspected, copied, or
+  vendored.
+- Generalized copy-not-guess preconditions into canonical SHA-256 surface
+  snapshots and `applyDelta`: every target hash is verified synchronously
+  before one commit callback can run, duplicate targets fail closed, and
+  proposer-supplied identity fields are rejected in favor of resolver-owned
+  ground truth.
+- Applied the hash gate to the existing scrutiny fitter. Staged multi-judge
+  weight changes now reject atomically when any live surface is stale, persist
+  the complete verified set before changing live weights, and audit previous
+  and successor hashes through the existing JSONL history.
+- Wired completion-evidence reports into an objective optimization reward
+  without preempting user feedback. Unsupported success claims score zero;
+  honest incomplete work retains requirement-level partial credit; structured
+  test summaries retain exact passed/total credit instead of collapsing to a
+  binary result.
+- Added deterministic failure signatures and bounded clustering from
+  structured status, code, missing-evidence, test-count, and tool-receipt
+  fields only. Assistant prose is never incorporated into a failure label.
+- Added strict-improvement selection: equal-scoring successors cannot replace
+  the incumbent, and equal better successors retain their earliest stable
+  order, preventing neutral-score drift.
+- Kill switch: `OPENAGI_SELF_OPTIMIZATION` is setup-wizard allowlisted and
+  default-off. Any value other than `1` omits the controller, outcome reward,
+  and fitter hash/reward paths.
+- Added zero npm dependencies. The implementation adds no agent-facing tools,
+  dynamic imports, external services, routing changes, or telemetry vendors.
+- Validation: focused self-optimization, completion-evidence, outcome, and
+  runtime coverage passes 135/135. Required isolated
+  `node --test --test-concurrency=1` passes 1900/1900 with zero failures and
+  zero skips.
+UPGRADE BATCH ITEM F COMPLETE
+
+## 2026-07-27 - Upgrade batch Phase 1 completion (Codex)
+
+- Completed and independently committed work items A, B.0, B.1/B.2, B.3, D,
+  C, E, and F in the required dependency order. No work item was skipped.
+- Every implementation commit was full-suite green before push and was pushed
+  to `origin/codex/upgrade-batch-2026-07`.
+- The branch adds no npm dependency or package-manifest change, leaves the
+  verified `task: "prompt"` cron discriminator untouched, and contains the
+  required MIT notices plus explicit clean-room boundaries for both
+  all-rights-reserved references.
+- Final implementation-tree validation:
+  `node --test --test-concurrency=1` passes 1900/1900 with zero failures and
+  zero skips.
+UPGRADE BATCH PHASE 1 COMPLETE

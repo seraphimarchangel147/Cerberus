@@ -57,6 +57,76 @@ test("providers default to 25 iterations and a 900-second turn guard", (t) => {
   }
 });
 
+for (const spec of [
+  {
+    name: "OpenAI",
+    make: (env) => new OpenAIResponsesProvider({
+      apiKey: "test-key",
+      model: "openai-base",
+      env,
+      maxIterations: 1,
+      contextCompactChars: 1_000_000
+    }),
+    stub(provider, models) {
+      provider.postResponses = async (body) => {
+        models.push(body.model);
+        return {
+          id: "routing-openai",
+          status: "completed",
+          output_text: "done",
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1 }
+        };
+      };
+    }
+  },
+  {
+    name: "Anthropic",
+    make: (env) => new AnthropicProvider({
+      apiKey: "test-key",
+      model: "anthropic-base",
+      env,
+      maxIterations: 1,
+      contextCompactChars: 1_000_000,
+      stallTimeoutMs: 0
+    }),
+    stub(provider, models) {
+      provider.postMessages = async (body) => {
+        models.push(body.model);
+        return {
+          id: "routing-anthropic",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "done" }],
+          usage: { input_tokens: 1, output_tokens: 1 }
+        };
+      };
+    }
+  }
+]) {
+  test(`${spec.name} generate routes a huge request through the base floor`, async () => {
+    const env = {
+      AGENT_ROUTING: "auto",
+      OPENAI_MODEL_NANO: "openai-nano",
+      OPENAI_MODEL_MINI: "openai-mini",
+      ANTHROPIC_MODEL_NANO: "anthropic-nano",
+      ANTHROPIC_MODEL_MINI: "anthropic-mini"
+    };
+    const provider = spec.make(env);
+    const models = [];
+    spec.stub(provider, models);
+    const result = await provider.generate({
+      input: "plain ".repeat(50_000),
+      agent,
+      task: "observer",
+      tools: []
+    });
+    assert.deepEqual(models, [
+      spec.name === "OpenAI" ? "openai-base" : "anthropic-base"
+    ]);
+    assert.equal(result.model, models[0]);
+  });
+}
+
 test("OPENAGI_MAX_ITERATIONS overrides the deprecated tool-hop alias", (t) => {
   isolateIterationEnv(t);
   process.env.OPENAGI_MAX_ITERATIONS = "9";
@@ -500,10 +570,14 @@ test("provider budget records receive content-free request efficiency metrics", 
     };
 
     await spec.post(provider, spec.body, requestContext, {
-      compression: { compressed: true }
+      compression: { compressed: true },
+      task: "condense",
+      attempt: 2
     });
     await spec.post(provider, spec.body, requestContext, {
-      compression: { compressed: true }
+      compression: { compressed: true },
+      task: "condense",
+      attempt: 3
     });
 
     const firstRecord = recorded[0];
@@ -520,6 +594,8 @@ test("provider budget records receive content-free request efficiency metrics", 
     assert.equal(firstRecord.efficiency.compression, true);
     assert.equal(firstRecord.efficiency.latencyMs, 37);
     assert.equal(firstRecord.efficiency.stopReason, "completed");
+    assert.equal(firstRecord.task, "condense");
+    assert.equal(firstRecord.attempt, 2);
     assert.equal(firstRecord.efficiency.toolSuccessCount, 1);
     assert.equal(firstRecord.efficiency.toolFailureCount, 1);
     assert.ok(firstRecord.efficiency.toolSchemaBytes > 0);
@@ -537,8 +613,8 @@ for (const spec of [
       budgetGuard
     }),
     stub(provider, onRequest) {
-      provider.postResponses = async () => {
-        const n = onRequest();
+      provider.postResponses = async (_body, _context, options) => {
+        const n = onRequest(options);
         return {
           id: `resp_${n}`,
           output: [{ type: "function_call", call_id: `call_${n}`, name: "step", arguments: "{}" }]
@@ -555,8 +631,8 @@ for (const spec of [
       budgetGuard
     }),
     stub(provider, onRequest) {
-      provider.postMessages = async () => {
-        const n = onRequest();
+      provider.postMessages = async (_body, _context, options) => {
+        const n = onRequest(options);
         return {
           id: `msg_${n}`,
           stop_reason: "tool_use",
@@ -570,6 +646,7 @@ for (const spec of [
   test(`${spec.name} re-checks the budget before every iteration and stops locally`, async () => {
     let checks = 0;
     let requests = 0;
+    const requestMeta = [];
     const budgetGuard = {
       check() {
         checks += 1;
@@ -581,12 +658,16 @@ for (const spec of [
       }
     };
     const provider = spec.make(budgetGuard);
-    spec.stub(provider, () => ++requests);
+    spec.stub(provider, (options) => {
+      requestMeta.push({ task: options.task, attempt: options.attempt });
+      return ++requests;
+    });
     const events = [];
 
     const result = await provider.generate({
       input: "keep spending until stopped",
       agent,
+      task: "autopilot",
       toolRegistry: spec.registry(),
       context: { __onToolEvent: (event) => events.push(event) }
     });
@@ -596,6 +677,10 @@ for (const spec of [
     assert.equal(result.toolCalls.length, 2);
     assert.equal(requests, 2, "the request whose preflight check failed never reaches the provider");
     assert.equal(checks, 3);
+    assert.deepEqual(requestMeta, [
+      { task: "autopilot", attempt: 1 },
+      { task: "autopilot", attempt: 2 }
+    ]);
     assert.match(result.text, /OPENAGI_MAX_TURN_USD|budget cap/i);
     assert.deepEqual(events, [
       { phase: "iteration", n: 1, max: 6 },

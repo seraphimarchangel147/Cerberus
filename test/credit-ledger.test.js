@@ -125,9 +125,43 @@ test("analytics summarizes token and content-free efficiency totals", () => {
   });
 });
 
+test("memory request counters persist and aggregate only when emitted", () => {
+  const L = tmpLedger();
+  const now = new Date("2026-06-06T12:00:00.000Z");
+  const row = L.record(entry({
+    at: "2026-06-06T10:00:00.000Z",
+    efficiency: {
+      memoryBytesInjected: 4096,
+      spillCount: 2,
+      mergesRequested: 3,
+      mergesCompleted: 1
+    }
+  }), { now });
+
+  assert.deepEqual(
+    {
+      memoryBytesInjected: row.efficiency.memoryBytesInjected,
+      spillCount: row.efficiency.spillCount,
+      mergesRequested: row.efficiency.mergesRequested,
+      mergesCompleted: row.efficiency.mergesCompleted
+    },
+    {
+      memoryBytesInjected: 4096,
+      spillCount: 2,
+      mergesRequested: 3,
+      mergesCompleted: 1
+    }
+  );
+  assert.equal(L.analytics({ days: 30, now }).efficiency.memoryBytesInjected, 4096);
+});
+
 test("efficiency rows are bounded, typed, and ignore arbitrary content", () => {
   const L = tmpLedger();
   const row = L.record(entry({
+    task: "secret user-supplied text",
+    attempt: 10 ** 15,
+    inputTokens: 10 ** 15,
+    outputTokens: -5,
     efficiency: {
       requestBytes: -1,
       toolCount: Number.POSITIVE_INFINITY,
@@ -158,7 +192,12 @@ test("efficiency rows are bounded, typed, and ignore arbitrary content", () => {
   assert.equal(row.efficiency.stopReason, null);
   assert.ok(Number.isSafeInteger(row.efficiency.latencyMs));
   assert.ok(row.efficiency.latencyMs > 0);
+  assert.equal(row.task, null);
+  assert.equal(row.attempt, 1_000_000);
+  assert.ok(Number.isSafeInteger(row.inputTokens));
+  assert.equal(row.outputTokens, 0);
   assert.doesNotMatch(JSON.stringify(row.efficiency), /must never|secret user/);
+  assert.doesNotMatch(JSON.stringify(row), /secret user/);
 });
 
 test("analytics keeps pre-efficiency ledger rows compatible", () => {

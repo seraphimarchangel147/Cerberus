@@ -49,6 +49,8 @@ import {
   sameBackgroundMemoryProposal
 } from "./memory-intake-policy.js";
 import { isProfileMemoryScope } from "./memory-system.js";
+import { readableMemoryScopes } from "../lib/memtree.js";
+import { incrementMemoryRequestMetric } from "./memory-request-metrics.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
@@ -3239,6 +3241,19 @@ function memoryScopeForClass(context = {}, memoryClass = "fact") {
     : "main";
 }
 
+function assertReadableMemTreeScope(scope, context = {}) {
+  const requested = String(scope ?? "");
+  const readable = readableMemoryScopes(
+    context?.__memoryScope ?? "main",
+    context?.__profileMemoryScope ?? null
+  );
+  if (!readable.includes(requested)) {
+    const error = new Error("Memory tree range is outside the current scope.");
+    error.code = "PROJECT_BOUNDARY_VIOLATION";
+    throw error;
+  }
+}
+
 function mergeMemoryHits(projectHits, profileHits, limit) {
   const byId = new Map();
   for (const entry of [...(projectHits ?? []), ...(profileHits ?? [])]) {
@@ -3957,6 +3972,135 @@ export function registerCoreTools(registry, runtime) {
     }
   });
 
+  if (runtime.spills) {
+    registry.register({
+      name: "read_spill",
+      description: "Read an exact inclusive line range from a structured oversized tool result. Use the spill id and range shown in its segment skeleton.",
+      sideEffects: false,
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", pattern: "^spill_[a-f0-9]{16}$" },
+          range: {
+            type: "string",
+            pattern: "^[1-9][0-9]{0,8}-[1-9][0-9]{0,8}$",
+            description: "Inclusive 1-based line range, for example 120-180."
+          }
+        },
+        required: ["id", "range"],
+        additionalProperties: false
+      },
+      handler: async ({ id, range }, context) => runtime.spills.read(id, range, {
+        projectId: context?.__projectId ?? context?.projectId ?? "default"
+      })
+    });
+  }
+
+  if (runtime.memtree) {
+    registry.register({
+      name: "memory_wake",
+      description: "Read the current scope's age-decayed memory cover within a hard record budget. Missing summaries are returned as in-band merge requests.",
+      sideEffects: false,
+      parameters: {
+        type: "object",
+        properties: {
+          budget: { type: "integer", minimum: 1, maximum: 4096 }
+        },
+        additionalProperties: false
+      },
+      handler: async ({ budget }, context) => {
+        const result = runtime.memtree.wake({
+          scope: context?.__memoryScope ?? "main",
+          profileScope: context?.__profileMemoryScope ?? null,
+          budget
+        });
+        incrementMemoryRequestMetric(
+          context,
+          "mergesRequested",
+          result.merges.length
+        );
+        return result;
+      }
+    });
+
+    registry.register({
+      name: "memory_zoom",
+      description: "Drill into one pending or summarized memory range without scanning unrelated history.",
+      sideEffects: false,
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", minLength: 1, maxLength: 256 },
+          lo: { type: "integer", minimum: 0 },
+          hi: { type: "integer", minimum: 1 },
+          budget: { type: "integer", minimum: 1, maximum: 64 }
+        },
+        required: ["scope", "lo", "hi"],
+        additionalProperties: false
+      },
+      handler: async ({ scope, lo, hi, budget }, context) => {
+        assertReadableMemTreeScope(scope, context);
+        const result = runtime.memtree.zoom(scope, lo, hi, budget);
+        incrementMemoryRequestMetric(
+          context,
+          "mergesRequested",
+          result.merges.length
+        );
+        return result;
+      }
+    });
+
+    registry.register({
+      name: "memory_merge",
+      description: "Write one concise summary for an exact pending memory range. This updates only the rebuildable tree cache; the append-only memory log is never edited.",
+      sideEffects: true,
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", minLength: 1, maxLength: 256 },
+          lo: { type: "integer", minimum: 0 },
+          hi: { type: "integer", minimum: 1 },
+          line: { type: "string", minLength: 1, maxLength: 1000 }
+        },
+        required: ["scope", "lo", "hi", "line"],
+        additionalProperties: false
+      },
+      handler: async ({ scope, lo, hi, line }, context) => {
+        assertReadableMemTreeScope(scope, context);
+        const result = runtime.memtree.merge(scope, lo, hi, line);
+        incrementMemoryRequestMetric(context, "mergesCompleted");
+        incrementMemoryRequestMetric(
+          context,
+          "mergesRequested",
+          result.merges.length
+        );
+        return result;
+      }
+    });
+
+    registry.register({
+      name: "memory_tree_recall",
+      description: "Run a bounded regular-expression grep over the append-only memory log in scopes visible to this turn.",
+      sideEffects: false,
+      parameters: {
+        type: "object",
+        properties: {
+          regex: { type: "string", minLength: 1, maxLength: 200 },
+          limit: { type: "integer", minimum: 1, maximum: 100 }
+        },
+        required: ["regex"],
+        additionalProperties: false
+      },
+      handler: async ({ regex, limit }, context) => ({
+        matches: runtime.memtree.recall(regex, {
+          scope: context?.__memoryScope ?? "main",
+          profileScope: context?.__profileMemoryScope ?? null,
+          limit
+        })
+      })
+    });
+  }
+
   registry.register({
     name: "project_list",
     sideEffects: false,
@@ -4224,6 +4368,14 @@ export function registerCoreTools(registry, runtime) {
           replaceIds
         }
       );
+      const memtreeProjection = runtime.memory.takeMemTreeProjection?.(item.id);
+      if (memtreeProjection?.merges?.length) {
+        incrementMemoryRequestMetric(
+          context,
+          "mergesRequested",
+          memtreeProjection.merges.length
+        );
+      }
       const external = await invokeExternalMemory(
         runtime.externalMemoryProvider,
         "setUserModel",
@@ -4249,6 +4401,9 @@ export function registerCoreTools(registry, runtime) {
         content: item.content,
         memoryClass,
         replaced: item.metadata?.replaces ?? [],
+        ...(memtreeProjection?.merges?.length
+          ? { memoryMerges: memtreeProjection.merges }
+          : {}),
         ...(external.enabled ? { externalMemory: external.status } : {})
       };
     }

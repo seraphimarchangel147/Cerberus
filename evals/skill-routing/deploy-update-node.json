@@ -1,0 +1,29 @@
+{
+  "skill_name": "deploy-update-node",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Roll out the latest openAGI code to the main host and Mac nodes",
+        "top_k": 1
+      },
+      {
+        "prompt": "Safely restart every node after deploying an update",
+        "top_k": 1
+      },
+      {
+        "prompt": "Ship the new version to both the agent host and iMessage Mac",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Grant screen control permissions while configuring a Mac computer-use node",
+        "owner": "setup-computer-use-node"
+      },
+      {
+        "prompt": "Investigate model failures and excessive token spending",
+        "owner": "diagnose-agent-tool-errors"
+      }
+    ]
+  }
+}

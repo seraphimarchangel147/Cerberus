@@ -129,7 +129,10 @@ function harness(t) {
       }
     }
   };
-  const controller = new ComputerUseController({ runtime, env: {} });
+  const controller = new ComputerUseController({
+    runtime,
+    env: { OPENAGI_DESKTOP_LEASE: "0" }
+  });
   return { controller, calls, dir, log, runtime };
 }
 

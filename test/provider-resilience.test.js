@@ -24,7 +24,7 @@ function fakeResponse(status, body = {}, headers = {}) {
   };
 }
 
-test("requestWithRetry recovers from a retryable 429", async () => {
+test("requestWithRetry classifies a generic 429 and honors its 60-second backoff", async () => {
   const scripted = [
     fakeResponse(429, { error: { message: "slow down" } }),
     fakeResponse(200, { ok: true })
@@ -40,6 +40,26 @@ test("requestWithRetry recovers from a retryable 429", async () => {
   });
 
   assert.equal(response.status, 200);
+  assert.equal(attempts, 2);
+  assert.deepEqual(waits, [60_000]);
+});
+
+test("requestWithRetry kill switch restores the former jittered 429 delay", async () => {
+  const scripted = [
+    fakeResponse(429, { error: { message: "slow down" } }),
+    fakeResponse(200, { ok: true })
+  ];
+  const waits = [];
+  let attempts = 0;
+
+  await requestWithRetry(async () => scripted[attempts++], {
+    retries: 1,
+    baseDelayMs: 100,
+    random: () => 0.5,
+    sleep: async (ms) => { waits.push(ms); },
+    env: { OPENAGI_ERROR_CLASSIFIER: "0" }
+  });
+
   assert.equal(attempts, 2);
   assert.deepEqual(waits, [50]);
 });

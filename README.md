@@ -320,7 +320,9 @@ On connect, each MCP tool becomes a first-class agent tool (`mcp_filesystem_read
 
 ## Skills
 
-Skills are markdown templates the agent can run as sub-prompts. Three are bundled (`recap`, `morning-brief`, `remind`). Add your own at `.openagi/skills/<name>/SKILL.md`:
+Skills are markdown templates the agent can run as sub-prompts. Thirteen are
+bundled under `examples/skills`; add your own at
+`.openagi/skills/<name>/SKILL.md`:
 
 ```markdown
 ---
@@ -342,6 +344,20 @@ User asked: {{input}}
 ```
 
 The skill becomes the `skill_weekly_review` tool and is also runnable from the UI's **Skills** tab. The `replay:` block (optional) makes it executable on the Mac via `replay_skill` with a confirmation modal.
+
+The bundled catalog has deterministic trigger and collision coverage:
+
+```bash
+node scripts/run-skill-routing-evals.js --min-rank1 80
+```
+
+Every bundled skill needs a matching JSON case under `evals/skill-routing`
+with at least three realistic positive prompts and two owner-labeled negative
+prompts. The zero-dependency evaluator ranks prompts against descriptions with
+TF-IDF, rejects ambiguous high-similarity descriptions, and fails CI if the
+unambiguous rank-1 rate drops below 80%. Pass `--skills-dir` and `--cases-dir`
+to audit another catalog. `OPENAGI_SKILL_ROUTING_EVAL=0` is the CI/manual
+kill switch; it has no runtime effect.
 
 ---
 
@@ -433,11 +449,49 @@ Additional defenses:
 
 See `.env.example`. All keys read from `.env` and `~/.openagi/.env` (override the location with `OPENAGI_DATA_DIR`).
 
+### Shared desktop lease
+
+Desktop computer-use sessions coordinate through one host-wide lease file so
+separate agents cannot drive the same physical mouse and keyboard at once. The
+default is `os.tmpdir()/legion-desktop.lease.json`. Set
+`OPENAGI_DESKTOP_LEASE_PATH` to either an exact `.json` file or a shared
+directory, and set `OPENAGI_AGENT_NAME` so contention messages identify the
+holder. WSL and Windows-side harnesses must map this setting to the same
+physical file; independent paths cannot coordinate.
+
+`OPENAGI_DESKTOP_LEASE_TTL_MS` controls crash recovery (default 120 seconds).
+`OPENAGI_DESKTOP_LEASE=0` restores the previous process-local behavior and
+should be used only as an emergency kill switch.
+
 ### Model tiering
 
 You set **one base model** for everything (`OPENAI_MODEL` / `ANTHROPIC_MODEL`). You do **not** need a top model for every internal job — the small, frequent background work (proactive observation, scrutiny judging, memory condensing, session mining, daily recaps) runs fine on a cheaper `mini`/`nano` model, which is where most of the spend hides. Tiering is **opt-in**: until you set a tier, every task stays on the base model.
 
 Run `openagi models` to see the plan — which job runs on which model, why each is safe to shrink, and exactly what to set to start saving.
+
+Complexity floors are staged behind `AGENT_ROUTING=auto`. In auto mode, a
+tool-bearing request is never routed below `mini`, medium contexts are floored
+at `mini`, and contexts around 32k tokens or larger are floored at `base`.
+Escalation is one-way: it cannot downgrade a task below its static profile,
+and explicit model/task pins still win. The default and kill switch is
+`AGENT_ROUTING=static`, which preserves the static router exactly.
+
+No Anthropic tier model is configured automatically. Verify a model ID against
+the live provider before setting it, and leave `ANTHROPIC_MODEL_MINI` unset
+until a distinct model is judged safe for memory-writing jobs.
+
+### Provider failure recovery
+
+Provider 429 responses are classified using both status and error text. Quota
+or billing exhaustion cools the affected credential for one hour (or until a
+provider reset header); an ordinary rate limit cools it for 60 seconds. Other
+configured credentials remain eligible, so a pool can rotate without retrying
+a known-cooled key.
+
+An HTTP 200 model response with no content is retried below the tool loop, so
+recovery cannot replay a tool side effect. Empty responses ending in
+`max_tokens` or `tool_use` remain legitimate. Set
+`OPENAGI_ERROR_CLASSIFIER=0` to restore the former response and retry behavior.
 
 | Variable | What it does |
 |---|---|

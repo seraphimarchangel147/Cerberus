@@ -6,6 +6,7 @@ import { resolveDataDir } from "./data-dir.js";
 import { nowIso, stableHash } from "./utils.js";
 import { pickUserSkillsDir, slugify, dedupeSlug } from "./skill-materialize.js";
 import { appendSkillRevision, loadSkillRevisions } from "./skill-revisions.js";
+import { createOptionalDomainLearningStore } from "./domain-learnings.js";
 
 // Subdirectories inside a skill dir that count as "linked files" — the
 // Hermes convention: a skill can carry deep reference docs, runnable
@@ -47,6 +48,13 @@ export class SkillRegistry {
     this.diagnostics = [];
     this.warn = options.warn ?? ((message) => console.warn(message));
     this.dataDir = options.dataDir ?? resolveDataDir();
+    this.domainLearnings = Object.hasOwn(options, "domainLearnings")
+      ? options.domainLearnings
+      : createOptionalDomainLearningStore({
+          env: options.env ?? process.env,
+          dataDir: this.dataDir,
+          root: options.learningsDir
+        });
     // Durable telemetry (Hermes-style): every view/run bumps a usage
     // counter, every mutation lands in an append-only edit log. This is
     // what lets the dashboard answer "which skills does he actually use,
@@ -151,6 +159,13 @@ export class SkillRegistry {
       "Before acting, scan this list. If a skill matches or is even partially relevant to the task, you MUST load it with use_skill(name) and follow its instructions — err on the side of loading. Skills encode proven workflows, exact commands, and the user's preferred approach; they outperform improvising. If a skill you used was wrong, stale, or missing a step, patch it immediately with edit_skill. Delete irrelevant skills with delete_skill.",
       ...lines
     ].join("\n");
+  }
+
+  domainGuidanceForUrl(url) {
+    if (!this.domainLearnings || typeof this.domainLearnings.loadForUrl !== "function") {
+      return null;
+    }
+    return this.domainLearnings.loadForUrl(url);
   }
 
   mustGet(name) {

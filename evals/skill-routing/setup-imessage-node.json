@@ -1,0 +1,29 @@
+{
+  "skill_name": "setup-imessage-node",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Guide me through setting up a Mac as an iMessage node",
+        "top_k": 1
+      },
+      {
+        "prompt": "Configure a trigger-word relay for incoming texts",
+        "top_k": 3
+      },
+      {
+        "prompt": "Run an iMessage search server on the connected Mac",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Troubleshoot why the assistant no longer replies to iMessages",
+        "owner": "diagnose-no-imessage-replies"
+      },
+      {
+        "prompt": "Configure a Mac for screen and keyboard computer control",
+        "owner": "setup-computer-use-node"
+      }
+    ]
+  }
+}

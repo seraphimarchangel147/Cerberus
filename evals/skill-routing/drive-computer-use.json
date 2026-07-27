@@ -1,0 +1,29 @@
+{
+  "skill_name": "drive-computer-use",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Operate the connected Mac to finish this on-screen task",
+        "top_k": 1
+      },
+      {
+        "prompt": "Take screenshots and control the mouse and keyboard",
+        "top_k": 3
+      },
+      {
+        "prompt": "Use computer control to click through the visible workflow",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Guide me through setting up a Mac computer-use node",
+        "owner": "setup-computer-use-node"
+      },
+      {
+        "prompt": "Configure an iMessage relay and search server",
+        "owner": "setup-imessage-node"
+      }
+    ]
+  }
+}

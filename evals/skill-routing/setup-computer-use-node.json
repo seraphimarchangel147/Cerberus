@@ -1,0 +1,29 @@
+{
+  "skill_name": "setup-computer-use-node",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Guide me through setting up a Mac as a computer-use node",
+        "top_k": 1
+      },
+      {
+        "prompt": "Configure screen capture and mouse control permissions on the Mac",
+        "top_k": 3
+      },
+      {
+        "prompt": "Prepare a connected machine so the agent can see and control its screen",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Operate the connected computer to complete an on-screen task",
+        "owner": "drive-computer-use"
+      },
+      {
+        "prompt": "Set up a Mac as an incoming iMessage relay",
+        "owner": "setup-imessage-node"
+      }
+    ]
+  }
+}
