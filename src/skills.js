@@ -166,7 +166,7 @@ export class SkillRegistry {
       "",
       "",
       "## Skills (mandatory scan)",
-      "Before acting, scan this list. If a skill matches or is even partially relevant to the task, you MUST load it with use_skill(name) and follow its instructions — err on the side of loading. Skills encode proven workflows, exact commands, and the user's preferred approach; they outperform improvising. If a skill you used was wrong, stale, or missing a step, patch it immediately with edit_skill. Delete irrelevant skills with delete_skill.",
+      "Before acting, scan this list. If a skill matches or is even partially relevant to the task, you MUST load it with use_skill(name) and follow its instructions; err on the side of loading. Skills encode proven workflows, exact commands, and user preferences; they outperform improvising. If a skill you used was wrong, stale, or missing a step, patch it immediately with edit_skill. After completing a non-trivial task (5+ tool calls), fixing a tricky error, or discovering a workflow worth repeating, call create_skill to save numbered steps, exact commands, and the pitfalls you hit. If the user corrects your approach, save the corrected version. Skip simple one-offs.",
       ...lines
     ].join("\n");
   }
@@ -471,6 +471,9 @@ export class SkillRegistry {
    */
   patchSkill(name, oldString, newString, by = "agent") {
     const skill = this.mustGet(name);
+    if (skill.pinned) {
+      throw new Error(`Skill '${name}' is pinned; unpin it before editing.`);
+    }
     if (typeof oldString !== "string" || !oldString) throw new Error("patchSkill requires old_string");
     const text = fs.readFileSync(skill.path, "utf8");
     const count = countOverlappingMatches(text, oldString);
@@ -497,6 +500,9 @@ export class SkillRegistry {
    */
   editSkill(name, { description, body, category, systemPrompt } = {}, by = "agent") {
     const skill = this.mustGet(name);
+    if (skill.pinned) {
+      throw new Error(`Skill '${name}' is pinned; unpin it before editing.`);
+    }
     const text = fs.readFileSync(skill.path, "utf8");
     const updates = {};
     if (description !== undefined) updates.description = description;
@@ -519,8 +525,8 @@ export class SkillRegistry {
   }
 
   /**
-   * Pin/unpin. Pinned skills refuse deletion — protection against
-   * irrecoverable loss, not against improvement (patch/edit still work).
+   * Pin/unpin. Pinned skills refuse deletion and edits until explicitly
+   * unpinned.
    */
   setPinned(name, pinned = true, by = "agent") {
     const skill = this.mustGet(name);
@@ -893,7 +899,7 @@ export class SkillRegistry {
     toolRegistry.register({
       name: "edit_skill",
       source: "skill",
-      description: "Improve an existing skill. Preferred: targeted patch via old_string/new_string (old_string must match exactly once). Or pass description/body/category to replace those fields. Patch skills IMMEDIATELY when you find them stale or wrong.",
+      description: "Improve an unpinned skill. Preferred: targeted patch via old_string/new_string (old_string must match exactly once). Or pass description/body/category to replace those fields. Patch skills IMMEDIATELY when you find them stale or wrong.",
       parameters: {
         type: "object",
         properties: {

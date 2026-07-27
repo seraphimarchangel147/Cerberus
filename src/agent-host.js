@@ -58,6 +58,10 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   // model to load matching skills with use_skill. That directive is a lie if
   // use_skill isn't reachable on the chat lane — so it is core.
   "use_skill",
+  // The same prompt tells the model when to author and repair skills. Keep both
+  // authoring tools on this lane so those instructions remain actionable.
+  "create_skill",
+  "edit_skill",
   "goal_status",
   "pause_goal",
   "resume_goal",

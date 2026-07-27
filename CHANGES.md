@@ -1736,7 +1736,8 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - `OPENAGI_SKILL_AUTO_MIN_OCCURRENCES` defaults to `3`; when unset, patterns
   seen fewer than three times stay pending.
 - `OPENAGI_SKILL_AUTO_MAX_PER_DAY` defaults to `3`; when unset, at most three
-  candidates materialize per UTC day. Setting it to `0` stops auto-creation.
+  candidates materialize per UTC day. `off`, `none`, or `unlimited` removes the
+  cap; `0` now throws and directs operators to use `off`.
 - `OPENAGI_CURATOR_PRUNE_BUNDLED` defaults to `off`; when unset, bundled skills
   are always exempt from transitions.
 - `OPENAGI_CURATOR_SCOPE` defaults to `all`; when unset, every unpinned,
@@ -1750,6 +1751,38 @@ UPGRADE BATCH PHASE 1 COMPLETE
   passes 60/60. The required isolated
   `node --test --test-concurrency=1` gate passes 1925/1925 with zero failures
   and zero skips in 363.55 seconds.
+
+## 2026-07-27 - Skill authorship and review queue phase baseline (Codex)
+
+- The required untouched phase baseline is 1901 passing, zero failing, and 24
+  skipped browser-dependent QA tests. Every implementation gate must retain at
+  least 1901 passing tests with zero failures.
+- This clone's isolated WSL baseline ran the optional browser lane and passed
+  1925/1925 with zero failures and zero skips in 468.78 seconds.
+
+## 2026-07-27 - Skill authorship at will (Codex)
+
+- `create_skill` and `edit_skill` are now chat-core and always-direct through
+  tool radar, so resolved conversational model requests retain both authoring
+  schemas after fast-lane and model-tool-budget trimming. `delete_skill` and
+  `pin_skill` remain outside the core surface.
+- The always-on skill index now tells the model to create a reusable procedure
+  after non-trivial work, tricky fixes, repeatable discoveries, or owner
+  corrections; it retains the immediate `edit_skill` repair instruction and
+  no longer encourages reflexive deletion.
+- Agent-authored `create_skill` remains unlimited and keeps the existing
+  default-project preflight and revision path. The changed
+  `OPENAGI_SKILL_AUTO_MAX_PER_DAY` still defaults to `3`; when unset or blank,
+  mined auto-materialization is capped at three per UTC day. `off`, `none`, and
+  `unlimited` now mean no cap, while `0`, negatives, fractions, and invalid
+  values throw with instructions to use `off`.
+- Pinned skills now reject both targeted and full edits until explicitly
+  unpinned. Successful creation and editing still use `appendSkillRevision`,
+  preserving `rollback_skill`.
+- No npm dependency or package manifest changed. Focused authorship, skill
+  registry, project-boundary, tool-radar, and cap coverage passes 85/85. The
+  isolated `node --test --test-concurrency=1` gate passes 1929/1929 with zero
+  failures and zero skips in 353.97 seconds.
 
 - 2026-07-27T09:34:01.345Z · **azazel** · edit `CHANGES.md` — Re-apply Azazel changelog additions onto origin/main version during rebase
 - 2026-07-27T10:39:07.440Z · **azazel** · edit `src/pending-actions.js`

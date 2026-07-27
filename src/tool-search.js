@@ -26,6 +26,8 @@ const ALWAYS_DIRECT_TOOL_NAMES = new Set([
   "list_skills",
   "use_skill",
   "run_skill",
+  "create_skill",
+  "edit_skill",
   "goal_status",
   "pause_goal",
   "resume_goal",

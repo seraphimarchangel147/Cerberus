@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import {
   autoMaterializeCandidates,
-  improveSkills
+  improveSkills,
+  resolveAutoCreationLimit
 } from "../src/skill-autocurator.js";
 import { loadSkillRevisions } from "../src/skill-revisions.js";
 import {
@@ -214,6 +215,41 @@ test("daily cap blocks the fourth skill and resets on the next UTC date", (t) =>
   assert.equal(records.filter(({ filePath }) => (
     JSON.parse(fs.readFileSync(filePath, "utf8")).status === "pending"
   )).length, 0);
+});
+
+test("auto-creation cap accepts explicit unlimited literals and rejects zero", () => {
+  for (const value of ["off", "none", "unlimited"]) {
+    assert.equal(resolveAutoCreationLimit(value), null, value);
+  }
+  assert.equal(resolveAutoCreationLimit(undefined), 3);
+  assert.equal(resolveAutoCreationLimit("7"), 7);
+  assert.throws(
+    () => resolveAutoCreationLimit(0),
+    /OPENAGI_SKILL_AUTO_MAX_PER_DAY.*greater than 0.*use 'off'/u
+  );
+});
+
+test("an unlimited auto-creation cap does not block a fourth candidate", (t) => {
+  const harness = createHarness();
+  t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));
+  for (let index = 1; index <= 4; index += 1) {
+    writeCandidate(harness.dataDir, `sug_unlimited_${index}`, {
+      name: `Unlimited Skill ${index}`
+    });
+  }
+
+  const result = autoMaterializeCandidates({
+    runtime: harness.runtime,
+    now: new Date("2026-07-27T23:00:00.000Z"),
+    env: {
+      OPENAGI_SKILL_AUTOCURATE: "on",
+      OPENAGI_SKILL_AUTO_MAX_PER_DAY: "off"
+    }
+  });
+
+  assert.equal(result.created, 4);
+  assert.equal(result.remainingToday, null);
+  assert.equal(result.skipped.some((entry) => entry.reason === "daily-cap"), false);
 });
 
 test("autocurate off preserves the fully manual pending lane", (t) => {

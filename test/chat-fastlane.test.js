@@ -33,7 +33,7 @@ function isolateEnv(t, keys) {
   });
 }
 
-function makeHarness(scrutinyAction) {
+function makeHarness(scrutinyAction, { sideEffecting = [] } = {}) {
   const requests = [];
   const taskAdds = [];
   const tools = new ToolRegistry();
@@ -41,7 +41,7 @@ function makeHarness(scrutinyAction) {
     tools.register({
       name,
       description: `${name} fixture`,
-      sideEffects: false,
+      sideEffects: sideEffecting.includes(name),
       handler: async () => ({ ok: true })
     });
   }
@@ -141,6 +141,29 @@ test("a plain question in the `act` band fast-lanes (the real casual verdict, no
     null,
     "the fast lane trims schemas only — an `act` turn keeps full (null) invoke-time policy"
   );
+});
+
+test("resolved act chat lane advertises skill authoring tools after trimming", async (t) => {
+  isolateEnv(t, ["OPENAGI_CHAT_MAX_ITERATIONS", "OPENAGI_MAX_MODEL_TOOLS"]);
+  delete process.env.OPENAGI_CHAT_MAX_ITERATIONS;
+  process.env.OPENAGI_MAX_MODEL_TOOLS = String(CHAT_CORE_TOOLS.length);
+
+  const { host, requests } = makeHarness("act", {
+    sideEffecting: ["create_skill", "edit_skill"]
+  });
+  const turn = await host.handleMessage({
+    channel: "discord",
+    from: "creator",
+    sessionId: "skill-authorship-tools",
+    text: "what is the capital of France?"
+  });
+
+  const advertised = requests[0].tools.map((tool) => tool.name);
+  assert.equal(turn.conversational, true);
+  assert.ok(advertised.includes("create_skill"), "create_skill was trimmed");
+  assert.ok(advertised.includes("edit_skill"), "edit_skill was trimmed");
+  assert.ok(advertised.length <= CHAT_CORE_TOOLS.length);
+  assert.deepEqual(requests[0].context.__advertisedTools, CHAT_CORE_TOOLS);
 });
 
 test("the fast-lane gate is band-independent: same casual question fast-lanes whether the live panel calls it ignore, watch, or act", () => {

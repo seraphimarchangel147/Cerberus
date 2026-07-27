@@ -112,14 +112,20 @@ test("editSkill replaces fields, preserves lineage frontmatter", () => {
   assert.equal(s.createdBy, "proactive-observer");
 });
 
-test("pin blocks delete; unpin + delete moves to .trash", () => {
+test("pin blocks edits and delete; unpin + delete moves to .trash", () => {
   const { reg, user } = makeRegistry();
   writeSkill(user, "precious");
   reg.reload();
   reg.setPinned("precious", true);
   assert.equal(reg.mustGet("precious").pinned, true);
-  reg.editSkill("precious", { body: "Pinned skills stay editable." });
-  assert.equal(reg.mustGet("precious").body, "Pinned skills stay editable.");
+  assert.throws(
+    () => reg.editSkill("precious", { body: "Pinned skills stay unchanged." }),
+    /pinned/u
+  );
+  assert.throws(
+    () => reg.patchSkill("precious", "Body", "Changed"),
+    /pinned/u
+  );
   assert.throws(() => reg.deleteSkill("precious"), /pinned/);
   reg.setPinned("precious", false);
   const { trash } = reg.deleteSkill("precious");

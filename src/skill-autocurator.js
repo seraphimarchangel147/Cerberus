@@ -20,6 +20,7 @@ const DEFAULT_AUTO_MAX_PER_DAY = 3;
 const DEFAULT_IMPROVE_MIN_USES = 5;
 const DEFAULT_IMPROVE_MAX_PER_RUN = 2;
 const COUNTER_VERSION = 1;
+const DISABLED_AUTO_LIMITS = new Set(["off", "none", "unlimited"]);
 
 export function autoMaterializeCandidates({
   runtime,
@@ -48,7 +49,8 @@ export function autoMaterializeCandidates({
   const counterPath = path.join(dataDir, "curator", "autocurator.json");
   const state = loadCounterState(counterPath);
   const date = summary.date;
-  let createdToday = state.corrupt
+  const capped = config.maxPerDay !== null;
+  let createdToday = state.corrupt && capped
     ? config.maxPerDay
     : nonnegativeInteger(state.days[date], 0);
   if (state.corrupt) {
@@ -88,7 +90,7 @@ export function autoMaterializeCandidates({
       summary.skipped.push({ id: candidate.id, reason: "active-skill-exists", slug });
       continue;
     }
-    if (createdToday >= config.maxPerDay) {
+    if (capped && createdToday >= config.maxPerDay) {
       summary.skipped.push({ id: candidate.id, reason: "daily-cap" });
       continue;
     }
@@ -150,7 +152,9 @@ export function autoMaterializeCandidates({
   }
 
   summary.createdToday = createdToday;
-  summary.remainingToday = Math.max(0, config.maxPerDay - createdToday);
+  summary.remainingToday = capped
+    ? Math.max(0, config.maxPerDay - createdToday)
+    : null;
   return summary;
 }
 
@@ -315,11 +319,31 @@ function resolveAutoMaterializeConfig(env) {
       env.OPENAGI_SKILL_AUTO_MIN_OCCURRENCES,
       DEFAULT_AUTO_MIN_OCCURRENCES
     ),
-    maxPerDay: nonnegativeInteger(
-      env.OPENAGI_SKILL_AUTO_MAX_PER_DAY,
-      DEFAULT_AUTO_MAX_PER_DAY
-    )
+    maxPerDay: resolveAutoCreationLimit(env.OPENAGI_SKILL_AUTO_MAX_PER_DAY)
   };
+}
+
+export function resolveAutoCreationLimit(raw) {
+  if (raw === undefined || (typeof raw === "string" && raw.trim() === "")) {
+    return DEFAULT_AUTO_MAX_PER_DAY;
+  }
+  if (
+    typeof raw === "string"
+    && DISABLED_AUTO_LIMITS.has(raw.trim().toLowerCase())
+  ) {
+    return null;
+  }
+  const parsed = (
+    typeof raw === "number"
+    || (typeof raw === "string" && raw.trim() !== "")
+  )
+    ? Number(raw)
+    : Number.NaN;
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  throw new TypeError(
+    "OPENAGI_SKILL_AUTO_MAX_PER_DAY must be an integer greater than 0; "
+    + "use 'off' to disable the daily auto-creation cap."
+  );
 }
 
 function loadCounterState(filePath) {

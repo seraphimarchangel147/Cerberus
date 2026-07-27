@@ -198,6 +198,8 @@ test("AgentHost keeps chat-core tools direct and indexes the full eligible omitt
     ...fixtureAdvertised,
     ...TOOL_SEARCH_BRIDGE_NAMES
   ]);
+  assert.ok(requests[0].tools.some((tool) => tool.name === "create_skill"));
+  assert.ok(requests[0].tools.some((tool) => tool.name === "edit_skill"));
   assert.deepEqual(requests[0].context.__advertisedTools, CHAT_CORE_TOOLS);
   assert.equal(requests[0].context.__toolSearchActive, true);
   assert.deepEqual(

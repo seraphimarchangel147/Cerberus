@@ -50,7 +50,10 @@ test("promptIndex tells the model to maintain its own library", () => {
   const index = registryFor(dir).promptIndex();
 
   assert.match(index, /patch it immediately with edit_skill/);
-  assert.match(index, /delete_skill/);
+  assert.match(index, /non-trivial task \(5\+ tool calls\)/);
+  assert.match(index, /call create_skill to save numbered steps/);
+  assert.match(index, /If the user corrects your approach, save the corrected version/);
+  assert.doesNotMatch(index, /delete_skill/);
 });
 
 test("promptIndex clips long descriptions instead of flooding the prompt", () => {
@@ -84,4 +87,11 @@ test("use_skill is reachable on the chat lane the directive targets", () => {
     CHAT_CORE_TOOLS.includes("use_skill"),
     "use_skill must be a chat core tool — the skill index instructs the model to call it"
   );
+});
+
+test("skill authoring tools are reachable on the chat lane their directives target", () => {
+  assert.ok(CHAT_CORE_TOOLS.includes("create_skill"));
+  assert.ok(CHAT_CORE_TOOLS.includes("edit_skill"));
+  assert.equal(CHAT_CORE_TOOLS.includes("delete_skill"), false);
+  assert.equal(CHAT_CORE_TOOLS.includes("pin_skill"), false);
 });
