@@ -1851,3 +1851,27 @@ UPGRADE BATCH PHASE 1 COMPLETE
   pass separately. Raw serial discovery passes 1934 tests and reaches only
   the untouched POSIX mode assertion, where NTFS reports 0666 instead of
   0700. This remains above the required 1912-pass baseline.
+
+## 2026-07-27 - Fail-safe Discord activity routing (Codex)
+
+- Activity routing now resolves only from an event's Discord session or this
+  adapter's configured activity channel. The mutable last-inbound-channel
+  state and its assignment were deleted.
+- Both text and embed feeds pass through one fail-closed destination guard.
+  Configured guild and channel restrictions are cumulative, so two Legion
+  agents in the same guild cannot post traces into each other's configured
+  channels.
+- Unresolved and out-of-allowlist feed items are dropped with a
+  `feed-dropped` diagnostic naming the reason and feed kind.
+- Catastrophic approval cards require a resolvable session and the same
+  allowlist check. A sessionless card is dropped instead of falling back to a
+  home or recently active channel.
+- The owner-reported regression was reproduced before the fix: the required
+  routing file passed 3 tests and failed 5, including the distinct
+  last-active sentinel. The additional same-guild cross-agent test also
+  failed red before the cumulative allowlist guard.
+- No environment variable, npm dependency, or package manifest changed.
+  All 76 Discord tests pass. The serial Windows-compatible full lane passes
+  1939 tests with zero failures and two pre-existing skips; the three
+  compatible mailbox tests pass separately. This remains above the required
+  1912-pass baseline.
