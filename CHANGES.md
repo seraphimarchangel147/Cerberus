@@ -1589,3 +1589,40 @@ UPGRADE BATCH ITEM C COMPLETE
   `node --test --test-concurrency=1` passes 1890/1890 with zero failures and
   zero skips.
 UPGRADE BATCH ITEM E COMPLETE
+
+## 2026-07-27 - Upgrade batch Item F: self-optimization safety patterns (Codex)
+
+- Added a clean-room, Node-stdlib-only self-optimization controller from the
+  four behavioral requirements in the local plan. No
+  world-model-optimizer source was cloned, fetched, inspected, copied, or
+  vendored.
+- Generalized copy-not-guess preconditions into canonical SHA-256 surface
+  snapshots and `applyDelta`: every target hash is verified synchronously
+  before one commit callback can run, duplicate targets fail closed, and
+  proposer-supplied identity fields are rejected in favor of resolver-owned
+  ground truth.
+- Applied the hash gate to the existing scrutiny fitter. Staged multi-judge
+  weight changes now reject atomically when any live surface is stale, persist
+  the complete verified set before changing live weights, and audit previous
+  and successor hashes through the existing JSONL history.
+- Wired completion-evidence reports into an objective optimization reward
+  without preempting user feedback. Unsupported success claims score zero;
+  honest incomplete work retains requirement-level partial credit; structured
+  test summaries retain exact passed/total credit instead of collapsing to a
+  binary result.
+- Added deterministic failure signatures and bounded clustering from
+  structured status, code, missing-evidence, test-count, and tool-receipt
+  fields only. Assistant prose is never incorporated into a failure label.
+- Added strict-improvement selection: equal-scoring successors cannot replace
+  the incumbent, and equal better successors retain their earliest stable
+  order, preventing neutral-score drift.
+- Kill switch: `OPENAGI_SELF_OPTIMIZATION` is setup-wizard allowlisted and
+  default-off. Any value other than `1` omits the controller, outcome reward,
+  and fitter hash/reward paths.
+- Added zero npm dependencies. The implementation adds no agent-facing tools,
+  dynamic imports, external services, routing changes, or telemetry vendors.
+- Validation: focused self-optimization, completion-evidence, outcome, and
+  runtime coverage passes 135/135. Required isolated
+  `node --test --test-concurrency=1` passes 1900/1900 with zero failures and
+  zero skips.
+UPGRADE BATCH ITEM F COMPLETE

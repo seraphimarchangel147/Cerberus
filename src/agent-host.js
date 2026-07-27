@@ -1309,6 +1309,20 @@ export class AgentHost {
       inputAbortSignal?.removeEventListener?.("abort", onInputAbort);
     }
 
+    let selfOptimizationReward = null;
+    if (!ephemeral && this.runtime.selfOptimization?.judgeCompletion) {
+      try {
+        selfOptimizationReward = this.runtime.selfOptimization.judgeCompletion({
+          completionEvidence: modelResult.completionEvidence ?? null,
+          assistantText: modelResult.text,
+          toolCalls: modelResult.toolCalls ?? []
+        });
+      } catch {
+        // Optimization telemetry must never turn a completed user turn into a failure.
+        selfOptimizationReward = null;
+      }
+    }
+
     const outcomeRecord = ephemeral ? null : this.runtime.outcomes?.record({
       kind: input.origin === "autopilot" ? "autopilot-fire" : input.origin === "cron" ? "cron-fire" : "agent-reply",
       refId: null, // patched after we know assistant message id
@@ -1328,6 +1342,9 @@ export class AgentHost {
         askDamped,
         conversational,
         completionEvidence: modelResult.completionEvidence ?? null,
+        ...(selfOptimizationReward
+          ? { selfOptimization: selfOptimizationReward }
+          : {}),
         scrutinyCeilingApplied,
         effectiveScrutinyAction: verdict,
         verdictOverrideReason,

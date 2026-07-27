@@ -35,6 +35,10 @@ import { MemoryCondenser } from "./memory-condenser.js";
 import { ObservationStore } from "./observation-store.js";
 import { buildAmbientDigest } from "./ambient-digest.js";
 import { OutcomeStore } from "./outcome-store.js";
+import {
+  createOptionalSelfOptimizationController,
+  selfOptimizationEnabled
+} from "./self-optimization.js";
 import { SessionIndex } from "./session-index.js";
 import { Introspector } from "./introspector.js";
 import { PatternMiner } from "./pattern-miner.js";
@@ -564,6 +568,10 @@ export class AbiRuntime {
     this.skills = options.skills ?? null;
     this.budget = options.budget ?? new BudgetGuard(options.budgetOptions ?? {});
     this.outcomes = options.outcomes ?? new OutcomeStore(options.outcomeOptions ?? {});
+    this.selfOptimization = selfOptimizationEnabled(runtimeEnv)
+      ? options.selfOptimization
+        ?? createOptionalSelfOptimizationController({ env: runtimeEnv })
+      : null;
     this.observations = options.observations ?? new ObservationStore(options.observationOptions ?? {});
     // FTS5 index over the agent's own chat transcripts, so search_sessions can
     // answer "what did we decide about X?" from the raw conversation record.
