@@ -13161,9 +13161,11 @@ switchTab(initialTab);
     pxEllipse(ctx, 40, 150, 17, 6, pal.outline);
     pxEllipse(ctx, 118, 150, 17, 6, pal.outline);
 
-    /* sprite blit — high-fidelity baked body. Returns false until the PNG
-       decodes (~1 frame), so the procedural body below is the fallback. */
-    if (!drawOmegaSprite(ctx, P)) {
+    /* Procedural animated body — the baked PNG sprite (drawOmegaSprite) renders
+       a static raster that only translates as a whole, killing all per-part
+       motion (breathing, jaw chatter, head sway, blinks, claw flex). Creator
+       wants the whole thing animated, so the procedural rig is authoritative. */
+    if (true) {
 
     /* torso — broad inverted trapezoid, chest out, cropped at the forelimbs */
     pxEllipse(ctx, 80, 108+breathe*0.5, 44, 26, pal.furDark);
@@ -13176,11 +13178,20 @@ switchTab(initialTab);
     ctx.globalAlpha = 0.10;
     pxEllipse(ctx, 80, 102+breathe*0.5, 20, 13, pal.lava2);
     ctx.globalAlpha = 1;
-    /* two distinct pec masses flanking the chest gem */
-    pxEllipse(ctx, 62, 100+breathe, 13, 11, pal.furMid);
-    pxEllipse(ctx, 98, 100+breathe, 13, 11, pal.furMid);
-    pxEllipse(ctx, 60, 96+breathe, 7, 5, pal.furLight);
-    pxEllipse(ctx, 100, 96+breathe, 7, 5, pal.furLight);
+    /* two distinct pec masses flanking the chest gem — each lobe catches light
+       on its top face (furLight + furHi rim) so the chest reads as stacked
+       muscle catching firelight, not one flat dark mass */
+    pxEllipse(ctx, 62, 101+breathe, 14, 12, pal.furMid);
+    pxEllipse(ctx, 98, 101+breathe, 14, 12, pal.furMid);
+    pxEllipse(ctx, 60, 96+breathe, 9, 6, pal.furLight);
+    pxEllipse(ctx, 100, 96+breathe, 9, 6, pal.furLight);
+    pxEllipse(ctx, 58, 94+breathe, 5, 3, pal.furHi);
+    pxEllipse(ctx, 102, 94+breathe, 5, 3, pal.furHi);
+    /* shoulder/deltoid masses capping the forelimbs, lit from the lava below */
+    pxEllipse(ctx, 46, 97+shoulderB, 10, 9, pal.furMid);
+    pxEllipse(ctx, 114, 97+shoulderB, 10, 9, pal.furMid);
+    pxEllipse(ctx, 44, 94+shoulderB, 6, 4, pal.furLight);
+    pxEllipse(ctx, 116, 94+shoulderB, 6, 4, pal.furLight);
     omegaVeins(ctx, 80, 104+breathe*0.5, flick, pal);
 
     /* forelimbs — massive, planted, angled outward */
