@@ -11599,7 +11599,9 @@ switchTab(initialTab);
   ];
   var FPS = 15, FRAME_MS = 1000 / FPS;
   var TICKS_PER_FRAME = Math.round(60 / FPS);
-  var MAXW = 112, MAXH = 88;   /* biggest buffer; smaller forms centered */
+  /* Buffer size is per-form (w*res × h*res) and the display canvas tracks the
+     active form, so there is no single global MAX — each form carries its own
+     resolution via FORMS[i].res. */
 
   /* ── palettes ── */
   var PAL = {   /* PUP — 16-bit */
@@ -12510,25 +12512,29 @@ switchTab(initialTab);
   /* OMEGA-only CRT scanline overlay. source-atop compositing means the
      scanlines only texture the creature's own pixels — they never paint the
      transparent background, so no rectangular canvas edge / box is visible. */
-  function applyScanlines(ctx, W, H) {
+  function applyScanlines(ctx, W, H, res) {
+    res = res||1;
     ctx.save();
     ctx.globalCompositeOperation = "source-atop";
     ctx.globalAlpha = 0.09; ctx.fillStyle = "#000000";
-    for (var y=0; y<H; y+=3) ctx.fillRect(0, y, W, 1);
+    for (var y=0; y<H; y+=3*res) ctx.fillRect(0, y, W, Math.max(1,res));
     ctx.restore();
   }
 
   var embers = [];
   for (var ei2=0; ei2<8; ei2++) embers.push({x:6+Math.random()*100, y:8+Math.random()*70, vy:0.12+Math.random()*0.22, c:Math.random()});
-  function drawEmbers(ctx, t, W, H, pal) {
+  function drawEmbers(ctx, t, W, H, res, pal) {
+    /* Ember positions live in logical (1×, 112×88) space and are scaled by res
+       at draw time, so the ambient drift looks identical at any density. */
+    res = res||1;
     for (var i=0;i<embers.length;i++) {
       var e = embers[i];
       e.y -= e.vy; e.x += Math.sin(t.flick*0.1 + e.c*10)*0.18;
-      if (e.y < 3) { e.y = H-4; e.x = 6+Math.random()*(W-12); }
+      if (e.y < 3) { e.y = 84; e.x = 6+Math.random()*100; }
       var a = Math.min(1, (e.y-3)/16);
       ctx.globalAlpha = a;
       ctx.fillStyle = e.c>0.5 ? pal.flameYel : pal.flameOrg;
-      ctx.fillRect(Math.round(e.x), Math.round(e.y), 1, 1);
+      ctx.fillRect(Math.round(e.x*res), Math.round(e.y*res), res, res);
       ctx.globalAlpha = 1;
     }
   }
@@ -12546,13 +12552,17 @@ switchTab(initialTab);
   /* ── canvas element ── */
   var canvas = document.createElement("canvas");
   canvas.id = "cerbPet";
-  canvas.width = MAXW; canvas.height = MAXH;
   canvas.style.cssText = "position:fixed;z-index:9999;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;";
   document.body.appendChild(canvas);
   var nctx = canvas.getContext("2d");
 
   function applyCanvasStyle() {
-    var F = FORMS[settings.stage], sc = settings.scale;
+    var F = FORMS[settings.stage], sc = settings.scale, res = F.res||1;
+    /* Internal resolution tracks the form's buffer (res× for HD forms) so the
+       display canvas never upsamples the sprite; the CSS size below is what
+       sets the on-screen footprint, and it stays at the logical w/h × scale so
+       an HD form occupies exactly the same space as before — just crisper. */
+    canvas.width = F.w*res; canvas.height = F.h*res;
     canvas.style.width = (F.w*sc) + "px";
     canvas.style.height = (F.h*sc) + "px";
     canvas.style.filter = settings.glow ? "drop-shadow(0 0 6px rgba(224,69,26,0.45)) drop-shadow(0 4px 8px rgba(0,0,0,0.6))" : "none";
@@ -12893,13 +12903,21 @@ switchTab(initialTab);
     var octx = b.ctx;
     var Fm = FORMS[stage];
     var pal = PALS[Fm.pal];
+    var res = Fm.res||1;
+    if (res > 1) {
+      /* High-density form: draw the existing logical-space art through a
+         res-scale so every primitive lands at res× fidelity, then post-process
+         at full buffer resolution. Same silhouette, dramatically more detail. */
+      octx.save(); octx.scale(res, res);
+    }
     if (stage === 0) { if (P.view==="front") drawPupFront(octx,P); else drawPupSide(octx,P); }
     else if (stage === 1) { if (P.view==="front") drawPrimeFront(octx,P); else drawPrimeSide(octx,P); }
     else if (stage === 2) { if (P.view==="front") drawUltraFront(octx,P); else drawUltraSide(octx,P); }
     else { if (P.view==="front") drawOmegaFront(octx,P); else drawOmegaSide(octx,P); }
-    applyRim(octx, Fm.w, Fm.h, pal);
-    applyOutline(octx, Fm.w, Fm.h, pal.outline);
-    return { canvas:b.canvas, w:Fm.w, h:Fm.h, pal:pal };
+    if (res > 1) octx.restore();
+    applyRim(octx, Fm.w*res, Fm.h*res, pal);
+    applyOutline(octx, Fm.w*res, Fm.h*res, pal.outline);
+    return { canvas:b.canvas, w:Fm.w*res, h:Fm.h*res, pal:pal };
   }
 
   function tick(now) {
@@ -13005,23 +13023,38 @@ switchTab(initialTab);
     /* render the right form into its buffer */
     renderForm(settings.stage, P);
     var b = bufs[settings.stage];
-    var sw = F.w, sh = F.h;
+    var res = F.res||1;
+    var sw = F.w*res, sh = F.h*res;   /* buffer (pixel) size of the current form */
+    var DW = canvas.width, DH = canvas.height;   /* display buffer size */
     var pal = PALS[F.pal];
 
-    nctx.clearRect(0,0,MAXW,MAXH);
+    nctx.clearRect(0,0,DW,DH);
 
     if (evolving) {
       /* 3-phase evolution: charge-up glow + inward streaks -> bright flash ->
          new form emerges with thick expanding shockwave rings + outward burst.
          Effects are deliberately bold so the moment reads at any scale. */
-      var cx=MAXW/2, cy=MAXH*0.55;
       var oldStage = settings.stage;
       var newStage = Math.min(3, settings.stage + 1);
+      var Fnew = FORMS[newStage];
+      var resNew = Fnew.res||1;
+      /* Size the display canvas to the EMERGING form's buffer for the duration
+         of the transition, so a higher-density form (OMEGA at 2×) is never
+         clipped to the old form's smaller canvas. The CSS footprint grows to
+         the new form's logical size at the same moment the charge-up begins,
+         reading as the creature swelling with energy. */
+      if (canvas.width !== Fnew.w*resNew || canvas.height !== Fnew.h*resNew) {
+        canvas.width = Fnew.w*resNew; canvas.height = Fnew.h*resNew;
+        canvas.style.width = (Fnew.w*settings.scale) + "px";
+        canvas.style.height = (Fnew.h*settings.scale) + "px";
+      }
+      DW = canvas.width; DH = canvas.height;
+      var cx=DW/2, cy=DH*0.55;
       var rold = renderForm(oldStage, P);
       var rnew = renderForm(newStage, P);
-      var oxOld = Math.round((MAXW-rold.w)/2), oyOld = MAXH-rold.h;
-      var oxNew = Math.round((MAXW-rnew.w)/2), oyNew = MAXH-rnew.h;
-      var shake = (evolveT < 0.4) ? Math.sin(frame*1.5)*(evolveT/0.4)*3 : 0;
+      var oxOld = Math.round((DW-rold.w)/2), oyOld = DH-rold.h;
+      var oxNew = Math.round((DW-rnew.w)/2), oyNew = DH-rnew.h;
+      var shake = (evolveT < 0.4) ? Math.sin(frame*1.5)*(evolveT/0.4)*3*resNew : 0;
       nctx.save();
       if (evolveT < 0.5) {
         /* PHASE 1 — old form charges up: glows white-hot, shakes, energy streaks IN */
@@ -13036,10 +13069,10 @@ switchTab(initialTab);
         /* inward energy streaks — each drawn as a short radial line so motion reads */
         for (var ep=0; ep<12; ep++) {
           var ang = ep*(Math.PI*2/12) + frame*0.05;
-          var radOut = (1-p1)*46 + 6;
-          var radIn = radOut - 9;
+          var radOut = ((1-p1)*46 + 6)*resNew;
+          var radIn = radOut - 9*resNew;
           nctx.globalAlpha = (0.4 + 0.5*p1);
-          nctx.strokeStyle = ep%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 2;
+          nctx.strokeStyle = ep%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 2*resNew;
           nctx.beginPath();
           nctx.moveTo(cx+Math.cos(ang)*radOut, cy+Math.sin(ang)*radOut*0.7);
           nctx.lineTo(cx+Math.cos(ang)*radIn, cy+Math.sin(ang)*radIn*0.7);
@@ -13053,11 +13086,11 @@ switchTab(initialTab);
         var flashA = Math.max(0, 1 - t2*1.6);
         nctx.globalAlpha = flashA*0.85;
         nctx.fillStyle = "#fff8e0";
-        nctx.fillRect(0, 0, MAXW, MAXH);
+        nctx.fillRect(0, 0, DW, DH);
         /* central bloom */
         nctx.globalAlpha = Math.max(0, 1-t2);
         nctx.fillStyle = "#fffef0";
-        nctx.beginPath(); nctx.arc(cx, cy, 12+t2*46, 0, Math.PI*2); nctx.fill();
+        nctx.beginPath(); nctx.arc(cx, cy, (12+t2*46)*resNew, 0, Math.PI*2); nctx.fill();
         /* new form fades in over the flash */
         nctx.globalAlpha = Math.min(1, t2*1.5);
         nctx.drawImage(rnew.canvas, oxNew, oyNew);
@@ -13066,17 +13099,17 @@ switchTab(initialTab);
         for (var rr=0; rr<3; rr++) {
           var rt = Math.min(1, t2*1.2 + rr*0.18);
           nctx.globalAlpha = (1-rt)*0.9;
-          nctx.strokeStyle = rr%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 3;
-          nctx.beginPath(); nctx.arc(cx, cy, rt*58, 0, Math.PI*2); nctx.stroke();
+          nctx.strokeStyle = rr%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 3*resNew;
+          nctx.beginPath(); nctx.arc(cx, cy, rt*58*resNew, 0, Math.PI*2); nctx.stroke();
         }
         /* outward particle burst with short trails so motion reads */
         for (var bp=0; bp<16; bp++) {
           var bang = bp*(Math.PI*2/16) + 0.2;
-          var brad = t2*54;
-          var brad0 = Math.max(0, brad-8);
+          var brad = t2*54*resNew;
+          var brad0 = Math.max(0, brad-8*resNew);
           nctx.globalAlpha = (1-t2);
           nctx.strokeStyle = bp%3===0 ? "#fff4d0" : (bp%2 ? "#ffd878" : "#ff5a00");
-          nctx.lineWidth = 2;
+          nctx.lineWidth = 2*resNew;
           nctx.beginPath();
           nctx.moveTo(cx+Math.cos(bang)*brad0, cy+Math.sin(bang)*brad0*0.75);
           nctx.lineTo(cx+Math.cos(bang)*brad, cy+Math.sin(bang)*brad*0.75);
@@ -13086,22 +13119,22 @@ switchTab(initialTab);
       }
       nctx.restore();
     } else {
-      var ox = Math.round((MAXW-sw)/2), oy = MAXH-sh;
-      pxEllipse(nctx, MAXW/2, MAXH-2, Math.round(sw*0.42), 2, "rgba(0,0,0,0.5)");
+      var ox = Math.round((DW-sw)/2), oy = DH-sh;
+      pxEllipse(nctx, DW/2, DH-2*res, Math.round(sw*0.42), 2*res, "rgba(0,0,0,0.5)");
       nctx.save();
-      if (P.view === "side" && facing > 0) { nctx.translate(MAXW, 0); nctx.scale(-1, 1); ox = MAXW-ox-sw; }
+      if (P.view === "side" && facing > 0) { nctx.translate(DW, 0); nctx.scale(-1, 1); ox = DW-ox-sw; }
       nctx.drawImage(b.canvas, ox, oy);
       nctx.restore();
 
-      /* egg FX layered on the display buffer (in MAXW space) */
-      var fcx = MAXW/2;
+      /* egg FX layered on the display buffer (in buffer-pixel space) */
+      var fcx = DW/2;
       if (P.nova) {   /* golden shockwave rings */
         nctx.save();
         for (var nr=0; nr<3; nr++) {
           var rt = (P.nova + nr*0.18) % 1;
           nctx.globalAlpha = (1-rt)*0.8;
-          nctx.strokeStyle = nr%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 2;
-          nctx.beginPath(); nctx.arc(fcx, MAXH*0.55, rt*52, 0, Math.PI*2); nctx.stroke();
+          nctx.strokeStyle = nr%2 ? "#ffd878" : "#ff9a2a"; nctx.lineWidth = 2*res;
+          nctx.beginPath(); nctx.arc(fcx, DH*0.55, rt*52*res, 0, Math.PI*2); nctx.stroke();
         }
         nctx.restore();
       }
@@ -13109,31 +13142,31 @@ switchTab(initialTab);
         nctx.save();
         for (var mr=0; mr<7; mr++) {
           var mt = ((frame*0.05 + mr*0.14) % 1);
-          var mxp = fcx-40 + ((mr*29)%80);
-          var myp = mt*MAXH*0.7;
+          var mxp = fcx-40*res + ((mr*29*res)%(80*res));
+          var myp = mt*DH*0.7;
           nctx.globalAlpha = (1-mt)*P.meteor;
           nctx.fillStyle = mr%2 ? "#ffd84a" : "#ff5a00";
-          nctx.fillRect(Math.round(mxp), Math.round(myp), 2, 3);
+          nctx.fillRect(Math.round(mxp), Math.round(myp), 2*res, 3*res);
           nctx.fillStyle = "#fff0b0";
-          nctx.fillRect(Math.round(mxp), Math.round(myp)-1, 1, 1);
+          nctx.fillRect(Math.round(mxp), Math.round(myp)-res, res, res);
         }
         nctx.restore();
       }
       if (P.gate) {   /* realm gate shimmer — vertical portal bars */
         nctx.save();
         for (var gr=0; gr<5; gr++) {
-          var gxp = fcx-24 + gr*12;
+          var gxp = fcx-24*res + gr*12*res;
           nctx.globalAlpha = (0.3+0.3*Math.sin(frame*0.2+gr))*P.gate;
           nctx.fillStyle = gr%2 ? "#ffd878" : "#ff5a1e";
-          nctx.fillRect(Math.round(gxp), Math.round(MAXH*0.2), 2, Math.round(MAXH*0.5));
+          nctx.fillRect(Math.round(gxp), Math.round(DH*0.2), 2*res, Math.round(DH*0.5));
         }
         nctx.restore();
       }
     }
-    drawEmbers(nctx, P, MAXW, MAXH, pal);
+    drawEmbers(nctx, P, DW, DH, res, pal);
 
     /* OMEGA gets the CRT scanline + vignette overlay on top */
-    if (settings.stage === 3 && !evolving) applyScanlines(nctx, MAXW, MAXH);
+    if (settings.stage === 3 && !evolving) applyScanlines(nctx, DW, DH, res);
 
     var sc = settings.scale;
     var dispW = F.w*sc, dispH = F.h*sc;
