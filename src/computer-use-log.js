@@ -72,6 +72,7 @@ export class ComputerUseLog {
   }
 
   startSession({
+    id = null,
     goal,
     approvedBy,
     projectId = null,
@@ -80,7 +81,7 @@ export class ComputerUseLog {
     maxActions = 40
   }) {
     const session = {
-      id: createId("cus"),
+      id: optionalControlSessionId(id) ?? createId("cus"),
       goal: String(goal ?? "").slice(0, 500),
       approvedBy: approvedBy ?? "user",
       projectId: optionalIdentifier(projectId),
@@ -104,6 +105,27 @@ export class ComputerUseLog {
       session: structuredClone(session)
     });
     return session;
+  }
+
+  recordLeaseEvent(kind, details = {}) {
+    const allowed = new Set([
+      "lease-acquired",
+      "lease-renewed",
+      "lease-released",
+      "lease-stolen",
+      "lease-contended"
+    ]);
+    if (!allowed.has(kind)) {
+      throw new TypeError(`Unknown computer-use lease event '${kind}'.`);
+    }
+    const event = {
+      kind,
+      at: nowIso(),
+      details: sanitizeValue(details, 0)
+    };
+    this._appendJournal({ op: "lease-event", event });
+    this.events?.emit?.("computer-use", structuredClone(event));
+    return event;
   }
 
   endSession(id, { reason, status = "ended" } = {}) {
@@ -459,6 +481,15 @@ function optionalSessionId(value) {
   const text = String(value).trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(text)) {
     throw new TypeError("Computer-use agentSessionId is invalid.");
+  }
+  return text;
+}
+
+function optionalControlSessionId(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const text = String(value).trim();
+  if (!/^cus_[A-Za-z0-9]{1,64}$/.test(text)) {
+    throw new TypeError("Computer-use control session id is invalid.");
   }
   return text;
 }

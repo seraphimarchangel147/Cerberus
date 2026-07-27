@@ -2,6 +2,32 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-27 - Upgrade batch work item A: Legion-wide desktop lease (Codex)
+
+Closed the live correctness hazard where separate agent sessions could both
+pass their local computer-use guard and drive one shared physical desktop:
+
+- Added a host-wide, atomic desktop lease with actionable agent/session
+  identity, TTL and same-host PID liveness recovery, re-entrant acquisition,
+  generation-counted takeover, and structured contention/lost-lease errors.
+- Desktop sessions acquire before their durable session record, renew before
+  every controller action, abort immediately if ownership changed, and release
+  idempotently on normal end or startup failure.
+- Lease acquisition, renewal, release, takeover, and contention now use the
+  existing `ComputerUseLog` JSONL event channel. Browser-only sessions retain
+  their prior behavior.
+- Added setup-allowlisted configuration for
+  `OPENAGI_DESKTOP_LEASE`, `OPENAGI_DESKTOP_LEASE_TTL_MS`,
+  `OPENAGI_DESKTOP_LEASE_PATH`, and `OPENAGI_AGENT_NAME`; setting the first to
+  `0` is the exact-behavior kill switch.
+- Documented cross-WSL/Windows shared-path requirements and added the seven
+  required lease regressions plus a no-orphan/audit integration check.
+- No package manifest changed and no dependency was added.
+
+Verification: focused computer-use/lease/ABI lane 129 passed, 0 failed; full
+isolated `node --test --test-concurrency=4` lane on Node 25.5.0: 1829 passed,
+0 failed.
+
 ## 2026-07-26 — Changelog backfill: six undocumented commits (Seraphim)
 
 Audited the last 30 commits against this file and found **six that shipped code with no entry**.

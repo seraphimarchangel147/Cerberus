@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { redactKnownValues } from "./redact.js";
 import { secretRedactionSpellings } from "./credential-redaction.js";
 import { secretsStoreRedactionSnapshot } from "./secrets-store.js";
+import { DesktopLease } from "./desktop-lease.js";
+import { createId } from "./utils.js";
 
 const DEFAULT_MAX_ACTIONS = 40;
 const MAX_ACTIONS = 200;
@@ -18,6 +20,7 @@ export class ComputerUseController {
     this.log = runtime.computerUseLog;
     this.fetchImpl = fetchImpl;
     this.env = env;
+    this.lease = new DesktopLease({ runtime, log: this.log, env });
   }
 
   capabilities(context = {}) {
@@ -73,16 +76,28 @@ export class ComputerUseController {
     const browserContext = surface === "browser"
       ? this._browserContext(context)
       : null;
-    const session = this.log.startSession({
-      goal,
-      approvedBy: context.__confirmed === true ? "user-or-policy" : "user",
-      projectId: owner.projectId,
-      agentSessionId: owner.agentSessionId,
-      surface,
-      maxActions
-    });
+    let leasedSessionId = null;
+    let session = null;
     let initialObservation = null;
     try {
+      if (surface === "desktop" && this.lease.enabled) {
+        const lease = this.lease.acquire({
+          sessionId: createId("cus"),
+          goal,
+          projectId: owner.projectId,
+          agentSessionId: owner.agentSessionId
+        });
+        leasedSessionId = lease.sessionId;
+      }
+      session = this.log.startSession({
+        ...(leasedSessionId ? { id: leasedSessionId } : {}),
+        goal,
+        approvedBy: context.__confirmed === true ? "user-or-policy" : "user",
+        projectId: owner.projectId,
+        agentSessionId: owner.agentSessionId,
+        surface,
+        maxActions
+      });
       if (surface === "browser") {
         initialObservation = await this.runtime.semanticBrowser.open(
           { url: args.url ?? null },
@@ -91,10 +106,13 @@ export class ComputerUseController {
         this._recordBrowserObservation(session, initialObservation, "open");
       }
     } catch (error) {
-      this.log.endSession(session.id, {
-        reason: safeError(error),
-        status: "aborted"
-      });
+      if (session) {
+        this.log.endSession(session.id, {
+          reason: safeError(error),
+          status: "aborted"
+        });
+      }
+      if (leasedSessionId) this.lease.release(leasedSessionId);
       throw error;
     }
     return {
@@ -122,19 +140,25 @@ export class ComputerUseController {
         browserClosed = { closed: false, error: safeError(error) };
       }
     }
-    this.log.endSession(session.id, {
-      reason: this._auditText(
-        optionalText(args.reason, 500) ?? "session closed",
-        500
-      ),
-      status: args.aborted === true ? "aborted" : "ended"
-    });
-    return {
-      ended: true,
-      sessionId: session.id,
-      surface: session.surface,
-      browserClosed
-    };
+    try {
+      this.log.endSession(session.id, {
+        reason: this._auditText(
+          optionalText(args.reason, 500) ?? "session closed",
+          500
+        ),
+        status: args.aborted === true ? "aborted" : "ended"
+      });
+      return {
+        ended: true,
+        sessionId: session.id,
+        surface: session.surface,
+        browserClosed
+      };
+    } finally {
+      if (session.surface === "desktop") {
+        this.lease.release(session.id);
+      }
+    }
   }
 
   async observe(args = {}, context = {}) {
@@ -636,6 +660,18 @@ export class ComputerUseController {
       throw new Error(
         "No active computer-use session for this project session. Call start_computer_use_session first."
       );
+    }
+    if (session.surface === "desktop") {
+      try {
+        this.lease.renew(session.id);
+      } catch (error) {
+        this.log.endSession(session.id, {
+          reason: safeError(error),
+          status: "aborted"
+        });
+        this.lease.release(session.id);
+        throw error;
+      }
     }
     return session;
   }

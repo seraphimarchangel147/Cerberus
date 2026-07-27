@@ -433,6 +433,20 @@ Additional defenses:
 
 See `.env.example`. All keys read from `.env` and `~/.openagi/.env` (override the location with `OPENAGI_DATA_DIR`).
 
+### Shared desktop lease
+
+Desktop computer-use sessions coordinate through one host-wide lease file so
+separate agents cannot drive the same physical mouse and keyboard at once. The
+default is `os.tmpdir()/legion-desktop.lease.json`. Set
+`OPENAGI_DESKTOP_LEASE_PATH` to either an exact `.json` file or a shared
+directory, and set `OPENAGI_AGENT_NAME` so contention messages identify the
+holder. WSL and Windows-side harnesses must map this setting to the same
+physical file; independent paths cannot coordinate.
+
+`OPENAGI_DESKTOP_LEASE_TTL_MS` controls crash recovery (default 120 seconds).
+`OPENAGI_DESKTOP_LEASE=0` restores the previous process-local behavior and
+should be used only as an emergency kill switch.
+
 ### Model tiering
 
 You set **one base model** for everything (`OPENAI_MODEL` / `ANTHROPIC_MODEL`). You do **not** need a top model for every internal job — the small, frequent background work (proactive observation, scrutiny judging, memory condensing, session mining, daily recaps) runs fine on a cheaper `mini`/`nano` model, which is where most of the spend hides. Tiering is **opt-in**: until you set a tier, every task stays on the base model.
