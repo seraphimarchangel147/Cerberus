@@ -234,21 +234,32 @@ export class PendingActionStore {
     if (decision === "deny" || result !== undefined || error !== undefined) {
       next.completedAt = nowIso();
     }
-    this._assertTransitionCapacity(next);
-    this._commitActionTransition(id, next, {
+    // The full result always flows to live waiters below; only the durable
+    // record is bounded, so an oversized tool result cannot fail the decision
+    // after the side effect already ran.
+    const persistedDecision = withBoundedResultForPersistence(next, this.maxActionBytes);
+    if (persistedDecision.truncated) {
+      console.warn(
+        `[pending-actions] ${id}: decision result exceeded the ` +
+        `${this.maxActionBytes}-byte persistence cap; the durable record was ` +
+        "truncated after the full result was delivered to the live caller."
+      );
+    }
+    this._assertTransitionCapacity(persistedDecision.action);
+    this._commitActionTransition(id, persistedDecision.action, {
       op: "decide",
       id,
-      status: next.status,
-      decidedAt: next.decidedAt,
-      completedAt: next.completedAt,
-      decidedBy: next.decidedBy,
-      approvedVia: next.approvedVia,
-      decider: next.decider,
-      deciderDisplayName: next.deciderDisplayName,
-      result,
-      error,
-      outcome,
-      receipt
+      status: persistedDecision.action.status,
+      decidedAt: persistedDecision.action.decidedAt,
+      completedAt: persistedDecision.action.completedAt,
+      decidedBy: persistedDecision.action.decidedBy,
+      approvedVia: persistedDecision.action.approvedVia,
+      decider: persistedDecision.action.decider,
+      deciderDisplayName: persistedDecision.action.deciderDisplayName,
+      result: persistedDecision.action.result,
+      error: persistedDecision.action.error,
+      outcome: persistedDecision.action.outcome,
+      receipt: persistedDecision.action.receipt
     });
     next._resolveDecision?.({
       decision: next.status === "approved" ? "approve" : "deny",
@@ -351,15 +362,23 @@ export class PendingActionStore {
       ...(receipt ? { receipt } : {}),
       completedAt: nowIso()
     });
-    this._assertTransitionCapacity(next);
-    this._commitActionTransition(id, next, {
+    const persistedCompletion = withBoundedResultForPersistence(next, this.maxActionBytes);
+    if (persistedCompletion.truncated) {
+      console.warn(
+        `[pending-actions] ${id}: completion result exceeded the ` +
+        `${this.maxActionBytes}-byte persistence cap; the durable record was ` +
+        "truncated after the full result was delivered to the live caller."
+      );
+    }
+    this._assertTransitionCapacity(persistedCompletion.action);
+    this._commitActionTransition(id, persistedCompletion.action, {
       op: "complete",
       id,
-      completedAt: next.completedAt,
-      result: next.result,
-      error: next.error,
-      outcome: next.outcome,
-      receipt: next.receipt ?? null
+      completedAt: persistedCompletion.action.completedAt,
+      result: persistedCompletion.action.result,
+      error: persistedCompletion.action.error,
+      outcome: persistedCompletion.action.outcome,
+      receipt: persistedCompletion.action.receipt ?? null
     });
     next._resolveCompletion?.(semanticCompletion(!next.error, next));
     return next;
@@ -633,13 +652,21 @@ export class PendingActionStore {
   }
 
   _assertTransitionCapacity(action) {
-    const persisted = normalizePersistedAction(
-      sanitizePendingPersistence(action),
-      this.maxActionBytes
-    );
+    const sanitized = sanitizePendingPersistence(action);
+    const persisted = normalizePersistedAction(sanitized, this.maxActionBytes);
     if (!persisted) {
+      const bytes = serializedBytes(sanitized);
+      if (bytes > this.maxActionBytes) {
+        throw pendingCapacityError(
+          `Pending action exceeds the persistence size limit (${bytes} serialized bytes > ${this.maxActionBytes}-byte cap).`
+        );
+      }
+      console.warn(
+        `[pending-actions] action ${action?.id ?? "unknown"} ` +
+        `(${action?.toolName ?? "unknown tool"}) failed persistence validation.`
+      );
       throw pendingCapacityError(
-        "Pending action is invalid or exceeds the persistence size limit."
+        "Pending action failed persistence validation; the rejected field is logged above."
       );
     }
     return persisted;
@@ -662,6 +689,34 @@ function serializedBytes(value) {
   } catch {
     return Number.POSITIVE_INFINITY;
   }
+}
+
+// A successful tool can return a payload larger than the durable action cap.
+// The full result always flows to live waiters/callers; only the persisted
+// record degrades to a bounded marker, so a state transition cannot fail
+// after the side effect already ran.
+function withBoundedResultForPersistence(action, maxActionBytes) {
+  if (action.result === null || action.result === undefined) {
+    return { action, truncated: false };
+  }
+  if (serializedBytes(sanitizePendingPersistence(action)) <= maxActionBytes) {
+    return { action, truncated: false };
+  }
+  const originalBytes = serializedBytes(action.result);
+  const bounded = {
+    ...action,
+    result:
+      "[pending-action result truncated at persistence: the original result " +
+      `serialized to ~${originalBytes} bytes, over the ${maxActionBytes}-byte ` +
+      "action cap. The full result was delivered to the live caller; only " +
+      "this marker is retained in the approval store.]"
+  };
+  if (serializedBytes(sanitizePendingPersistence(bounded)) > maxActionBytes) {
+    // The result was not the overflow source; let the caller surface the
+    // original capacity error unchanged.
+    return { action, truncated: false };
+  }
+  return { action: bounded, truncated: true };
 }
 
 function snapshotBytes(value) {
@@ -803,7 +858,10 @@ function normalizePersistedAction(value, maxBytes) {
   let context;
   try {
     context = normalizeActionContext(value.context);
-  } catch {
+  } catch (error) {
+    console.warn(
+      `[pending-actions] action context rejected during normalization: ${error?.message ?? error}`
+    );
     return null;
   }
   const receiptValue = value.receipt ?? null;

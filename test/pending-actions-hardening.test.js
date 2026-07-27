@@ -290,3 +290,55 @@ test("persisted identifiers, project scope, context fields, and transitions fail
     /project id is invalid/
   );
 });
+
+test("oversized decision and completion results truncate the durable record without failing the transition", async (t) => {
+  const dir = tempDir(t, "openagi-pending-oversize-");
+  const store = new PendingActionStore({ dir, maxActionBytes: 4096 });
+  const bigResult = "x".repeat(20000);
+
+  // Path 1: decide() carries the result (auto-approve shape).
+  const decided = store.enqueue({ toolName: "safe_tool", summary: "Small action" });
+  const waiter = store.waitForDecision(decided.id);
+  const approved = store.decide(decided.id, {
+    decision: "approve",
+    decidedBy: "test",
+    result: bigResult
+  });
+  assert.equal(approved.result, bigResult, "live caller keeps the full result");
+  const resolution = await waiter;
+  assert.equal(resolution.result, bigResult, "live waiter keeps the full result");
+  const persistedDecision = store.get(decided.id);
+  assert.match(persistedDecision.result, /truncated at persistence/);
+  assert.match(persistedDecision.result, /4096-byte/);
+  assert.equal(persistedDecision.status, "approved");
+
+  // Path 2: approve first, then complete() with a big result (manual shape).
+  const manual = store.enqueue({ toolName: "safe_tool", summary: "Manual action" });
+  store.decide(manual.id, { decision: "approve", decidedBy: "test" });
+  const completed = store.complete(manual.id, { result: bigResult });
+  assert.equal(completed.result, bigResult, "completion caller keeps the full result");
+  assert.match(store.get(manual.id).result, /truncated at persistence/);
+
+  // The bounded records survive a journal/snapshot round-trip.
+  const recovered = new PendingActionStore({ dir, maxActionBytes: 4096 });
+  assert.match(recovered.get(decided.id).result, /truncated at persistence/);
+  assert.match(recovered.get(manual.id).result, /truncated at persistence/);
+});
+
+test("small results persist untouched", (t) => {
+  const dir = tempDir(t, "openagi-pending-small-");
+  const store = new PendingActionStore({ dir, maxActionBytes: 4096 });
+  const action = store.enqueue({ toolName: "safe_tool" });
+  store.decide(action.id, { decision: "approve", decidedBy: "test", result: "ok" });
+  assert.equal(store.get(action.id).result, "ok");
+});
+
+test("oversized enqueue arguments still fail closed with byte counts", (t) => {
+  const dir = tempDir(t, "openagi-pending-oversize-args-");
+  const store = new PendingActionStore({ dir, maxActionBytes: 4096 });
+  assert.throws(
+    () => store.enqueue({ toolName: "safe_tool", args: { data: "x".repeat(20000) } }),
+    /exceeds the persistence size limit \(\d+ serialized bytes > 4096-byte cap\)/
+  );
+  assert.equal(store.list().length, 0);
+});
