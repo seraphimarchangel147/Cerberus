@@ -11633,7 +11633,7 @@ switchTab(initialTab);
   };
   var PAL4 = {  /* OMEGA — molten obsidian + gold inlay (ember veins beneath the hide) */
     outline:"#0e1116", furDeep:"#14171b", furDark:"#1b1f24", furMid:"#2e343b",
-    furLight:"#4b535c", furHi:"#6a727b", rim:"#c8862e", rimHot:"#ffd878",
+    furLight:"#4b535c", furHi:"#6a727b", rim:"#e8641e", rimHot:"#ffb04a",
     gold:"#d99a3a", goldHi:"#ffd878", goldDk:"#8a5a1e",
     gem:"#e0461a", gemCore:"#ffd24a", gemHalo:"#7a1400",
     lava1:"#7a1400", lava2:"#c83000", lava3:"#ff5a14", lava4:"#ffd24a", lava5:"#ffe680",
@@ -11712,6 +11712,7 @@ switchTab(initialTab);
   }
   /* hotter 5-band flame for ULTRA/OMEGA (adds a deep-red base band) */
   function flameTongue5(ctx, bx, by, h, w, sway, seed, pal) {
+    pal = pal || PAL;
     for (var i = 0; i < h; i++) {
       var t = i/h;
       var y = Math.round(by - i);
@@ -11847,6 +11848,19 @@ switchTab(initialTab);
     pxEllipse(ctx, cx, cy, hw, hh, pal.furMid);
     pxEllipse(ctx, cx-1, cy-hh+2, hw-3, 2, pal.furLight);
     pxEllipse(ctx, cx-2, cy-hh+3, hw-5, 1, pal.furHi);
+    /* OMEGA: molten lava veins crackling across the cheeks and brow */
+    if (crown === 2) {
+      pxLine(ctx, cx-Math.round(hw*0.75), cy, cx-Math.round(hw*0.4), cy+3, 1, pal.lava3);
+      pxLine(ctx, cx+Math.round(hw*0.75), cy, cx+Math.round(hw*0.4), cy+3, 1, pal.lava3);
+      pxLine(ctx, cx-Math.round(hw*0.4), cy+3, cx-Math.round(hw*0.2), cy+5, 1, pal.lava2);
+      pxLine(ctx, cx+Math.round(hw*0.4), cy+3, cx+Math.round(hw*0.2), cy+5, 1, pal.lava2);
+      pxLine(ctx, cx-Math.round(hw*0.55), cy-hh+4, cx-Math.round(hw*0.25), cy-hh+7, 1, pal.lava2);
+      pxLine(ctx, cx+Math.round(hw*0.55), cy-hh+4, cx+Math.round(hw*0.25), cy-hh+7, 1, pal.lava2);
+      pxRect(ctx, cx-Math.round(hw*0.4), cy+3, 1, 1, pal.lava4);
+      pxRect(ctx, cx+Math.round(hw*0.4), cy+3, 1, 1, pal.lava4);
+      pxRect(ctx, cx-Math.round(hw*0.2), cy+5, 1, 1, pal.lava5);
+      pxRect(ctx, cx+Math.round(hw*0.2), cy+5, 1, 1, pal.lava5);
+    }
     /* gold jaw/cheek spikes — two per side, bright-tipped so they read at scale */
     pxTri(ctx, cx-hw, cy, cx-hw-4, cy+2, cx-hw, cy+4, pal.gold);
     pxTri(ctx, cx-hw+1, cy+3, cx-hw-3, cy+5, cx-hw+1, cy+6, pal.gold);
@@ -11880,11 +11894,22 @@ switchTab(initialTab);
       pxLine(ctx, cx+hw-1, cy-hh, cx+hw+5, cy-hh-hornH*0.55, 3, pal.gold);
       pxLine(ctx, cx+hw+5, cy-hh-hornH*0.55, cx+hw+10, cy-hh-hornH, 2, pal.gold);
       pxRect(ctx, cx+hw+10, cy-hh-hornH, 1, 2, pal.goldHi);
-    } else if (crown === 2) {  /* OMEGA: upright gold diamond + inverted-V notch */
-      var oh = Math.round(5*s);
-      pxDiamond(ctx, cx, cy-hh-oh+3, 3, oh, pal.gold);
-      pxRect(ctx, cx-1, cy-hh-oh*2+4, 2, 2, pal.goldHi);
-      pxTri(ctx, cx-2, cy-hh+2, cx, cy-hh+5, cx+2, cy-hh+2, pal.gold);
+    } else if (crown === 2) {  /* OMEGA: elaborate flame-spike crown + forehead diamond */
+      var ch = Math.round(9*s);
+      /* gold base band across the skull, bright-topped */
+      pxRect(ctx, cx-Math.round(hw*0.85), cy-hh+1, Math.round(hw*1.7), 2, pal.gold);
+      pxRect(ctx, cx-Math.round(hw*0.85), cy-hh+1, Math.round(hw*1.7), 1, pal.goldHi);
+      /* central flame spike — tallest, bright-tipped */
+      pxTri(ctx, cx, cy-hh-ch, cx-3, cy-hh+2, cx+3, cy-hh+2, pal.gold);
+      pxTri(ctx, cx, cy-hh-ch, cx-1, cy-hh-ch+4, cx+1, cy-hh-ch+4, pal.goldHi);
+      /* inner side spikes */
+      pxTri(ctx, cx-Math.round(4*s), cy-hh-Math.round(6*s), cx-Math.round(6*s), cy-hh+2, cx-Math.round(2*s), cy-hh+2, pal.gold);
+      pxTri(ctx, cx+Math.round(4*s), cy-hh-Math.round(6*s), cx+Math.round(2*s), cy-hh+2, cx+Math.round(6*s), cy-hh+2, pal.gold);
+      pxRect(ctx, cx-Math.round(4*s), cy-hh-Math.round(6*s), 1, 2, pal.goldHi);
+      pxRect(ctx, cx+Math.round(4*s)-1, cy-hh-Math.round(6*s), 1, 2, pal.goldHi);
+      /* outer side spikes — shortest */
+      pxTri(ctx, cx-Math.round(7*s), cy-hh-Math.round(3*s), cx-Math.round(8*s), cy-hh+2, cx-Math.round(5*s), cy-hh+2, pal.gold);
+      pxTri(ctx, cx+Math.round(7*s), cy-hh-Math.round(3*s), cx+Math.round(5*s), cy-hh+2, cx+Math.round(8*s), cy-hh+2, pal.gold);
     }
     /* eyes — glowing with hot core */
     var ey = cy-2;
@@ -11897,6 +11922,17 @@ switchTab(initialTab);
       pxRect(ctx, exL+gx, ey+gy, 2, 1, pal.eyeCore);
       pxRect(ctx, exR+gx-1, ey+gy-1, 4, 3, pal.eye);
       pxRect(ctx, exR+gx+1, ey+gy, 2, 1, pal.eyeCore);
+    }
+    /* OMEGA: small red diamond motif on the forehead — drawn after the eyes so
+       it always reads, set in a gold frame with a white-hot core. Scaled with
+       head size so it stays visible on the larger center head. */
+    if (crown === 2) {
+      var fy = cy-hh+4;
+      var fr = Math.max(2, Math.round(2.6*s));
+      pxDiamond(ctx, cx, fy, fr+1, fr+1, pal.outline);
+      pxDiamond(ctx, cx, fy, fr, fr, pal.gold);
+      pxDiamond(ctx, cx, fy, Math.max(1,fr-1), Math.max(1,fr-1), pal.gem);
+      pxRect(ctx, cx, fy-1, 1, 1, pal.gemCore);
     }
     /* mouth */
     var mx = cx + snoutX;
@@ -12314,52 +12350,99 @@ switchTab(initialTab);
     pxRect(ctx, cx-16, cy-8, 1, 1, pal.goldHi);
     pxRect(ctx, cx+16, cy-8, 1, 1, pal.goldHi);
   }
-  function omegaTail(ctx, x0, y0, wag, flick, flameI, pal) {
-    /* right-hip tail, 4 gold dorsal barbs + flared flame-barb tip */
-    pxLine(ctx, x0, y0, x0+7, y0+2, 4, pal.furDark);
-    pxLine(ctx, x0+7, y0+2, x0+6+wag*0.3, y0-6, 4, pal.furDark);
-    pxLine(ctx, x0+6+wag*0.3, y0-6, x0+12+wag, y0-11, 4, pal.furDark);
+  function omegaTail(ctx, x0, y0, wag, flick, flameI, pal, dir) {
+    /* hip tail, 4 gold dorsal barbs + flared flame-barb tip. dir=1 curls out to
+       the right (right hip), dir=-1 mirrors to the left (left hip). */
+    dir = dir==null?1:dir;
+    pxLine(ctx, x0, y0, x0+7*dir, y0+2, 4, pal.furDark);
+    pxLine(ctx, x0+7*dir, y0+2, x0+6*dir+wag*0.3*dir, y0-6, 4, pal.furDark);
+    pxLine(ctx, x0+6*dir+wag*0.3*dir, y0-6, x0+12*dir+wag*dir, y0-11, 4, pal.furDark);
     for (var b=0;b<4;b++){
       var bt=b/3;
-      var bx=x0+7+ (x0+12+wag-(x0+7))*bt*0.9;
+      var bx=x0+7*dir+ (12*dir+wag*dir-7*dir)*bt*0.9;
       var by=y0+2 + (y0-11-(y0+2))*bt;
       pxTri(ctx, bx, by-3, bx-2, by+1, bx+2, by+1, pal.gold);
     }
-    var tx=x0+12+wag, ty=y0-11;
+    var tx=x0+12*dir+wag*dir, ty=y0-11;
     pxTri(ctx, tx, ty-5, tx-3, ty+1, tx+1, ty, pal.gold);   /* flared flame-barb */
-    pxTri(ctx, tx+1, ty-3, tx+4, ty-5, tx+3, ty, pal.gold);
-    pxTri(ctx, tx-1, ty-3, tx-4, ty-5, tx-3, ty, pal.gold);
-    flameTongue(ctx, tx, ty-3, 6*flameI, 3, wag*0.5, 7, pal);
+    pxTri(ctx, tx+1*dir, ty-3, tx+4*dir, ty-5, tx+3*dir, ty, pal.gold);
+    pxTri(ctx, tx-1*dir, ty-3, tx-4*dir, ty-5, tx-3*dir, ty, pal.gold);
+    flameTongue(ctx, tx, ty-3, 6*flameI, 3, wag*0.5*dir, 7, pal);
   }
-  function omegaAura(ctx, W, H, flick, pal) {
-    /* CONTAINED fire halo — a radial ember-glow behind the body that fades to
-       fully transparent well before the canvas edge, so the beast reads as
-       wreathed in fire without any rectangular canvas border. Drawn first. */
-    var g = ctx.createRadialGradient(W/2, H/2+6, 6, W/2, H/2+6, 40);
-    g.addColorStop(0, "rgba(255,110,26,0.34)");
-    g.addColorStop(0.55, "rgba(224,60,16,0.16)");
+  function omegaBackdrop(ctx, W, H, flick, pal, flameI) {
+    /* CONTAINED inferno — a dome of roaring fire behind the beast. Flame height
+       follows a cosine falloff that reaches ZERO at the left/right margins and
+       the tongues fade to dark at their tips, so it reads as a blazing backdrop
+       without ever painting a rectangular canvas border. Drawn first. */
+    flameI = flameI==null?1:flameI;
+    var cx = W/2, groundY = H-8, half = (W-16)/2;
+    /* deep fire glow — radial, fades to transparent well before the edge */
+    var g = ctx.createRadialGradient(cx, H*0.55, 8, cx, H*0.55, 54);
+    g.addColorStop(0, "rgba(255,120,30,0.40)");
+    g.addColorStop(0.5, "rgba(224,70,18,0.20)");
     g.addColorStop(1, "rgba(224,60,16,0)");
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-    /* rising embers within the halo */
-    for (var e=0; e<9; e++) {
-      var ex = 16 + ((e*13 + Math.round(flick*0.35)) % (W-32));
-      var ey = H-14 - ((e*17 + Math.round(flick*0.6)) % 46);
-      ctx.globalAlpha = 0.55 + 0.4*Math.sin(flick*0.2 + e);
-      ctx.fillStyle = e%3===0 ? pal.lava4 : pal.flameOrg;
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    /* outer dome of flame tongues — tall at center, zero at the margins */
+    for (var fx=8; fx<=W-8; fx+=4) {
+      var u = (fx-cx)/half;
+      var dome = Math.pow(Math.max(0, Math.cos(u*Math.PI/2)), 1.4);
+      if (dome < 0.03) continue;
+      var fh = dome * (52 + 9*Math.sin(fx*0.7)) * flameI;
+      flameTongue5(ctx, fx, groundY, Math.max(6, Math.round(fh)), 5, Math.sin(flick*0.13+fx*0.4)*2.2*dome, fx, pal);
+    }
+    /* inner hotter layer — shorter brighter tongues for depth */
+    for (var fx2=14; fx2<=W-14; fx2+=7) {
+      var u2 = (fx2-cx)/half;
+      var dome2 = Math.pow(Math.max(0, Math.cos(u2*Math.PI/2)), 1.2);
+      if (dome2 < 0.05) continue;
+      var fh2 = dome2 * (34 + 6*Math.sin(fx2*0.9+2)) * flameI;
+      flameTongue5(ctx, fx2, groundY, Math.max(5, Math.round(fh2)), 4, Math.sin(flick*0.17+fx2)*1.6, fx2+3, pal);
+    }
+    /* rising embers throughout the dome, fading near the margins */
+    for (var e=0; e<14; e++) {
+      var ex = 12 + ((e*17 + Math.round(flick*0.4)) % (W-24));
+      var ey = groundY - 6 - ((e*23 + Math.round(flick*0.7)) % 56);
+      var eu = Math.abs((ex-cx)/half);
+      if (eu > 0.95) continue;
+      ctx.globalAlpha = (0.5 + 0.4*Math.sin(flick*0.22 + e)) * (1-eu*0.6);
+      ctx.fillStyle = e%3===0 ? pal.lava5 : (e%3===1 ? pal.flameOrg : pal.flameYel);
       ctx.fillRect(ex, ey, 1, 1);
     }
     ctx.globalAlpha = 1;
-    /* fire tongues along the ground, tapered so no hard edge */
-    for (var ax=14; ax<W-14; ax+=7) {
-      var ah = (15 + Math.round(6*Math.sin(ax*0.2 + flick*0.05)));
-      flameTongue(ctx, ax, H-16, ah, 6, Math.sin(flick*0.15+ax)*1.5, ax, pal);
-    }
+  }
+  function omegaGround(ctx, W, H, flick, pal) {
+    /* Molten floor — dark rock plates split by a glowing lava-fissure web.
+       Contained: the plate is an ellipse that fades before the canvas edge. */
+    var cx = W/2, gy = H-6;
+    pxEllipse(ctx, cx, gy, 46, 5, "#241008");
+    pxEllipse(ctx, cx, gy+1, 40, 3, "#1a0b06");
+    var pulse = 0.75 + 0.25*Math.sin(flick*0.09);
+    ctx.globalAlpha = pulse;
+    /* main horizontal fissure, broken into glowing segments */
+    pxLine(ctx, cx-40, gy, cx-20, gy+1, 1, pal.lava3);
+    pxLine(ctx, cx-20, gy+1, cx+2, gy, 1, pal.lava2);
+    pxLine(ctx, cx+2, gy, cx+24, gy+1, 1, pal.lava3);
+    pxLine(ctx, cx+24, gy+1, cx+40, gy, 1, pal.lava2);
+    /* branching diagonal cracks */
+    pxLine(ctx, cx-30, gy, cx-34, gy+3, 1, pal.lava2);
+    pxLine(ctx, cx-12, gy+1, cx-8, gy+3, 1, pal.lava3);
+    pxLine(ctx, cx+8, gy, cx+12, gy+3, 1, pal.lava2);
+    pxLine(ctx, cx+28, gy+1, cx+24, gy+3, 1, pal.lava3);
+    /* hot nodes where cracks meet */
+    pxRect(ctx, cx-20, gy+1, 1, 1, pal.lava4);
+    pxRect(ctx, cx+2, gy, 1, 1, pal.lava5);
+    pxRect(ctx, cx+24, gy+1, 1, 1, pal.lava4);
+    pxRect(ctx, cx-8, gy+3, 1, 1, pal.lava4);
+    pxRect(ctx, cx+12, gy+3, 1, 1, pal.lava4);
+    ctx.globalAlpha = 1;
+    /* bright front rim of the plate */
+    pxEllipse(ctx, cx, gy+3, 34, 1, pal.lava1);
   }
   function omegaVeins(ctx, cx, cy, flick, pal) {
-    /* molten ember veins beneath the obsidian hide — traced across the visible
-       haunches and belly (not under the legs/gem) so they clearly read as a
-       burning core. Brighter than a whisper, sparser than ULTRA's full network. */
+    /* molten ember veins beneath the obsidian hide — a network of glowing lava
+       cracks across the haunches, belly, shoulders and upper arms, so the beast
+       reads as cooled volcanic rock with fire burning underneath. Bright nodes
+       pulse at the junctions. */
     var pulse = 0.7 + 0.3*Math.sin(flick*0.1);
     var veins = [
       [cx-26,cy-2, cx-19,cy+2, cx-13,cy+6],   /* left haunch */
@@ -12368,16 +12451,24 @@ switchTab(initialTab);
       [cx+22,cy+6, cx+16,cy+9, cx+9,cy+10],   /* right lower */
       [cx-7,cy+9, cx,cy+11, cx+7,cy+9],       /* belly */
       [cx-16,cy-8, cx-10,cy-5, cx-5,cy-7],    /* upper left chest */
-      [cx+16,cy-8, cx+10,cy-5, cx+5,cy-7]     /* upper right chest */
+      [cx+16,cy-8, cx+10,cy-5, cx+5,cy-7],    /* upper right chest */
+      [cx-28,cy-6, cx-24,cy-1, cx-20,cy-4],   /* left shoulder boulder */
+      [cx+28,cy-6, cx+24,cy-1, cx+20,cy-4],   /* right shoulder boulder */
+      [cx-14,cy-12, cx-9,cy-9, cx-4,cy-11],   /* left upper arm */
+      [cx+14,cy-12, cx+9,cy-9, cx+4,cy-11]    /* right upper arm */
     ];
     for (var v=0; v<veins.length; v++) {
       var vn = veins[v];
       for (var sgm=0; sgm<vn.length-2; sgm+=2) {
-        pxLine(ctx, vn[sgm], vn[sgm+1], vn[sgm+2], vn[sgm+3], 1, pal.lava3);
+        pxLine(ctx, vn[sgm], vn[sgm+1], vn[sgm+2], vn[sgm+3], 3, pal.lava2);
+        pxLine(ctx, vn[sgm], vn[sgm+1], vn[sgm+2], vn[sgm+3], 2, pal.lava3);
+        pxLine(ctx, vn[sgm], vn[sgm+1], vn[sgm+2], vn[sgm+3], 1, pal.lava5);
       }
     }
     ctx.globalAlpha = pulse;
-    var nodes = [[cx-19,cy+2],[cx+19,cy+2],[cx-13,cy+6],[cx+13,cy+6],[cx,cy+11],[cx-10,cy-5],[cx+10,cy-5],[cx-16,cy+9],[cx+16,cy+9]];
+    var nodes = [[cx-19,cy+2],[cx+19,cy+2],[cx-13,cy+6],[cx+13,cy+6],[cx,cy+11],
+                 [cx-10,cy-5],[cx+10,cy-5],[cx-16,cy+9],[cx+16,cy+9],
+                 [cx-24,cy-1],[cx+24,cy-1],[cx-9,cy-9],[cx+9,cy-9]];
     for (var n=0; n<nodes.length; n++) {
       pxRect(ctx, nodes[n][0], nodes[n][1], 1, 1, n%3===0 ? pal.lava5 : pal.lava4);
     }
@@ -12388,20 +12479,20 @@ switchTab(initialTab);
     var pal=PAL4, bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0, gx=P.gazeX||0, gy=P.gazeY||0;
     var sad=P.sad||0, droop=sad*3, howl=P.howl||0;
     var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*7;
-    omegaAura(ctx, W, H, flick, pal);
-    /* scorched ground band — tapered at the edges so no hard canvas rectangle */
-    pxRect(ctx, 20, H-5, W-40, 4, "#3a1410");
-    for (var sx=24; sx<W-24; sx+=8) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
+    omegaBackdrop(ctx, W, H, flick, pal, flameI);
+    omegaGround(ctx, W, H, flick, pal);
     /* torso — broad, heavy, molten-veined obsidian */
     pxEllipse(ctx,56,64+bob*0.3,32,16,pal.furDark); pxEllipse(ctx,56,58+bob*0.3,22,17,pal.furMid);
     pxEllipse(ctx,38,66+bob*0.3,10,10,pal.furDark); pxEllipse(ctx,74,66+bob*0.3,10,10,pal.furDark);  /* haunches */
     pxEllipse(ctx,56,50+bob*0.3,14,7,pal.furLight); pxEllipse(ctx,56,47+bob*0.3,8,3,pal.furHi);
     pxEllipse(ctx,56,76+bob*0.3,24,2,pal.furDeep);
     pxEllipse(ctx,46,52+bob*0.3,5,2,pal.furHi); pxEllipse(ctx,66,52+bob*0.3,5,2,pal.furHi);  /* shoulder sheen */
+    /* boulder-like shoulder muscles — rounded dark masses capping the upper arms */
+    pxEllipse(ctx,44,61+bob*0.3,7,6,pal.furMid); pxEllipse(ctx,43,59+bob*0.3,4,3,pal.furLight);
+    pxEllipse(ctx,70,61+bob*0.3,7,6,pal.furMid); pxEllipse(ctx,71,59+bob*0.3,4,3,pal.furLight);
     omegaVeins(ctx, 56, 60+bob*0.3, flick, pal);
-    /* gold collar/ruff ring at neck base */
-    for (var rk=0; rk<7; rk++) { var ra=Math.PI + rk*(Math.PI/6); pxTri(ctx, 56+Math.cos(ra)*16, 44+bob*0.3+Math.sin(ra)*4, 56+Math.cos(ra)*19, 42+bob*0.3+Math.sin(ra)*5, 56+Math.cos(ra+0.2)*16, 45+bob*0.3, pal.gold); }
-    omegaTail(ctx, 78, 62, Math.sin((P.tailWag||0))*4, flick, flameI, pal);
+    omegaTail(ctx, 78, 62, Math.sin((P.tailWag||0))*4, flick, flameI, pal, 1);
+    omegaTail(ctx, 34, 62, Math.sin((P.tailWag||0))*4, flick, flameI, pal, -1);
     /* front legs + gold inlay joints + 4 gold talons */
     if (P.wave) {
       pxLine(ctx,46,65,45,81,8,pal.furMid); pxRect(ctx,38,80,10,3,pal.furMid);
@@ -12423,6 +12514,17 @@ switchTab(initialTab);
     pxLine(ctx,28+hl,35+bob*0.8+droop-headLift,42,54+bob*0.3,8,pal.furDark);
     pxLine(ctx,56+hc,27+bob+droop*0.5-headLift,56,54+bob*0.3,10,pal.furDark);
     pxLine(ctx,84+hr,35+bob*0.8+droop-headLift,70,54+bob*0.3,8,pal.furDark);
+    /* prominent jagged gold ruff framing the base of the necks — a collar of
+       upward spikes drawn AFTER the necks so it reads as a golden mane. Spikes
+       fan across the full width where the three necks meet the torso. */
+    for (var rk=0; rk<9; rk++) {
+      var rx = 34 + rk*5.5;
+      var rHgt = 8 + (rk%2)*2 + Math.round(Math.sin(rk*1.3)*1.5);
+      var rBase = 52+bob*0.3;
+      pxTri(ctx, rx, rBase-rHgt-3, rx-3, rBase, rx+3, rBase, pal.outline);
+      pxTri(ctx, rx, rBase-rHgt-2, rx-2, rBase, rx+2, rBase, pal.gold);
+      pxRect(ctx, rx, rBase-rHgt-2, 1, 2, pal.goldHi);
+    }
     /* ornate breastplate — drawn AFTER the necks so the gem sits in front of the
        chest and is never buried by the center neck */
     omegaChevron(ctx, 56, 60+bob*0.3, flick, pal, P.runeFlare);
@@ -12443,9 +12545,8 @@ switchTab(initialTab);
     var W=112,H=88; ctx.clearRect(0,0,W,H);
     var pal=PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
     var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
-    omegaAura(ctx, W, H, flick, pal);
-    pxRect(ctx, 22, H-5, W-44, 4, "#3a1410");
-    for (var sx=26; sx<W-26; sx+=9) pxRect(ctx, sx, H-4, 5, 1, "#7a2a18");
+    omegaBackdrop(ctx, W, H, flick, pal, flameI);
+    omegaGround(ctx, W, H, flick, pal);
     var legAmp=walk?8:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
     pxLine(ctx,26+legSwing(0),60,25+legSwing(0),76,7,pal.furDark); pxRect(ctx,19+legSwing(0),75,9,3,pal.furDark);
     for (var c1=0;c1<4;c1++) pxRect(ctx,19+legSwing(0)+c1*2,78,1,2,pal.claw);
