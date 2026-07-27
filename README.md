@@ -464,6 +464,19 @@ No Anthropic tier model is configured automatically. Verify a model ID against
 the live provider before setting it, and leave `ANTHROPIC_MODEL_MINI` unset
 until a distinct model is judged safe for memory-writing jobs.
 
+### Provider failure recovery
+
+Provider 429 responses are classified using both status and error text. Quota
+or billing exhaustion cools the affected credential for one hour (or until a
+provider reset header); an ordinary rate limit cools it for 60 seconds. Other
+configured credentials remain eligible, so a pool can rotate without retrying
+a known-cooled key.
+
+An HTTP 200 model response with no content is retried below the tool loop, so
+recovery cannot replay a tool side effect. Empty responses ending in
+`max_tokens` or `tool_use` remain legitimate. Set
+`OPENAGI_ERROR_CLASSIFIER=0` to restore the former response and retry behavior.
+
 | Variable | What it does |
 |---|---|
 | `OPENAI_MODEL` / `ANTHROPIC_MODEL` | Base model — handles chat + autopilot (real reasoning). Default `gpt-5` / `claude-sonnet-4-6`. |

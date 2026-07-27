@@ -60,7 +60,12 @@ test("OpenAI Responses serializes routing only for a gated endpoint", async (t) 
   const requests = [];
   useFetch(t, async (url, init) => {
     requests.push({ url: String(url), body: JSON.parse(init.body) });
-    return jsonResponse({ id: "response", output: [], usage: {} });
+    return jsonResponse({
+      id: "response",
+      output_text: "ok",
+      output: [],
+      usage: {}
+    });
   });
 
   const routed = new OpenAIResponsesProvider({

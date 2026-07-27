@@ -103,7 +103,45 @@ test("OpenAI rotation uses the leased key, warns for the cache reset, and stays 
   assert.equal(provider.apiKey, "", "request leases must not mutate shared provider state");
 });
 
-test("generic OpenAI 429 retries the same lease once before rotating", async (t) => {
+test("classified OpenAI 429 cools the lease for 60 seconds and rotates", async (t) => {
+  const headers = [];
+  useFetch(t, async (_url, init) => {
+    headers.push(init.headers.authorization);
+    if (headers.length === 1) {
+      return jsonResponse(429, { error: { message: "temporarily rate limited" } });
+    }
+    return jsonResponse(200, { id: "done", output_text: "ok", output: [] });
+  });
+
+  const now = Date.parse("2026-07-27T12:00:00.000Z");
+  const credentialPool = pool("openai", {
+    OPENAI_FIRST: "first-secret",
+    OPENAI_SECOND: "second-secret"
+  }, [
+    { id: "first", secretName: "OPENAI_FIRST" },
+    { id: "second", secretName: "OPENAI_SECOND" }
+  ], { now: () => now });
+  const provider = new OpenAIResponsesProvider({
+    apiKey: "",
+    credentialPool,
+    providerMaxRetries: 3,
+    now: () => now,
+    env: {}
+  });
+
+  const result = await provider.postResponses({ model: "test-model", input: [] });
+  assert.equal(result.output_text, "ok");
+  assert.deepEqual(headers, [
+    "Bearer first-secret",
+    "Bearer second-secret"
+  ]);
+  assert.equal(
+    credentialPool.snapshot().credentials[0].cooldownUntil,
+    new Date(now + 60_000).toISOString()
+  );
+});
+
+test("error-classifier kill switch preserves the former same-lease 429 retry", async (t) => {
   const headers = [];
   useFetch(t, async (_url, init) => {
     headers.push(init.headers.authorization);
@@ -123,7 +161,8 @@ test("generic OpenAI 429 retries the same lease once before rotating", async (t)
   const provider = new OpenAIResponsesProvider({
     apiKey: "",
     credentialPool,
-    providerMaxRetries: 3
+    providerMaxRetries: 3,
+    env: { OPENAGI_ERROR_CLASSIFIER: "0" }
   });
 
   const result = await provider.postResponses({ model: "test-model", input: [] });

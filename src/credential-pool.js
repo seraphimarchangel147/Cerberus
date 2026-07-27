@@ -133,6 +133,23 @@ export function credentialPoolRedactionSnapshot(pool) {
 export function classifyCredentialFailure(error) {
   const status = errorStatus(error);
   const text = errorText(error);
+  const providerKind = error?.failureKind ?? error?.classification;
+  if (providerKind === "quota-exhausted") {
+    return {
+      kind: "usage_limit",
+      status,
+      retrySame: false,
+      retryAfterMs: nonNegativeNumber(error?.retryAfterMs, 0)
+    };
+  }
+  if (providerKind === "rate-limit") {
+    return {
+      kind: "transient_rate_limit",
+      status,
+      retrySame: false,
+      retryAfterMs: nonNegativeNumber(error?.retryAfterMs, 0)
+    };
+  }
   if (status === 402) return { kind: "billing", status, retrySame: false };
   if (status === 401) return { kind: "auth", status, retrySame: false };
   if (status === 429 && isPlanOrUsageLimit(text)) {
@@ -316,14 +333,24 @@ export class CredentialPool {
   _recordFailure(lease, classification) {
     const state = this.#stateForLease(lease);
     state.failures += 1;
+    const retryAfterMs = Number.isFinite(classification.retryAfterMs)
+      && classification.retryAfterMs >= 0
+      ? classification.retryAfterMs
+      : null;
     if (classification.kind === "billing") {
       state.cooldownUntil = Number(this.now()) + CREDENTIAL_BILLING_COOLDOWN_MS;
+    } else if (
+      retryAfterMs !== null
+      && ["usage_limit", "transient_rate_limit"].includes(classification.kind)
+    ) {
+      state.cooldownUntil = Number(this.now()) + retryAfterMs;
     } else if (classification.kind === "usage_limit") {
       state.blockedReason = "usage_limit";
     }
     this.#persistState("failure", lease, {
       kind: classification.kind,
-      status: classification.status
+      status: classification.status,
+      ...(retryAfterMs !== null ? { retryAfterMs } : {})
     });
   }
 
@@ -557,7 +584,11 @@ export class CredentialPoolRequest {
         this.pool._recordFailure(lease, classification);
         failures.push({ id: lease.id, ...classification });
 
-        if (classification.kind === "transient_rate_limit" && genericRetriedId !== lease.id) {
+        if (
+          classification.kind === "transient_rate_limit"
+          && classification.retrySame
+          && genericRetriedId !== lease.id
+        ) {
           genericRetriedId = lease.id;
           continue;
         }

@@ -2,6 +2,26 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-27 - Upgrade batch work item B.3: provider error classifier (Codex)
+
+Made provider recovery distinguish congestion, exhausted quota, and silent
+HTTP success without moving retries above the side-effecting tool loop:
+
+- Added the MIT-attributed, zero-dependency provider outcome classifier using
+  both HTTP status and bounded body text.
+- Quota/billing 429s now carry a one-hour backoff, overridden by a valid reset
+  header; other 429s carry a 60-second backoff.
+- Credential pools persist those classified delays as per-key cooldowns and
+  rotate immediately to another eligible key instead of retrying a cooled key.
+- OpenAI and Anthropic HTTP 200 responses with no model content now retry
+  below tool execution. `max_tokens` and `tool_use` empty stops remain valid.
+- Added the setup-allowlisted `OPENAGI_ERROR_CLASSIFIER=0` kill switch. It
+  restores the former jittered 429 retry and empty-response behavior.
+- Added no dependency and did not change the package manifest.
+
+Verification: focused error/provider lane 28 passed, 0 failed; full isolated
+`node --test --test-concurrency=1` lane on Node 25.5.0: 1854 passed, 0 failed.
+
 ## 2026-07-27 - Upgrade batch work items B.1/B.2: complexity routing (Codex)
 
 Added an opt-in, floor-only runtime complexity layer to model routing:

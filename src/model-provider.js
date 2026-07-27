@@ -55,6 +55,7 @@ import {
   completionEvidenceDecision,
   completionEvidenceNudge
 } from "./completion-evidence.js";
+import { classifyProviderOutcome } from "./error-classifier.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
@@ -146,6 +147,7 @@ export class ProviderError extends Error {
     retryAfterMs = null,
     providerCode = null,
     providerType = null,
+    failureKind = null,
     cause = null
   } = {}) {
     super(message, cause ? { cause } : undefined);
@@ -154,6 +156,10 @@ export class ProviderError extends Error {
     this.retryAfterMs = Number.isFinite(retryAfterMs) ? retryAfterMs : null;
     this.providerCode = typeof providerCode === "string" ? providerCode : null;
     this.providerType = typeof providerType === "string" ? providerType : null;
+    if (typeof failureKind === "string" && failureKind) {
+      this.failureKind = failureKind;
+      this.classification = failureKind;
+    }
   }
 }
 
@@ -189,16 +195,24 @@ function isRetryableNetworkError(error) {
     || ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ENETUNREACH", "ETIMEDOUT"].includes(error.code);
 }
 
-async function responseProviderError(response) {
+async function responseProviderError(response, options = {}) {
   const body = await response.json().catch(() => ({}));
   const detail = body?.error && typeof body.error === "object" ? body.error : {};
+  const classification = classifyProviderOutcome({
+    status: response.status,
+    body,
+    headers: response.headers,
+    now: typeof options.now === "function" ? options.now() : Date.now(),
+    env: options.env
+  });
   return new ProviderError(
     detail.message ?? `Provider request failed with ${response.status}`,
     {
       status: response.status,
-      retryAfterMs: retryAfterMs(response),
+      retryAfterMs: classification?.retryAfterMs ?? retryAfterMs(response),
       providerCode: detail.code,
-      providerType: detail.type
+      providerType: detail.type,
+      failureKind: classification?.kind
     }
   );
 }
@@ -236,11 +250,12 @@ export async function requestWithRetry(doRequest, options = {}) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       const response = await doRequest(attempt);
-      if (response?.ok === false) throw await responseProviderError(response);
+      if (response?.ok === false) throw await responseProviderError(response, options);
       return response;
     } catch (error) {
       const retryable = error instanceof ProviderError
         ? RETRYABLE_PROVIDER_STATUSES.has(error.status)
+          || error.failureKind === "silent-failure"
         : isRetryableNetworkError(error);
       let retryApproved = retryable;
       if (retryable && typeof options.shouldRetry === "function") {
@@ -260,7 +275,9 @@ export async function requestWithRetry(doRequest, options = {}) {
       const jittered = Math.floor(Math.max(0, Math.min(1, Number(random()) || 0)) * jitterCap);
       const delayMs = error.retryAfterMs === null
         ? jittered
-        : Math.min(MAX_PROVIDER_RETRY_DELAY_MS, error.retryAfterMs);
+        : ["quota-exhausted", "rate-limit"].includes(error.failureKind)
+          ? Math.max(0, error.retryAfterMs)
+          : Math.min(MAX_PROVIDER_RETRY_DELAY_MS, error.retryAfterMs);
       try { options.onRetry?.({ attempt: attempt + 1, delayMs, error }); } catch { /* advisory */ }
       await wait(delayMs);
     }
@@ -313,6 +330,7 @@ function resolveMaxIterations(options) {
 }
 
 function applyIterationSettings(provider, options) {
+  provider.env = options.env ?? process.env;
   provider.maxIterations = resolveMaxIterations(options);
   // Tests and embedders may provide both names while migrating: in that case
   // maxIterations is the outer cap and the old option remains the inner hop
@@ -387,6 +405,8 @@ function providerRetryOptions(provider, context, signal) {
     baseDelayMs: provider.providerRetryBaseMs,
     sleep: provider.retrySleep ?? ((ms) => sleepWithSignal(ms, signal)),
     random: provider.retryRandom,
+    env: provider.env,
+    now: provider.now,
     onRetry: ({ attempt, delayMs, error }) => {
       try {
         context?.__onToolEvent?.({
@@ -400,6 +420,31 @@ function providerRetryOptions(provider, context, signal) {
       }
     }
   };
+}
+
+function assertProviderContent(provider, response, body) {
+  const classification = classifyProviderOutcome({
+    status: response?.status ?? 200,
+    body,
+    headers: response?.headers,
+    now: provider.now(),
+    env: provider.env
+  });
+  if (classification?.kind !== "silent-failure") return;
+  throw new ProviderError("Provider returned HTTP 200 without model content.", {
+    status: 200,
+    retryAfterMs: classification.retryAfterMs,
+    providerCode: "silent_response",
+    providerType: "silent_failure",
+    failureKind: classification.kind
+  });
+}
+
+async function requestWithSilentResponseRetry(provider, context, signal, request) {
+  return requestWithRetry(request, {
+    ...providerRetryOptions(provider, context, signal),
+    shouldRetry: ({ error }) => error?.failureKind === "silent-failure"
+  });
 }
 
 const MANAGED_CREDENTIAL_STATUSES = new Set([401, 402, 429]);
@@ -482,7 +527,8 @@ async function requestWithProviderCredential(provider, credentialRequest, {
   context,
   signal,
   model,
-  request
+  request,
+  transform = null
 }) {
   const active = credentialRequest ?? beginProviderCredentialRequest(provider).request;
   let previousId = active.lease?.id ?? null;
@@ -504,13 +550,16 @@ async function requestWithProviderCredential(provider, credentialRequest, {
       context
     });
     try {
-      return await requestWithRetry(
+      const response = await requestWithRetry(
         () => request(lease.value, lease),
         {
           ...providerRetryOptions(provider, context, signal),
           shouldRetry: managedCredentialRetry
         }
       );
+      return typeof transform === "function"
+        ? await transform(response)
+        : response;
     } catch (error) {
       previousStatus = Number.isInteger(error?.status) ? error.status : null;
       throw error;
@@ -4658,46 +4707,57 @@ export class OpenAIResponsesProvider {
     const serializedBody = JSON.stringify(routedBody);
     const startedAt = this.now();
     try {
-      const response = await requestWithProviderCredential(
+      const { json } = await requestWithSilentResponseRetry(
         this,
-        options.credentialRequest,
-        {
-          context,
-          signal: controller.signal,
-          model: body.model,
-          request: (credential, lease) => {
-            const expectedCredentialIdentity = options.expectedContinuationCredentialIdentity;
-            if (expectedCredentialIdentity) {
-              const actualCredentialIdentity = openAICredentialIdentity(this, lease);
-              if (
-                !actualCredentialIdentity
-                || actualCredentialIdentity !== expectedCredentialIdentity
-              ) {
-                throw new ContinuationCredentialChangedError();
+        context,
+        controller.signal,
+        () => requestWithProviderCredential(
+          this,
+          options.credentialRequest,
+          {
+            context,
+            signal: controller.signal,
+            model: body.model,
+            request: (credential, lease) => {
+              const expectedCredentialIdentity = options.expectedContinuationCredentialIdentity;
+              if (expectedCredentialIdentity) {
+                const actualCredentialIdentity = openAICredentialIdentity(this, lease);
+                if (
+                  !actualCredentialIdentity
+                  || actualCredentialIdentity !== expectedCredentialIdentity
+                ) {
+                  throw new ContinuationCredentialChangedError();
+                }
               }
+              return fetch(openAIResponsesUrl(this.baseUrl), {
+                method: "POST",
+                signal: controller.signal,
+                headers: {
+                  "content-type": "application/json",
+                  authorization: `Bearer ${credential}`
+                },
+                body: serializedBody
+              });
+            },
+            transform: async (response) => {
+              const contentType = response.headers?.get?.("content-type") ?? "";
+              const streamResponse = streaming && /text\/event-stream/i.test(contentType);
+              if (streamResponse) armStallTimeout();
+              const parsed = streamResponse
+                ? await readOpenAIEventStream(response, {
+                    onDelta: options.onDelta,
+                    onActivity,
+                    signal: controller.signal
+                  })
+                : await response.json().catch(() => ({}));
+              if (parsed?.status !== "failed" && !parsed?.error) {
+                assertProviderContent(this, response, parsed);
+              }
+              return { response, json: parsed };
             }
-            return fetch(openAIResponsesUrl(this.baseUrl), {
-              method: "POST",
-              signal: controller.signal,
-              headers: {
-                "content-type": "application/json",
-                authorization: `Bearer ${credential}`
-              },
-              body: serializedBody
-            });
           }
-        }
+        )
       );
-      const contentType = response.headers?.get?.("content-type") ?? "";
-      const streamResponse = streaming && /text\/event-stream/i.test(contentType);
-      if (streamResponse) armStallTimeout();
-      const json = streamResponse
-        ? await readOpenAIEventStream(response, {
-            onDelta: options.onDelta,
-            onActivity,
-            signal: controller.signal
-          })
-        : await response.json().catch(() => ({}));
       if (json?.status === "failed" || json?.error) {
         throw openAIStreamError({ response: json }, "OpenAI failed to generate a response.");
       }
@@ -5443,33 +5503,45 @@ export class AnthropicProvider {
     const serializedBody = JSON.stringify(routedBody);
     const startedAt = this.now();
     try {
-      const response = await requestWithProviderCredential(
+      const { json } = await requestWithSilentResponseRetry(
         this,
-        options.credentialRequest,
-        {
-          context,
-          signal: controller.signal,
-          model: body.model,
-          request: (credential, lease) => {
-            const headers = {
-              "content-type": "application/json",
-              "anthropic-version": this.version
-            };
-            if (lease.type === "oauth") headers.authorization = `Bearer ${credential}`;
-            else headers["x-api-key"] = credential;
-            return fetch(`${this.baseUrl}/messages`, {
-              method: "POST",
-              signal: controller.signal,
-              headers,
-              body: serializedBody
-            });
+        context,
+        controller.signal,
+        () => requestWithProviderCredential(
+          this,
+          options.credentialRequest,
+          {
+            context,
+            signal: controller.signal,
+            model: body.model,
+            request: (credential, lease) => {
+              const headers = {
+                "content-type": "application/json",
+                "anthropic-version": this.version
+              };
+              if (lease.type === "oauth") headers.authorization = `Bearer ${credential}`;
+              else headers["x-api-key"] = credential;
+              return fetch(`${this.baseUrl}/messages`, {
+                method: "POST",
+                signal: controller.signal,
+                headers,
+                body: serializedBody
+              });
+            },
+            transform: async (response) => {
+              const contentType = response.headers?.get?.("content-type") ?? "";
+              const parsed = streaming && /text\/event-stream/i.test(contentType)
+                ? await readAnthropicEventStream(response, {
+                    onDelta: options.onDelta,
+                    onActivity
+                  })
+                : await response.json().catch(() => ({}));
+              assertProviderContent(this, response, parsed);
+              return { response, json: parsed };
+            }
           }
-        }
+        )
       );
-      const contentType = response.headers?.get?.("content-type") ?? "";
-      const json = streaming && /text\/event-stream/i.test(contentType)
-        ? await readAnthropicEventStream(response, { onDelta: options.onDelta, onActivity })
-        : await response.json().catch(() => ({}));
       const latencyMs = Math.max(0, this.now() - startedAt);
       const callTools = (json.content ?? []).filter((b) => b.type === "tool_use").map((b) => b.name);
       const efficiency = providerRequestEfficiency({
