@@ -8,6 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { DiscordCommands, COMMAND_DEFS } from "../src/discord-commands.js";
+import { DiscordChannel } from "../src/discord-channel.js";
 
 function commandNamed(name) {
   return COMMAND_DEFS.find((cmd) => cmd.name === name);
@@ -32,7 +33,8 @@ function harness({ skills = {}, owner = "owner-1", env = {} } = {}) {
     agentHost: { modelProvider: { model: "kimi-k3" }, runtime },
     rest: async () => ({}),
     log: () => {},
-    runtime
+    runtime,
+    sessionKeyFor: DiscordChannel.prototype.sessionKeyFor
   };
   const cmds = new DiscordCommands(channel, {});
   cmds.respond = async (_interaction, payload) => { sent.push(payload); return payload; };
@@ -46,6 +48,17 @@ function harness({ skills = {}, owner = "owner-1", env = {} } = {}) {
 function interaction(name, sub, options = [], userId = "owner-1") {
   return {
     data: { name, options: [{ type: 1, name: sub, options }] },
+    guild_id: "guild-1",
+    channel_id: "channel-1",
+    member: { user: { id: userId } }
+  };
+}
+
+function componentInteraction(customId, userId = "owner-1") {
+  return {
+    data: { custom_id: customId },
+    guild_id: "guild-1",
+    channel_id: "channel-1",
     member: { user: { id: userId } }
   };
 }
@@ -100,17 +113,18 @@ test("confirming a delete actually deletes, and only for the requester", async (
   const confirmId = sent.at(-1).components[0].components[0].custom_id;
 
   // A different user cannot confirm someone else's destructive action.
-  await cmds.handleComponent({ data: { custom_id: confirmId } }, "stranger");
+  await cmds.handleComponent(componentInteraction(confirmId, "stranger"), "stranger");
   assert.ok(!sent.some((s) => s.call === "deleteSkill"), "another user must not confirm");
 
-  await cmds.handleComponent({ data: { custom_id: confirmId } }, "owner-1");
+  await cmds.handleComponent(componentInteraction(confirmId), "owner-1");
   const deleted = sent.find((s) => s.call === "deleteSkill");
   assert.ok(deleted, "the requester's confirmation should delete");
   assert.equal(deleted.args[0], "graphify");
+  assert.equal(deleted.args[2], "discord:guild-1:channel-1:owner-1");
 
   // The confirmation is single-use.
   const before = sent.filter((s) => s.call === "deleteSkill").length;
-  await cmds.handleComponent({ data: { custom_id: confirmId } }, "owner-1");
+  await cmds.handleComponent(componentInteraction(confirmId), "owner-1");
   assert.equal(sent.filter((s) => s.call === "deleteSkill").length, before, "replay must not re-delete");
 });
 
@@ -119,6 +133,7 @@ test("/skill pin protects a skill", async () => {
   await cmds.cmdSkill(interaction("skill", "pin", [{ name: "name", value: "graphify" }]));
   const call = sent.find((s) => s.call === "setPinned");
   assert.deepEqual(call.args.slice(0, 2), ["graphify", true]);
+  assert.equal(call.args[3], "discord:guild-1:channel-1:owner-1");
   assert.match(sent.at(-1).content, /pinned/u);
 });
 

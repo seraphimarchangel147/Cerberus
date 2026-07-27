@@ -67,9 +67,15 @@ function makeHarness(t, { withProjectStore = true } = {}) {
         }
       }
     : null;
+  const emitted = [];
   const runtime = {
     skills: { dirs: [bundled, user] },
     tools: new ToolRegistry(),
+    events: {
+      emit(name, payload) {
+        emitted.push({ name, payload });
+      }
+    },
     ...(projects ? { projects } : {})
   };
   if (projects) runtime.tools.bindProjects(projects);
@@ -81,7 +87,7 @@ function makeHarness(t, { withProjectStore = true } = {}) {
     warn() {}
   });
   registry.reload();
-  return { registry, runtime, tools: runtime.tools, user };
+  return { emitted, registry, runtime, tools: runtime.tools, user };
 }
 
 test("nondefault projects cannot mutate global skill definitions through preflight or direct dispatch", async (t) => {
@@ -128,14 +134,16 @@ test("nondefault projects cannot mutate global skill definitions through preflig
 });
 
 test("default control plane can mutate definitions independently of project skill grants", (t) => {
-  const { registry, tools, user } = makeHarness(t);
+  const { emitted, registry, tools, user } = makeHarness(t);
   writeSkill(user, "guarded", { state: "stale" });
   writeSkill(user, "disposable");
+  writeSkill(user, "rollbackable");
   registry.reload();
   const context = {
     __projectId: "default",
     __projectActiveSkills: [],
-    agentId: "main"
+    agentId: "main",
+    sessionId: "discord:guild:control-channel"
   };
 
   for (const [name, args] of Object.entries(MUTATION_ARGS)) {
@@ -152,14 +160,52 @@ test("default control plane can mutate definitions independently of project skil
     name: "guarded",
     body: "Edited by the control plane."
   }, context);
+  tools.get("edit_skill").handler({
+    name: "guarded",
+    old_string: "Edited by the control plane.",
+    new_string: "Patched by the control plane."
+  }, context);
   tools.get("pin_skill").handler({ name: "guarded", pinned: true }, context);
   tools.get("restore_skill").handler({ name: "guarded" }, context);
   tools.get("delete_skill").handler({ name: "disposable" }, context);
+  tools.get("edit_skill").handler({
+    name: "rollbackable",
+    body: "Temporary revision."
+  }, context);
+  const rollbackRevision = registry.revisionHistory("rollbackable").revisions[0];
+  tools.get("rollback_skill").handler({
+    name: "rollbackable",
+    revisionId: rollbackRevision.id
+  }, {
+    ...context,
+    __projectActiveSkills: ["rollbackable"]
+  });
 
-  assert.equal(registry.mustGet("guarded").body, "Edited by the control plane.");
+  assert.equal(registry.mustGet("guarded").body, "Patched by the control plane.");
   assert.equal(registry.mustGet("guarded").pinned, true);
   assert.equal(registry.mustGet("guarded").state, "active");
   assert.equal(registry.has("disposable"), false);
+  assert.equal(registry.mustGet("rollbackable").body, "Original body.");
+  const editEvents = emitted.filter((event) => event.name === "skill-edit");
+  assert.deepEqual(
+    editEvents.map((event) => event.payload.action),
+    [
+      "created",
+      "edited",
+      "patched",
+      "pinned",
+      "restored",
+      "deleted",
+      "edited",
+      "rolled-back"
+    ]
+  );
+  assert.ok(
+    editEvents.every(
+      (event) => event.payload.sessionId === "discord:guild:control-channel"
+    ),
+    "every authoring tool must retain the originating session"
+  );
 });
 
 test("legacy runtimes without ProjectStore keep the model-facing mutation contract", (t) => {

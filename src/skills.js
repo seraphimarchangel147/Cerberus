@@ -187,7 +187,7 @@ export class SkillRegistry {
 
   // MARK: — telemetry
 
-  recordUse(name, mode, outcome = "ok", at = nowIso()) {
+  recordUse(name, mode, outcome = "ok", at = nowIso(), sessionId = null) {
     assertSkillSlug(name);
     if (mode !== "view" && mode !== "run") throw new Error(`Invalid skill usage mode: ${mode}`);
     if (outcome !== "ok" && outcome !== "error") {
@@ -206,7 +206,13 @@ export class SkillRegistry {
     // when a skill was loaded or executed. Advisory only — listeners must
     // never break the underlying skill action.
     try {
-      this.runtime?.events?.emit?.("skill-use", { skill: name, mode, outcome, at });
+      this.runtime?.events?.emit?.("skill-use", {
+        skill: name,
+        mode,
+        outcome,
+        at,
+        sessionId
+      });
     } catch { /* advisory */ }
   }
 
@@ -245,13 +251,16 @@ export class SkillRegistry {
     };
   }
 
-  logEdit(entry) {
+  logEdit(entry, sessionId = null) {
     const record = { at: nowIso(), ...entry };
     try {
       appendJsonLine(this.editLogPath, record);
     } catch { /* ignore */ }
     try {
-      this.runtime?.events?.emit?.("skill-edit", record);
+      this.runtime?.events?.emit?.("skill-edit", {
+        ...record,
+        sessionId
+      });
     } catch { /* advisory */ }
   }
 
@@ -343,7 +352,7 @@ export class SkillRegistry {
     };
   }
 
-  rollbackSkillRevision(name, revisionId, by = "agent") {
+  rollbackSkillRevision(name, revisionId, by = "agent", sessionId = null) {
     const skill = this.mustGet(name);
     const requestedId = String(revisionId ?? "").trim();
     if (!requestedId) throw new Error("rollbackSkillRevision requires a revisionId");
@@ -373,7 +382,10 @@ export class SkillRegistry {
         restoredAction: head.action
       }
     });
-    this.logEdit({ skill: name, action: "rolled-back", by, summary: `restored ${head.id}` });
+    this.logEdit(
+      { skill: name, action: "rolled-back", by, summary: `restored ${head.id}` },
+      sessionId
+    );
     this.reload();
     return {
       skill: name,
@@ -391,7 +403,7 @@ export class SkillRegistry {
    * reads the instructions and acts with its own conversation context.
    * Pass `file` to read one linked file's content instead.
    */
-  view(name, file = null) {
+  view(name, file = null, sessionId = null) {
     const skill = this.mustGet(name);
     if (file) {
       try {
@@ -401,14 +413,14 @@ export class SkillRegistry {
           file,
           content: readUtf8FileCapped(resolved, MAX_LINKED_FILE_BYTES, "linked file")
         };
-        this.recordUse(name, "view", "ok");
+        this.recordUse(name, "view", "ok", nowIso(), sessionId);
         return result;
       } catch (error) {
-        this.recordUse(name, "view", "error");
+        this.recordUse(name, "view", "error", nowIso(), sessionId);
         throw error;
       }
     }
-    this.recordUse(name, "view", "ok");
+    this.recordUse(name, "view", "ok", nowIso(), sessionId);
     return {
       name: skill.name,
       description: skill.description,
@@ -433,7 +445,10 @@ export class SkillRegistry {
 
   // MARK: — curation (create / patch / edit / pin / delete)
 
-  createSkill({ name, description = "", body = "", category = null, createdBy = "agent" } = {}) {
+  createSkill(
+    { name, description = "", body = "", category = null, createdBy = "agent" } = {},
+    sessionId = null
+  ) {
     if (!name) throw new Error("createSkill requires a name/title");
     const slugBase = slugForCreate(name);
     const bodyText = String(body ?? "");
@@ -459,7 +474,15 @@ export class SkillRegistry {
     ensureDir(skillDir);
     writeTextAtomic(path.join(skillDir, "SKILL.md"), document);
     appendSkillRevision(skillDir, { skill: slug, action: "created", by: createdBy, after: document });
-    this.logEdit({ skill: slug, action: "created", by: createdBy, summary: String(description).slice(0, 120) });
+    this.logEdit(
+      {
+        skill: slug,
+        action: "created",
+        by: createdBy,
+        summary: String(description).slice(0, 120)
+      },
+      sessionId
+    );
     this.reload();
     return { slug, path: path.join(skillDir, "SKILL.md") };
   }
@@ -469,7 +492,7 @@ export class SkillRegistry {
    * primitive. Requires a UNIQUE match so a sloppy old_string can't
    * silently rewrite the wrong section.
    */
-  patchSkill(name, oldString, newString, by = "agent") {
+  patchSkill(name, oldString, newString, by = "agent", sessionId = null) {
     const skill = this.mustGet(name);
     if (skill.pinned) {
       throw new Error(`Skill '${name}' is pinned; unpin it before editing.`);
@@ -484,12 +507,15 @@ export class SkillRegistry {
     assertSkillDocumentSize(next);
     writeTextAtomic(skill.path, next);
     appendSkillRevision(skill.dir, { skill: name, action: "patched", by, before: text, after: next });
-    this.logEdit({
-      skill: name,
-      action: "patched",
-      by,
-      summary: `-${oldString.slice(0, 60).replace(/\n/g, " ")} → +${String(newString ?? "").slice(0, 60).replace(/\n/g, " ")}`
-    });
+    this.logEdit(
+      {
+        skill: name,
+        action: "patched",
+        by,
+        summary: `-${oldString.slice(0, 60).replace(/\n/g, " ")} -> +${String(newString ?? "").slice(0, 60).replace(/\n/g, " ")}`
+      },
+      sessionId
+    );
     this.reload();
     return { skill: name, patched: true };
   }
@@ -498,7 +524,12 @@ export class SkillRegistry {
    * Full-field edit: replace body and/or frontmatter fields, preserving
    * lineage keys (sourceSuggestionId, createdBy, createdAt) untouched.
    */
-  editSkill(name, { description, body, category, systemPrompt } = {}, by = "agent") {
+  editSkill(
+    name,
+    { description, body, category, systemPrompt } = {},
+    by = "agent",
+    sessionId = null
+  ) {
     const skill = this.mustGet(name);
     if (skill.pinned) {
       throw new Error(`Skill '${name}' is pinned; unpin it before editing.`);
@@ -519,7 +550,10 @@ export class SkillRegistry {
       systemPrompt !== undefined ? "systemPrompt" : null,
       body !== undefined ? `body (${String(body ?? "").length} chars)` : null
     ].filter(Boolean).join(", ");
-    this.logEdit({ skill: name, action: "edited", by, summary: touched || "no-op" });
+    this.logEdit(
+      { skill: name, action: "edited", by, summary: touched || "no-op" },
+      sessionId
+    );
     this.reload();
     return { skill: name, edited: true, fields: touched };
   }
@@ -528,13 +562,16 @@ export class SkillRegistry {
    * Pin/unpin. Pinned skills refuse deletion and edits until explicitly
    * unpinned.
    */
-  setPinned(name, pinned = true, by = "agent") {
+  setPinned(name, pinned = true, by = "agent", sessionId = null) {
     const skill = this.mustGet(name);
     const text = fs.readFileSync(skill.path, "utf8");
     const next = updateFrontmatter(text, { pinned: pinned ? true : null });
     writeTextAtomic(skill.path, next);
     appendSkillRevision(skill.dir, { skill: name, action: pinned ? "pinned" : "unpinned", by, before: text, after: next });
-    this.logEdit({ skill: name, action: pinned ? "pinned" : "unpinned", by });
+    this.logEdit(
+      { skill: name, action: pinned ? "pinned" : "unpinned", by },
+      sessionId
+    );
     this.reload();
     return { skill: name, pinned: Boolean(pinned) };
   }
@@ -543,7 +580,7 @@ export class SkillRegistry {
    * Soft delete: moves the skill dir into .trash/ under the user skills
    * dir (recoverable beats gone forever). Refuses pinned + bundled.
    */
-  deleteSkill(name, by = "agent") {
+  deleteSkill(name, by = "agent", sessionId = null) {
     const skill = this.mustGet(name);
     if (skill.pinned) throw new Error(`Skill '${name}' is pinned — unpin it first if you really mean to delete it.`);
     if (skill.bundled) throw new Error(`Skill '${name}' is bundled (read-only examples dir) — it cannot be deleted.`);
@@ -560,12 +597,15 @@ export class SkillRegistry {
       metadata: { destination: dest }
     });
     fs.renameSync(skill.dir, dest);
-    this.logEdit({ skill: name, action: "deleted", by, summary: `moved to ${dest}` });
+    this.logEdit(
+      { skill: name, action: "deleted", by, summary: `moved to ${dest}` },
+      sessionId
+    );
     this.reload();
     return { skill: name, deleted: true, trash: dest };
   }
 
-  restoreSkill(name, by = "agent", now = new Date()) {
+  restoreSkill(name, by = "agent", now = new Date(), sessionId = null) {
     const skill = this.mustGet(name);
     const restoredAt = validDate(now, "restore time").toISOString();
     const text = fs.readFileSync(skill.path, "utf8");
@@ -578,7 +618,7 @@ export class SkillRegistry {
       before: text,
       after: next
     });
-    this.logEdit({ skill: name, action: "restored", by });
+    this.logEdit({ skill: name, action: "restored", by }, sessionId);
     this.reload();
     return { skill: name, state: "active", restoredAt };
   }
@@ -659,7 +699,10 @@ export class SkillRegistry {
               pruneBundled: policy.pruneBundled
             }
           });
-          this.logEdit({ skill: skill.name, action: `curator-${after}`, by: "skill-curator" });
+          this.logEdit(
+            { skill: skill.name, action: `curator-${after}`, by: "skill-curator" },
+            null
+          );
           changed += 1;
           result = "transitioned";
         }
@@ -776,7 +819,11 @@ export class SkillRegistry {
         if (skill.state === "archived") {
           throw new Error(`Skill '${args.name}' is archived; call restore_skill before using it.`);
         }
-        return this.view(args.name, args.file ?? null);
+        return this.view(
+          args.name,
+          args.file ?? null,
+          context?.sessionId ?? null
+        );
       }
     });
 
@@ -826,7 +873,10 @@ export class SkillRegistry {
       ),
       handler: (args, context) => {
         assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill creation");
-        return this.createSkill({ ...args, createdBy: context?.agentId ?? "agent" });
+        return this.createSkill(
+          { ...args, createdBy: context?.agentId ?? "agent" },
+          context?.sessionId ?? null
+        );
       }
     });
 
@@ -892,7 +942,12 @@ export class SkillRegistry {
       handler: (args, context) => {
         assertProjectSkill(context, args.name);
         assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill rollback");
-        return this.rollbackSkillRevision(args.name, args.revisionId, context?.agentId ?? "agent");
+        return this.rollbackSkillRevision(
+          args.name,
+          args.revisionId,
+          context?.agentId ?? "agent",
+          context?.sessionId ?? null
+        );
       }
     });
 
@@ -921,8 +976,17 @@ export class SkillRegistry {
       handler: (args, context) => {
         assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill editing");
         const by = context?.agentId ?? "agent";
-        if (args.old_string !== undefined) return this.patchSkill(args.name, args.old_string, args.new_string ?? "", by);
-        return this.editSkill(args.name, args, by);
+        const sessionId = context?.sessionId ?? null;
+        if (args.old_string !== undefined) {
+          return this.patchSkill(
+            args.name,
+            args.old_string,
+            args.new_string ?? "",
+            by,
+            sessionId
+          );
+        }
+        return this.editSkill(args.name, args, by, sessionId);
       }
     });
 
@@ -944,7 +1008,11 @@ export class SkillRegistry {
       ),
       handler: (args, context) => {
         assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill deletion");
-        return this.deleteSkill(args.name, context?.agentId ?? "agent");
+        return this.deleteSkill(
+          args.name,
+          context?.agentId ?? "agent",
+          context?.sessionId ?? null
+        );
       }
     });
 
@@ -971,7 +1039,8 @@ export class SkillRegistry {
         return this.setPinned(
           args.name,
           args.pinned !== false,
-          context?.agentId ?? "agent"
+          context?.agentId ?? "agent",
+          context?.sessionId ?? null
         );
       }
     });
@@ -993,13 +1062,19 @@ export class SkillRegistry {
       ),
       handler: (args, context) => {
         assertDefaultProjectSkillControl(this.runtime?.projects, context, "Skill restoration");
-        return this.restoreSkill(args.name, context?.agentId ?? "agent");
+        return this.restoreSkill(
+          args.name,
+          context?.agentId ?? "agent",
+          new Date(),
+          context?.sessionId ?? null
+        );
       }
     });
   }
 
   async run(name, { input = "", args = {} } = {}, context = {}) {
     assertProjectSkill(context, name);
+    const sessionId = context?.sessionId ?? null;
     const skill = this.mustGet(name);
     if (skill.state === "archived") {
       throw new Error(`Skill '${name}' is archived; call restore_skill before using it.`);
@@ -1007,7 +1082,7 @@ export class SkillRegistry {
     const rendered = renderTemplate(skill.body, { input, args });
     const provider = this.runtime?.agentHost?.modelProvider;
     if (!provider) {
-      this.recordUse(name, "run", "error");
+      this.recordUse(name, "run", "error", nowIso(), sessionId);
       throw new Error("No model provider available for skill execution.");
     }
     const agentName = `skill:${skill.name}`;
@@ -1070,7 +1145,7 @@ export class SkillRegistry {
         const completionScore = calls.length > 0 ? scoreFromToolCalls(calls) : 0.7;
         this.runtime.outcomes.resolve(outcome.id, completionScore, "skill-completed");
       }
-      this.recordUse(name, "run", "ok");
+      this.recordUse(name, "run", "ok", nowIso(), sessionId);
       return {
         skill: skill.name,
         output: result.text,
@@ -1078,7 +1153,7 @@ export class SkillRegistry {
         toolScope: publicSkillToolScope(toolScope)
       };
     } catch (error) {
-      this.recordUse(name, "run", "error");
+      this.recordUse(name, "run", "error", nowIso(), sessionId);
       if (outcome) this.runtime.outcomes.resolve(outcome.id, 0.1, "skill-failed", error.message);
       throw error;
     }

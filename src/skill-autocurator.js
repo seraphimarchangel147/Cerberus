@@ -278,7 +278,8 @@ export async function improveSkills({
         name,
         patch.oldString,
         patch.newString,
-        "skill-autocurator"
+        "skill-autocurator",
+        null
       );
       const change = {
         skill: name,
@@ -296,7 +297,7 @@ export async function improveSkills({
         action: "improvement-skipped",
         by: "skill-autocurator",
         summary: reason.slice(0, 240)
-      });
+      }, null);
       warn(runtime, `[skill-autocurator] skipped improvement for '${name}': ${reason}`);
       if (error?.code === "BUDGET_EXCEEDED") break;
     }

@@ -2447,7 +2447,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
               stats: runtime.skills.statsFor(name)
             });
           }
-          return sendJson(res, 200, runtime.skills.view(name, file || null));
+          return sendJson(res, 200, runtime.skills.view(name, file || null, null));
         } catch (error) {
           return sendJson(res, 404, { error: error.message });
         }
@@ -2460,7 +2460,10 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
           }
           assertProjectSkill(project, body.name);
-          const result = runtime.skills.createSkill({ ...body, createdBy: body.createdBy ?? "dashboard" });
+          const result = runtime.skills.createSkill(
+            { ...body, createdBy: body.createdBy ?? "dashboard" },
+            null
+          );
           events.emit("skills", { op: "created", skill: result.slug });
           return sendJson(res, 200, result);
         } catch (error) {
@@ -2477,8 +2480,14 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           }
           assertProjectSkill(project, name);
           const result = body.old_string !== undefined
-            ? runtime.skills.patchSkill(name, body.old_string, body.new_string ?? "", body.by ?? "dashboard")
-            : runtime.skills.editSkill(name, body, body.by ?? "dashboard");
+            ? runtime.skills.patchSkill(
+                name,
+                body.old_string,
+                body.new_string ?? "",
+                body.by ?? "dashboard",
+                null
+              )
+            : runtime.skills.editSkill(name, body, body.by ?? "dashboard", null);
           events.emit("skills", { op: "edited", skill: name });
           return sendJson(res, 200, result);
         } catch (error) {
@@ -2494,7 +2503,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
           }
           assertProjectSkill(project, name);
-          return sendJson(res, 200, runtime.skills.setPinned(name, body.pinned !== false, body.by ?? "dashboard"));
+          return sendJson(
+            res,
+            200,
+            runtime.skills.setPinned(
+              name,
+              body.pinned !== false,
+              body.by ?? "dashboard",
+              null
+            )
+          );
         } catch (error) {
           return sendJson(res, 400, { error: error.message });
         }
@@ -2507,7 +2525,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             return sendJson(res, 403, { error: "Skill definition administration is default-project only" });
           }
           assertProjectSkill(project, name);
-          const result = runtime.skills.deleteSkill(name, "dashboard");
+          const result = runtime.skills.deleteSkill(name, "dashboard", null);
           events.emit("skills", { op: "deleted", skill: name });
           return sendJson(res, 200, result);
         } catch (error) {

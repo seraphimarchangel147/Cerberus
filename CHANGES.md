@@ -1816,6 +1816,12 @@ UPGRADE BATCH PHASE 1 COMPLETE
   mailbox tests successfully; its only failure was the untouched POSIX
   directory-mode assertion (`0700` reads as `0666` on Windows).
 
+## 2026-07-27 - Session-scoped trace routing phase baseline (Codex)
+
+- The required untouched phase baseline is 1912 passing, zero failing, and 24
+  skipped browser-dependent QA tests. Both workstream gates must retain at
+  least 1912 passing tests with zero failures.
+
 - 2026-07-27T09:34:01.345Z · **azazel** · edit `CHANGES.md` — Re-apply Azazel changelog additions onto origin/main version during rebase
 - 2026-07-27T10:39:07.440Z · **azazel** · edit `src/pending-actions.js`
 - 2026-07-27T10:39:40.489Z · **azazel** · edit `test/pending-actions-hardening.test.js`
@@ -1824,3 +1830,24 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - 2026-07-27T12:16:54.517Z · **azazel** · edit `src/abi-runtime.js` — memtree observability site 2: log enabled state with dir/migrated/spill details; failure warn now carries stack and states the degradation
 - 2026-07-27T12:52:00.000Z · **seraphim** · edit `src/memory-system.js` — memtree observability site 3: projection failures now name item id/scope/tier, carry the stack, and state the tiered-memory↔memory-tree divergence; successful projections log pending merge pressure
 - 2026-07-27T12:52:00.000Z · **seraphim** · edit `src/spill-store.js` — memtree observability site 4: spill journal replay no longer falls back silently — snapshot fallback and unrecoverable-truncation paths both warn with sequences/entry counts; snapshot-write failure carries stack and names the degraded recovery posture
+
+## 2026-07-27 - Session-scoped skill telemetry (Codex)
+
+- Skill use and edit telemetry now retains the originating agent session from
+  the tool, Discord command, and skill execution boundaries. Every authoring
+  tool passes its session through the existing guarded revision path.
+- Autonomous curator transitions, improvement patches, and skipped
+  improvements pass an explicit null session. Dashboard operations also pass
+  null rather than inventing a conversational identity.
+- The curator-facing skill usage JSONL records are byte-schema compatible:
+  session identity is present only on advisory runtime events.
+- Discord skill deletion confirmations retain and verify their originating
+  session before emitting the delete trace. Existing owner, project, pin, and
+  revision guards remain intact.
+- No environment variable, npm dependency, or package manifest changed.
+  Focused session, authoring, curator, and Discord coverage passes 61/61.
+  The serial Windows-compatible full lane passes 1930 tests with zero
+  failures and two pre-existing skips; the three compatible mailbox tests
+  pass separately. Raw serial discovery passes 1934 tests and reaches only
+  the untouched POSIX mode assertion, where NTFS reports 0666 instead of
+  0700. This remains above the required 1912-pass baseline.

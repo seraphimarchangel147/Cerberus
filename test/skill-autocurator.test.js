@@ -518,6 +518,11 @@ test("failed improvement patch leaves SKILL.md byte-identical and logs the skip"
   const edits = fs.readFileSync(path.join(harness.dataDir, "skill-edits.jsonl"), "utf8");
   assert.match(edits, /"action":"improvement-skipped"/u);
   assert.match(edits, /"by":"skill-autocurator"/u);
+  const editEvent = harness.emitted.find(
+    (event) => event.name === "skill-edit"
+      && event.payload.action === "improvement-skipped"
+  );
+  assert.equal(editEvent?.payload.sessionId, null);
 });
 
 test("successful improvement uses patchSkill revision history and rolls back", async (t) => {
@@ -561,6 +566,10 @@ test("successful improvement uses patchSkill revision history and rolls back", a
   const revision = loadSkillRevisions(skill.dir).at(-1);
   assert.equal(revision.action, "patched");
   assert.equal(revision.by, "skill-autocurator");
+  const editEvent = harness.emitted.find(
+    (event) => event.name === "skill-edit" && event.payload.action === "patched"
+  );
+  assert.equal(editEvent?.payload.sessionId, null);
 
   harness.runtime.skills.rollbackSkillRevision(
     "patch-works",
@@ -587,11 +596,29 @@ test("run and view usage records default-compatible ok and error outcomes", asyn
   });
   harness.runtime.skills.reload();
 
-  harness.runtime.skills.view("usage-outcomes");
-  await harness.runtime.skills.run("usage-outcomes");
+  harness.runtime.skills.recordUse(
+    "usage-outcomes",
+    "view",
+    "ok",
+    "2026-07-27T11:59:00.000Z"
+  );
+  harness.runtime.skills.view(
+    "usage-outcomes",
+    null,
+    "discord:guild:view-channel"
+  );
+  await harness.runtime.skills.run(
+    "usage-outcomes",
+    {},
+    { sessionId: "discord:guild:run-channel" }
+  );
   fail = true;
   await assert.rejects(
-    harness.runtime.skills.run("usage-outcomes"),
+    harness.runtime.skills.run(
+      "usage-outcomes",
+      {},
+      { sessionId: "discord:guild:error-channel" }
+    ),
     /execution failed/u
   );
 
@@ -603,8 +630,30 @@ test("run and view usage records default-compatible ok and error outcomes", asyn
     rows.map(({ mode, outcome }) => ({ mode, outcome })),
     [
       { mode: "view", outcome: "ok" },
+      { mode: "view", outcome: "ok" },
       { mode: "run", outcome: "ok" },
       { mode: "run", outcome: "error" }
+    ]
+  );
+  assert.deepEqual(rows[0], {
+    skill: "usage-outcomes",
+    mode: "view",
+    outcome: "ok",
+    at: "2026-07-27T11:59:00.000Z"
+  });
+  assert.ok(
+    rows.every((row) => !Object.hasOwn(row, "sessionId")),
+    "the curator-facing usage JSONL schema must remain unchanged"
+  );
+  assert.deepEqual(
+    harness.emitted
+      .filter((event) => event.name === "skill-use")
+      .map((event) => event.payload.sessionId),
+    [
+      null,
+      "discord:guild:view-channel",
+      "discord:guild:run-channel",
+      "discord:guild:error-channel"
     ]
   );
 });

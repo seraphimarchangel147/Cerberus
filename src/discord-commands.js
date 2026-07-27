@@ -364,9 +364,20 @@ export class DiscordCommands {
           flags: EPHEMERAL
         }, T.UPDATE_MESSAGE);
       }
+      const sessionId = this.goalSessionId(interaction);
+      if (pending.sessionId && pending.sessionId !== sessionId) {
+        return this.respond(interaction, {
+          content: "This delete confirmation belongs to another session.",
+          flags: EPHEMERAL
+        }, T.UPDATE_MESSAGE);
+      }
       this.skillDeleteConfirmations.delete(id);
       try {
-        this.runtime?.skills?.deleteSkill(pending.name, discordDecisionActor(userId));
+        this.runtime?.skills?.deleteSkill(
+          pending.name,
+          discordDecisionActor(userId),
+          sessionId
+        );
         return this.respond(interaction, {
           content: `🗑 **${pending.name}** moved to .trash — recoverable with restore.`,
           components: []
@@ -1014,7 +1025,8 @@ export class DiscordCommands {
 
     try {
       if (action === "view") {
-        const skill = registry.view(name);
+        const sessionId = this.goalSessionId(interaction);
+        const skill = registry.view(name, null, sessionId);
         const body = String(skill?.body ?? skill?.content ?? "");
         const files = Array.isArray(skill?.linkedFiles) && skill.linkedFiles.length
           ? `\nLinked files: ${skill.linkedFiles.map((f) => (typeof f === "string" ? f : f?.path)).filter(Boolean).join(", ")}`
@@ -1029,8 +1041,9 @@ export class DiscordCommands {
       }
 
       if (action === "pin") {
+        const sessionId = this.goalSessionId(interaction);
         const pinned = arg("state") !== "unpin";
-        registry.setPinned(name, pinned, by);
+        registry.setPinned(name, pinned, by, sessionId);
         return this.respond(interaction, {
           content: pinned ? `📌 **${name}** pinned — protected from deletion.` : `**${name}** unpinned.`
         });
@@ -1083,12 +1096,17 @@ export class DiscordCommands {
         if (!registry.has(name)) {
           return this.respond(interaction, { content: `Unknown skill: ${name}`, flags: EPHEMERAL });
         }
+        const sessionId = this.goalSessionId(interaction);
         const confirmationId = `skill-delete:${(++this.rollbackConfirmationSeq).toString(36)}`;
         if (this.skillDeleteConfirmations.size >= 50) {
           const oldest = this.skillDeleteConfirmations.keys().next().value;
           if (oldest) this.skillDeleteConfirmations.delete(oldest);
         }
-        this.skillDeleteConfirmations.set(confirmationId, { name, userId });
+        this.skillDeleteConfirmations.set(confirmationId, {
+          name,
+          userId,
+          sessionId
+        });
         return this.respond(interaction, {
           content: `Delete skill **${name}**? It moves to .trash and stays recoverable.`,
           flags: EPHEMERAL,
