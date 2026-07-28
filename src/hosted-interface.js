@@ -1202,7 +1202,9 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         try {
           const candidate = runtime.skillImports.approve(id, {
             projectId: project.id,
-            expectedRevision: body?.expectedRevision
+            expectedRevision: body?.expectedRevision,
+            // Required when the static threat scan returned caution/dangerous.
+            acknowledgeScan: body?.acknowledgeScan ?? null
           }, {
             actor: "http:POST:/skill-imports/approve"
           });
@@ -1212,7 +1214,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             candidateId: candidate.id,
             revision: candidate.revision,
             status: candidate.status,
-            skillName: candidate.skillName
+            skillName: candidate.skillName,
+            scanVerdict: candidate.scan?.verdict ?? null
           });
           return sendJson(res, 200, candidate);
         } catch (error) {
@@ -14532,6 +14535,7 @@ switchTab(initialTab);
   }
 
   var lastDraw = 0;
+  var gazeSmX = 0, gazeSmY = 0;   /* smoothed gaze — eased, not snapped */
   /* render one form (by stage index) into its off-screen buffer; returns its
      buffer + dims so callers (e.g. the evolution crossfade) can composite it */
   function renderForm(stage, P) {
@@ -14561,8 +14565,17 @@ switchTab(initialTab);
     requestAnimationFrame(tick);
     if (paused || !settings.enabled) return;
     if (now - lastDraw < FRAME_MS - 1) return;
+    /* Delta-time animation clock. rAF lands on irregular vsync boundaries
+       (50/66.7/83ms on a 60Hz display); the old fixed +4-tick step turned
+       that cadence jitter into visible speed judder. Advance by ACTUAL
+       elapsed time instead — frame stays in 60Hz-tick units so every
+       existing frame*k constant keeps its tuned speed, and average motion
+       rate is identical but judder-free. Clamped so a backgrounded tab
+       doesn't fast-forward on refocus. dtF = elapsed time in 15fps frames. */
+    var dtMs = Math.min(now - lastDraw, 250);
     lastDraw = now;
-    frame += TICKS_PER_FRAME;
+    var dtF = dtMs / FRAME_MS;
+    frame += dtF * TICKS_PER_FRAME;
 
     var S = STATES[state];
     var F = FORMS[settings.stage];
@@ -14573,7 +14586,7 @@ switchTab(initialTab);
       else if ((state === "running" || state === "review") && Math.random() < 0.0006) doEvolve();
     }
     if (evolving) {
-      evolveT += 1/(2.2*FPS);
+      evolveT += dtF/(2.2*FPS);
       var evSt = document.getElementById("cerbHudState");
       if (evSt) { evSt.textContent = "EVOLVING"; evSt.style.color = "#fff4d0"; }
       if (evolveT >= 1) finishEvolve();
@@ -14581,7 +14594,7 @@ switchTab(initialTab);
 
     /* easter-egg scheduling (idle only) — pool depends on form */
     if (state === "idle" && !egg) {
-      nextEggIn--;
+      nextEggIn -= dtF;
       if (nextEggIn <= 0) {
         var pool = EGGS[settings.stage] || EGGS[0];
         egg = pool[Math.floor(Math.random()*pool.length)];
@@ -14591,7 +14604,7 @@ switchTab(initialTab);
     }
     var eggEnv = 0;
     if (egg) {
-      eggT += 1/EGG_DURATION;
+      eggT += dtF/EGG_DURATION;
       eggEnv = eggT < 0.2 ? eggT/0.2 : (eggT > 0.8 ? (1-eggT)/0.2 : 1);
       eggEnv = Math.max(0, Math.min(1, eggEnv));
       if (eggT >= 1) { egg = null; eggT = 0; eggEnv = 0; }
@@ -14603,7 +14616,7 @@ switchTab(initialTab);
       var dx = mouseX - petX;
       if (Math.abs(dx) > 6) {
         walkPhase = frame*0.35;
-        petX += (dx>0?1:-1)*Math.min(Math.abs(dx), 2.2);
+        petX += (dx>0?1:-1)*Math.min(Math.abs(dx), 2.2*dtF);
         facing = dx>0?1:-1; moving = true;
       }
     } else if ((state === "idle" || state === "waiting") && !egg) {
@@ -14611,7 +14624,7 @@ switchTab(initialTab);
       var dist = Math.sqrt(dx2*dx2+dy2*dy2);
       if (dist > 160) {
         walkPhase = frame*0.25;
-        petX += (dx2/dist)*1.4; petY += (dy2/dist)*1.0;
+        petX += (dx2/dist)*1.4*dtF; petY += (dy2/dist)*1.0*dtF;
         if (Math.abs(dx2) > 4) facing = dx2>0?1:-1;
         moving = true;
       }
@@ -14622,18 +14635,26 @@ switchTab(initialTab);
 
     /* gaze */
     var gdx = mouseX-petX, gdy = mouseY-petY;
-    var gazeX = Math.max(-1, Math.min(1, Math.round(gdx/60)));
-    var gazeY = Math.max(-1, Math.min(1, Math.round(gdy/80)));
+    /* Smoothed gaze: ease toward the mouse instead of snapping in 3 steps,
+       so eye motion reads as continuous at 15fps. State overrides below
+       still snap intentionally (review scan, failed droop). */
+    var gazeTgtX = Math.max(-1, Math.min(1, gdx/60));
+    var gazeTgtY = Math.max(-1, Math.min(1, gdy/80));
+    var gazeEase = Math.min(1, dtF*0.4);
+    gazeSmX += (gazeTgtX-gazeSmX)*gazeEase; gazeSmY += (gazeTgtY-gazeSmY)*gazeEase;
+    var gazeX = Math.max(-1, Math.min(1, gazeSmX));
+    var gazeY = Math.max(-1, Math.min(1, gazeSmY));
     var runeFlare = false;
     if (state === "review") {
       gazeX = Math.max(-1, Math.min(1, Math.round(Math.sin(frame*0.15)*1.4)));
       gazeY = 0; runeFlare = true;
-    } else if (state === "failed") { gazeX = 0; gazeY = 1; }
+      gazeSmX = gazeX; gazeSmY = gazeY;   /* sync so exit doesn't lurch */
+    } else if (state === "failed") { gazeX = 0; gazeY = 1; gazeSmX = 0; gazeSmY = 1; }
 
     var bob = reduced ? 0 : Math.sin(frame*0.07)*S.bobAmp;
     var squash = 1, yOff = 0;
     if (state === "jumping") {
-      jumpT += 0.06*TICKS_PER_FRAME;
+      jumpT += 0.06*TICKS_PER_FRAME*dtF;
       var arc = Math.sin(Math.min(1, jumpT)*Math.PI);
       yOff = -arc*26; squash = 1+arc*0.25-(jumpT<0.15?0.2:0);
       if (jumpT >= 1.15) setState("idle");

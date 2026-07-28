@@ -7056,13 +7056,14 @@ export function registerCapabilityProfileTools(registry, runtime) {
       capability: {
         resources: ["filesystem"]
       },
-      description: "Approve one exact quarantined import revision and atomically materialize it as a user skill. A real human approval is mandatory; auto-approve cannot load imported code.",
+      description: "Approve one exact quarantined import revision and atomically materialize it as a user skill. A real human approval is mandatory; auto-approve cannot load imported code. If the static threat scan returned a 'caution' or 'dangerous' verdict, the candidate's scan.acknowledgementDigest must also be supplied as acknowledgeScan.",
       summarize: ({ id }) => `Approve quarantined skill import ${boundedImportId(id)}`,
       parameters: {
         type: "object",
         properties: {
           id: { type: "string", pattern: "^skill_import_[a-f0-9]{16}$" },
-          expectedRevision: { type: "integer", minimum: 1 }
+          expectedRevision: { type: "integer", minimum: 1 },
+          acknowledgeScan: { type: "string", pattern: "^[a-f0-9]{64}$" }
         },
         required: ["id", "expectedRevision"],
         additionalProperties: false
@@ -7071,7 +7072,8 @@ export function registerCapabilityProfileTools(registry, runtime) {
         assertManualCapabilityApproval(context, "Skill import approval");
         return runtime.skillImports.approve(args.id, {
           projectId: capabilityProjectId(runtime, context, "Skill import approval"),
-          expectedRevision: args.expectedRevision
+          expectedRevision: args.expectedRevision,
+          acknowledgeScan: args.acknowledgeScan ?? null
         }, {
           actor: capabilityActor(context)
         });

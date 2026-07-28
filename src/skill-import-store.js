@@ -12,6 +12,13 @@ import {
 import { resolveDataDir } from "./data-dir.js";
 import { DEFAULT_PROJECT_ID } from "./project-store.js";
 import { pickUserSkillsDir } from "./skill-materialize.js";
+import {
+  THREAT_SCANNER_VERSION,
+  THREAT_VERDICTS,
+  scanAcknowledgementDigest,
+  scanSkillPackage,
+  summarizeScan
+} from "./skill-threat-scan.js";
 import { createId, nowIso, stableHash } from "./utils.js";
 
 export const SKILL_IMPORT_STATUSES = Object.freeze({
@@ -51,6 +58,7 @@ const STORED_CANDIDATE_FIELDS = new Set([
   "sourceHash",
   "manifest",
   "totalBytes",
+  "scan",
   "createdAt",
   "createdBy",
   "updatedAt",
@@ -204,6 +212,16 @@ export class SkillImportStore {
     });
     const candidateDir = path.join(this.quarantineDir, candidateId);
     ensurePathWithin(candidateDir, this.quarantineDir);
+    // Content inspection happens on the in-memory package, before a single
+    // byte lands in quarantine. Bounds and path policy tell us the package is
+    // shaped like a skill; this tells a reviewer what the package intends.
+    const scan = summarizeScanRecord(
+      scanSkillPackage(stagedPackage.files, {
+        allowedTools: stagedPackage.allowedTools,
+        skillName: stagedPackage.skillName
+      }),
+      stagedPackage.sourceHash
+    );
     writeQuarantineFiles(candidateDir, stagedPackage.files);
     const at = this._now();
     const candidate = normalizeStoredCandidate({
@@ -221,6 +239,7 @@ export class SkillImportStore {
       sourceHash: stagedPackage.sourceHash,
       manifest: stagedPackage.manifest,
       totalBytes: stagedPackage.totalBytes,
+      scan,
       createdAt: at,
       createdBy: actor(context),
       updatedAt: at,
@@ -245,7 +264,9 @@ export class SkillImportStore {
           actor: actor(context),
           kind,
           skillName: candidate.skillName,
-          revision: candidate.revision
+          revision: candidate.revision,
+          scanVerdict: candidate.scan.verdict,
+          scanFindings: candidate.scan.findingCount
         });
         return publicCandidate(candidate);
       });
@@ -288,9 +309,12 @@ export class SkillImportStore {
     });
   }
 
-  approve(id, { projectId, expectedRevision } = {}, context = {}) {
+  approve(id, { projectId, expectedRevision, acknowledgeScan } = {}, context = {}) {
     const project = this._authorizeControlProject(projectId);
     const candidateId = normalizeImportId(id);
+    const acknowledgement = acknowledgeScan == null || acknowledgeScan === ""
+      ? null
+      : requiredText(acknowledgeScan, "acknowledgeScan", 64);
     let installedPath = null;
     let candidateView = null;
     this._mutate(() => {
@@ -300,6 +324,7 @@ export class SkillImportStore {
       if (candidate.status === SKILL_IMPORT_STATUSES.REJECTED) {
         throw new Error("A rejected skill import cannot be approved.");
       }
+      assertScanAcknowledged(candidate, acknowledgement);
       const userDir = pickUserSkillsDir(this.runtime);
       if (!userDir) throw new Error("No writable user skills directory is configured.");
       ensurePrivateDir(userDir);
@@ -327,6 +352,18 @@ export class SkillImportStore {
       }
       if (fs.existsSync(destination)) {
         throw new Error(`Skill '${candidate.skillName}' already exists.`);
+      }
+
+      // Re-scan the quarantined bytes that are actually about to be
+      // materialized rather than trusting the verdict recorded at stage time.
+      // Every file is read back through its manifest digest first, so the scan
+      // is bound to the exact content leaving quarantine.
+      const fresh = this._rescanQuarantine(candidate);
+      if (fresh.acknowledgementDigest !== candidate.scan.acknowledgementDigest) {
+        throw new SkillImportBoundaryError(
+          "Quarantined skill content no longer matches its recorded scan.",
+          { id: candidate.id }
+        );
       }
 
       // Prepare and hash-check a hidden directory before recording approval.
@@ -423,6 +460,27 @@ export class SkillImportStore {
       .sort((left, right) => right.sequence - left.sequence)
       .slice(0, bounded)
       .map(({ state: _state, ...event }) => structuredClone(event)));
+  }
+
+  // Re-derive a scan from the bytes currently sitting in quarantine. Each file
+  // is read through its manifest digest, so tampering is caught as a digest
+  // mismatch before the scanner even runs.
+  _rescanQuarantine(candidate) {
+    const files = candidate.manifest.map((entry) => {
+      const absolute = quarantineFilePath(
+        this.quarantineDir,
+        candidate.id,
+        entry.path
+      );
+      return { path: entry.path, content: readVerifiedFile(absolute, entry) };
+    });
+    return summarizeScanRecord(
+      scanSkillPackage(files, {
+        allowedTools: candidate.allowedTools,
+        skillName: candidate.skillName
+      }),
+      candidate.sourceHash
+    );
   }
 
   _resolveSourcePath(project, value) {
@@ -1445,6 +1503,7 @@ function normalizeStoredCandidate(value) {
     sourceHash: normalizeDigest(source.sourceHash),
     manifest,
     totalBytes,
+    scan: normalizeStoredScan(source.scan),
     createdAt: requiredIso(source.createdAt, "createdAt"),
     createdBy: requiredText(source.createdBy, "createdBy", 200),
     updatedAt: requiredIso(source.updatedAt, "updatedAt"),
@@ -1472,6 +1531,181 @@ function publicCandidate(candidate) {
       ? path.basename(candidate.installedPath)
       : null
   });
+}
+
+// A stored scan record: the verdict, severity census, capability
+// reconciliation, and a bounded set of findings. Findings are capped so a
+// hostile package cannot bloat the durable state file, and the count is kept
+// alongside so truncation is visible rather than silent.
+const MAX_STORED_FINDINGS = 100;
+const STORED_SCAN_FIELDS = new Set([
+  "scannerVersion",
+  "rulesDigest",
+  "ruleCount",
+  "verdict",
+  "counts",
+  "findingCount",
+  "storedFindingCount",
+  "truncated",
+  "capabilities",
+  "acknowledgementDigest",
+  "summary",
+  "findings"
+]);
+const STORED_FINDING_FIELDS = new Set([
+  "ruleId",
+  "severity",
+  "category",
+  "path",
+  "line",
+  "evidence",
+  "description",
+  "capability",
+  "obfuscated"
+]);
+const SCAN_VERDICTS = new Set(Object.values(THREAT_VERDICTS));
+const SCAN_SEVERITIES = ["critical", "high", "medium", "low"];
+
+function summarizeScanRecord(scan, sourceHash) {
+  const findings = scan.findings.slice(0, MAX_STORED_FINDINGS).map((finding) => ({
+    ruleId: finding.ruleId,
+    severity: finding.severity,
+    category: finding.category,
+    path: finding.path,
+    line: finding.line,
+    evidence: finding.evidence,
+    description: finding.description,
+    capability: finding.capability ?? null,
+    obfuscated: Boolean(finding.obfuscated)
+  }));
+  return {
+    scannerVersion: scan.scannerVersion,
+    rulesDigest: scan.rulesDigest,
+    ruleCount: scan.ruleCount,
+    verdict: scan.verdict,
+    counts: { ...scan.counts },
+    findingCount: scan.findingCount,
+    storedFindingCount: findings.length,
+    truncated: Boolean(scan.truncated) || findings.length < scan.findingCount,
+    capabilities: {
+      declared: [...scan.capabilities.declared],
+      required: [...scan.capabilities.required],
+      undeclared: [...scan.capabilities.undeclared]
+    },
+    // Binds the verdict to the exact content; an approval must quote it.
+    acknowledgementDigest: scanAcknowledgementDigest(scan, sourceHash),
+    summary: summarizeScan(scan),
+    findings
+  };
+}
+
+function normalizeStoredScan(value) {
+  const source = plainRecord(value, "skill import scan");
+  assertOnlyKeys(source, STORED_SCAN_FIELDS, "skill import scan");
+  if (source.scannerVersion !== THREAT_SCANNER_VERSION) {
+    throw new TypeError("Skill import scan was produced by a different scanner version.");
+  }
+  if (!SCAN_VERDICTS.has(source.verdict)) {
+    throw new TypeError("Invalid skill import scan verdict.");
+  }
+  const counts = plainRecord(source.counts, "skill import scan counts");
+  assertOnlyKeys(counts, new Set(SCAN_SEVERITIES), "skill import scan counts");
+  const normalizedCounts = {};
+  for (const severity of SCAN_SEVERITIES) {
+    normalizedCounts[severity] = integerInRange(
+      counts[severity],
+      `scan ${severity} count`,
+      0,
+      1_000_000
+    );
+  }
+  const capabilities = plainRecord(source.capabilities, "skill import scan capabilities");
+  assertOnlyKeys(
+    capabilities,
+    new Set(["declared", "required", "undeclared"]),
+    "skill import scan capabilities"
+  );
+  const capabilityList = (key) => plainArray(capabilities[key], `scan ${key} capabilities`, 32)
+    .map((item) => requiredText(item, `scan ${key} capability`, 64));
+  const findings = plainArray(source.findings, "skill import scan findings", MAX_STORED_FINDINGS)
+    .map((raw) => {
+      const finding = plainRecord(raw, "skill import scan finding");
+      assertOnlyKeys(finding, STORED_FINDING_FIELDS, "skill import scan finding");
+      if (!SCAN_SEVERITIES.includes(finding.severity)) {
+        throw new TypeError("Invalid skill import scan finding severity.");
+      }
+      requireBoolean(finding.obfuscated, "scan finding obfuscated");
+      return {
+        ruleId: requiredText(finding.ruleId, "scan finding ruleId", 64),
+        severity: finding.severity,
+        category: requiredText(finding.category, "scan finding category", 64),
+        path: requiredText(finding.path, "scan finding path", 4096),
+        line: integerInRange(finding.line, "scan finding line", 0, 10_000_000),
+        evidence: requiredText(finding.evidence, "scan finding evidence", 400),
+        description: requiredText(finding.description, "scan finding description", 500),
+        capability: finding.capability == null
+          ? null
+          : requiredText(finding.capability, "scan finding capability", 64),
+        obfuscated: finding.obfuscated
+      };
+    });
+  const findingCount = integerInRange(source.findingCount, "scan findingCount", 0, 1_000_000);
+  if (findings.length > findingCount) {
+    throw new TypeError("Skill import scan stores more findings than it counted.");
+  }
+  requireBoolean(source.truncated, "scan truncated");
+  const digest = requiredText(source.acknowledgementDigest, "scan acknowledgementDigest", 64);
+  if (!/^[a-f0-9]{64}$/.test(digest)) {
+    throw new TypeError("Invalid skill import scan acknowledgement digest.");
+  }
+  const rulesDigest = requiredText(source.rulesDigest, "scan rulesDigest", 64);
+  if (!/^[a-f0-9]{64}$/.test(rulesDigest)) {
+    throw new TypeError("Invalid skill import scan rules digest.");
+  }
+  return {
+    scannerVersion: THREAT_SCANNER_VERSION,
+    rulesDigest,
+    ruleCount: integerInRange(source.ruleCount, "scan ruleCount", 1, 100_000),
+    verdict: source.verdict,
+    counts: normalizedCounts,
+    findingCount,
+    storedFindingCount: integerInRange(
+      source.storedFindingCount,
+      "scan storedFindingCount",
+      0,
+      MAX_STORED_FINDINGS
+    ),
+    truncated: source.truncated,
+    capabilities: {
+      declared: capabilityList("declared"),
+      required: capabilityList("required"),
+      undeclared: capabilityList("undeclared")
+    },
+    acknowledgementDigest: digest,
+    summary: requiredText(source.summary, "scan summary", 1000),
+    findings
+  };
+}
+
+// A clean scan installs on the reviewer's word alone. Anything the scanner
+// flagged as caution or dangerous requires the approver to quote the
+// acknowledgement digest, which is bound to the exact scanned content — so an
+// acknowledgement cannot be replayed against a different package, and an
+// operator cannot approve findings they never saw.
+function assertScanAcknowledged(candidate, acknowledgement) {
+  if (candidate.status === SKILL_IMPORT_STATUSES.APPROVED) return;
+  if (candidate.scan.verdict === THREAT_VERDICTS.SAFE) return;
+  if (acknowledgement === candidate.scan.acknowledgementDigest) return;
+  throw new SkillImportBoundaryError(
+    `Skill import scan verdict '${candidate.scan.verdict}' requires an explicit acknowledgement. `
+    + `Review the findings, then approve with acknowledgeScan set to the candidate's scan acknowledgementDigest.`,
+    {
+      id: candidate.id,
+      verdict: candidate.scan.verdict,
+      findingCount: candidate.scan.findingCount,
+      summary: candidate.scan.summary
+    }
+  );
 }
 
 function validState(value) {
