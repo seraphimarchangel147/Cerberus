@@ -150,8 +150,12 @@ export class SkillRegistry {
     } catch {
       return "";
     }
+    const availableTools = availableSkillToolNames(this.runtime?.tools);
     const active = rows
       .filter((skill) => normalizeSkillState(skill?.state) !== "archived")
+      // Conditional activation: a skill whose requires_tools are missing, or
+      // whose primaries are present, is not advertised this session.
+      .filter((skill) => this.isActivatedFor(skill, availableTools))
       .slice(0, maxSkills);
     if (active.length === 0) return "";
     const lines = active.map((skill) => {
@@ -160,7 +164,8 @@ export class SkillRegistry {
         ? `${desc.slice(0, maxDescription - 1)}…`
         : desc;
       const stale = normalizeSkillState(skill?.state) === "stale" ? " (stale)" : "";
-      return `- ${skill.name}${stale}: ${clipped || "no description"}`;
+      const bundle = skill?.bundle?.length ? ` (bundle: ${skill.bundle.join(", ")})` : "";
+      return `- ${skill.name}${stale}${bundle}: ${clipped || "no description"}`;
     });
     return [
       "",
@@ -176,6 +181,85 @@ export class SkillRegistry {
       return null;
     }
     return this.domainLearnings.loadForUrl(url);
+  }
+
+  // MARK: — conditional activation (Hermes parity)
+
+  // A skill is ACTIVE for this session when its hard dependencies are present
+  // (`requires_tools`) and its primaries are absent (`fallback_for_tools`).
+  // No declaration = always active, so every legacy skill is unaffected.
+  // When the tool registry is unreadable we fail OPEN: hiding procedural
+  // knowledge on a probe failure is worse than showing an extra skill.
+  isActivatedFor(skill, available = availableSkillToolNames(this.runtime?.tools)) {
+    if (!skill) return false;
+    if (!(available instanceof Set)) return true;
+    const requires = skill.requiresTools;
+    if (requires && !requires.every((tool) => available.has(tool))) return false;
+    const fallbackFor = skill.fallbackForTools;
+    if (fallbackFor && fallbackFor.some((tool) => available.has(tool))) return false;
+    return true;
+  }
+
+  // Why a skill is hidden — surfaced by list_skills so the model can tell
+  // "no such skill" from "gated off this session".
+  activationFor(skill, available = availableSkillToolNames(this.runtime?.tools)) {
+    const active = this.isActivatedFor(skill, available);
+    if (active) return { active: true, reason: null, missingTools: [], supersededBy: [] };
+    const missingTools = (skill?.requiresTools ?? [])
+      .filter((tool) => !(available instanceof Set) || !available.has(tool));
+    const supersededBy = (skill?.fallbackForTools ?? [])
+      .filter((tool) => available instanceof Set && available.has(tool));
+    return {
+      active: false,
+      reason: missingTools.length > 0 ? "requires-missing-tools" : "primary-tools-available",
+      missingTools,
+      supersededBy
+    };
+  }
+
+  // MARK: — bundles
+
+  // Expand a bundle alias into its concrete member skills, depth-first, with
+  // cycle detection and a hard depth cap so a self-referential bundle cannot
+  // hang the load path.
+  expandBundle(name, { maxDepth = 4, maxMembers = 24 } = {}) {
+    const members = [];
+    const seen = new Set();
+    const cycles = [];
+    const missing = [];
+    const walk = (skillName, depth, trail) => {
+      if (depth > maxDepth) {
+        throw new Error(`bundle '${name}' exceeds max expansion depth of ${maxDepth}`);
+      }
+      if (trail.includes(skillName)) {
+        cycles.push([...trail, skillName].join(" -> "));
+        return;
+      }
+      const skill = this.skills.get(skillName);
+      if (!skill) {
+        missing.push(skillName);
+        return;
+      }
+      const refs = skill.bundle;
+      if (!refs || refs.length === 0) {
+        if (!seen.has(skillName)) {
+          seen.add(skillName);
+          if (members.length >= maxMembers) {
+            throw new Error(`bundle '${name}' expands past the ${maxMembers}-skill limit`);
+          }
+          members.push(skillName);
+        }
+        return;
+      }
+      for (const ref of refs) walk(ref, depth + 1, [...trail, skillName]);
+    };
+    walk(name, 0, []);
+    return { bundle: name, members, cycles, missing };
+  }
+
+  isBundle(name) {
+    const skill = this.skills.get(name);
+    return Boolean(skill?.bundle?.length);
   }
 
   mustGet(name) {
@@ -436,6 +520,10 @@ export class SkillRegistry {
       sourceImportKind: skill.sourceImportKind,
       ownerProjectId: skill.ownerProjectId,
       allowedTools: skill.allowedTools,
+      requiresTools: skill.requiresTools ?? null,
+      fallbackForTools: skill.fallbackForTools ?? null,
+      bundle: skill.bundle ?? null,
+      meta: skill.meta ?? {},
       body: skill.body,
       linkedFiles: skill.linkedFiles ?? [],
       path: skill.path,
@@ -786,17 +874,33 @@ export class SkillRegistry {
       parameters: {
         type: "object",
         properties: {
-          include_archived: { type: "boolean", description: "Include archived skills so one can be restored." }
+          include_archived: { type: "boolean", description: "Include archived skills so one can be restored." },
+          include_inactive: { type: "boolean", description: "Include skills gated off this session by requires_tools / fallback_for_tools, with the reason they are hidden." }
         },
         additionalProperties: false
       },
-      handler: (args = {}, context) => this.list()
-        .filter((skill) => args.include_archived === true || skill.state !== "archived")
-        .filter((skill) => projectAllowsSkill(context, skill.name))
-        .map(({ name, description, category, pinned, state, stats }) => ({
-          name, description, category, pinned, state,
-          runs: stats.runs, views: stats.views, avgScore: stats.avgScore, lastUsedAt: stats.lastUsedAt
-        }))
+      handler: (args = {}, context) => {
+        const availableTools = availableSkillToolNames(this.runtime?.tools);
+        return this.list()
+          .filter((skill) => args.include_archived === true || skill.state !== "archived")
+          .filter((skill) => projectAllowsSkill(context, skill.name))
+          .map((skill) => ({ skill, activation: this.activationFor(skill, availableTools) }))
+          .filter(({ activation }) => args.include_inactive === true || activation.active)
+          .map(({ skill, activation }) => ({
+            name: skill.name,
+            description: skill.description,
+            category: skill.category,
+            pinned: skill.pinned,
+            state: skill.state,
+            bundle: skill.bundle ?? null,
+            active: activation.active,
+            inactiveReason: activation.reason,
+            runs: skill.stats.runs,
+            views: skill.stats.views,
+            avgScore: skill.stats.avgScore,
+            lastUsedAt: skill.stats.lastUsedAt
+          }));
+      }
     });
 
     toolRegistry.register({
@@ -818,6 +922,27 @@ export class SkillRegistry {
         const skill = this.mustGet(args.name);
         if (skill.state === "archived") {
           throw new Error(`Skill '${args.name}' is archived; call restore_skill before using it.`);
+        }
+        // Bundle alias: one call loads every member skill in declared order.
+        // A linked-file request is member-specific, so it stays single-skill.
+        if (this.isBundle(args.name) && !args.file) {
+          const expansion = this.expandBundle(args.name);
+          const members = [];
+          for (const member of expansion.members) {
+            assertProjectSkill(context, member);
+            const loaded = this.skills.get(member);
+            if (!loaded || loaded.state === "archived") continue;
+            members.push(this.view(member, null, context?.sessionId ?? null));
+          }
+          this.recordUse(args.name, "view", "ok", nowIso(), context?.sessionId ?? null);
+          return {
+            bundle: args.name,
+            description: skill.description,
+            memberCount: members.length,
+            missing: expansion.missing,
+            cycles: expansion.cycles,
+            skills: members
+          };
         }
         return this.view(
           args.name,
@@ -1283,6 +1408,22 @@ function parseSkillDocument(text) {
     state: normalizeSkillState(meta.state),
     curatorRestoredAt: meta.curatorRestoredAt ?? null,
     allowedTools: normalizeAllowedTools(meta.allowed_tools),
+    // Conditional activation (Hermes parity). `requires_tools` hides a skill
+    // when its hard dependencies are absent from the session;
+    // `fallback_for_tools` hides a skill while its PRIMARY tools are present,
+    // surfacing it only when they are missing. Both default to null = always on.
+    requiresTools: normalizeDeclaredToolList(meta.requires_tools, "requires_tools"),
+    fallbackForTools: normalizeDeclaredToolList(
+      meta.fallback_for_tools ?? meta.fallback_for_toolsets,
+      "fallback_for_tools"
+    ),
+    // Skill bundles: one alias loads several skills. Expanded at view time
+    // with cycle + depth guards (see expandBundle).
+    bundle: normalizeBundleList(meta.bundle),
+    // Generic frontmatter pass-through: any key we do not model explicitly is
+    // preserved here instead of being dropped into the void, so new metadata
+    // consumers do not need parser surgery.
+    meta: collectExtraFrontmatter(meta),
     // Story 2: lineage back to the proactive-suggestion that birthed
     // this skill (set by skill-materialize.js when the user accepts
     // a category=skill proposal). null for hand-authored skills.
@@ -1433,6 +1574,61 @@ function parseFrontmatter(text) {
     out[key] = value;
   }
   return out;
+}
+
+// Explicitly modelled frontmatter keys. Everything else is preserved on
+// `skill.meta` by collectExtraFrontmatter so future features are metadata
+// consumers rather than parser surgery.
+const KNOWN_FRONTMATTER_KEYS = new Set([
+  "name", "description", "systemPrompt", "system-prompt", "parameters",
+  "category", "pinned", "state", "curatorRestoredAt", "allowed_tools",
+  "requires_tools", "fallback_for_tools", "fallback_for_toolsets", "bundle",
+  "sourceSuggestionId", "sourceImportId", "sourceImportHash", "sourceImportKind",
+  "ownerProjectId", "createdBy", "createdAt"
+]);
+
+const MAX_EXTRA_FRONTMATTER_KEYS = 40;
+
+function collectExtraFrontmatter(meta) {
+  const out = {};
+  let count = 0;
+  for (const [key, value] of Object.entries(meta ?? {})) {
+    if (KNOWN_FRONTMATTER_KEYS.has(key)) continue;
+    if (++count > MAX_EXTRA_FRONTMATTER_KEYS) {
+      throw new Error(`too many custom frontmatter keys: limit is ${MAX_EXTRA_FRONTMATTER_KEYS}`);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+// Shared shape validator for requires_tools / fallback_for_tools. Accepts a
+// JSON array or a single string; returns null when unset so "no declaration"
+// stays distinguishable from "declared empty".
+function normalizeDeclaredToolList(value, label) {
+  if (value === undefined || value === null || value === "") return null;
+  const raw = Array.isArray(value) ? value : [value];
+  if (raw.length > 32) throw new Error(`${label} accepts at most 32 tool names`);
+  const names = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string" || !entry.trim() || entry.length > 128) {
+      throw new Error(`${label} entries must be non-empty tool-name strings up to 128 characters`);
+    }
+    const name = entry.trim();
+    if (!names.includes(name)) names.push(name);
+  }
+  return names.length > 0 ? names : null;
+}
+
+function normalizeBundleList(value) {
+  const names = normalizeDeclaredToolList(value, "bundle");
+  if (!names) return null;
+  for (const name of names) {
+    if (!isValidSkillSlug(name)) {
+      throw new Error(`bundle entries must be lowercase kebab-case skill slugs: got '${name}'`);
+    }
+  }
+  return names;
 }
 
 function normalizeAllowedTools(value) {
