@@ -584,6 +584,33 @@ test("use_skill reports nonexistent and invalid names without changing the tool 
   }
 });
 
+test("use_skill threads the tool context session into skill-use telemetry", () => {
+  const { reg, runtime, user } = makeRegistry();
+  writeSkill(user, "session-view");
+  const emitted = [];
+  runtime.events = {
+    emit(name, payload) {
+      emitted.push({ name, payload });
+    }
+  };
+  const tools = new Map();
+  const fakeRegistry = {
+    tools,
+    register(tool) { tools.set(tool.name, tool); },
+    unregister(name) { tools.delete(name); }
+  };
+  reg.reload();
+  reg.exposeAsTools(fakeRegistry);
+
+  tools.get("use_skill").handler(
+    { name: "session-view" },
+    { sessionId: "discord:guild:use-channel" }
+  );
+
+  const event = emitted.find((entry) => entry.name === "skill-use");
+  assert.equal(event?.payload.sessionId, "discord:guild:use-channel");
+});
+
 test("Skills dashboard escapes stored skill strings at every rendering site", () => {
   const source = fs.readFileSync(new URL("../src/hosted-interface.js", import.meta.url), "utf8");
   const start = source.indexOf("async function refreshSkills");

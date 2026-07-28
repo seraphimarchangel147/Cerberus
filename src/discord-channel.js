@@ -318,10 +318,6 @@ export class DiscordChannel {
       .trim() || (hasImages ? "(image attached — no caption)" : text);
 
     this.log({ op: "inbound", from: message.author?.id, channel: message.channel_id, guild: message.guild_id ?? null, len: text.length });
-    // Track where Azazel is actively working so the activity feed can follow
-    // him (Hermes-style): feed posts route to the channel of the current
-    // conversation, not just the static home channel.
-    this.lastActiveChannel = message.channel_id;
 
     // Approvals from Discord: "!approve <id>" / "!deny <id>" from an
     // allowFrom user decides a pending action without opening the dashboard.
@@ -711,8 +707,12 @@ export class DiscordChannel {
   async postCatastrophicApproval(actionLike) {
     const runtime = this.agentHost?.runtime;
     const action = runtime?.pendingActions?.get?.(actionLike?.id) ?? actionLike;
-    const channelId = this.activityChannelFor(action?.context?.sessionId ?? actionLike?.sessionId);
-    if (!action?.id || !channelId || this.approvalPrompts.has(action.id)) return null;
+    if (!action?.id || this.approvalPrompts.has(action.id)) return null;
+    const channelId = this.resolveActivityChannel(
+      action?.context?.sessionId ?? actionLike?.sessionId,
+      { feed: "approval", sessionOnly: true }
+    );
+    if (!channelId) return null;
 
     const card = catastrophicApprovalEmbed(action);
     const manualApproval = runtime?.tools?.get?.(action.toolName)?.manualApproval === true;
@@ -846,8 +846,79 @@ export class DiscordChannel {
   }
 
   activityChannelFor(sessionId) {
-    const match = /^discord:[^:]+:(\d+)(?::.+)?$/.exec(String(sessionId ?? ""));
-    return match?.[1] ?? this.lastActiveChannel ?? this.activityChannel ?? null;
+    return this.activityTargetFor(sessionId)?.channelId ?? null;
+  }
+
+  activityTargetFor(sessionId, { sessionOnly = false } = {}) {
+    const match = /^discord:([^:]+):(\d+)(?::.+)?$/.exec(
+      String(sessionId ?? "")
+    );
+    if (match) {
+      return {
+        guildId: match[1],
+        channelId: match[2],
+        source: "session"
+      };
+    }
+    if (sessionOnly) return null;
+    const configured = String(this.activityChannel ?? "").trim();
+    return configured
+      ? {
+          guildId: null,
+          channelId: configured,
+          source: "configured"
+        }
+      : null;
+  }
+
+  activityTargetAllowed(target) {
+    if (!target?.channelId) return false;
+    const configured = String(this.activityChannel ?? "").trim();
+    if (target.source === "configured") {
+      return Boolean(configured) && target.channelId === configured;
+    }
+    const allowedGuilds = Array.isArray(this.guilds) ? this.guilds : [];
+    const hasChannelConstraint = Boolean(configured);
+    const hasGuildConstraint = allowedGuilds.length > 0;
+    if (!hasChannelConstraint && !hasGuildConstraint) return false;
+    if (hasChannelConstraint && target.channelId !== configured) return false;
+    if (
+      hasGuildConstraint
+      && (
+        !target.guildId
+        || target.guildId === "dm"
+        || !allowedGuilds.includes(target.guildId)
+      )
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  resolveActivityChannel(sessionId, {
+    feed = "activity",
+    sessionOnly = false
+  } = {}) {
+    const target = this.activityTargetFor(sessionId, { sessionOnly });
+    if (!target) {
+      this.log({
+        op: "feed-dropped",
+        reason: "unresolved-session",
+        feed
+      });
+      return null;
+    }
+    if (!this.activityTargetAllowed(target)) {
+      this.log({
+        op: "feed-dropped",
+        reason: "channel-not-allowed",
+        feed,
+        channelId: target.channelId,
+        guildId: target.guildId
+      });
+      return null;
+    }
+    return target.channelId;
   }
 
   async replyToInteraction(interaction, content) {
@@ -875,16 +946,19 @@ export class DiscordChannel {
     // Route each feed post to the channel the agent is actually WORKING in
     // (Hermes-style): prefer the event's own session channel (events carry
     // sessionId "discord:<guild>:<channel>[:<user>]" when a Discord turn
-    // triggered them), then the channel of the most recent inbound message,
-    // then the configured home channel as the static fallback.
+    // triggered them), then the configured home channel. Never infer a
+    // destination from unrelated inbound activity.
     const post = (text, d = null) => {
-      const chan = this.activityChannelFor(d?.sessionId);
+      const chan = this.resolveActivityChannel(d?.sessionId, { feed: "text" });
       if (!chan) return;
       // Fire-and-forget: the feed must never break the runtime.
       this.sendMessage(chan, text).catch((error) => this.log({ op: "feed-error", error: error.message }));
     };
     const postEmbed = (embedObj, d = null) => {
-      const chan = this.activityChannelFor(d?.sessionId ?? d?.session?.agentSessionId ?? d?.agentSessionId);
+      const chan = this.resolveActivityChannel(
+        d?.sessionId ?? d?.session?.agentSessionId ?? d?.agentSessionId,
+        { feed: "embed" }
+      );
       if (!chan) return;
       this.sendEmbed(chan, embedObj).catch((error) => this.log({ op: "feed-error", error: error.message }));
     };
