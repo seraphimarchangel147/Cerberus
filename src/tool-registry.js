@@ -23,6 +23,7 @@ import {
   toolSchemaBytes
 } from "./tool-search.js";
 import { resolveSibling, siblingNames, legionUserId } from "./legion-siblings.js";
+import { loadVisionImage } from "./vision-load.js";
 import { deliverLegionMailbox } from "./legion-mailbox.js";
 import {
   ensureSemanticToolEnvelope,
@@ -4764,6 +4765,38 @@ export function registerCoreTools(registry, runtime) {
         projectId: context.__projectId ?? "default"
       });
       return finalize(raw, args.channel, args.target);
+    }
+  });
+
+  registry.register({
+    name: "vision_load",
+    sideEffects: false,
+    description: "Look at a local image file. Reads a PNG, JPEG, GIF, or WEBP from disk and attaches it to your context as a real image so you can SEE its contents — use it to verify rendered output (charts, screenshots, generated art, animation frames) instead of assuming it looks right. Path must be absolute or start with ~/. Protected locations, symlinks, and non-image files are refused.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute path (or ~/…) to a .png, .jpg, .jpeg, .gif, or .webp file."
+        }
+      },
+      required: ["path"],
+      additionalProperties: false
+    },
+    verbs: ["read"],
+    resources: ["filesystem"],
+    latency: "low",
+    handler: async (args, context = {}) => {
+      const projectId = typeof context.__projectId === "string" && context.__projectId.trim()
+        ? context.__projectId.trim().toLowerCase()
+        : "default";
+      // Outside the default project the workspace root is the boundary, exactly
+      // as it is for outbound delivery. Passing project scope through is what
+      // makes an isolated project's vision lane stay inside its own sandbox.
+      return loadVisionImage(args.path, {
+        projectId,
+        workspaceRoot: context.__projectWorkspaceDir ?? null
+      });
     }
   });
 

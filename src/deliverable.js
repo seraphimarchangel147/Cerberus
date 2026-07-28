@@ -88,6 +88,56 @@ const SENSITIVE_BASENAMES = new Set([
   ".pypirc"
 ]);
 
+/**
+ * Resolve a caller-supplied path for READING, under the same guards that
+ * govern outbound delivery: no relative paths, no symlinks, no credential or
+ * key material, and — outside the default project — nothing beyond the
+ * project workspace root.
+ *
+ * Sharing this with scanDeliverables() keeps one definition of "a path this
+ * agent may touch". A second copy would drift, and the copy that drifts is
+ * always the one guarding the secrets.
+ *
+ * Returns { realPath, size } or throws a caller-safe Error.
+ */
+export function resolveReadablePath(value, options = {}) {
+  const settings = scanSettings(options);
+  const resolved = resolveMentionedPath(value, settings.homeDir);
+  if (!resolved) {
+    throw new Error("Path must be absolute or start with ~/.");
+  }
+  if (isSensitivePath(resolved, settings.homeDir)) {
+    throw new Error("Path is inside a protected location and cannot be read.");
+  }
+  let realPath;
+  let stat;
+  try {
+    const linkStat = settings.fsImpl.lstatSync(resolved);
+    if (linkStat.isSymbolicLink?.()) {
+      throw new Error("Symlinks are not readable.");
+    }
+    realPath = settings.fsImpl.realpathSync(resolved);
+    stat = settings.fsImpl.statSync(realPath);
+  } catch (error) {
+    // Re-throw our own refusals verbatim; collapse filesystem errors so a
+    // probe cannot map the filesystem through error-message differences.
+    if (error?.message === "Symlinks are not readable.") throw error;
+    throw new Error("Path could not be read.");
+  }
+  // The symlink check above is on the pre-resolution path; re-check the target
+  // so a link into ~/.ssh cannot smuggle a key out through its realpath.
+  if (isSensitivePath(realPath, settings.homeDir)) {
+    throw new Error("Path is inside a protected location and cannot be read.");
+  }
+  if (!withinProjectWorkspace(realPath, settings)) {
+    throw new Error("Path is outside this project's workspace.");
+  }
+  if (!stat.isFile()) {
+    throw new Error("Path is not a regular file.");
+  }
+  return { realPath, size: stat.size };
+}
+
 export function classifyDeliverablePath(value) {
   const extension = path.extname(String(value ?? "")).slice(1).toLowerCase();
   const classification = DELIVERABLE_EXTENSION_MAP[extension];
