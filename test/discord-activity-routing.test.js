@@ -199,7 +199,16 @@ test("activity feed drops a session outside the configured allowlist", (t) => {
   );
 });
 
-test("same-guild traces cannot escape the configured agent channel", (t) => {
+// A same-guild session channel is a channel this adapter provably ingested a
+// message from (inbound is guild-gated on `this.guilds`), so its trace belongs
+// there — that IS session scoping. An earlier revision additionally required
+// channelId === activityChannel, which collapsed every session-scoped trace
+// back onto the home channel: measured against the live event log, 95.6% of
+// this agent's real conversations happen OUTSIDE its configured activity
+// channel, so that rule silently reintroduced the misroute it was meant to fix
+// while every test stayed green. Keep this test as the guard against
+// re-narrowing.
+test("same-guild traces route to their own session channel", (t) => {
   const harness = createHarness(t, {
     activityChannel: "222222",
     guilds: ["shared-guild"]
@@ -212,12 +221,57 @@ test("same-guild traces cannot escape the configured agent channel", (t) => {
     sessionId: "discord:shared-guild:333333:user-1"
   });
 
+  assert.deepEqual(
+    harness.embeds.map((entry) => entry.channelId),
+    ["333333"]
+  );
+  assert.ok(
+    !harness.logs.some((entry) => entry.op === "feed-dropped")
+  );
+});
+
+test("a session in a NON-allowlisted guild is still dropped", (t) => {
+  const harness = createHarness(t, {
+    activityChannel: "222222",
+    guilds: ["shared-guild"]
+  });
+  harness.channel.bindActivityFeed(harness.events);
+
+  harness.events.emit("skill-edit", {
+    skill: "session-skill",
+    action: "edited",
+    sessionId: "discord:intruder-guild:333333:user-1"
+  });
+
   assert.equal(harness.embeds.length, 0);
   assert.ok(
     harness.logs.some(
       (entry) => entry.op === "feed-dropped"
         && entry.reason === "channel-not-allowed"
-        && entry.channelId === "333333"
+    )
+  );
+});
+
+// Fail-closed: with no guild allowlist we cannot prove a session channel
+// belongs to this agent, so an unverifiable session must NOT be trusted.
+test("without a guild allowlist an unverifiable session is not trusted", (t) => {
+  const harness = createHarness(t, {
+    activityChannel: "222222",
+    guilds: []
+  });
+  harness.channel.bindActivityFeed(harness.events);
+
+  harness.events.emit("skill-edit", {
+    skill: "session-skill",
+    action: "edited",
+    sessionId: "discord:any-guild:333333:user-1"
+  });
+
+  assert.equal(harness.embeds.length, 0);
+  assert.ok(
+    harness.logs.some(
+      (entry) => entry.op === "feed-dropped"
+        && entry.reason === "channel-not-allowed"
     )
   );
 });

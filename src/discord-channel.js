@@ -877,22 +877,23 @@ export class DiscordChannel {
     if (target.source === "configured") {
       return Boolean(configured) && target.channelId === configured;
     }
+    // Session-derived targets: the boundary is the GUILD allowlist, not the
+    // single configured channel. This adapter only ever ingests messages from
+    // guilds in `this.guilds`, so a session channel inside one of them is by
+    // construction a channel this agent was actually spoken to in — routing a
+    // trace back there is correct, and is the entire point of session scoping.
+    // Requiring channelId === activityChannel here would collapse every trace
+    // onto the home channel and silently re-create the misroute, since agents
+    // are usually addressed OUTSIDE their configured activity channel.
     const allowedGuilds = Array.isArray(this.guilds) ? this.guilds : [];
-    const hasChannelConstraint = Boolean(configured);
-    const hasGuildConstraint = allowedGuilds.length > 0;
-    if (!hasChannelConstraint && !hasGuildConstraint) return false;
-    if (hasChannelConstraint && target.channelId !== configured) return false;
-    if (
-      hasGuildConstraint
-      && (
-        !target.guildId
-        || target.guildId === "dm"
-        || !allowedGuilds.includes(target.guildId)
-      )
-    ) {
-      return false;
+    if (allowedGuilds.length > 0) {
+      if (!target.guildId || target.guildId === "dm") return false;
+      return allowedGuilds.includes(target.guildId);
     }
-    return true;
+    // No guild allowlist configured: we have no way to prove the session
+    // channel belongs to this agent, so fail closed onto the configured
+    // channel rather than trusting an unverifiable session id.
+    return Boolean(configured) && target.channelId === configured;
   }
 
   resolveActivityChannel(sessionId, {
