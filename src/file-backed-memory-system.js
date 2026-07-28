@@ -9,6 +9,10 @@ const MEMORY_STATE_VERSION = 2;
 const MAX_MEMORY_ITEMS = 10_000;
 const MAX_MEMORY_STATE_BYTES = 8 * 1024 * 1024;
 const MAX_MEMORY_EVENT_BYTES = 8 * 1024 * 1024;
+// _restore() refuses a journal past MAX_MEMORY_STATE_BYTES * 8 (64 MiB). Compact
+// at 75% of that ceiling so the store heals itself with headroom to spare.
+const MAX_MEMORY_JOURNAL_BYTES = MAX_MEMORY_STATE_BYTES * 8;
+const DEFAULT_AUTO_COMPACT_BYTES = Math.floor(MAX_MEMORY_JOURNAL_BYTES * 0.75);
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 const DEFAULT_STALE_LOCK_MS = 60_000;
 const LOCK_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
@@ -30,6 +34,11 @@ export class FileBackedMemorySystem extends MemorySystem {
     this.writeSnapshot = options.writeSnapshot ?? writeJsonAtomic;
     this.lockTimeoutMs = positiveInteger(options.lockTimeoutMs, DEFAULT_LOCK_TIMEOUT_MS);
     this.staleLockMs = positiveInteger(options.staleLockMs, DEFAULT_STALE_LOCK_MS);
+    this.autoCompact = options.autoCompact !== false;
+    this.autoCompactBytes = Math.min(
+      positiveInteger(options.autoCompactBytes, DEFAULT_AUTO_COMPACT_BYTES),
+      MAX_MEMORY_JOURNAL_BYTES
+    );
     this.lockDepth = 0;
     this.sequence = 0;
     this.journalHealthy = true;
@@ -149,12 +158,51 @@ export class FileBackedMemorySystem extends MemorySystem {
     }
     if (!appendError) this.sequence = sequence;
 
+    let snapshotWritten = false;
     try {
       this.writeSnapshot(this.snapshotPath, state);
+      snapshotWritten = true;
     } catch (error) {
       // The journal is authoritative. A snapshot cache refresh failure must
       // not roll back a completed memory write or produce a false error.
       try { console.warn(`[memory] snapshot refresh failed: ${error?.message ?? error}`); } catch { /* advisory */ }
+    }
+
+    this._maybeAutoCompact(snapshotWritten);
+  }
+
+  /**
+   * Every v2 event embeds the full normalized state, so the journal grows
+   * superlinearly with item count and reaches the replay ceiling in days, not
+   * years. Once past it, `_restore()` marks the journal unhealthy and every
+   * write fails — recovery then needs manual surgery.
+   *
+   * Self-compact well below that ceiling instead. This is only safe when the
+   * snapshot that supersedes the journal actually reached disk, so a failed
+   * snapshot write skips compaction and leaves the journal as sole authority
+   * (fail-closed: prefer an oversized journal over a lost one).
+   */
+  _maybeAutoCompact(snapshotWritten) {
+    if (!snapshotWritten || this.autoCompact === false) return null;
+    let size;
+    try {
+      size = fs.statSync(this.eventsPath).size;
+    } catch {
+      return null;
+    }
+    if (size < this.autoCompactBytes) return null;
+    try {
+      // The snapshot already holds this exact sequence, so dropping the
+      // superseded events preserves the restore path: snapshot supplies the
+      // state, and future events continue from the same monotonic sequence.
+      this.saveSnapshot();
+      writeTextAtomic(this.eventsPath, "");
+      try { console.warn(`[memory] event journal auto-compacted at ${size} bytes (sequence ${this.sequence})`); } catch { /* advisory */ }
+      return { sequence: this.sequence, compactedAt: nowIso(), reclaimedBytes: size };
+    } catch (error) {
+      // A failed compaction must never break the write that triggered it.
+      try { console.warn(`[memory] auto-compaction failed: ${error?.message ?? error}`); } catch { /* advisory */ }
+      return null;
     }
   }
 

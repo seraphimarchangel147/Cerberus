@@ -178,6 +178,21 @@ class ContinuationCredentialChangedError extends Error {
 
 const RETRYABLE_PROVIDER_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
 
+// A tool-input JSON body that will not parse means the SSE stream was cut
+// mid-`input_json_delta` — a transport truncation, not a model decision. It is
+// as retryable as a dropped socket, so it carries a failureKind instead of
+// surfacing as a bare Error that aborts the turn.
+const MALFORMED_TOOL_INPUT_FAILURE = "malformed-tool-input";
+
+function malformedToolInputError(cause) {
+  return new ProviderError("Anthropic stream returned malformed tool input JSON.", {
+    providerCode: "malformed_tool_input",
+    providerType: "stream_truncation",
+    failureKind: MALFORMED_TOOL_INPUT_FAILURE,
+    cause: cause ?? null
+  });
+}
+
 function nonNegativeInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
@@ -261,6 +276,7 @@ export async function requestWithRetry(doRequest, options = {}) {
       const retryable = error instanceof ProviderError
         ? RETRYABLE_PROVIDER_STATUSES.has(error.status)
           || error.failureKind === "silent-failure"
+          || error.failureKind === MALFORMED_TOOL_INPUT_FAILURE
         : isRetryableNetworkError(error);
       let retryApproved = retryable;
       if (retryable && typeof options.shouldRetry === "function") {
@@ -449,6 +465,7 @@ async function requestWithSilentResponseRetry(provider, context, signal, request
   return requestWithRetry(request, {
     ...providerRetryOptions(provider, context, signal),
     shouldRetry: ({ error }) => error?.failureKind === "silent-failure"
+      || error?.failureKind === MALFORMED_TOOL_INPUT_FAILURE
   });
 }
 
@@ -1203,8 +1220,8 @@ export async function readAnthropicEventStream(response, { onDelta, onActivity }
         const raw = toolJson.get(index);
         try {
           block.input = raw ? JSON.parse(raw) : (block.input ?? {});
-        } catch {
-          throw new Error("Anthropic stream returned malformed tool input JSON.");
+        } catch (error) {
+          throw malformedToolInputError(error);
         }
       }
       return;
@@ -1250,8 +1267,8 @@ export async function readAnthropicEventStream(response, { onDelta, onActivity }
     if (block?.type !== "tool_use" || block.input !== undefined) continue;
     try {
       block.input = raw ? JSON.parse(raw) : {};
-    } catch {
-      throw new Error("Anthropic stream returned malformed tool input JSON.");
+    } catch (error) {
+      throw malformedToolInputError(error);
     }
   }
   message.content = message.content.filter(Boolean);
