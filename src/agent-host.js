@@ -11,6 +11,7 @@ import { BackgroundReviewer, backgroundReviewEnabled } from "./background-review
 import { TOOL_SEARCH_BRIDGE_NAMES } from "./tool-search.js";
 import { expandContextReferences } from "./context-references.js";
 import { siblingNames, legionUserId, legionMember, LEGION_MEMBERS } from "./legion-siblings.js";
+import { TASK_PROFILES } from "./model-router.js";
 import {
   createConversationContentIdentity,
   createConversationLineageIdentity
@@ -1288,11 +1289,17 @@ export class AgentHost {
       const defaultTask = (channel === "autopilot" || channel === "cron")
         ? "autopilot"
         : "chat";
+      // A delegated child states the KIND of work it was handed, which routes it
+      // to a model matched to that work. It sits below an explicit project
+      // routing profile (an operator pin still wins) but above the channel
+      // default, which would otherwise send every subagent to the base model.
+      const requestedTask = cleanRoutingTask(input.routingTask);
       const profileModel = cleanProfileString(project.modelProfile?.model);
       const profileTier = cleanProfileString(
         project.routingProfile?.tier ?? project.modelProfile?.tier
       );
       const profileTask = cleanProfileString(project.routingProfile?.task)
+        ?? requestedTask
         ?? defaultTask;
       modelResult = await turnProvider.generate({
         input: providerInput,
@@ -2505,6 +2512,16 @@ function cleanProfileString(value) {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return normalized && normalized.length <= 200 ? normalized : null;
+}
+
+// A routing task arrives from a caller (a delegating agent), so it is only
+// honored when it names a task the router actually knows. An unknown string
+// resolves to the base model inside ModelRouter anyway, but accepting it here
+// would let a typo look like a deliberate routing decision in the audit trail.
+function cleanRoutingTask(value) {
+  const normalized = cleanProfileString(value);
+  if (!normalized) return null;
+  return Object.hasOwn(TASK_PROFILES, normalized) ? normalized : null;
 }
 
 function assertProjectProviderSecrets(project, provider) {

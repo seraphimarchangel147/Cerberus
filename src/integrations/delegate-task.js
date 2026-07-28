@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import {
+  DELEGATE_KINDS,
+  DELEGATE_KIND_GUIDANCE,
+  delegateTaskForKind
+} from "../model-router.js";
 
 const DEFAULT_MAX_CHILDREN = 3;
 const DEFAULT_MAX_SPAWN_DEPTH = 1;
@@ -47,7 +52,23 @@ function normalizeTask(task, index) {
   if (role !== "leaf" && role !== "orchestrator") {
     return { error: `tasks[${index}].role must be leaf or orchestrator` };
   }
-  return { task: { goal, context: String(task.context ?? "").trim(), role } };
+  // `kind` describes the WORK, which is what picks the child's model. An
+  // unknown kind is rejected rather than silently coerced: a typo that quietly
+  // downgraded a reasoning task to the cheapest model would be invisible in the
+  // result and very expensive to debug.
+  const rawKind = task.kind;
+  if (rawKind !== undefined && rawKind !== null && rawKind !== "") {
+    const normalizedKind = String(rawKind).trim().toLowerCase();
+    if (!Object.hasOwn(DELEGATE_KINDS, normalizedKind)) {
+      return {
+        error: `tasks[${index}].kind must be one of ${Object.keys(DELEGATE_KINDS).join(", ")}`
+      };
+    }
+    return {
+      task: { goal, context: String(task.context ?? "").trim(), role, kind: normalizedKind }
+    };
+  }
+  return { task: { goal, context: String(task.context ?? "").trim(), role, kind: null } };
 }
 
 function normalizeRequest(args, maxChildren) {
@@ -56,7 +77,10 @@ function normalizeRequest(args, maxChildren) {
   if (hasGoal === hasTasks) return { error: "Provide exactly one of goal or tasks." };
 
   if (hasGoal) {
-    const normalized = normalizeTask({ goal: args.goal, context: args.context, role: args.role }, 0);
+    const normalized = normalizeTask(
+      { goal: args.goal, context: args.context, role: args.role, kind: args.kind },
+      0
+    );
     return normalized.task
       ? { tasks: [normalized.task] }
       : { error: normalized.error.replace("tasks[0].", "") };
@@ -106,13 +130,18 @@ export function registerDelegateTaskTool(runtime) {
   runtime.tools.register({
     name: "delegate_task",
     sideEffects: true,
-    description: "Delegate one isolated task, or a batch of independent tasks, to parallel subagents. Each child knows only the supplied goal/context and returns only its final summary. Use for parallel research or bounded work that does not need the parent conversation.",
+    description: "Delegate one isolated task, or a batch of independent tasks, to parallel subagents. Each child knows only the supplied goal/context and returns only its final summary. Use for parallel research or bounded work that does not need the parent conversation. Set `kind` to say what the work IS (reason/code/debug/research/extract) and the child is matched to a model of appropriate strength — cheap mechanical work does not need the top model. Omitting kind keeps the strongest model.",
     parameters: {
       type: "object",
       properties: {
         goal: { type: "string", description: "Single-task goal. Mutually exclusive with tasks." },
         context: { type: "string", description: "Background the child needs; it cannot see the parent chat." },
         role: { type: "string", enum: ["leaf", "orchestrator"], description: "Single-task role (default leaf)." },
+        kind: {
+          type: "string",
+          enum: Object.keys(DELEGATE_KINDS),
+          description: "Kind of work, which selects the child's model. 'reason': Strongest model. Architecture, design tradeoffs, ambiguous or open-ended problems. 'code': Strongest model. Writing or refactoring code that must compile and pass tests. 'debug': Mid model. Running tests, reading failures, bisecting. 'research': Mid model. Reading sources and summarizing. 'extract': Cheapest model. Mechanical lookup: find a value, list files, pull one field. Omit when unsure — an unlabelled task keeps the strongest model."
+        },
         tasks: {
           type: "array",
           description: "Batch tasks. Mutually exclusive with goal.",
@@ -121,7 +150,12 @@ export function registerDelegateTaskTool(runtime) {
             properties: {
               goal: { type: "string" },
               context: { type: "string" },
-              role: { type: "string", enum: ["leaf", "orchestrator"] }
+              role: { type: "string", enum: ["leaf", "orchestrator"] },
+              kind: {
+                type: "string",
+                enum: Object.keys(DELEGATE_KINDS),
+                description: "Per-task work kind; selects that child's model. See the top-level kind."
+              }
             },
             required: ["goal"],
             additionalProperties: false
@@ -202,6 +236,12 @@ export function registerDelegateTaskTool(runtime) {
               role: effectiveRole,
               spawnDepth: childDepth
             },
+            // Route the child by the KIND of work it was given. Without this
+            // every subagent inherited the `chat` task and ran on the base
+            // model, so a mechanical lookup cost the same as deep reasoning.
+            // An absent/unknown kind resolves to the conservative `delegate`
+            // profile, which is base — never a silent downgrade.
+            routingTask: delegateTaskForKind(task.kind),
             memoryScope: `subagent:${childId}`,
             allowedTools,
             scrutinyPolicyCeiling: context.__scrutinyPolicy ?? "full",
@@ -221,7 +261,13 @@ export function registerDelegateTaskTool(runtime) {
             ok: true,
             summary: String(result?.reply ?? "").slice(0, MAX_SUMMARY_CHARS),
             iterations: result?.model?.iterations ?? null,
-            stopReason: result?.model?.stopReason ?? "completed"
+            stopReason: result?.model?.stopReason ?? "completed",
+            // Report what the routing decision actually produced. Without the
+            // resolved model, a tiering change looks identical to no change and
+            // a silent fallback to the base model is invisible.
+            kind: task.kind,
+            routedTask: delegateTaskForKind(task.kind),
+            model: result?.model?.model ?? null
           };
         } catch (error) {
           notify(context, { phase: "subagent", n, total: normalized.tasks.length, state: "failed" });

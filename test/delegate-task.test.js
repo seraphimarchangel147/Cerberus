@@ -162,7 +162,13 @@ test("single delegate_task returns only the summary and keeps child turns out of
     ok: true,
     summary: "Reviewed three files; all checks passed.",
     iterations: 2,
-    stopReason: "completed"
+    stopReason: "completed",
+    // An unclassified delegation reports the conservative routing it received
+    // and the model that actually served it, so a silent base-model fallback
+    // is visible in the result rather than inferred.
+    kind: null,
+    routedTask: "delegate",
+    model: "stub"
   });
   assert.doesNotMatch(JSON.stringify(outcome.result), /INTERMEDIATE TOOL OUTPUT/);
 

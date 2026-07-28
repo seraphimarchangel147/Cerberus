@@ -53,8 +53,53 @@ export const TASK_PROFILES = {
   mine:      { tier: "mini", label: "Session mining",      why: "Cluster intents out of a transcript — mini is enough." },
   plan:      { tier: "mini", label: "Daily plan / recap",  why: "Summarize the day — mini is enough." },
   extract:   { tier: "nano", label: "iMessage extraction", why: "Pull follow-ups/events from a batch of texts, runs often — nano is plenty." },
-  sweep:     { tier: "mini", label: "Task list hygiene",    why: "Classify queue + dedupe/stale-judge the task list — mini has the judgment for it." }
+  sweep:     { tier: "mini", label: "Task list hygiene",    why: "Classify queue + dedupe/stale-judge the task list — mini has the judgment for it." },
+
+  // ── Delegation ────────────────────────────────────────────────────────────
+  // A delegated subagent used to inherit the `chat` task, so EVERY child ran on
+  // the base model whether it was deep architectural reasoning or a one-line
+  // grep. These profiles let the delegator say what KIND of work the child is
+  // doing and get a model matched to it. `delegate` itself is the conservative
+  // default for an unclassified task and deliberately stays on base — an
+  // unlabelled delegation must never get silently downgraded.
+  delegate:        { tier: "base", label: "Delegated task (unclassified)", why: "Kind not stated — assume real reasoning and keep the strong model." },
+  delegate_reason: { tier: "base", label: "Delegated deep reasoning",      why: "Architecture, tradeoff analysis, ambiguous problems — needs the strongest model." },
+  delegate_code:   { tier: "base", label: "Delegated code writing",        why: "Writing/refactoring real code that must compile and pass tests — keep it strong." },
+  delegate_debug:  { tier: "mini", label: "Delegated debugging / testing", why: "Run tests, read failures, bisect. Bounded and verifiable — mini is enough, and the test result is the ground truth, not the model's confidence." },
+  delegate_research:{ tier: "mini", label: "Delegated research",           why: "Gather, read, and summarize sources. Volume work with a checkable output — mini is enough." },
+  delegate_extract:{ tier: "nano", label: "Delegated extraction / lookup", why: "Find a value, list files, pull a field. Mechanical and high-frequency — nano is plenty." }
 };
+
+// The delegator names WORK, not a model. This is the only mapping from a
+// task-shaped word to a routing task, so the tool schema and the router cannot
+// drift apart. Keys are what a caller may pass as `kind`.
+export const DELEGATE_KINDS = Object.freeze({
+  reason:   "delegate_reason",
+  code:     "delegate_code",
+  debug:    "delegate_debug",
+  research: "delegate_research",
+  extract:  "delegate_extract"
+});
+
+// Human-facing capability guidance, surfaced in the delegate_task schema so the
+// model choosing a `kind` knows what each one COSTS it in capability. Without
+// this the model picks a label by vibes and either overpays or under-powers a
+// task that needed real reasoning.
+export const DELEGATE_KIND_GUIDANCE = Object.freeze({
+  reason:   "Strongest model. Architecture, design tradeoffs, ambiguous or open-ended problems.",
+  code:     "Strongest model. Writing or refactoring code that must actually compile and pass tests.",
+  debug:    "Mid model. Running tests, reading failures, bisecting — the test result verifies the work.",
+  research: "Mid model. Reading sources and summarizing; the output is checkable against the sources.",
+  extract:  "Cheapest model. Mechanical lookup: find a value, list files, pull one field."
+});
+
+// Resolve a caller-supplied `kind` to a routing task. Unknown or absent kinds
+// fall back to the conservative `delegate` profile (base model) rather than
+// guessing — a mislabelled task must degrade toward MORE capability, never less.
+export function delegateTaskForKind(kind) {
+  const normalized = String(kind ?? "").trim().toLowerCase();
+  return DELEGATE_KINDS[normalized] ?? "delegate";
+}
 
 // Order matters for display (strongest → cheapest).
 export const TIERS = ["base", "mini", "nano"];
