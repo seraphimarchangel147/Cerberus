@@ -1526,54 +1526,399 @@ export function updateFrontmatter(text, updates = {}, newBody = undefined) {
   if (!match) throw new Error("SKILL.md has no frontmatter block");
   let lines = match[1].split(/\r?\n/);
   for (const [key, value] of Object.entries(updates)) {
-    const prefix = key + ":";
+    // Block-aware: a key's value can span several lines (block sequence,
+    // nested mapping, literal/folded scalar). Replacing or deleting only the
+    // `key:` line would strand its continuation lines as orphaned garbage
+    // that the parser then rejects — so we always operate on the full range.
+    const range = findTopLevelKeyRange(lines, key);
     if (value === null || value === undefined) {
-      lines = lines.filter((l) => !l.trim().startsWith(prefix));
+      if (range) lines.splice(range.start, range.end - range.start);
       continue;
     }
-    const rendered = `${key}: ${typeof value === "string" ? JSON.stringify(value) : value}`;
-    const idx = lines.findIndex((l) => l.trim().startsWith(prefix));
-    if (idx >= 0) lines[idx] = rendered;
+    const rendered = `${key}: ${renderFrontmatterValue(value)}`;
+    if (range) lines.splice(range.start, range.end - range.start, rendered);
     else lines.push(rendered);
   }
   const body = newBody !== undefined ? String(newBody).trim() : match[2].trim();
   return `---\n${lines.join("\n")}\n---\n\n${body}\n`;
 }
 
+// Values are always re-emitted in FLOW form (inline JSON). The parser accepts
+// both flow and block form, so a block list read in comes back out inline —
+// lossless in meaning, and it keeps the writer a single-line operation.
+function renderFrontmatterValue(value) {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function frontmatterLineIndent(raw) {
+  return raw.length - raw.trimStart().length;
+}
+
+function isBlankOrComment(raw) {
+  const trimmed = raw.trim();
+  return !trimmed || trimmed.startsWith("#");
+}
+
+/**
+ * Locate a TOP-LEVEL key and every continuation line belonging to it.
+ * Returns { start, end } as a half-open line range, or null when absent.
+ *
+ * The old writer matched with `line.trim().startsWith(key + ":")`, which
+ * happily matched a NESTED key of the same name and ignored continuation
+ * lines entirely. Both are corrected here: only column-0 keys match, and
+ * the range extends across every following indented line.
+ */
+function findTopLevelKeyRange(lines, key) {
+  const keyPattern = new RegExp(`^${escapeRegExp(key)}\\s*:`);
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i];
+    if (isBlankOrComment(raw)) continue;
+    if (frontmatterLineIndent(raw) !== 0) continue;
+    if (!keyPattern.test(raw)) continue;
+    // Extend across continuation lines. Interior blank lines are only
+    // absorbed when more indented content follows them, so we never eat the
+    // separator blank line that precedes the next top-level key.
+    let end = i + 1;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j];
+      if (!line.trim()) continue;
+      if (frontmatterLineIndent(line) > 0) end = j + 1;
+      else break;
+    }
+    return { start: i, end };
+  }
+  return null;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// --- Frontmatter parsing (YAML subset) -------------------------------------
+//
+// This is deliberately a SUBSET, not a YAML engine: flow scalars, flow JSON,
+// block sequences, nested block mappings, and literal/folded block scalars.
+// That covers what real skill frontmatter uses — critically including the
+// block-list form that externally authored (stock Hermes/Anthropic) skills
+// use, which the previous line-splitter rejected outright, taking the whole
+// skill down with it.
+const MAX_FRONTMATTER_DEPTH = 4;
+const MAX_FRONTMATTER_KEYS_PER_MAP = 64;
+const MAX_FRONTMATTER_SEQUENCE_ITEMS = 256;
+const BLOCK_SCALAR_RE = /^([|>])([+-]?)(\d*)$/;
+const FRONTMATTER_KEY_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+
 function parseFrontmatter(text) {
+  const lines = text.split(/\r?\n/).map((raw, index) => ({ raw, num: index + 1 }));
+  const [value, next] = parseFrontmatterMapping(lines, 0, 0, 0);
+  if (next < lines.length) {
+    throw new Error(`invalid frontmatter line ${lines[next].num}: unexpected indentation`);
+  }
+  return value;
+}
+
+function nextContentIndex(lines, start) {
+  let i = start;
+  while (i < lines.length && isBlankOrComment(lines[i].raw)) i += 1;
+  return i;
+}
+
+function parseFrontmatterMapping(lines, start, indent, depth) {
+  if (depth > MAX_FRONTMATTER_DEPTH) throw new Error("frontmatter nesting is too deep");
   const out = {};
-  for (const [lineIndex, rawLine] of text.split(/\r?\n/).entries()) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
+  let keyCount = 0;
+  let i = start;
+  for (;;) {
+    i = nextContentIndex(lines, i);
+    if (i >= lines.length) break;
+    const entry = lines[i];
+    const lineIndent = frontmatterLineIndent(entry.raw);
+    if (lineIndent < indent) break;
+    if (lineIndent > indent) {
+      throw new Error(`invalid frontmatter line ${entry.num}: unexpected indentation`);
+    }
+    const line = entry.raw.trim();
+    if (line === "-" || line.startsWith("- ")) {
+      throw new Error(`invalid frontmatter line ${entry.num}: unexpected sequence item`);
+    }
     const idx = line.indexOf(":");
-    if (idx <= 0) throw new Error(`invalid frontmatter line ${lineIndex + 1}: expected key: value`);
+    if (idx <= 0) throw new Error(`invalid frontmatter line ${entry.num}: expected key: value`);
     const key = line.slice(0, idx).trim();
+    if (!FRONTMATTER_KEY_RE.test(key)) {
+      throw new Error(`invalid frontmatter key on line ${entry.num}: ${key}`);
+    }
     if (Object.hasOwn(out, key)) throw new Error(`duplicate frontmatter key: ${key}`);
-    let value = line.slice(idx + 1).trim();
-    if (value.startsWith('"')) {
-      if (!value.endsWith('"') || value.length === 1) {
-        throw new Error(`unterminated JSON string for frontmatter key ${key}`);
-      }
+    if (++keyCount > MAX_FRONTMATTER_KEYS_PER_MAP) {
+      throw new Error(`too many frontmatter keys: limit is ${MAX_FRONTMATTER_KEYS_PER_MAP}`);
+    }
+    const rest = line.slice(idx + 1).trim();
+    i += 1;
+    const blockScalar = BLOCK_SCALAR_RE.exec(rest);
+    if (rest === "") {
+      const [value, next] = parseFrontmatterChild(lines, i, indent, depth);
+      out[key] = value;
+      i = next;
+    } else if (blockScalar) {
+      const [value, next] = parseBlockScalar(lines, i, indent, blockScalar[1], blockScalar[2]);
+      out[key] = value;
+      i = next;
+    } else {
+      out[key] = parseFrontmatterScalar(rest, key, entry.num);
+    }
+  }
+  return [out, i];
+}
+
+// After a bare `key:` decide what the indented block below it is: a sequence,
+// a nested mapping, or nothing at all (the historical empty-string value).
+function parseFrontmatterChild(lines, start, parentIndent, depth) {
+  const i = nextContentIndex(lines, start);
+  if (i >= lines.length) return ["", i];
+  const childIndent = frontmatterLineIndent(lines[i].raw);
+  if (childIndent <= parentIndent) return ["", start];
+  const line = lines[i].raw.trim();
+  if (line === "-" || line.startsWith("- ")) {
+    return parseFrontmatterSequence(lines, i, childIndent, depth + 1);
+  }
+  return parseFrontmatterMapping(lines, i, childIndent, depth + 1);
+}
+
+function parseFrontmatterSequence(lines, start, indent, depth) {
+  if (depth > MAX_FRONTMATTER_DEPTH) throw new Error("frontmatter nesting is too deep");
+  const out = [];
+  let i = start;
+  for (;;) {
+    i = nextContentIndex(lines, i);
+    if (i >= lines.length) break;
+    const entry = lines[i];
+    const lineIndent = frontmatterLineIndent(entry.raw);
+    if (lineIndent < indent) break;
+    if (lineIndent > indent) {
+      throw new Error(`invalid frontmatter line ${entry.num}: unexpected indentation`);
+    }
+    const line = entry.raw.trim();
+    if (line !== "-" && !line.startsWith("- ")) break;
+    if (out.length >= MAX_FRONTMATTER_SEQUENCE_ITEMS) {
+      throw new Error(`frontmatter list exceeds ${MAX_FRONTMATTER_SEQUENCE_ITEMS} items`);
+    }
+    const rest = line.slice(1).trim();
+    const blockScalar = BLOCK_SCALAR_RE.exec(rest);
+    if (rest === "") {
+      i += 1;
+      const [value, next] = parseFrontmatterChild(lines, i, indent, depth);
+      out.push(value);
+      i = next;
+    } else if (blockScalar) {
+      i += 1;
+      const [value, next] = parseBlockScalar(lines, i, indent, blockScalar[1], blockScalar[2]);
+      out.push(value);
+      i = next;
+    } else if (/^[A-Za-z0-9_][A-Za-z0-9_.-]*\s*:(\s|$)/.test(rest)) {
+      // Item is itself a mapping ("- name: x" + following aligned keys).
+      // Blanking the dash IN PLACE re-aligns the line into an ordinary
+      // mapping row at the item's own column, so the same mapping parser
+      // handles it. Indexed rather than String.replace so a "-" inside the
+      // value can never be the one blanked.
+      const dashAt = entry.raw.indexOf("-");
+      entry.raw = `${entry.raw.slice(0, dashAt)} ${entry.raw.slice(dashAt + 1)}`;
+      const itemIndent = frontmatterLineIndent(entry.raw);
+      const [value, next] = parseFrontmatterMapping(lines, i, itemIndent, depth + 1);
+      out.push(value);
+      i = next;
+    } else {
+      out.push(parseFrontmatterScalar(rest, "list item", entry.num));
+      i += 1;
+    }
+  }
+  return [out, i];
+}
+
+// Literal (|) and folded (>) block scalars, with clip/strip/keep chomping.
+// Explicit indent indicators are not supported; indentation is taken from the
+// first non-blank line, which is what hand-authored frontmatter does anyway.
+function parseBlockScalar(lines, start, parentIndent, style, chomp) {
+  const collected = [];
+  let i = start;
+  let blockIndent = null;
+  for (; i < lines.length; i += 1) {
+    const raw = lines[i].raw;
+    if (!raw.trim()) {
+      collected.push("");
+      continue;
+    }
+    const lineIndent = frontmatterLineIndent(raw);
+    if (lineIndent <= parentIndent) break;
+    if (blockIndent === null) blockIndent = lineIndent;
+    if (lineIndent < blockIndent) break;
+    collected.push(raw.slice(blockIndent));
+  }
+  // Trailing blank lines are governed by the chomping indicator, not by the
+  // next key — count them rather than discarding, so `|+` can restore them.
+  let trailingBlanks = 0;
+  while (collected.length > 0 && collected[collected.length - 1] === "") {
+    collected.pop();
+    trailingBlanks += 1;
+  }
+
+  let value;
+  if (style === "|") {
+    value = collected.join("\n");
+  } else {
+    // Folded: consecutive non-blank lines join with a space; a blank line
+    // becomes a hard newline.
+    const folded = [];
+    for (const line of collected) {
+      if (line === "") folded.push("\n");
+      else if (folded.length === 0 || folded[folded.length - 1] === "\n") folded.push(line);
+      else folded[folded.length - 1] += ` ${line}`;
+    }
+    value = folded.join("");
+  }
+  // Chomping: `-` strip (no trailing newline), `+` keep (retain every
+  // trailing blank line), default clip (exactly one trailing newline).
+  if (chomp === "-") return [value, i];
+  if (chomp === "+") return [`${value}\n${"\n".repeat(trailingBlanks)}`, i];
+  return [value === "" ? "" : `${value}\n`, i];
+}
+
+function parseFrontmatterScalar(raw, key, lineNum) {
+  let value = raw;
+  if (value.startsWith('"')) {
+    if (!value.endsWith('"') || value.length === 1) {
+      throw new Error(`unterminated JSON string for frontmatter key ${key}`);
+    }
+    try {
+      value = JSON.parse(value);
+    } catch (error) {
+      throw new Error(`invalid JSON string for frontmatter key ${key}: ${error.message}`);
+    }
+  } else if (value.startsWith("'")) {
+    if (!value.endsWith("'") || value.length === 1) {
+      throw new Error(`unterminated quoted string for frontmatter key ${key}`);
+    }
+    value = value.slice(1, -1);
+  } else if (value.startsWith("{") || value.startsWith("[")) {
+    // Flow collections. JSON is the fast path, but YAML flow sequences do NOT
+    // require quoting — `platforms: [linux, macos]` is perfectly valid YAML
+    // and invalid JSON. The old parser assumed `[` implied JSON and rejected
+    // the whole skill, which is what actually blocked importing third-party
+    // skills at scale. Fall back to a YAML flow reader before giving up.
+    try {
+      value = JSON.parse(value);
+    } catch (jsonError) {
       try {
-        value = JSON.parse(value);
-      } catch (error) {
-        throw new Error(`invalid JSON string for frontmatter key ${key}: ${error.message}`);
-      }
-    } else if (value.startsWith("'")) {
-      if (!value.endsWith("'") || value.length === 1) {
-        throw new Error(`unterminated quoted string for frontmatter key ${key}`);
-      }
-      value = value.slice(1, -1);
-    } else if (value.startsWith("{") || value.startsWith("[")) {
-      try {
-        value = JSON.parse(value);
-      } catch (error) {
-        throw new Error(`invalid JSON value for frontmatter key ${key}: ${error.message}`);
+        value = parseFlowCollection(value);
+      } catch {
+        throw new Error(
+          `invalid flow value for frontmatter key ${key} on line ${lineNum}: ${jsonError.message}`
+        );
       }
     }
-    out[key] = value;
   }
-  return out;
+  return value;
+}
+
+/**
+ * Minimal YAML flow-collection reader: `[a, b]`, `{k: v}`, nested, with
+ * optional quoting on any scalar. Bare scalars are taken verbatim (trimmed),
+ * matching YAML's plain-scalar behaviour, with true/false/null/numbers
+ * resolved the way the JSON path would have resolved them.
+ */
+function parseFlowCollection(input) {
+  let pos = 0;
+  const text = input;
+
+  const skipWs = () => { while (pos < text.length && /\s/.test(text[pos])) pos += 1; };
+
+  function parseValue(depth) {
+    if (depth > MAX_FRONTMATTER_DEPTH) throw new Error("flow collection is too deep");
+    skipWs();
+    const ch = text[pos];
+    if (ch === "[") return parseSeq(depth);
+    if (ch === "{") return parseMap(depth);
+    if (ch === '"' || ch === "'") return parseQuoted(ch);
+    return parsePlain();
+  }
+
+  function parseQuoted(quote) {
+    pos += 1;
+    let out = "";
+    while (pos < text.length) {
+      const ch = text[pos];
+      if (ch === "\\" && quote === '"') {
+        const next = text[pos + 1];
+        out += next === "n" ? "\n" : next === "t" ? "\t" : next;
+        pos += 2;
+        continue;
+      }
+      if (ch === quote) { pos += 1; return out; }
+      out += ch;
+      pos += 1;
+    }
+    throw new Error("unterminated quoted scalar in flow collection");
+  }
+
+  function parsePlain() {
+    const start = pos;
+    while (pos < text.length && !",]}".includes(text[pos])) pos += 1;
+    const raw = text.slice(start, pos).trim();
+    if (raw === "") throw new Error("empty scalar in flow collection");
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    if (raw === "null" || raw === "~") return null;
+    if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+    return raw;
+  }
+
+  function parseSeq(depth) {
+    pos += 1; // consume [
+    const out = [];
+    skipWs();
+    if (text[pos] === "]") { pos += 1; return out; }
+    for (;;) {
+      if (out.length >= MAX_FRONTMATTER_SEQUENCE_ITEMS) {
+        throw new Error(`flow list exceeds ${MAX_FRONTMATTER_SEQUENCE_ITEMS} items`);
+      }
+      out.push(parseValue(depth + 1));
+      skipWs();
+      if (text[pos] === ",") { pos += 1; skipWs(); if (text[pos] === "]") { pos += 1; return out; } continue; }
+      if (text[pos] === "]") { pos += 1; return out; }
+      throw new Error("malformed flow sequence");
+    }
+  }
+
+  function parseMap(depth) {
+    pos += 1; // consume {
+    const out = {};
+    skipWs();
+    if (text[pos] === "}") { pos += 1; return out; }
+    for (;;) {
+      skipWs();
+      const keyCh = text[pos];
+      const mapKey = keyCh === '"' || keyCh === "'"
+        ? parseQuoted(keyCh)
+        : (() => {
+            const start = pos;
+            while (pos < text.length && !":,}".includes(text[pos])) pos += 1;
+            return text.slice(start, pos).trim();
+          })();
+      skipWs();
+      if (text[pos] !== ":") throw new Error("malformed flow mapping: expected ':'");
+      pos += 1;
+      out[mapKey] = parseValue(depth + 1);
+      skipWs();
+      if (text[pos] === ",") { pos += 1; skipWs(); if (text[pos] === "}") { pos += 1; return out; } continue; }
+      if (text[pos] === "}") { pos += 1; return out; }
+      throw new Error("malformed flow mapping");
+    }
+  }
+
+  const result = parseValue(0);
+  skipWs();
+  if (pos !== text.length) throw new Error("trailing content after flow collection");
+  return result;
 }
 
 // Explicitly modelled frontmatter keys. Everything else is preserved on
