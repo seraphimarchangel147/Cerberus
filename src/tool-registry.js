@@ -1087,7 +1087,9 @@ export class ToolRegistry {
     }
 
     const configured = Number(process.env.OPENAGI_APPROVAL_TIMEOUT_MS);
-    const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 300000;
+    // Default 30 min: approvals route to Discord with buttons, and the
+    // decider is often away from the desk. OPENAGI_APPROVAL_TIMEOUT_MS overrides.
+    const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 1800000;
     const decision = await this.pendingActions.waitForDecision(action.id, {
       timeoutMs,
       signal: context?.__abortSignal
@@ -4769,6 +4771,33 @@ export function registerCoreTools(registry, runtime) {
   });
 
   registry.register({
+    name: "quota_status",
+    sideEffects: false,
+    description: "Check rolling usage-window status for a flat-rate subscription plan (e.g. Kimi's 5-hour window). Reports calls and tokens consumed in the current window, when capacity starts returning, and whether the provider actually rate-limited you. Use before starting expensive multi-step work to see whether the window has room.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    verbs: ["read"],
+    resources: [],
+    latency: "low",
+    handler: async () => {
+      // AbiRuntime exposes the guard as `budget`; accept `budgetGuard` too so
+      // a differently-wired runtime still reports rather than silently
+      // claiming tracking is off.
+      const guard = runtime?.budget ?? runtime?.budgetGuard;
+      if (!guard) return { tracking: false, reason: "No budget guard is bound to this runtime." };
+      const status = typeof guard.subscriptionStatus === "function"
+        ? guard.subscriptionStatus()
+        : null;
+      if (!status) {
+        return {
+          tracking: false,
+          reason: "Subscription window tracking is off. Set OPENAGI_SUBSCRIPTION_TRACKING=1 to enable it."
+        };
+      }
+      return { tracking: true, ...status };
+    }
+  });
+
+  registry.register({
     name: "vision_load",
     sideEffects: false,
     description: "Look at a local image file. Reads a PNG, JPEG, GIF, or WEBP from disk and attaches it to your context as a real image so you can SEE its contents — use it to verify rendered output (charts, screenshots, generated art, animation frames) instead of assuming it looks right. Path must be absolute or start with ~/. Protected locations, symlinks, and non-image files are refused.",
@@ -6049,7 +6078,9 @@ export function registerCoreTools(registry, runtime) {
     ),
     handler: async (_args, context) => {
       assertDefaultProjectControl(runtime.projects, context, "Agent task queue mutation");
-      const task = runtime.tasks.agentPickNext?.() ?? null;
+      // Claim (mark in_progress + startedAt) when the store supports it so
+      // autopilot wait/work durations are recorded; fall back to a plain peek.
+      const task = runtime.tasks.claimNextAgentTask?.() ?? runtime.tasks.agentPickNext?.() ?? null;
       return task ? { task } : { task: null, reason: "agent queue empty" };
     }
   });

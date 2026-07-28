@@ -3,6 +3,7 @@ import { ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { nowIso } from "./utils.js";
 import { CreditLedger } from "./credit-ledger.js";
+import { SubscriptionQuotaTracker, subscriptionTrackingEnabled } from "./subscription-quota.js";
 
 // USD per 1M tokens. Keep specific variants (…-nano, …-mini, …-5.5) listed so
 // priceFor's longest-prefix match doesn't bill a nano call at flagship rates.
@@ -58,6 +59,13 @@ export class BudgetGuard {
     ensureDir(path.dirname(this.storePath));
     this.state = readJsonFile(this.storePath, { version: 1, days: {} });
     this.ledger = options.ledger ?? new CreditLedger({ storePath: path.join(path.dirname(this.storePath), "ledger.jsonl") });
+    // Flat-rate plans (Kimi subscription) are not bounded by dollars, so the
+    // USD guard alone reports the wrong constraint. Opt-in, and independent of
+    // dailyUsdLimit so either can run without the other.
+    this.subscriptionQuota = options.subscriptionQuota
+      ?? (subscriptionTrackingEnabled(this.env)
+        ? new SubscriptionQuotaTracker({ env: this.env, dir: path.dirname(this.storePath) })
+        : null);
   }
 
   get enabled() {
@@ -170,8 +178,34 @@ export class BudgetGuard {
       this.ledger?.record(entry);
     } catch { /* ledger is best-effort; never break a reply over it */ }
 
+    try {
+      // Rolling-window tracking for flat-rate subscriptions, where the binding
+      // constraint is the provider's usage window rather than spend.
+      this.subscriptionQuota?.record({ tokens, model, at: Date.now() });
+    } catch { /* advisory; never break a reply over quota telemetry */ }
+
     this.persist();
     return { added: usd, today: day.usd, limit: this.dailyUsdLimit };
+  }
+
+  /**
+   * A provider 429 is the only ground truth a header-less endpoint gives us
+   * about the real plan ceiling. Recording it turns the rolling-window number
+   * from a pure estimate into something that can be corrected against reality.
+   */
+  recordThrottle(details = {}) {
+    try {
+      this.subscriptionQuota?.recordThrottle(details);
+    } catch { /* advisory */ }
+  }
+
+  /** Rolling-window usage for flat-rate plans, or null when not tracking. */
+  subscriptionStatus(now = Date.now()) {
+    try {
+      return this.subscriptionQuota?.status(now) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   priceFor(model) {
