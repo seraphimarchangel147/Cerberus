@@ -13554,46 +13554,107 @@ switchTab(initialTab);
     ctx.restore();
   }
 
-  /* Blink overlay: draw a dark lid rect over each detected eye position.
-     eyes are in layer-local coords; we re-apply the same transform used to
-     draw the head so the lid tracks the head's rotation/translation. */
-  function skelBlink(ctx, setName, headName, box, px, py, rot, sx, sy, dx, dy, blinkAmt, pal) {
-    if (!blinkAmt || blinkAmt <= 0) return;
+  /* ── Full animated eye system ──────────────────────────────────────────
+     Draws procedural eyes ON TOP of the baked head art. Each eye has:
+     - Dark socket outline
+     - Colored iris that tracks the cursor (gaze)
+     - Dark pupil that dilates with state
+     - White specular highlight
+     - Eyelid that slides down for blinks
+     All drawn in the head's transform space so they track head rotation.
+     This replaces the old skelBlink/skelGaze with something that actually
+     LOOKS ALIVE — the eyes are the #1 thing that makes a character feel real. */
+  function skelEyes(ctx, setName, headName, box, px, py, rot, sx, sy, dx, dy, opts, pal) {
     var eyes = CERB_SPRITES[setName].heads[headName].eyes;
     if (!eyes || !eyes.length) return;
+    var blink = opts.blink || 0;
+    var gx = opts.gx || 0, gy = opts.gy || 0;
+    var dilate = opts.dilate || 0;
     ctx.save();
     ctx.translate(px + dx, py + dy);
     if (rot) ctx.rotate(rot);
     if (sx !== 1 || sy !== 1) ctx.scale(sx, sy);
-    ctx.fillStyle = pal ? pal.outline : "#1a1a1e";
-    ctx.globalAlpha = Math.min(1, blinkAmt);
     for (var ei = 0; ei < eyes.length; ei++) {
-      var ex = box[0] + eyes[ei][0] - px;
-      var ey = box[1] + eyes[ei][1] - py;
-      ctx.fillRect(ex - 2, ey - 1, 5, 3);
+      /* filter out tiny artifact clusters */
+      if (eyes[ei].size < 50) continue;
+      var ex = box[0] + eyes[ei].x - px;
+      var ey = box[1] + eyes[ei].y - py;
+      /* eye size: bigger = more visible. Scale with cluster size. */
+      var sz = eyes[ei].size > 400 ? 4 : 3;
+      if (blink > 0.7) {
+        /* fully closed: thick lid line */
+        ctx.fillStyle = pal.furDark;
+        ctx.fillRect(ex - sz - 1, ey - 1, sz * 2 + 3, 3);
+        ctx.fillStyle = pal.outline;
+        ctx.fillRect(ex - sz, ey, sz * 2 + 1, 1);
+      } else {
+        /* dark socket — bigger than the iris so it frames the eye */
+        ctx.fillStyle = "#000";
+        ctx.fillRect(ex - sz - 2, ey - sz - 2, sz * 2 + 5, sz * 2 + 5);
+        /* iris — tracks gaze, bright and visible */
+        var ix = ex + Math.round(gx * 3);
+        var iy = ey + Math.round(gy * 2);
+        ctx.fillStyle = pal.eye;
+        ctx.fillRect(ix - sz, iy - sz, sz * 2 + 1, sz * 2 + 1);
+        /* inner iris ring */
+        ctx.fillStyle = pal.eyeCore || "#fff";
+        ctx.fillRect(ix - sz + 1, iy - sz + 1, sz * 2 - 1, sz * 2 - 1);
+        /* pupil — dilates with state */
+        var ps = Math.max(1, sz - 1 + dilate);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(ix - ps + 1, iy - ps + 1, ps * 2 - 1, ps * 2 - 1);
+        /* specular highlight — top-left, always visible */
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(ix - sz, iy - sz, 2, 2);
+        /* partial lid for half-blink */
+        if (blink > 0) {
+          ctx.fillStyle = pal.furDark;
+          ctx.globalAlpha = blink * 0.9;
+          var lidH = Math.round((sz * 2 + 3) * blink);
+          ctx.fillRect(ex - sz - 2, ey - sz - 2, sz * 2 + 5, lidH);
+          ctx.globalAlpha = 1;
+        }
+      }
     }
-    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
-  /* Gaze pupil: shift a bright pixel within each eye toward the gaze dir. */
-  function skelGaze(ctx, setName, headName, box, px, py, rot, sx, sy, dx, dy, gx, gy, pal) {
-    if (!gx && !gy) return;
-    var eyes = CERB_SPRITES[setName].heads[headName].eyes;
-    if (!eyes || !eyes.length) return;
+  /* ── Animated jaw: procedural mouth that opens/closes with teeth ───────
+     Drawn on top of the baked head art at the snout position. Opens with
+     roar/howl, chatters slightly when idle. */
+  function skelJaw(ctx, setName, headName, box, px, py, rot, sx, sy, dx, dy, opts, pal) {
+    var jaw = opts.jaw || 0;  /* 0 = closed, 1 = wide open */
+    if (jaw < 0.05) return;
     ctx.save();
     ctx.translate(px + dx, py + dy);
     if (rot) ctx.rotate(rot);
     if (sx !== 1 || sy !== 1) ctx.scale(sx, sy);
-    ctx.fillStyle = pal ? pal.gemHalo : "#fff";
-    ctx.globalAlpha = 0.9;
-    var ox = Math.round(gx * 1.5), oy = Math.round(gy * 1.0);
-    for (var ei = 0; ei < eyes.length; ei++) {
-      var ex = box[0] + eyes[ei][0] - px + ox;
-      var ey = box[1] + eyes[ei][1] - py + oy;
-      ctx.fillRect(ex, ey, 1, 1);
+    /* snout position: bottom-center of the head layer */
+    var mx = box[0] + (box[2] - box[0]) / 2 - px;
+    var my = box[1] + (box[3] - box[1]) * 0.72 - py;
+    var mw = Math.round((box[2] - box[0]) * 0.35);
+    var mh = Math.round(jaw * (box[3] - box[1]) * 0.18);
+    /* mouth interior */
+    ctx.fillStyle = pal.mouth;
+    ctx.fillRect(mx - mw, my, mw * 2, mh);
+    /* tongue */
+    if (mh > 3) {
+      ctx.fillStyle = pal.tongue;
+      ctx.fillRect(mx - mw + 2, my + 2, mw * 2 - 4, mh - 3);
     }
-    ctx.globalAlpha = 1;
+    /* upper teeth */
+    ctx.fillStyle = pal.fang;
+    for (var ti = 0; ti < 4; ti++) {
+      var tx = mx - mw + 2 + ti * Math.round((mw * 2 - 4) / 3);
+      ctx.fillRect(tx, my, 1, Math.min(3, mh));
+    }
+    /* lower teeth */
+    if (mh > 4) {
+      for (var ti2 = 0; ti2 < 3; ti2++) {
+        var tx2 = mx - mw + 4 + ti2 * Math.round((mw * 2 - 6) / 2);
+        ctx.fillRect(tx2, my + mh - 2, 1, 2);
+      }
+    }
     ctx.restore();
   }
 
@@ -13635,13 +13696,21 @@ switchTab(initialTab);
     skelDraw(ctx, L.headR, bR, pR[0], pR[1], rotR, 1, 1, hr + gx*1.5, nodR + bob*0.8);
     skelDraw(ctx, L.headC, bC, pC[0], pC[1], rotC, 1, 1, hc + gx*1.2, nodC + bob);
 
-    /* Eye effects */
-    skelBlink(ctx, setName, "headL", bL, pL[0], pL[1], rotL, 1, 1, hl+gx*1.5, nodL+bob*0.8, blinkL, pal);
-    skelBlink(ctx, setName, "headC", bC, pC[0], pC[1], rotC, 1, 1, hc+gx*1.2, nodC+bob, blinkC, pal);
-    skelBlink(ctx, setName, "headR", bR, pR[0], pR[1], rotR, 1, 1, hr+gx*1.5, nodR+bob*0.8, blinkR, pal);
-    skelGaze(ctx, setName, "headL", bL, pL[0], pL[1], rotL, 1, 1, hl+gx*1.5, nodL+bob*0.8, gx, gy, pal);
-    skelGaze(ctx, setName, "headC", bC, pC[0], pC[1], rotC, 1, 1, hc+gx*1.2, nodC+bob, gx, gy, pal);
-    skelGaze(ctx, setName, "headR", bR, pR[0], pR[1], rotR, 1, 1, hr+gx*1.5, nodR+bob*0.8, gx, gy, pal);
+    /* ── Animated eyes: iris tracks cursor, pupils dilate, lids blink ── */
+    var eyeOpts = { gx: gx, gy: gy, dilate: P.sad ? 1 : 0 };
+    skelEyes(ctx, setName, "headL", bL, pL[0], pL[1], rotL, 1, 1, hl+gx*1.5, nodL+bob*0.8,
+             Object.assign({blink: blinkL}, eyeOpts), pal);
+    skelEyes(ctx, setName, "headC", bC, pC[0], pC[1], rotC, 1, 1, hc+gx*1.2, nodC+bob,
+             Object.assign({blink: blinkC}, eyeOpts), pal);
+    skelEyes(ctx, setName, "headR", bR, pR[0], pR[1], rotR, 1, 1, hr+gx*1.5, nodR+bob*0.8,
+             Object.assign({blink: blinkR}, eyeOpts), pal);
+
+    /* ── Animated jaw: only opens on explicit roar/howl events ── */
+    var jawAmt = Math.max(P.howl ? 0.7 : 0, P.jaw || 0);
+    if (jawAmt > 0.1) {
+      skelJaw(ctx, setName, "headC", bC, pC[0], pC[1], rotC, 1, 1, hc+gx*1.2, nodC+bob,
+              {jaw: jawAmt}, pal);
+    }
 
     return true;
   }
@@ -13685,10 +13754,22 @@ switchTab(initialTab);
     skelDraw(ctx, L.headMid,   bM, pM[0], pM[1], rotM, 1, 1, 0, bobM + droop + bob*0.5);
     skelDraw(ctx, L.headFront, bF, pF[0], pF[1], rotF, 1, 1, gx*1.5, bobF + droop + bob*0.7);
 
-    /* Eye effects (side view: front head has the main visible eye) */
+    /* ── Animated eyes on all visible heads ── */
     var blinkF = P.blink || 0;
-    skelBlink(ctx, setName, "headFront", bF, pF[0], pF[1], rotF, 1, 1, gx*1.5, bobF+droop+bob*0.7, blinkF, pal);
-    skelGaze(ctx, setName, "headFront", bF, pF[0], pF[1], rotF, 1, 1, gx*1.5, bobF+droop+bob*0.7, gx, gy, pal);
+    var eyeOpts = { gx: gx, gy: gy, dilate: P.sad ? 1 : 0 };
+    skelEyes(ctx, setName, "headFront", bF, pF[0], pF[1], rotF, 1, 1, gx*1.5, bobF+droop+bob*0.7,
+             Object.assign({blink: blinkF}, eyeOpts), pal);
+    skelEyes(ctx, setName, "headMid", bM, pM[0], pM[1], rotM, 1, 1, 0, bobM+droop+bob*0.5,
+             Object.assign({blink: blinkF}, eyeOpts), pal);
+    skelEyes(ctx, setName, "headRear", bR, pR[0], pR[1], rotR, 1, 1, 0, bobR+droop+bob*0.3,
+             Object.assign({blink: blinkF}, eyeOpts), pal);
+
+    /* ── Animated jaw: only on explicit roar/howl ── */
+    var jawAmt = Math.max(P.howl ? 0.6 : 0, P.jaw || 0);
+    if (jawAmt > 0.1) {
+      skelJaw(ctx, setName, "headFront", bF, pF[0], pF[1], rotF, 1, 1, gx*1.5, bobF+droop+bob*0.7,
+              {jaw: jawAmt}, pal);
+    }
 
     return true;
   }
@@ -14613,7 +14694,11 @@ switchTab(initialTab);
       var ox = Math.round((DW-sw)/2), oy = DH-sh;
       pxEllipse(nctx, DW/2, DH-2*res, Math.round(sw*0.42), 2*res, "rgba(0,0,0,0.5)");
       nctx.save();
-      if (P.view === "side" && facing > 0) { nctx.translate(DW, 0); nctx.scale(-1, 1); ox = DW-ox-sw; }
+      /* Procedural forms (0-2) face LEFT; baked sprite forms (3-4) face RIGHT.
+         Flip the canvas horizontally so the pet faces its travel direction. */
+      var bakedArt = settings.stage >= 3;
+      var needFlip = bakedArt ? (facing < 0) : (facing > 0);
+      if (P.view === "side" && needFlip) { nctx.translate(DW, 0); nctx.scale(-1, 1); ox = DW-ox-sw; }
       nctx.drawImage(b.canvas, ox, oy);
       nctx.restore();
 
