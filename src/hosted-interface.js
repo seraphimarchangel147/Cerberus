@@ -13534,6 +13534,14 @@ switchTab(initialTab);
   function skelEyes(ctx, setName, headName, box, px, py, rot, sx, sy, dx, dy, opts, pal) {
     var eyes = CERB_SPRITES[setName].heads[headName].eyes;
     if (!eyes || !eyes.length) return;
+    /* The eye clusters are auto-detected from the baked PNGs. For the OMEGA
+       sets the detector locked onto flame highlights ABOVE the skulls rather
+       than the pupils, so overpainting them stamped 5 black boxes into the
+       fire band (verified: front + side, 0 on alpha, absent pre-merge).
+       The omega art already carries hand-painted eyes, so the procedural
+       overpaint is pure damage there. Gate it on an explicit opt-in flag
+       set per sprite set; blink/gaze still drive the sets that want it. */
+    if (!CERB_SPRITES[setName].proceduralEyes) return;
     var blink = opts.blink || 0;
     var gx = opts.gx || 0, gy = opts.gy || 0;
     var dilate = opts.dilate || 0;
