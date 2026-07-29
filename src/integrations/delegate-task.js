@@ -112,7 +112,16 @@ function childPrompt(task, steeringNote = null) {
   const steerBlock = steeringNote
     ? `\n\n<steering>\nThe delegator interrupted an earlier attempt and redirected you:\n${steeringNote}\n</steering>`
     : "";
-  return `[delegated_task]\nGoal:\n${task.goal}\n\n<background_context>\n${contextBlock}\n</background_context>${verifyBlock}${steerBlock}\n\nWork independently. You have no access to the parent conversation beyond the block above. Do not ask the user questions or send messages. Use tools as needed, then return only a concise final summary of findings, completed work, blockers, and any remaining action.\n[/delegated_task]`;
+  // Output contract. The findings/blockers scaffold is the DEFAULT report
+  // shape, but weak-tier models obey it literally — an exact-output goal
+  // ("reply with exactly X") came back padded with status narration. An
+  // explicit output demand in the goal always overrides the scaffold, and
+  // extract-kind children skip it entirely: their value IS the answer, so
+  // any report framing is corruption.
+  const outputContract = task.kind === "extract"
+    ? "Then return only the requested value — no section headers, no status narration, no findings/blockers report. If the goal names an exact output, return exactly that string and nothing else."
+    : "Then return only a concise final summary of findings, completed work, blockers, and any remaining action. If the goal demands an exact output or format, that overrides this summary format — return exactly what was asked for.";
+  return `[delegated_task]\nGoal:\n${task.goal}\n\n<background_context>\n${contextBlock}\n</background_context>${verifyBlock}${steerBlock}\n\nWork independently. You have no access to the parent conversation beyond the block above. Do not ask the user questions or send messages. Use tools as needed. ${outputContract}\n[/delegated_task]`;
 }
 
 function childAllowedTools(runtime, parentContext, role, childDepth, maxSpawnDepth) {

@@ -498,3 +498,36 @@ test("subagent configuration validates defaults, overrides, batch caps, and wiza
   const envText = fs.readFileSync(persisted.written, "utf8");
   for (const [key, value] of Object.entries(values)) assert.match(envText, new RegExp(`${key}=${value}`));
 });
+
+test("child prompt output contract: exact-output goals override the scaffold, extract skips it", async () => {
+  const tools = new ToolRegistry();
+  const childTurns = [];
+  const runtime = {
+    tools,
+    agentHost: {
+      async handleMessage(input) {
+        childTurns.push(input);
+        return { reply: "ok", model: { iterations: 1, stopReason: "completed" } };
+      }
+    }
+  };
+  registerDelegateTaskTool(runtime);
+
+  await delegateHandler(tools)(
+    { goal: "Reply with exactly the word ALPHA.", kind: "extract" },
+    { sessionId: "prompt-extract" }
+  );
+  await delegateHandler(tools)(
+    { goal: "Summarize the repo layout." },
+    { sessionId: "prompt-default" }
+  );
+
+  const extractPrompt = childTurns[0].text;
+  assert.match(extractPrompt, /return only the requested value/);
+  assert.match(extractPrompt, /exactly that string and nothing else/);
+  assert.doesNotMatch(extractPrompt, /concise final summary of findings/);
+
+  const defaultPrompt = childTurns[1].text;
+  assert.match(defaultPrompt, /concise final summary of findings, completed work, blockers/);
+  assert.match(defaultPrompt, /overrides this summary format/);
+});
