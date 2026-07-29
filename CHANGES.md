@@ -1875,3 +1875,14 @@ UPGRADE BATCH PHASE 1 COMPLETE
   1939 tests with zero failures and two pre-existing skips; the three
   compatible mailbox tests pass separately. This remains above the required
   1912-pass baseline.
+
+- 2026-07-28T10:48:17.500Z · **azazel** · edit `src/hosted-interface.js` — Cerberus pet: delta-time animation clock (fixes vsync judder at 15fps), time-scaled movement/timers, smoothed gaze easing
+- 2026-07-28T12:18:59.561Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Cover 2026-07-28 re-issue of checklist draft
+- 2026-07-28T13:16:22.769Z · **azazel** · edit `src/task-store.js` — Autopilot queue metrics: startedAt on claim, claimNextAgentTask pop-and-claim, stranded-claim reclaim after 2h
+- 2026-07-28T13:16:39.729Z · **azazel** · edit `src/tool-registry.js` — Approvals: default decision-wait 300s to 30min; agent_pick_next claims the task for duration metrics
+- 2026-07-28T13:18:02.468Z · **azazel** · edit `src/discord-channel.js` — Approvals to Discord: button cards for all suspended approvals (not just catastrophic), env-aware 30min card expiry; task-updated autopilot feed with queue/work
+- 2026-07-28T13:20:38.431Z · **azazel** · create `test/autopilot-queue-visibility.test.js`
+- 2026-07-29T02:32:01.635Z · **azazel** · rewrite `src/integrations/delegate-task.js` — delegation: waves auto-chunking, verify hints, per-child metrics, async mode with delegate_status/_steer/_cancel
+- 2026-07-29T02:33:53.607Z · **azazel** · create `test/delegate-async.test.js` — tests for async delegation waves, verify hints, steer, cancel, and metrics
+- 2026-07-29T02:37:15.401Z · **azazel** · edit `test/delegate-task.test.js`
+- 2026-07-29T02:37:39.558Z · **azazel** · edit `test/delegate-task.test.js`

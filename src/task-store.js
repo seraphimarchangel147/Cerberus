@@ -124,6 +124,7 @@ export class TaskStore {
       // task auto-flips from blocked → pending; status fires a "task-
       // unblocked" event the daily recap picks up.
       dependsOn: Array.isArray(input.dependsOn) ? input.dependsOn.filter((id) => typeof id === "string") : [],
+      startedAt: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
       completedAt: null,
@@ -158,6 +159,10 @@ export class TaskStore {
     if (patch.priority !== undefined) next.priority = clamp(Number(patch.priority), 0, 100);
     if (patch.status !== undefined && STATUSES.includes(patch.status)) {
       next.status = patch.status;
+      if (patch.status === "in_progress") {
+        // Refresh on every (re)entry: startedAt marks when work (re)started.
+        next.startedAt = nowIso();
+      }
       if (patch.status === "completed" && !next.completedAt) {
         next.completedAt = nowIso();
         next.completedVia = patch.completedVia ?? "manual";
@@ -294,9 +299,20 @@ export class TaskStore {
   // Agent picks the next thing to work on from the agent_tasks queue.
   // Skips completed/cancelled. Prefers today bucket + highest priority.
   agentPickNext() {
+    const staleClaimMs = 2 * 60 * 60 * 1000;
+    const now = Date.now();
     const candidates = [...this.tasks.values()]
       .filter((t) => t.queue === "agent")
-      .filter((t) => t.status === "pending");
+      .filter((t) => {
+        if (t.status === "pending") return true;
+        // Reclaim stranded claims: a pulse that claimed a task but died
+        // (budget/wall-clock) before completing or deferring it must not
+        // strand the task in in_progress forever.
+        if (t.status === "in_progress" && t.startedAt) {
+          return now - Date.parse(t.startedAt) > staleClaimMs;
+        }
+        return false;
+      });
     candidates.sort((a, b) => {
       const ba = BUCKETS.indexOf(a.bucket);
       const bb = BUCKETS.indexOf(b.bucket);
@@ -305,6 +321,16 @@ export class TaskStore {
       return (a.createdAt ?? "").localeCompare(b.createdAt ?? "");
     });
     return candidates[0] ?? null;
+  }
+
+  // Pop-and-claim for the agent_pick_next tool: peek, then mark the task
+  // in_progress with startedAt so queue metrics (wait time, work time) get
+  // recorded and the task-updated feed can report the pickup. agentPickNext
+  // stays a pure read because the autopilot wake-gate peeks with it.
+  claimNextAgentTask() {
+    const task = this.agentPickNext();
+    if (!task) return null;
+    return this.update(task.id, { status: "in_progress" }) ?? task;
   }
 
   // Roll up summary stats for dashboards / health.

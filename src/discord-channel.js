@@ -28,7 +28,10 @@ import { scanDeliverables, stripDeliveredPaths } from "./deliverable.js";
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
-const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+const APPROVAL_TIMEOUT_MS = (() => {
+  const configured = Number(process.env.OPENAGI_APPROVAL_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 30 * 60 * 1000;
+})();
 const EPHEMERAL = 64;
 const EXPIRED_COLOR = 0x95a5a6;
 const DISCORD_REST_MAX_ATTEMPTS = 3;
@@ -993,7 +996,12 @@ export class DiscordChannel {
         if (autoApproveEnabled()) {
           post(`⚡ **Gated action (auto-approve ON)** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\n_Running automatically; result will follow._`, d);
         } else {
-          post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}${d.reason ? `\n_reason: ${d.reason}_` : ""}\nApprove with \`!approve ${d.id}\` · deny with \`!deny ${d.id}\``, d);
+          // Same button card as catastrophic approvals: the decider is often
+          // away from the desk, so every suspended approval must be tappable
+          // from Discord (phone), not just the dashboard or !approve CLI.
+          this.postCatastrophicApproval(d).catch((error) => {
+            this.log({ op: "approval-card-error", actionId: d.id, error: error.message });
+          });
         }
       }).catch(() => {
         post(`⏸️ **Action awaiting approval** — \`${d.id}\`\n**${d.toolName}** — ${d.summary ?? ""}`, d);
@@ -1010,6 +1018,32 @@ export class DiscordChannel {
       post(d.enabled
         ? "🟢 **Auto-approve enabled** — gated actions now run without manual approval."
         : "🔴 **Auto-approve disabled** — gated actions will queue for manual approval.");
+    });
+    events.on("task-updated", (d) => {
+      if ((process.env.DISCORD_ACTIVITY_TASKS ?? "1") === "0") return;
+      const task = d?.task;
+      if (!task || task.queue !== "agent") return;
+      const title = String(task.title ?? "(untitled)").slice(0, 120);
+      if (d.op === "create") {
+        if (!throttled(`task:${task.id}:create`, 10000)) return;
+        post(`📥 **Queued for autopilot** — ${title}\n_bucket: \`${task.bucket}\` · priority: \`${task.priority}\`_`);
+        return;
+      }
+      if (d.op !== "update") return;
+      if (task.status === "in_progress") {
+        if (!throttled(`task:${task.id}:in_progress`, 10000)) return;
+        const waited = formatDurationMs(Date.parse(task.startedAt ?? "") - Date.parse(task.createdAt ?? ""));
+        post(`⏳ **Autopilot picked up** — ${title}${waited ? `\n_waited in queue: ${waited}_` : ""}`);
+      } else if (task.status === "completed") {
+        if (!throttled(`task:${task.id}:completed`, 10000)) return;
+        const worked = task.startedAt ? formatDurationMs(Date.parse(task.completedAt ?? "") - Date.parse(task.startedAt)) : null;
+        const total = formatDurationMs(Date.parse(task.completedAt ?? "") - Date.parse(task.createdAt ?? ""));
+        const bits = [worked ? `work: ${worked}` : null, total ? `queued→done: ${total}` : null].filter(Boolean).join(" · ");
+        post(`✅ **Autopilot completed** — ${title}${bits ? `\n_${bits}_` : ""}`);
+      } else if (task.status === "cancelled") {
+        if (!throttled(`task:${task.id}:cancelled`, 10000)) return;
+        post(`🗑️ **Task cancelled** — ${title}`);
+      }
     });
     events.on("skill-use", (d) => {
       if ((process.env.DISCORD_ACTIVITY_SKILLS ?? "1") === "0") return;
@@ -1359,6 +1393,16 @@ function isPendingApprovalInteraction(interaction) {
   return interaction?.type === 3 && /^pa:(?:approve|deny|session):/.test(String(interaction?.data?.custom_id ?? ""));
 }
 
+function formatDurationMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
 function approvalComponents(actionId, { allowSession = true } = {}) {
   const components = [
     { type: 2, style: 3, label: "Approve Once", custom_id: `pa:approve:${actionId}` }
@@ -1386,16 +1430,18 @@ function disableComponents(rows = []) {
 
 function catastrophicApprovalEmbed(action) {
   const args = JSON.stringify(action.args ?? {}, null, 2);
+  const catastrophic = action.severity === "catastrophic";
+  const expiryMinutes = Math.max(1, Math.round(APPROVAL_TIMEOUT_MS / 60000));
   return embed({
-    title: "Catastrophic action requires approval",
-    color: COLORS.warn,
+    title: catastrophic ? "Catastrophic action requires approval" : "Action requires approval",
+    color: catastrophic ? COLORS.warn : COLORS.info,
     fields: [
       { name: "Tool", value: `\`${action.toolName}\``, inline: true },
       { name: "Action", value: action.summary ?? `Run ${action.toolName}` },
-      { name: "Why this is gated", value: action.reason ?? "Catastrophic policy match" },
+      { name: "Why this is gated", value: action.reason ?? (catastrophic ? "Catastrophic policy match" : "Tool requires human confirmation") },
       { name: "Arguments", value: `\`\`\`json\n${args.slice(0, 990)}\n\`\`\`` }
     ],
-    footer: "Only an authorized user can decide - expires in 10 minutes"
+    footer: `Only an authorized user can decide - expires in ${expiryMinutes} minutes`
   });
 }
 
