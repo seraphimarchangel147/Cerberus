@@ -168,9 +168,9 @@ function extractResults(completion, choice, message, limit) {
   }
   addProseUrls(results, seen, prose);
 
-  if (results.length === 0 && prose) {
-    results.push({ title: "Kimi web answer", url: null, snippet: prose.slice(0, 400) });
-  }
+  // Fail closed: refusal-shaped prose (no URLs, no citations) must NOT be
+  // laundered into a pseudo-result with url:null. Zero results flows to the
+  // caller's "empty answer" failure, which triggers provider fall-through.
   return results.slice(0, limit);
 }
 

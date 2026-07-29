@@ -152,12 +152,11 @@ test("Kimi can make more than one builtin search hop before final prose", async 
   const result = await kimiWebSearch("multi-hop search", { postChat });
 
   assert.equal(calls, 3);
-  assert.equal(result.count, 1);
-  assert.deepEqual(result.results[0], {
-    title: "Kimi web answer",
-    url: null,
-    snippet: "The searches completed, but Kimi returned prose without structured citations."
-  });
+  // Refusal-shaped prose (no citations, no URLs) must fail closed — no
+  // url:null pseudo-result may leak through to the caller.
+  assert.equal(result.count, 0);
+  assert.deepEqual(result.results, []);
+  assert.match(result.error, /empty answer/);
 });
 
 test("Kimi timeout returns an error envelope instead of throwing", async (t) => {
