@@ -1886,3 +1886,15 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - 2026-07-29T02:33:53.607Z · **azazel** · create `test/delegate-async.test.js` — tests for async delegation waves, verify hints, steer, cancel, and metrics
 - 2026-07-29T02:37:15.401Z · **azazel** · edit `test/delegate-task.test.js`
 - 2026-07-29T02:37:39.558Z · **azazel** · edit `test/delegate-task.test.js`
+- 2026-07-29T03:48:39.879Z · **azazel** · edit `src/integrations/delegate-task.js`
+- 2026-07-29T03:49:00.247Z · **azazel** · edit `test/delegate-task.test.js`
+- 2026-07-29T04:16:32.041Z · **azazel** · edit `src/integrations/web-search-providers-kimi.js` — Remove hardcoded temperature:0.3 — Kimi coding endpoint rejects any temperature except 1
+- 2026-07-29T04:16:46.742Z · **azazel** · edit `test/web-search-kimi.test.js` — Invert temperature assertion: field must now be absent (endpoint rejects temperature != 1)
+- 2026-07-29T04:34:20.589Z · **azazel** · edit `src/integrations/web-search-providers-kimi.js` — Decouple web-search model from agent base model: KIMI_WEB_SEARCH_MODEL override, default kimi-for-coding (kimi-k3 breaks $web_search tokenization)
+- 2026-07-29T04:34:20.610Z · **azazel** · edit `test/web-search-kimi.test.js` — Pin search-model override to KIMI_WEB_SEARCH_MODEL, add ANTHROPIC_MODEL isolation regression test
+- 2026-07-29T05:20:03.587Z · **azazel** · edit `src/integrations/web-search-providers-kimi.js` — Remove url:null pseudo-result fallback so Kimi refusals trigger provider fall-through
+- 2026-07-29T05:20:03.612Z · **azazel** · edit `test/web-search-kimi.test.js` — Invert multi-hop test: prose-only answer now asserts fail-closed empty answer instead of pseudo-result
+- 2026-07-29T12:19:37.952Z · **azazel** · create `drafts/provider-auth-dashboard-outline.md` — Draft: provider-auth dashboard functional outline and wireframe (draft-only planner task)
+- 2026-07-29T12:49:18.575Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend verification checklist with dashboard/auth/provider-state section for 2026-07-29 re-issue
+- 2026-07-29T13:19:04.328Z · **azazel** · create `drafts/deep-work-block-provider-auth-dashboard.md` — Draft 3h deep-work calendar block proposal (draft-only, not scheduled)
+- 2026-07-29T13:19:29.903Z · **azazel** · create `drafts/eod-progress-reminder-2026-07-29.md` — Draft 5:30 PM ET end-of-day progress reminder (draft-only, not scheduled)

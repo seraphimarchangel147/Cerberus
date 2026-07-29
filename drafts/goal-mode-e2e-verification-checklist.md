@@ -1,6 +1,7 @@
 # Goal-Mode End-to-End Verification Checklist (DRAFT)
 
-Prepared by daily planner (2026-07-26; re-issued 2026-07-27 and 2026-07-28, same scope — this draft covers all). Draft only — nothing here has been executed.
+Prepared by daily planner (2026-07-26; re-issued 2026-07-27, 2026-07-28 and 2026-07-29, same scope — this draft covers all). Draft only — nothing here has been executed.
+Verify each item against the live system; check off as confirmed. Source of truth: `~/openagi` runtime + `goal_status` tool. Scope: goal-mode loop, dashboard, auth, and provider states.
 Verify each item against the live system; check off as confirmed. Source of truth: `~/openagi` runtime + `goal_status` tool.
 
 ## 0. Pre-flight
@@ -34,8 +35,14 @@ Verify each item against the live system; check off as confirmed. Source of trut
 
 ## 6. Interaction with autopilot pulses
 - [ ] While a goal is active, run one autopilot pulse; confirm queue-draining and goal work don't double-fire the same turn or corrupt each other's state.
+## 7. Dashboard, auth & provider states
+- [ ] Dashboard loads and renders goal state consistent with `goal_status` output (status, budget remaining, latest judge result) — no drift between UI and runtime.
+- [ ] Auth-gated routes reject unauthenticated access and accept valid credentials; expired/invalid tokens fail closed (not silently degraded).
+- [ ] Provider list reflects live config: each provider shows correct state (configured / missing key / error), and a disabled or key-less provider is visibly marked rather than silently skipped.
+- [ ] A provider failure surfaces on the dashboard (error state propagates) and does not wedge the goal loop — goal work degrades to an available provider or stops explicitly.
+- [ ] After adding/removing a provider key, dashboard state updates without a stale cached view (verify after restart).
 
-## 7. Cleanup
+## 8. Cleanup
 - [ ] Clear all test goals. `goal_status` empty/clean.
 - [ ] No orphan scheduled messages or cron entries left behind by the test runs.
 - [ ] Write a one-paragraph verification report (what passed, what failed, any code fixes needed) before closing the parent goal item.
