@@ -168,7 +168,13 @@ test("single delegate_task returns only the summary and keeps child turns out of
     // is visible in the result rather than inferred.
     kind: null,
     routedTask: "delegate",
-    model: "stub"
+    model: "stub",
+    // Per-child cost observability landed with the async delegation wave:
+    // durationMs is always reported; usage/verify are null when the provider
+    // reported nothing and no verify hint was supplied.
+    durationMs: outcome.result.results[0].durationMs,
+    usage: null,
+    verify: null
   });
   assert.doesNotMatch(JSON.stringify(outcome.result), /INTERMEDIATE TOOL OUTPUT/);
 
@@ -468,12 +474,16 @@ test("subagent configuration validates defaults, overrides, batch caps, and wiza
     }
   });
   process.env.OPENAGI_MAX_CHILDREN = "2";
-  const provider = { async generate() { return modelResult("unused"); } };
+  const provider = { async generate() { return modelResult("waved child"); } };
   const { dir, tools } = makeHarness(provider);
-  const capped = await delegateHandler(tools)({
+  // Batches beyond maxChildren are no longer rejected: they run in sequential
+  // waves of maxChildren so the cap bounds concurrency, not batch size.
+  const waved = await delegateHandler(tools)({
     tasks: [{ goal: "one" }, { goal: "two" }, { goal: "three" }]
   }, { sessionId: "cap-parent" });
-  assert.match(capped.error, /OPENAGI_MAX_CHILDREN is 2/);
+  assert.equal(waved.error, undefined);
+  assert.equal(waved.results.length, 3);
+  assert.equal(waved.waves, 2);
   assert.match((await delegateHandler(tools)({}, {})).error, /exactly one/);
   assert.match((await delegateHandler(tools)({ goal: "one", tasks: [{ goal: "two" }] }, {})).error, /exactly one/);
 
