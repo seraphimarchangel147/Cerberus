@@ -17,7 +17,12 @@ export async function kimiWebSearch(query, options = {}) {
 
   const baseUrl = String(options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
   const url = `${baseUrl}/chat/completions`;
-  const model = options.model ?? process.env.ANTHROPIC_MODEL ?? DEFAULT_MODEL;
+  // Deliberately NOT process.env.ANTHROPIC_MODEL: that is the agent's base
+  // model (e.g. kimi-k3), and the coding endpoint rejects the $web_search
+  // builtin tool spec under it with "Invalid request: tokenization failed".
+  // Search gets its own override; the default stays on the model the builtin
+  // was built for.
+  const model = options.model ?? process.env.KIMI_WEB_SEARCH_MODEL ?? DEFAULT_MODEL;
   const timeoutMs = positiveInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS);
   const maxToolHops = positiveInteger(options.maxToolHops, MAX_TOOL_HOPS);
   const numResults = Math.min(20, Math.max(1, positiveInteger(options.numResults, 5)));

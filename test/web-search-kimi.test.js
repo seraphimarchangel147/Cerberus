@@ -8,15 +8,17 @@ import { PROVIDERS } from "../src/integrations/web-search-providers.js";
 import { registerWebSearchTools } from "../src/integrations/web-search.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
-const KIMI_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"];
+const KIMI_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "KIMI_WEB_SEARCH_MODEL"];
 
 function setKimiEnv(t, values = {}) {
   const saved = Object.fromEntries(KIMI_ENV.map((key) => [key, process.env[key]]));
   process.env.ANTHROPIC_API_KEY = values.apiKey ?? "unit-test-kimi-key";
   if (values.baseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
   else process.env.ANTHROPIC_BASE_URL = values.baseUrl;
-  if (values.model === undefined) delete process.env.ANTHROPIC_MODEL;
-  else process.env.ANTHROPIC_MODEL = values.model;
+  if (values.model === undefined) delete process.env.KIMI_WEB_SEARCH_MODEL;
+  else process.env.KIMI_WEB_SEARCH_MODEL = values.model;
+  if (values.agentModel === undefined) delete process.env.ANTHROPIC_MODEL;
+  else process.env.ANTHROPIC_MODEL = values.agentModel;
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -24,6 +26,31 @@ function setKimiEnv(t, values = {}) {
     }
   });
 }
+
+test("Kimi search never inherits the agent base model (ANTHROPIC_MODEL leak breaks $web_search)", async (t) => {
+  setKimiEnv(t, { agentModel: "kimi-k3" });
+  const calls = [];
+  const result = await kimiWebSearch("agent model isolation", {
+    postChat: async (body) => {
+      calls.push(structuredClone(body));
+      return {
+        choices: [{
+          finish_reason: "stop",
+          message: {
+            role: "assistant",
+            content: "Per the [docs](https://example.com/doc), isolated."
+          }
+        }]
+      };
+    }
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "kimi-for-coding",
+    "search must stay on the builtin-capable model: the coding endpoint fails tokenization on the $web_search tool spec under the agent base model");
+});
+
 
 test("Kimi advertises $web_search and echoes Moonshot's exact tool-result shape", async (t) => {
   setKimiEnv(t, {
