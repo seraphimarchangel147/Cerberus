@@ -13759,13 +13759,15 @@ switchTab(initialTab);
   })();
 
   function cerbAnimFrameIdx(setName, state, t) {
+    /* t is the engine tick counter (flick), advancing ~60/sec.
+       Convert to ms (tick * 1000/60) then to frame index by fps. */
     var A = CERB_ANIM[setName];
     if (!A) return 0;
     var layout = A.frame_layout[state];
     if (!layout) return 0;
     var fps = layout.fps || 4;
     var count = layout.frame_count || 1;
-    return Math.floor(t / (1000 / fps)) % count;
+    return Math.floor(t / (60 / fps)) % count;
   }
 
   function drawSpriteSide(ctx, P, setName, pal, ampScale) {
