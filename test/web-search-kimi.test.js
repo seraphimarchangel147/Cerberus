@@ -71,7 +71,7 @@ test("Kimi advertises $web_search and echoes Moonshot's exact tool-result shape"
     type: "builtin_function",
     function: { name: "$web_search" }
   }]);
-  assert.equal(calls[0].body.temperature, 0.3);
+  assert.equal("temperature" in calls[0].body, false, "no temperature field: the Kimi coding endpoint rejects any value except 1");
   assert.match(calls[0].body.messages[0].content, /Moonshot web search protocol/);
   assert.match(calls[0].body.messages[0].content, /past week/);
   assert.match(calls[0].body.messages[0].content, /up to 3/);

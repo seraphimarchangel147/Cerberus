@@ -30,8 +30,7 @@ export async function kimiWebSearch(query, options = {}) {
       const completion = await postWithTimeout(postChat, {
         model,
         messages,
-        tools: WEB_SEARCH_TOOLS,
-        temperature: 0.3
+        tools: WEB_SEARCH_TOOLS
       }, {
         url,
         timeoutMs,
