@@ -2254,3 +2254,5 @@ MUTATION LEASE WAVE 2 COMPLETE
 - Env flag: `OPENAGI_VECTOR_HYBRID_SEARCH` defaults to off; unset, false, or
   unrecognized values retain cosine-only retrieval. A per-search
   `hybrid: true|false` option provides a reversible caller override.
+
+CONTEXT VALUE WAVE 3 COMPLETE
