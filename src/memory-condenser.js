@@ -690,6 +690,37 @@ async function prepareContextLedgerCandidate(source, options, binding) {
   boundary = adjustLiveToolPairBoundary(working, format, boundary);
   let summaryStart = liveContextSummaryStart(working, boundary);
   summaryStart = adjustLiveToolPairSummaryStart(working, format, summaryStart, boundary);
+  // A tool-heavy transcript whose role-message count equals `keepRecentRoleMessages`
+  // pins the boundary to its FIRST role message, so the summary start collapses
+  // onto the boundary and compaction silently becomes a no-op — while both
+  // neighbouring keep values compress fine. That is non-monotonic (asking to keep
+  // MORE kept less) and it silently disables compaction at one arbitrary setting.
+  // When the window is degenerate, retain the opening role turn verbatim and
+  // summarize the completed tool hops between it and the final role turn, which is
+  // exactly the intent documented on liveContextSummaryStart.
+  if (boundary <= summaryStart) {
+    const roleIndexes = [];
+    working.forEach((message, index) => {
+      if ((message?.role === "user" || message?.role === "assistant")
+        && !isLiveContextSummaryMessage(message)
+        && !isSyntheticContinueMessage(message)) {
+        roleIndexes.push(index);
+      }
+    });
+    if (roleIndexes.length >= 2) {
+      let retryBoundary = adjustLiveToolPairBoundary(working, format, roleIndexes.at(-1));
+      let retryStart = adjustLiveToolPairSummaryStart(
+        working,
+        format,
+        roleIndexes[0] + 1,
+        retryBoundary
+      );
+      if (retryBoundary > retryStart && retryBoundary < working.length) {
+        boundary = retryBoundary;
+        summaryStart = retryStart;
+      }
+    }
+  }
   if (options.valueAwareCompaction === true) {
     try {
       const valueAware = await prepareValueAwareContextLedgerCandidate({

@@ -278,3 +278,60 @@ test("Anthropic tool_result blocks use the same capped ref path", async (t) => {
   assert.ok(ref);
   assert.equal(store.read(ref, { maxChars: 5000 }).content, JSON.stringify(fullValue));
 });
+
+// A tool-heavy transcript whose role-message count equals `keepRecentTurns`
+// used to pin the recent boundary to its FIRST role message. The summary start
+// then collapsed onto that boundary, leaving an empty region, and compaction
+// silently became a no-op — while keepRecentTurns-1 and +1 both compressed the
+// same conversation fine. Keeping MORE must never compact LESS.
+test("compaction stays monotonic when keepRecentTurns equals the role-message count", async () => {
+  const build = (roleCount, toolPairs) => {
+    const conversation = [{ role: "user", content: `start ${"x".repeat(4000)}` }];
+    for (let index = 0; index < toolPairs; index += 1) {
+      conversation.push(
+        { type: "function_call", call_id: `t${index}`, name: "n", arguments: "{}" },
+        { type: "function_call_output", call_id: `t${index}`, output: `out ${"y".repeat(4000)}` }
+      );
+    }
+    for (let turn = 1; turn < roleCount; turn += 1) {
+      conversation.push({
+        role: turn % 2 ? "assistant" : "user",
+        content: `turn${turn} ${"z".repeat(2000)}`
+      });
+    }
+    return conversation;
+  };
+
+  for (const roleCount of [2, 3, 4]) {
+    const conversation = build(roleCount, 6);
+    for (let keepRecentTurns = 1; keepRecentTurns <= roleCount + 1; keepRecentTurns += 1) {
+      const input = structuredClone(conversation);
+      const result = await compressLiveContext(input, {
+        format: "openai",
+        keepRecentTurns,
+        maxDigestChars: 600
+      });
+      assert.equal(
+        result.compressed,
+        true,
+        `roleCount=${roleCount} keepRecentTurns=${keepRecentTurns} silently declined to compact`
+      );
+      assert.deepEqual(input, conversation, "input conversation was mutated");
+
+      const calls = new Set();
+      const outputs = new Set();
+      for (const item of result.conversation) {
+        if (item?.type === "function_call") calls.add(item.call_id);
+        if (item?.type === "function_call_output") outputs.add(item.call_id);
+      }
+      assert.deepEqual([...calls].filter((id) => !outputs.has(id)), [], "orphaned tool call");
+      assert.deepEqual([...outputs].filter((id) => !calls.has(id)), [], "orphaned tool output");
+
+      const lastRole = [...conversation].reverse().find((item) => item.role);
+      assert.ok(
+        JSON.stringify(result.conversation).includes(JSON.stringify(lastRole.content).slice(1, 40)),
+        "most recent role turn must survive verbatim"
+      );
+    }
+  }
+});
