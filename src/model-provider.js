@@ -60,6 +60,10 @@ import {
   consumeMemoryRequestMetrics,
   incrementMemoryRequestMetric
 } from "./memory-request-metrics.js";
+import {
+  bindTurnProgressCounter,
+  readTurnProgressCount
+} from "./turn-progress.js";
 import { memtreeEnabled } from "../lib/memtree.js";
 
 const DEFAULT_MAX_ITERATIONS = 25;
@@ -69,6 +73,7 @@ const DEFAULT_MAX_TURN_SECONDS = 900;
 // deadline (by maxTurnSeconds each time) with a synthetic status ping before
 // the guard hard-stops it. 0 restores the original hard-stop behaviour.
 const DEFAULT_WALL_CLOCK_CHECKPOINTS = 3;
+const DEFAULT_WALL_CLOCK_FREE_EXTENSIONS = 3;
 // Max silence (no streamed tokens/events) before a single request is treated
 // as stalled. A model that keeps producing output — even slowly, like Kimi —
 // resets this on every event and is never aborted for being slow. 0 disables
@@ -208,6 +213,24 @@ function malformedToolInputError(cause) {
 function nonNegativeInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function resolveWallClockFreeExtensions(value) {
+  try {
+    if (
+      value === undefined
+      || value === null
+      || String(value).trim() === ""
+    ) {
+      return DEFAULT_WALL_CLOCK_FREE_EXTENSIONS;
+    }
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0
+      ? parsed
+      : DEFAULT_WALL_CLOCK_FREE_EXTENSIONS;
+  } catch {
+    return DEFAULT_WALL_CLOCK_FREE_EXTENSIONS;
+  }
 }
 
 function retryAfterMs(response, now = Date.now()) {
@@ -415,6 +438,10 @@ function applyIterationSettings(provider, options) {
   provider.wallClockCheckpoints = nonNegativeInteger(
     options.wallClockCheckpoints ?? process.env.OPENAGI_WALL_CLOCK_CHECKPOINTS,
     DEFAULT_WALL_CLOCK_CHECKPOINTS
+  );
+  provider.wallClockFreeExtensions = resolveWallClockFreeExtensions(
+    options.wallClockFreeExtensions
+      ?? provider.env?.OPENAGI_WALL_CLOCK_FREE_EXTENSIONS
   );
   provider.maxTurnUsd = optionalPositiveNumber(
     options.maxTurnUsd ?? process.env.OPENAGI_MAX_TURN_USD
@@ -912,9 +939,87 @@ function extendTurnDeadline(provider, context, maxTurnSeconds) {
   return next;
 }
 
-function emitWallClockCheckpoint(context, extensionsLeft) {
+function createWallClockCheckpointState(provider, context) {
+  const progressCounter = bindTurnProgressCounter(context);
+  const progressCount = readTurnProgressCount(progressCounter);
+  // Both budgets decrease monotonically. Therefore absolute turn time is
+  // bounded by maxTurnSeconds * (1 + checkpoints + freeExtensions).
+  return {
+    total: provider.wallClockCheckpoints,
+    left: provider.wallClockCheckpoints,
+    freeTotal: provider.wallClockFreeExtensions,
+    freeLeft: provider.wallClockFreeExtensions,
+    progressCounter,
+    lastProgressCount: progressCount,
+    stoppedWhileMakingProgress: null
+  };
+}
+
+function chargedWallClockDecision(state, progressSinceLastCheckpoint = null) {
+  if (!state || !Number.isSafeInteger(state.left) || state.left <= 0) {
+    if (state) {
+      state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
+    }
+    return {
+      extend: false,
+      extensionKind: null,
+      progressSinceLastCheckpoint
+    };
+  }
+  state.left -= 1;
+  state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
+  return {
+    extend: true,
+    extensionKind: "charged",
+    progressSinceLastCheckpoint
+  };
+}
+
+function evaluateWallClockCheckpoint(state) {
   try {
-    context?.__onToolEvent?.({ phase: "wall-clock-checkpoint", extensionsLeft });
+    const currentProgressCount = readTurnProgressCount(
+      state?.progressCounter
+    );
+    if (
+      currentProgressCount === null
+      || !Number.isSafeInteger(state?.lastProgressCount)
+      || state.lastProgressCount < 0
+    ) {
+      return chargedWallClockDecision(state);
+    }
+    const progressSinceLastCheckpoint = currentProgressCount
+      > state.lastProgressCount;
+    state.lastProgressCount = currentProgressCount;
+    state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
+    if (
+      progressSinceLastCheckpoint
+      && Number.isSafeInteger(state.freeLeft)
+      && state.freeLeft > 0
+    ) {
+      state.freeLeft -= 1;
+      return {
+        extend: true,
+        extensionKind: "free",
+        progressSinceLastCheckpoint
+      };
+    }
+    return chargedWallClockDecision(state, progressSinceLastCheckpoint);
+  } catch {
+    // If progress accounting is ever unreadable, charge the checkpoint exactly
+    // as the pre-feature wall-clock guard did.
+    return chargedWallClockDecision(state);
+  }
+}
+
+function emitWallClockCheckpoint(context, state, decision) {
+  try {
+    context?.__onToolEvent?.({
+      phase: "wall-clock-checkpoint",
+      extensionsLeft: state.left,
+      freeExtensionsLeft: state.freeLeft,
+      progressSinceLastCheckpoint: decision.progressSinceLastCheckpoint,
+      extensionKind: decision.extensionKind
+    });
   } catch {
     // Progress observers are advisory and must never break a turn.
   }
@@ -924,9 +1029,18 @@ function emitWallClockCheckpoint(context, extensionsLeft) {
 // extensions remain: a status check, not a stop order. The model answers if
 // the work is done, keeps working if it is not, or says plainly that it is
 // stuck -- the turn continues autonomously either way.
-function wallClockCheckpointPrompt(extensionsLeft, maxTurnSeconds) {
+function wallClockCheckpointPrompt(state, decision, maxTurnSeconds) {
+  const progressVerdict = decision.progressSinceLastCheckpoint === true
+    ? decision.extensionKind === "free"
+      ? "Output-aware progress was observed since the previous checkpoint, so this extension did not consume a charged checkpoint. "
+      : "Output-aware progress was observed, but the free-extension cap is exhausted, so this extension consumed a charged checkpoint. "
+    : decision.progressSinceLastCheckpoint === false
+      ? "No output-aware progress was observed since the previous checkpoint, so this extension consumed a charged checkpoint. "
+      : "Progress status was unavailable, so the fail-safe path consumed a charged checkpoint. ";
   return "[system] Wall-clock checkpoint: the turn's time budget was reached, so the deadline was extended "
-    + `by ~${Math.round(maxTurnSeconds)}s (${extensionsLeft} extension${extensionsLeft === 1 ? "" : "s"} left before a hard stop). `
+    + `by ~${Math.round(maxTurnSeconds)}s. ${progressVerdict}`
+    + `${state.left} charged extension${state.left === 1 ? "" : "s"} and `
+    + `${state.freeLeft} progress extension${state.freeLeft === 1 ? "" : "s"} remain before a hard stop. `
     + "Status check: if the user's request is already answered, give the final answer now. "
     + "If work remains, keep working -- do not stop or summarise yet. "
     + "If you are stuck or looping, say so plainly and name what is blocking you.";
@@ -937,11 +1051,11 @@ function wallClockCheckpointPrompt(extensionsLeft, maxTurnSeconds) {
 // "turn-timeout" exactly as before). Orphaned tool calls are reconciled first
 // so the next request never carries an unanswered call.
 function maybeWallClockCheckpoint(provider, context, conversation, format, state, maxTurnSeconds) {
-  if (!state || state.left <= 0) return null;
-  state.left -= 1;
+  const decision = evaluateWallClockCheckpoint(state);
+  if (!decision.extend) return null;
   const next = extendTurnDeadline(provider, context, maxTurnSeconds);
-  emitWallClockCheckpoint(context, state.left);
-  const prompt = wallClockCheckpointPrompt(state.left, maxTurnSeconds);
+  emitWallClockCheckpoint(context, state, decision);
+  const prompt = wallClockCheckpointPrompt(state, decision, maxTurnSeconds);
   if (format === "openai") {
     reconcileOrphanedToolCalls(conversation, "openai");
     appendOpenAIContinue(conversation);
@@ -3854,6 +3968,44 @@ async function prepareProviderConversation(providerInstance, conversation, {
 // The system prompt appended to the final "force an answer" call when a turn is
 // cut short. Tells the model to stop, not call tools, and answer from work so
 // far — the reason tunes the guidance so the reply names the right knob.
+function wallClockStopSnapshot(state) {
+  return {
+    total: Math.max(0, Number(state?.total) || 0),
+    left: Math.max(0, Number(state?.left) || 0),
+    freeTotal: Math.max(0, Number(state?.freeTotal) || 0),
+    freeLeft: Math.max(0, Number(state?.freeLeft) || 0),
+    stoppedWhileMakingProgress: state?.stoppedWhileMakingProgress === true
+      ? true
+      : state?.stoppedWhileMakingProgress === false
+        ? false
+        : null
+  };
+}
+
+function wallClockStopProgressText(wallClock) {
+  if (wallClock?.stoppedWhileMakingProgress === true) {
+    return "The turn was stopped while making progress because both bounded extension budgets were exhausted.";
+  }
+  if (wallClock?.stoppedWhileMakingProgress === false) {
+    return "The turn was stopped without new output-aware progress since the previous checkpoint.";
+  }
+  return "Output-aware progress at the stop could not be determined.";
+}
+
+function wallClockConsumptionText(wallClock) {
+  const freeUsed = Math.max(
+    0,
+    (wallClock.freeTotal ?? 0) - (wallClock.freeLeft ?? 0)
+  );
+  const chargedDetail = wallClock?.total > 0
+    ? ` All ${wallClock.total} checkpoint extension${wallClock.total === 1 ? "" : "s"} were consumed before this stop (the base window plus ${wallClock.total} charged extension${wallClock.total === 1 ? "" : "s"} ran).`
+    : "";
+  const freeDetail = freeUsed > 0
+    ? ` The turn also used ${freeUsed} bounded progress-aware free extension${freeUsed === 1 ? "" : "s"}.`
+    : "";
+  return `${chargedDetail}${freeDetail}`;
+}
+
 function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
   const base = "[system] Stop here and answer the user now. Do NOT call any tools. Using the conversation and any tool results above, give the best complete answer you can with what you have.";
   if (reason === "iteration-cap") {
@@ -3869,7 +4021,7 @@ function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
     return `${base} The provider stayed unavailable after bounded retries; summarise completed work and give your best current answer.`;
   }
   // turn-timeout
-  return `${base} The overall time budget is ${wallClock?.total > 0 ? `spent after the base window plus all ${wallClock.total} wall-clock checkpoint extension${wallClock.total === 1 ? "" : "s"}` : "nearly spent"}; be concise and note OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS can be raised.`;
+  return `${base} The overall time budget is exhausted. ${wallClockStopProgressText(wallClock)} Be concise and note OPENAGI_MAX_TURN_SECONDS, OPENAGI_WALL_CLOCK_CHECKPOINTS, or OPENAGI_WALL_CLOCK_FREE_EXTENSIONS can be raised.`;
 }
 
 function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText, wallClock }) {
@@ -3880,7 +4032,7 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
     : "No tool calls completed.";
   const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
   if (reason === "turn-timeout") {
-    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached.${wallClock?.total > 0 ? ` All ${wallClock.total} checkpoint extension${wallClock.total === 1 ? "" : "s"} were consumed before this stop (the base window plus ${wallClock.total} extension${wallClock.total === 1 ? "" : "s"} ran).` : ""} ${detail} Raise OPENAGI_MAX_TURN_SECONDS or OPENAGI_WALL_CLOCK_CHECKPOINTS if this task needs more time.${prior}`;
+    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached.${wallClockConsumptionText(wallClock)} ${wallClockStopProgressText(wallClock)} ${detail} Raise OPENAGI_MAX_TURN_SECONDS, OPENAGI_WALL_CLOCK_CHECKPOINTS, or OPENAGI_WALL_CLOCK_FREE_EXTENSIONS if this task needs more time.${prior}`;
   }
   if (reason === "stalled") {
     return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model went silent (no output for the stall window) and could not be revived. ${detail} This usually means a transient provider hiccup — retry the request. OPENAGI_STALL_TIMEOUT_MS tunes how long silence is tolerated.${prior}`;
@@ -4226,7 +4378,10 @@ export class OpenAIResponsesProvider {
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
-    const wallClockCheckpointState = { left: this.wallClockCheckpoints };
+    const wallClockCheckpointState = createWallClockCheckpointState(
+      this,
+      context
+    );
     const completionContract = context?.__completionContract ?? null;
     let completionNudges = 0;
     let completionEvidence = assessCompletionEvidence(
@@ -4715,7 +4870,12 @@ export class OpenAIResponsesProvider {
       continuationUsedForcedAnswer = true;
       reconcileOrphanedToolCalls(conversationInput, "openai");
       appendOpenAIContinue(conversationInput);
-      conversationInput.at(-1).content[0].text = forceAnswerPrompt(stopReason, iterations, maxIterations, { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left });
+      conversationInput.at(-1).content[0].text = forceAnswerPrompt(
+        stopReason,
+        iterations,
+        maxIterations,
+        wallClockStopSnapshot(wallClockCheckpointState)
+      );
       try {
         checkRequestBudget(this, turnBudget);
         const preparation = await prepareProviderConversation(this, conversationInput, {
@@ -4770,9 +4930,23 @@ export class OpenAIResponsesProvider {
     }
 
     if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error" || stopReason === "context-too-large")) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
+      text = localPartialSummary({
+        reason: stopReason,
+        iterations,
+        maxIterations,
+        toolCalls,
+        lastText,
+        wallClock: wallClockStopSnapshot(wallClockCheckpointState)
+      });
     } else if (stopReason === "iteration-cap" && !text) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
+      text = localPartialSummary({
+        reason: stopReason,
+        iterations,
+        maxIterations,
+        toolCalls,
+        lastText,
+        wallClock: wallClockStopSnapshot(wallClockCheckpointState)
+      });
     } else if (text === undefined) {
       text = extractResponseText(response) || "(no text)";
     }
@@ -5260,7 +5434,10 @@ export class AnthropicProvider {
     let previousUsage = null;
     let goalContinuationRevision = activeGoalRevision(context);
     let successfulModelHops = 0;
-    const wallClockCheckpointState = { left: this.wallClockCheckpoints };
+    const wallClockCheckpointState = createWallClockCheckpointState(
+      this,
+      context
+    );
     const completionContract = context?.__completionContract ?? null;
     let completionNudges = 0;
     let completionEvidence = assessCompletionEvidence(
@@ -5635,7 +5812,15 @@ export class AnthropicProvider {
       && claimTurnForcedAnswer(turnBudget)
     ) {
       reconcileOrphanedToolCalls(convo, "anthropic");
-      appendAnthropicUserText(convo, forceAnswerPrompt(stopReason, iterations, maxIterations, { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left }));
+      appendAnthropicUserText(
+        convo,
+        forceAnswerPrompt(
+          stopReason,
+          iterations,
+          maxIterations,
+          wallClockStopSnapshot(wallClockCheckpointState)
+        )
+      );
       try {
         checkRequestBudget(this, turnBudget);
         const preparation = await prepareProviderConversation(this, convo, {
@@ -5687,9 +5872,23 @@ export class AnthropicProvider {
     }
 
     if (!text && (stopReason === "turn-timeout" || stopReason === "budget-cap" || stopReason === "request-timeout" || stopReason === "stalled" || stopReason === "provider-error" || stopReason === "context-too-large")) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
+      text = localPartialSummary({
+        reason: stopReason,
+        iterations,
+        maxIterations,
+        toolCalls,
+        lastText,
+        wallClock: wallClockStopSnapshot(wallClockCheckpointState)
+      });
     } else if (stopReason === "iteration-cap" && !text) {
-      text = localPartialSummary({ reason: stopReason, iterations, maxIterations, toolCalls, lastText, wallClock: { total: this.wallClockCheckpoints, left: wallClockCheckpointState.left } });
+      text = localPartialSummary({
+        reason: stopReason,
+        iterations,
+        maxIterations,
+        toolCalls,
+        lastText,
+        wallClock: wallClockStopSnapshot(wallClockCheckpointState)
+      });
     } else if (text === undefined) {
       text = extractAnthropicText(response);
     }

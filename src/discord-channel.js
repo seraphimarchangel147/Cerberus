@@ -62,6 +62,23 @@ export function discordStreamingEnabled() {
   return value !== "0" && value !== "false" && value !== "off";
 }
 
+export function formatWallClockCheckpointActivity(event = {}) {
+  const chargedLeft = Number.isSafeInteger(event?.extensionsLeft)
+    ? Math.max(0, event.extensionsLeft)
+    : "?";
+  const freeLeft = Number.isSafeInteger(event?.freeExtensionsLeft)
+    ? Math.max(0, event.freeExtensionsLeft)
+    : "?";
+  const verdict = event?.progressSinceLastCheckpoint === true
+    ? event?.extensionKind === "free"
+      ? "progress detected; free extension granted"
+      : "progress detected; free cap exhausted, charged extension used"
+    : event?.progressSinceLastCheckpoint === false
+      ? "no new progress; charged extension used"
+      : "progress unknown; fail-safe charged extension used";
+  return `Wall-clock checkpoint - long turn still working (${chargedLeft} charged, ${freeLeft} progress extensions left; ${verdict})`;
+}
+
 export function formatEmptyTurnFallback(result = {}) {
   const toolCount = result?.toolCalls?.length ?? result?.output?.toolCalls?.length ?? 0;
   const suffix = `${toolCount} tool call${toolCount === 1 ? "" : "s"} ran`;
@@ -1222,7 +1239,7 @@ export class DiscordChannel {
       }
       if (d?.phase === "wall-clock-checkpoint") {
         if (!throttled("agent-activity:wall-clock", 60000)) return;
-        post(`⏱️ **Wall-clock checkpoint** — long turn still working (${d.extensionsLeft ?? "?"} extensions left)`, d);
+        post(formatWallClockCheckpointActivity(d), d);
         return;
       }
       if (d?.phase === "context-compression") {

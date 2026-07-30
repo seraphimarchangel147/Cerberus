@@ -2002,3 +2002,29 @@ UPGRADE BATCH PHASE 1 COMPLETE
   passes 41/41. The complete Windows-compatible `npm test` lane passes 2100
   tests with zero failures and two pre-existing skips. No dependency or
   package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 6: progress-aware wall clock (Codex)
+
+- Added one trusted per-turn progress counter fed by Fix 5's already-computed
+  successful-output verdict. The provider does not hash or compare tool output
+  a second time.
+- A checkpoint with new progress now grants a free extension without
+  decrementing the existing charged budget, up to a separate bounded cap.
+  Once that cap is exhausted, or when output made no progress, charged
+  checkpoints behave exactly as before. The absolute bound is
+  `maxTurnSeconds * (1 + checkpoints + freeExtensions)`.
+- Checkpoint prompts, lifecycle events, and Discord activity messages expose
+  whether progress was observed and whether the extension was free or charged.
+  Forced-answer guidance and local hard-stop summaries now distinguish a stop
+  while making progress from a stop with no new output-aware progress.
+- `OPENAGI_WALL_CLOCK_FREE_EXTENSIONS` is setup-wizard persistable. It defaults
+  to 3 when unset, blank, invalid, unsafe, or unreadable. An explicit `0`
+  disables progress-aware free extensions.
+- The clock-injected regression file failed red at 0 passing and 3 failing
+  before implementation. Its final OpenAI, Anthropic, no-progress, bounded
+  forever-progress, Discord visibility, and fail-open coverage passes 5/5
+  without sleeping. The broader related provider and registry lane passes
+  78/78.
+- The complete Windows-compatible `npm test` lane passes 2105 tests with zero
+  failures and two pre-existing skips. No dependency or package manifest
+  changed.

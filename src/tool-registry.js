@@ -57,6 +57,7 @@ import {
 import { isProfileMemoryScope } from "./memory-system.js";
 import { readableMemoryScopes } from "../lib/memtree.js";
 import { incrementMemoryRequestMetric } from "./memory-request-metrics.js";
+import { recordTurnProgress } from "./turn-progress.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
@@ -1018,7 +1019,8 @@ export class ToolRegistry {
       fingerprint,
       reserved: true,
       operationReceipt: createOperationReceipt(scope, fingerprint),
-      activeKey
+      activeKey,
+      progressContext: context
     };
     if (activeKey) state.activeOperations.set(activeKey, tracking);
     return tracking;
@@ -1055,6 +1057,9 @@ export class ToolRegistry {
           inFlight: false
         });
         tracking.outputProgress = evaluation.progressed;
+        if (evaluation.progressed) {
+          recordTurnProgress(tracking.progressContext);
+        }
         return evaluation.thresholdReached
           ? repeatedNoProgressEnvelope(
               envelope,
