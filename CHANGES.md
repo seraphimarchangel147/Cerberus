@@ -2,6 +2,37 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-30 — execute_code can batch mutations: nested mutation-lease re-entrancy (Seraphim)
+
+Wave 4, closing F1 from the 2026-07-29 QA battery (found by Azazel). `execute_code` held the
+process-global foreground mutation lease for its whole run, so every mutation dispatched inside it
+collided with its own wrapper — the tool could not batch writes at all. `nestedToolContext` set
+`__fromExecuteCode: true`, but nothing in the lease path ever read that flag.
+
+- Nested mutations now re-enter the parent's lease. Authority is an opaque handle minted in
+  `job-manager.js`, held in a module-private `WeakMap`, keyed by a non-exported `Symbol`.
+  `acquireToolInvocation` grants re-entry only when the handle was minted here, the parent lease is
+  still live in foreground state, no other nested mutation holds it, and the child's locks are
+  **covered** by the parent's. Otherwise it falls through to the existing conflict error.
+- Mutual exclusion and approval scoping are preserved: two *concurrent* nested mutations still
+  conflict, and `__confirmed`/`__approval` are still stripped at the nested boundary (the handle is
+  re-attached as exactly one allowlisted property, never via a descriptor-wide copy, which would
+  resurrect the approval bindings).
+- **Hazard worth knowing:** non-enumerable context properties do not survive this dispatch path.
+  Six layers rebuild context with an enumerable `{ ...context }` spread (`ToolRegistry.invoke`,
+  `operationContext`, `authorizedProjectContext`, `authorizeProfileContext` ×2,
+  `refreshToolInvocationAuthority`). The carry helper is now invoked inside the rebuild *functions*
+  so future call sites inherit it.
+- **Hazard worth knowing:** lock coverage is directional; `resourcesOverlap` is symmetric and using
+  it for coverage would let re-entrancy silently *widen* a grant (`…/workspace/narrow` parent
+  "covering" a `…/workspace` child). `resourceCovers` is explicit and one-way.
+- Tool description updated: mutations work inside `execute_code`, but sequentially only, and a
+  nested call cannot claim a broader resource than the script holds. A long-running script still
+  blocks other mutations — TTL reaping remains the backstop.
+- Regression: `test/mutation-lease-reentrancy.test.js`, 7 cases incl. forged-handle rejection,
+  lock-widening refusal, and approval non-carry. Negative control: with the gate neutered 4/7 fail.
+  Suite 2141 tests / 2117 pass / 0 fail; QA pre-check 13/13.
+
 ## 2026-07-26 — Wall-clock stops now report consumed checkpoint extensions (Azazel)
 
 The soft-checkpoint guard worked invisibly: a turn that ran the base budget plus all

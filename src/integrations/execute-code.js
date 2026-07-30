@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { scanGhosts } from "../code-tools.js";
+import { carryParentMutationLease } from "../job-manager.js";
 import { buildSafeEnv } from "../mcp-client.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -45,7 +46,12 @@ function nestedToolContext(context) {
   // approved execute_code call silently authorize a catastrophic child call.
   delete nested.__confirmed;
   delete nested.__approval;
-  return nested;
+  // The mutation-lease handle is non-enumerable, so the spread above drops it.
+  // Re-attach it explicitly: nested mutations must re-enter this script's own
+  // lease rather than deadlock against it. This is an allowlist of exactly one
+  // property — deliberately NOT a descriptor-wide copy, which would resurrect
+  // the approval bindings deleted just above.
+  return carryParentMutationLease(context, nested);
 }
 
 function finalizeOutput(output, details) {
@@ -176,7 +182,7 @@ export function registerExecuteCodeTool(runtime) {
   runtime.tools.register({
     name: "execute_code",
     sideEffects: true,
-    description: "Run a short JS script that can call your tools via await callTool(name, args). Use for 3+ dependent tool calls with logic between them, or to reduce large tool output before it reaches you. Print the final result with console.log. Read-only tools work normally, but this script holds the workspace mutation lease for its entire run, so any tool that WRITES (code_write, delegate_task, and similar) fails inside it with a lease conflict naming 'execute_code' as the holder. Batch reads here and make mutating calls directly instead.",
+    description: "Run a short JS script that can call your tools via await callTool(name, args). Use for 3+ dependent tool calls with logic between them, or to reduce large tool output before it reaches you. Print the final result with console.log. Mutating tools (code_write and similar) work inside the script: nested calls re-enter this script's own workspace mutation lease. Two limits still apply — nested mutations run ONE AT A TIME (fire them sequentially, not via Promise.all, or the second fails with a lease conflict), and a nested call cannot claim a BROADER resource than the script itself holds. A long-running script still blocks other mutations for its whole run, so keep it short.",
     parameters: {
       type: "object",
       properties: {

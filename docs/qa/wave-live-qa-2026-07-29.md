@@ -139,6 +139,49 @@ His closing observation is the sharpest thing in this report: a stuck `execute_c
 shape of the original 18-minute freeze. Wave 2's TTL reaping is the backstop that makes it
 survivable — which means Wave 2 is already earning its keep.
 
+### F1 — FIXED (2026-07-30, Wave 4)
+
+Re-entrancy implemented and verified. `execute_code` can now batch mutations.
+
+**Authority model.** The right to re-enter a lease is an opaque handle minted in `job-manager.js`
+and held in a module-private `WeakMap`, keyed by a **non-exported** `Symbol`. `acquireToolInvocation`
+grants re-entry only when all four hold: the handle is one this module minted; the parent lease is
+*still live* in foreground state; no other nested mutation currently holds it; and the child's locks
+are **covered** by the parent's. Anything else falls through to the normal acquisition path and
+produces the existing conflict error. The answer to the spec question above is therefore "neither" —
+a nested call does not inherit locks verbatim, and it does not re-run `assertLocksCover`; it gets a
+directional coverage check that can only ever *narrow*.
+
+**Two bugs found while building it, both caught by the tests rather than by reading:**
+
+1. **Non-enumerable context properties do not survive this dispatch path.** The handle is
+   deliberately non-enumerable so it never reaches audit logs — and **six** layers between the
+   caller and the lease gate rebuild context with an enumerable `{ ...context }` spread, each
+   silently dropping it: `ToolRegistry.invoke`, `operationContext`, `authorizedProjectContext`,
+   `authorizeProfileContext` (both branches), and `refreshToolInvocationAuthority`. Three
+   "obviously correct" attempts failed for this reason alone. Found by instrumenting the carry
+   helper with a stack trace and watching where the handle vanished. **Generalise this:** any future
+   non-enumerable context binding needs the same treatment, and `carryParentMutationLease` is now
+   called inside the two rebuild *functions* so new call sites inherit the fix.
+2. **Coverage must be directional; overlap is not coverage.** My first `locksCover` reused
+   `resourcesOverlap`, which is symmetric. A parent holding `…/workspace/narrow` *overlaps* a child
+   demanding all of `…/workspace` — so re-entrancy would have silently **widened** the grant to
+   resources the parent never held. This is precisely the "wrongly grants a lease" failure the
+   caution above was about, and it shipped in my own first draft. `resourceCovers` is now explicit
+   and one-directional.
+
+**Verification.** New suite `test/mutation-lease-reentrancy.test.js`, 7 cases: happy path, missing
+handle still conflicts, forged handle grants nothing (string key, same-description symbol, and
+copied-descriptor attempts all rejected), no lock widening, one-nested-mutation-at-a-time, no lease
+leak after the wrapper returns, and no approval carried across the nested boundary. **Negative
+control run:** with the re-entrancy gate neutered, 4 of the 7 fail — the tests have teeth.
+Full suite **2141 tests / 2117 pass / 0 fail** (+7 from baseline 2134), pre-check **13/13**.
+
+**Unchanged risk.** A long-running `execute_code` still blocks other mutations for its whole run —
+the 18-minute-freeze shape is *not* eliminated, only made useful. TTL reaping remains the backstop.
+The tool description now states the two live constraints (sequential nested mutations; no
+broadening) instead of the old blanket "mutations always fail here".
+
 ---
 
 ## Addendum — A4 live capture

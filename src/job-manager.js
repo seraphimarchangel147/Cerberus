@@ -376,6 +376,12 @@ export class JobManager {
       return () => {};
     }
 
+    // Re-entrancy is checked BEFORE any conflict scan: a nested call inside the
+    // parent's own locks is not a conflict with anything, and scanning first
+    // would surface the parent as its own blocker.
+    const reentrant = reentrantMutationLeaseRelease(this, context, required);
+    if (reentrant) return reentrant;
+
     const durableRecords = this.store.listAll({ limit: 2_000 });
     const durableById = new Map(
       durableRecords.map((record) => [record.id, record])
@@ -425,7 +431,7 @@ export class JobManager {
       });
     }
     const leaseId = crypto.randomUUID();
-    state.foreground.set(leaseId, {
+    const lease = {
       acquiredAt: mutationLeaseNow(this),
       jobId: mutationLeaseContextId(context.__jobId ?? context.jobId),
       leaseId,
@@ -434,15 +440,21 @@ export class JobManager {
       persistent: false,
       sessionId: mutationLeaseContextId(context.sessionId),
       resourceLocks: required
-    });
+    };
+    state.foreground.set(leaseId, lease);
     let released = false;
-    return () => {
+    const release = () => {
       if (released) return;
       released = true;
       state.foreground.delete(leaseId);
       this._scheduleDrain();
       this._releaseSchedulerLeaseIfIdle();
     };
+    // The handle rides on the release function so the existing single-return
+    // contract at the registry call site is unchanged; only a wrapper tool that
+    // deliberately reaches for it can pass it inward.
+    release.parentMutationLease = mintMutationLeaseHandle(this, leaseId, lease);
+    return release;
   }
 
   inspectMutationLeases() {
@@ -1517,6 +1529,31 @@ function assertToolIdentity(record, tool) {
   }
 }
 
+// Coverage is DIRECTIONAL and must not reuse resourcesOverlap, which is
+// symmetric: a parent holding `…/workspace/narrow` overlaps a child demanding
+// all of `…/workspace`, but it does not COVER it. Using overlap here would let
+// re-entrancy silently widen the grant to resources the parent never held —
+// exactly the failure mode this whole path is guarded against. `held` covers
+// `required` only when held is required itself or a proper ancestor of it.
+function resourceCovers(held, required) {
+  if (!held || !required) return false;
+  return required === held || required.startsWith(`${held}/`);
+}
+
+function locksCover(heldLocks, requiredLocks) {
+  if (!Array.isArray(heldLocks) || !Array.isArray(requiredLocks)) return false;
+  if (requiredLocks.length === 0) return false;
+  return requiredLocks.every((required) => (
+    heldLocks.some((held) => (
+      held?.mode === "write"
+      && resourceCovers(
+        String(held.resource ?? ""),
+        String(required?.resource ?? "")
+      )
+    ))
+  ));
+}
+
 function assertLocksCover(heldLocks, requiredLocks) {
   const covered = requiredLocks.every((required) => (
     heldLocks.some((held) => (
@@ -2132,6 +2169,94 @@ function privateState(manager) {
   const state = LIVE_STATE.get(manager);
   if (!state) throw new Error("JobManager state is unavailable.");
   return state;
+}
+
+// ── Nested mutation lease re-entrancy ────────────────────────────────────────
+// A wrapper tool (execute_code) holds a foreground mutation lease for its whole
+// run, so a naive nested mutation collides with its own parent. Re-entrancy is
+// the one change class that can wrongly GRANT a lease, so the authority to
+// re-enter is an opaque object handle minted here and stored in a module-private
+// WeakMap. A caller cannot forge one: the symbol key is not exported, and even a
+// correctly-keyed context property is rejected unless the value is an object
+// this module minted AND the underlying lease is still live in foreground state.
+const PARENT_MUTATION_LEASE = Symbol("openagi.parentMutationLease");
+const LEASE_HANDLES = new WeakMap();
+
+function mintMutationLeaseHandle(manager, leaseId, lease) {
+  const handle = Object.freeze({});
+  LEASE_HANDLES.set(handle, { manager, leaseId, lease, nested: 0 });
+  return handle;
+}
+
+// Explicit allowlist copy. Callers must NOT clone whole context descriptors to
+// carry this inward: approval bindings are deliberately dropped at the nested
+// boundary, and a descriptor-wide copy would smuggle them through.
+export function withParentMutationLease(context, handle) {
+  if (!handle || !LEASE_HANDLES.has(handle)) return context;
+  let bound = context && typeof context === "object" ? context : {};
+  // The binding is non-configurable, so rebinding (a nested call that acquires
+  // its OWN lease while carrying its parent's handle) needs a fresh object with
+  // that one key omitted. Everything else keeps its original descriptor.
+  if (Object.getOwnPropertyDescriptor(bound, PARENT_MUTATION_LEASE)) {
+    const descriptors = Object.getOwnPropertyDescriptors(bound);
+    delete descriptors[PARENT_MUTATION_LEASE];
+    bound = Object.defineProperties({}, descriptors);
+  }
+  Object.defineProperty(bound, PARENT_MUTATION_LEASE, {
+    value: handle,
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return bound;
+}
+
+// The handle is intentionally non-enumerable so it never lands in audit logs or
+// serialized context. Several layers rebuild context with an enumerable spread
+// (`{ ...context }`), which silently drops it — every such rebuild between the
+// caller and the lease gate must re-carry it or re-entrancy is unreachable.
+export function carryParentMutationLease(source, target) {
+  let handle;
+  try {
+    handle = source?.[PARENT_MUTATION_LEASE];
+  } catch {
+    return target;
+  }
+  if (!handle || !LEASE_HANDLES.has(handle)) return target;
+  return withParentMutationLease(target, handle);
+}
+
+// Returns a no-op release when the nested call is fully inside the parent's
+// already-held locks; returns null to mean "no re-entrancy — use the normal
+// acquisition path", which then produces the existing conflict error. Widening
+// locks or a second CONCURRENT nested mutation both fall through deliberately:
+// mutual exclusion must survive re-entrancy.
+function reentrantMutationLeaseRelease(manager, context, required) {
+  let handle;
+  try {
+    handle = context?.[PARENT_MUTATION_LEASE];
+  } catch {
+    return null;
+  }
+  if (!handle) return null;
+  const parent = LEASE_HANDLES.get(handle);
+  if (!parent || parent.manager !== manager) return null;
+  let state;
+  try {
+    state = privateState(manager);
+  } catch {
+    return null;
+  }
+  if (state.foreground.get(parent.leaseId) !== parent.lease) return null;
+  if (parent.nested > 0) return null;
+  if (!locksCover(parent.lease.resourceLocks ?? [], required)) return null;
+  parent.nested += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    parent.nested = Math.max(0, parent.nested - 1);
+  };
 }
 
 export const JOB_DEFAULTS = Object.freeze({

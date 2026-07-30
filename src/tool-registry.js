@@ -5,6 +5,11 @@
 
 import { createId, nowIso, tokenOverlapScore } from "./utils.js";
 import { HookRegistry } from "./hook-registry.js";
+// job-manager does not import this module, so this direction is acyclic.
+import {
+  carryParentMutationLease,
+  withParentMutationLease
+} from "./job-manager.js";
 import { sanitizeForAudit } from "./redact.js";
 import { validateMcpServerSpec } from "./mcp-registry.js";
 import { MODEL_PROVIDER_IDS, isModelProviderId } from "./model-router.js";
@@ -609,10 +614,10 @@ export class ToolRegistry {
     const receiptState = internal.failureTracking?.receiptState
       ?? internal.receiptState
       ?? createExecutionReceiptState(name);
-    context = {
+    context = carryParentMutationLease(context, {
       ...(context ?? {}),
       [EXECUTION_RECEIPT_STATE]: receiptState
-    };
+    });
     const tool = this.tools.get(name);
     try {
       const safeArgs = snapshotToolValue(args ?? {});
@@ -795,10 +800,10 @@ export class ToolRegistry {
       markExecutionDecision(receiptState, "preflight", "not_required");
     }
     const operationContext = tracking?.operationReceipt
-      ? {
+      ? carryParentMutationLease(context, {
           ...(context ?? {}),
           __operationReceipt: tracking.operationReceipt
-        }
+        })
       : context;
     const notify = typeof operationContext?.__onToolEvent === "function"
       ? operationContext.__onToolEvent
@@ -1756,6 +1761,18 @@ export class ToolRegistry {
             args ?? {},
             context
           );
+          // Wrapper tools (execute_code) run nested tool calls while still
+          // holding this lease. Bind the coordinator-minted handle onto the
+          // context so those nested calls can re-enter the SAME lease instead
+          // of colliding with their own parent. The handle is an opaque object
+          // the coordinator validates against live state — holding it grants
+          // nothing beyond the locks this invocation already owns.
+          if (releaseJobLease?.parentMutationLease) {
+            context = withParentMutationLease(
+              cloneInvocationContext(context),
+              releaseJobLease.parentMutationLease
+            );
+          }
           markExecutionDecision(receiptState, "resource_lease", "passed");
         } catch (error) {
           markExecutionDecision(receiptState, "resource_lease", "failed");
@@ -2345,7 +2362,10 @@ function authorizedProjectContext(context, project) {
       ? projectAllowed.filter((name) => inheritedAllowed.includes(name))
       : [...projectAllowed]
     : inheritedAllowed;
-  return {
+  // The mutation-lease handle is non-enumerable, so the spread below drops it.
+  // Re-carrying here (rather than at each of the several call sites) keeps every
+  // authority refresh on the dispatch path from silently breaking re-entrancy.
+  return carryParentMutationLease(context, {
     ...(context ?? {}),
     __projectId: project.id,
     __projectRevision: project.revision,
@@ -2363,7 +2383,7 @@ function authorizedProjectContext(context, project) {
       context?.__scrutinyPolicy,
       project.policy?.toolPolicy
     )
-  };
+  });
 }
 
 function authorizeProfileContext(profiles, context, project) {
@@ -2383,11 +2403,11 @@ function authorizeProfileContext(profiles, context, project) {
   }
   if (!resolution?.active) {
     return {
-      context: {
+      context: carryParentMutationLease(context, {
         ...(context ?? {}),
         __capabilityProfileResolution: resolution ?? null,
         __capabilityProfileIdentity: null
-      },
+      }),
       error: null
     };
   }
@@ -2408,7 +2428,7 @@ function authorizeProfileContext(profiles, context, project) {
     : [];
   const activeSkills = intersectGrantLists(projectSkills, profileSkills);
   return {
-    context: {
+    context: carryParentMutationLease(context, {
       ...(context ?? {}),
       __allowedTools: allowedTools,
       __projectActiveSkills: activeSkills,
@@ -2422,7 +2442,7 @@ function authorizeProfileContext(profiles, context, project) {
       },
       __capabilityProfileResolution: structuredClone(resolution),
       __capabilityProfileIdentity: resolution.identity ?? null
-    },
+    }),
     error: null
   };
 }
