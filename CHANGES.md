@@ -1924,6 +1924,23 @@ UPGRADE BATCH PHASE 1 COMPLETE
   failures and two pre-existing skips. No environment variable, dependency,
   or package manifest changed.
 
+## 2026-07-29 - Cline RSI Wave 1 Fix 3: direct unref regression guard (Codex)
+
+- Added a zero-dependency repository scanner and test that reject direct
+  `.unref()` calls anywhere under `src/**/*.js`. A future legitimate direct
+  unref must add an explicit allowlist entry with a comment proving no
+  foreground caller awaits the timer.
+- Reality was narrower than the assessment wording: direct `.unref()` calls
+  are absent as verified, but intentional optional `.unref?.()` calls already
+  exist on background timers and child processes. The guard's synthetic
+  cases lock that distinction instead of falsely failing existing explicit
+  background lifecycle sites.
+- The regression failed red because the guard module did not exist, then
+  passed 2/2 after the scanner was added.
+- The complete Windows-compatible `npm test` lane passes 2085 tests with zero
+  failures and two pre-existing skips. No environment variable, dependency,
+  or package manifest changed.
+
 ## 2026-07-29 - Cline RSI Wave 1 Fix 2: provider retry window (Codex)
 
 - Updated the verified retry constants in `src/model-provider.js`: the
