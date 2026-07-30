@@ -26,7 +26,9 @@ mentioning any benchmark** — these are general harness reliability improvement
 - WSL 12GB memory cap — never run a full parallel build.
 - The **live daemon must not be restarted** by you. Leave it alone; the Creator bounces it.
 - Node zero-dep repo: no new dependencies, ever.
-- `npm test` must stay green. Record the baseline pass count BEFORE your first edit.
+- `npm test` must stay green. **Verified baseline on `main` @ `f786534` (2026-07-29):
+  `tests 2083 · pass 2059 · fail 0 · skipped 24`.** Your final suite must show **fail 0** and
+  a pass count of **at least 2059** plus your new tests. Re-measure yourself before editing.
 - Every fix gets a test that fails before the fix and passes after.
 - Commit each fix separately with a descriptive message.
 
