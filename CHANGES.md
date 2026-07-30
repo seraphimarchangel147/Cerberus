@@ -1979,3 +1979,26 @@ UPGRADE BATCH PHASE 1 COMPLETE
   context-ledger coverage passes 97/97. The complete Windows-compatible
   `npm test` lane passes 2092 tests with zero failures and two pre-existing
   skips. No dependency or package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 5: output-aware progress (Codex)
+
+- Extended the existing per-turn tool-call fingerprint entries with bounded
+  successful-output signatures and independent repeated-success counters.
+  Changing output resets its call's streak and emits a progress verdict;
+  identical output emits one `repeated_no_progress` advisory exactly at the
+  configured threshold without suppressing tool dispatch.
+- The pure exported `evaluateRepeatedOutcome` comparison implements the Cline
+  PR #12465 rule inside OpenAGI's existing tracker. `src/tool-registry.js`
+  carries the required Apache-2.0 attribution header. Existing failure
+  damping and `allowedAttempts` behavior are unchanged.
+- Output hashing reuses `toolFailureFingerprint` after the existing semantic
+  result snapshot bound. If comparison or hashing fails, the registry restores
+  the prior delete-on-success behavior and never blocks the turn.
+- `OPENAGI_REPEATED_SUCCESS_LIMIT` is now setup-wizard persistable. It defaults
+  to 8 when unset; blank, non-integer, unsafe, or values below 2 also fail open
+  to 8.
+- The new test file failed red because the pure comparison export did not
+  exist. The focused comparison, polling, failure, security, and outcome lane
+  passes 41/41. The complete Windows-compatible `npm test` lane passes 2100
+  tests with zero failures and two pre-existing skips. No dependency or
+  package manifest changed.

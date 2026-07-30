@@ -1,3 +1,8 @@
+// Portions adapted from Cline (https://github.com/cline/cline), Apache-2.0.
+// Copyright (c) Cline Bot Inc. Derived from PR #12465 (commit d1324e402a58):
+// sdk/packages/core/src/runtime/safety/loop-detection.ts — output-aware
+// progress detection for repeated tool calls.
+
 import { createId, nowIso, tokenOverlapScore } from "./utils.js";
 import { HookRegistry } from "./hook-registry.js";
 import { sanitizeForAudit } from "./redact.js";
@@ -63,6 +68,7 @@ const REGISTRY_FAILURE_STATE = new WeakMap();
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 const MAX_TURN_FAILURE_SCOPES = 256;
+const DEFAULT_REPEATED_SUCCESS_LIMIT = 8;
 const EXECUTION_DECISION_STOP_STATUSES = new Set([
   "blocked",
   "cancelled",
@@ -119,6 +125,56 @@ const DRAFT_DOMAIN_STATUSES = Object.freeze([
   "sent"
 ]);
 
+export function evaluateRepeatedOutcome(input = {}) {
+  const fallback = {
+    comparable: false,
+    progressed: false,
+    repeatedSuccessCount: 0,
+    thresholdReached: false
+  };
+  try {
+    const nextSignature = input?.nextSignature;
+    if (typeof nextSignature !== "string" || nextSignature.length === 0) {
+      return fallback;
+    }
+    const priorSignature = input?.priorSignature;
+    const hasPrior = typeof priorSignature === "string"
+      && priorSignature.length > 0;
+    if (!hasPrior) {
+      return {
+        comparable: true,
+        progressed: false,
+        repeatedSuccessCount: 1,
+        thresholdReached: false
+      };
+    }
+    if (priorSignature !== nextSignature) {
+      return {
+        comparable: true,
+        progressed: true,
+        repeatedSuccessCount: 1,
+        thresholdReached: false
+      };
+    }
+    const priorCount = Number.isSafeInteger(input?.count) && input.count > 0
+      ? input.count
+      : 1;
+    const limit = repeatedSuccessLimitValue(input?.limit);
+    const repeatedSuccessCount = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      priorCount + 1
+    );
+    return {
+      comparable: true,
+      progressed: false,
+      repeatedSuccessCount,
+      thresholdReached: repeatedSuccessCount === limit
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export class ToolRegistry {
   constructor(options = {}) {
     this.tools = new Map();
@@ -130,6 +186,9 @@ export class ToolRegistry {
     this.projects = options.projects ?? null;
     this.profiles = options.profiles ?? null;
     this.timeline = options.timeline ?? null;
+    this.repeatedSuccessLimit = resolveRepeatedSuccessLimit(
+      options.env ?? process.env
+    );
     this.startupBarrier = null;
     REGISTRY_FAILURE_STATE.set(this, {
       contextFailures: new WeakMap(),
@@ -785,6 +844,7 @@ export class ToolRegistry {
           error: outcome.ok ? null : (outcome.error ?? null),
           pending: Boolean(outcome.outcome?.status === "pending"),
           receipt: outcome.receipt ?? null,
+          progress: tracking?.outputProgress === true,
           outcome: outcome.outcome
             ? {
                 status: outcome.outcome.status,
@@ -817,6 +877,9 @@ export class ToolRegistry {
       context,
       classifyLegacyToolFailure(value)
     );
+    if (tracking?.reserved) {
+      semantic = this._recordOutcome(tracking, semantic) ?? semantic;
+    }
     markExecutionDecision(
       context?.[EXECUTION_RECEIPT_STATE],
       "outcome",
@@ -827,9 +890,6 @@ export class ToolRegistry {
       name,
       context?.[EXECUTION_RECEIPT_STATE]
     );
-    if (tracking?.reserved) {
-      this._recordFailureOutcome(tracking, semantic);
-    }
     try {
       if (!markTracked) return semantic;
       Object.defineProperty(semantic, SEMANTIC_OUTCOME_TRACKED, {
@@ -949,6 +1009,8 @@ export class ToolRegistry {
     scope.entries.set(fingerprint, {
       attempts: prior?.attempts ?? 0,
       envelope: prior?.envelope ?? null,
+      outputSignature: prior?.outputSignature ?? null,
+      repeatedSuccessCount: prior?.repeatedSuccessCount ?? 0,
       inFlight: true
     });
     const tracking = {
@@ -962,11 +1024,50 @@ export class ToolRegistry {
     return tracking;
   }
 
-  _recordFailureOutcome(tracking, envelope) {
+  _recordOutcome(tracking, envelope) {
     const { scope, fingerprint } = tracking;
     if (envelope?.ok === true && envelope?.outcome?.status !== "pending") {
-      scope.entries.delete(fingerprint);
-      return;
+      try {
+        // ensureSemanticToolEnvelope has already applied the existing bounded
+        // result snapshot, so the existing fingerprint hash never sees an
+        // unbounded tool value here.
+        const outputSignature = toolFailureFingerprint(
+          "tool_output",
+          envelope?.result
+        );
+        const previous = scope.entries.get(fingerprint);
+        const evaluation = evaluateRepeatedOutcome({
+          priorSignature: previous?.outputSignature,
+          nextSignature: outputSignature,
+          count: previous?.repeatedSuccessCount,
+          limit: this.repeatedSuccessLimit
+        });
+        if (!evaluation.comparable) {
+          scope.entries.delete(fingerprint);
+          tracking.outputProgress = false;
+          return null;
+        }
+        scope.entries.set(fingerprint, {
+          attempts: 0,
+          envelope: null,
+          outputSignature,
+          repeatedSuccessCount: evaluation.repeatedSuccessCount,
+          inFlight: false
+        });
+        tracking.outputProgress = evaluation.progressed;
+        return evaluation.thresholdReached
+          ? repeatedNoProgressEnvelope(
+              envelope,
+              evaluation.repeatedSuccessCount
+            )
+          : null;
+      } catch {
+        // Output comparison is advisory. Any unexpected value or hashing
+        // error restores the exact pre-feature delete-on-success behavior.
+        scope.entries.delete(fingerprint);
+        tracking.outputProgress = false;
+        return null;
+      }
     }
     const previous = scope.entries.get(fingerprint);
     scope.entries.set(fingerprint, {
@@ -974,6 +1075,8 @@ export class ToolRegistry {
       envelope: failureTrackerEnvelope(envelope),
       inFlight: false
     });
+    tracking.outputProgress = false;
+    return null;
   }
 
   _releaseFailureTracking(tracking) {
@@ -992,7 +1095,11 @@ export class ToolRegistry {
       }
       return;
     }
-    if ((current.attempts ?? 0) === 0 && !current.envelope) {
+    if (
+      (current.attempts ?? 0) === 0
+      && !current.envelope
+      && typeof current.outputSignature !== "string"
+    ) {
       tracking.scope.entries.delete(tracking.fingerprint);
     } else {
       tracking.scope.entries.set(tracking.fingerprint, {
@@ -3210,6 +3317,44 @@ function failureTrackerEnvelope(value) {
       nextSteps: []
     }
   };
+}
+
+function repeatedNoProgressEnvelope(previous, count) {
+  return {
+    ok: false,
+    error: `No progress detected after ${count} identical successful tool outputs.`,
+    outcome: {
+      status: "blocked",
+      code: "repeated_no_progress",
+      retryable: false,
+      changed: previous?.outcome?.changed ?? null,
+      artifacts: [...(previous?.outcome?.artifacts ?? [])],
+      evidence: [...(previous?.outcome?.evidence ?? [])],
+      verification: previous?.outcome?.verification ?? {
+        status: "not_requested",
+        summary: null
+      },
+      nextSteps: [
+        "The output has not changed; try a different approach.",
+        "If the operation needs time, wait differently before checking again."
+      ]
+    }
+  };
+}
+
+function repeatedSuccessLimitValue(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 2
+    ? parsed
+    : DEFAULT_REPEATED_SUCCESS_LIMIT;
+}
+
+function resolveRepeatedSuccessLimit(env = process.env) {
+  try {
+    return repeatedSuccessLimitValue(env?.OPENAGI_REPEATED_SUCCESS_LIMIT);
+  } catch {
+    return DEFAULT_REPEATED_SUCCESS_LIMIT;
+  }
 }
 
 function externalMemoryIdentity(context = {}) {
