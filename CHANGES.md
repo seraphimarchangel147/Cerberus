@@ -2186,3 +2186,23 @@ MUTATION LEASE WAVE 2 COMPLETE
   when disabled.
 - Env flag: `OPENAGI_VALUE_AWARE_COMPACTION` defaults to off; when unset,
   false, or unrecognized, compaction remains the prior positional algorithm.
+
+## 2026-07-29 - Wave 3 Fix 3: current-task context protection
+
+- Extended Wave 1's trusted `src/turn-progress.js` state with a bounded
+  64-record output lineage. `src/tool-registry.js` records the exact
+  `outputSignature` it already computed plus the provider call id, so current
+  task detection does not hash tool output a second time or create a parallel
+  progress tracker.
+- Provider ledger options sort and deduplicate those signature-backed call ids
+  before caching. The mild cascade exempts matching atomic tool pairs in
+  addition to the existing recent-hop suffix; emergency mode deliberately
+  removes that exemption. Missing or unreadable progress state degrades to the
+  Fix 2 cascade.
+- Locking test: `test/context-current-task.test.js` failed first because
+  `readTurnProgressOutputs` did not exist. It now proves exact signature reuse,
+  mild protection, emergency eligibility, bounded identity metadata, and
+  deterministic output.
+- Env flag: no new flag. This behavior remains contained by the existing
+  default-off `OPENAGI_VALUE_AWARE_COMPACTION`; when it is unset, both provider
+  formats continue using the legacy positional path.

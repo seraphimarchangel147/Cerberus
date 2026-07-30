@@ -57,7 +57,10 @@ import {
 import { isProfileMemoryScope } from "./memory-system.js";
 import { readableMemoryScopes } from "../lib/memtree.js";
 import { incrementMemoryRequestMetric } from "./memory-request-metrics.js";
-import { recordTurnProgress } from "./turn-progress.js";
+import {
+  recordTurnProgress,
+  recordTurnProgressOutput
+} from "./turn-progress.js";
 
 const PRE_TOOL_HOOKS_PASSED = Symbol("pre-tool-hooks-passed");
 const INTERNAL_INVOCATION = Symbol("internal-invocation");
@@ -1057,6 +1060,11 @@ export class ToolRegistry {
           inFlight: false
         });
         tracking.outputProgress = evaluation.progressed;
+        recordTurnProgressOutput(
+          tracking.progressContext,
+          outputSignature,
+          { progressed: evaluation.progressed }
+        );
         if (evaluation.progressed) {
           recordTurnProgress(tracking.progressContext);
         }

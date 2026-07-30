@@ -62,7 +62,8 @@ import {
 } from "./memory-request-metrics.js";
 import {
   bindTurnProgressCounter,
-  readTurnProgressCount
+  readTurnProgressCount,
+  readTurnProgressOutputs
 } from "./turn-progress.js";
 import { memtreeEnabled } from "../lib/memtree.js";
 
@@ -3659,6 +3660,16 @@ function contextLedgerPreparationKey(options) {
   hmac.update(options.valueAwareCompaction === true ? "value-aware" : "positional", "utf8");
   hmac.update("\0", "utf8");
   hmac.update(String(options.valueAwareTargetChars ?? ""), "utf8");
+  hmac.update("\0", "utf8");
+  hmac.update(String(options.valueAwareStage ?? "mild"), "utf8");
+  for (const callId of options.currentTaskCallIds ?? []) {
+    hmac.update("\0call:", "utf8");
+    hmac.update(callId, "utf8");
+  }
+  for (const signature of options.currentTaskOutputSignatures ?? []) {
+    hmac.update("\0output:", "utf8");
+    hmac.update(signature, "utf8");
+  }
   hmac.update(options.redactionOverflow === true ? "\0overflow" : "\0complete", "utf8");
   for (const value of options.redactValues ?? []) {
     hmac.update("\0", "utf8");
@@ -3679,6 +3690,23 @@ function contextLedgerOptions(providerInstance, format, context, {
     context,
     redactValues
   );
+  const progressOutputs = providerInstance.valueAwareCompaction === true
+    ? readTurnProgressOutputs(context)
+      .filter((record) => (
+        typeof record.callId === "string"
+        && typeof record.outputSignature === "string"
+      ))
+      .sort((left, right) => (
+        (left.callId < right.callId ? -1 : left.callId > right.callId ? 1 : 0)
+        || (
+          left.outputSignature < right.outputSignature
+            ? -1
+            : left.outputSignature > right.outputSignature
+              ? 1
+              : 0
+        )
+      ))
+    : [];
   return {
     format,
     keepRecentHops: providerInstance.contextKeepRecentHops,
@@ -3686,6 +3714,13 @@ function contextLedgerOptions(providerInstance, format, context, {
     redactValues: redaction.values,
     redactionOverflow: redaction.overflow,
     valueAwareCompaction: providerInstance.valueAwareCompaction === true,
+    valueAwareStage: "mild",
+    currentTaskCallIds: Object.freeze([
+      ...new Set(progressOutputs.map((record) => record.callId))
+    ]),
+    currentTaskOutputSignatures: Object.freeze([
+      ...new Set(progressOutputs.map((record) => record.outputSignature))
+    ]),
     ...(Number.isSafeInteger(valueAwareTargetChars) && valueAwareTargetChars > 0
       ? { valueAwareTargetChars }
       : {})

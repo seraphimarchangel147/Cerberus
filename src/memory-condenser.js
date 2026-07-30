@@ -699,6 +699,14 @@ async function prepareValueAwareContextLedgerCandidate({
   binding
 }) {
   const targetChars = positiveSafeInteger(options.valueAwareTargetChars);
+  const stage = options.valueAwareStage === "emergency" ? "emergency" : "mild";
+  const currentTaskOutputSignatures = Array.isArray(options.currentTaskOutputSignatures)
+    ? options.currentTaskOutputSignatures
+    : [];
+  const currentTaskCallIds = currentTaskOutputSignatures.length > 0
+    && Array.isArray(options.currentTaskCallIds)
+    ? new Set(options.currentTaskCallIds)
+    : new Set();
   const emptyCandidate = (cascade = null, digest = null) => attachContextLedgerRestore({
     compressed: false,
     conversation: working,
@@ -719,10 +727,13 @@ async function prepareValueAwareContextLedgerCandidate({
 
   if (boundary <= summaryStart || boundary >= working.length) {
     return emptyCandidate({
+      stage,
       targetChars,
       selectedIndexes: [],
       selectedScores: [],
-      thresholdReached: null
+      thresholdReached: null,
+      protectedCurrentTaskIndexes: [],
+      currentTaskSignatureCount: currentTaskOutputSignatures.length
     });
   }
 
@@ -730,20 +741,32 @@ async function prepareValueAwareContextLedgerCandidate({
     working,
     format,
     summaryStart,
-    boundary
+    boundary,
+    currentTaskCallIds
   );
   if (units.length > CONTEXT_VALUE_MAX_CASCADE_UNITS) {
     throw new RangeError("Value-aware cascade exceeds its bounded unit count.");
   }
 
   const ordered = [];
+  const protectedCurrentTaskIndexes = stage === "mild"
+    ? units
+      .filter((unit) => unit.currentTask)
+      .flatMap((unit) => unit.indexes)
+      .sort((left, right) => left - right)
+    : [];
   for (
     let threshold = CONTEXT_VALUE_CASCADE_INITIAL_SCORE;
     threshold >= CONTEXT_VALUE_CASCADE_FLOOR_SCORE;
     threshold -= 1
   ) {
     for (const unit of units) {
-      if (unit.score === threshold) ordered.push(unit);
+      if (
+        unit.score === threshold
+        && !(stage === "mild" && unit.currentTask)
+      ) {
+        ordered.push(unit);
+      }
     }
   }
 
@@ -774,10 +797,13 @@ async function prepareValueAwareContextLedgerCandidate({
 
   const selectedIndexes = [...selected].sort((left, right) => left - right);
   const cascade = {
+    stage,
     targetChars,
     selectedIndexes,
     selectedScores,
-    thresholdReached
+    thresholdReached,
+    protectedCurrentTaskIndexes,
+    currentTaskSignatureCount: currentTaskOutputSignatures.length
   };
   if (selectedIndexes.length === 0) return emptyCandidate(cascade);
 
@@ -870,7 +896,13 @@ async function prepareValueAwareContextLedgerCandidate({
   }, original, binding);
 }
 
-function buildContextValueUnits(conversation, format, summaryStart, boundary) {
+function buildContextValueUnits(
+  conversation,
+  format,
+  summaryStart,
+  boundary,
+  currentTaskCallIds
+) {
   const parent = new Map();
   for (let index = summaryStart; index < boundary; index += 1) {
     parent.set(index, index);
@@ -926,13 +958,43 @@ function buildContextValueUnits(conversation, format, summaryStart, boundary) {
       return {
         indexes,
         score: protectedScore.score,
-        reason: protectedScore.reason
+        reason: protectedScore.reason,
+        currentTask: indexes.some((index) => (
+          contextValueItemCallIds(conversation[index], format)
+            .some((callId) => currentTaskCallIds.has(callId))
+        ))
       };
     })
     .sort((left, right) => (
       left.indexes[0] - right.indexes[0]
       || left.indexes.length - right.indexes.length
     ));
+}
+
+function contextValueItemCallIds(item, format) {
+  if (!item || typeof item !== "object") return [];
+  if (format === "anthropic") {
+    const ids = [];
+    for (const block of Array.isArray(item.content) ? item.content : []) {
+      if (block?.type === "tool_use" && typeof block.id === "string") {
+        ids.push(block.id);
+      }
+      if (
+        block?.type === "tool_result"
+        && typeof block.tool_use_id === "string"
+      ) {
+        ids.push(block.tool_use_id);
+      }
+    }
+    return ids;
+  }
+  if (
+    (item.type === "function_call" || item.type === "function_call_output")
+    && typeof item.call_id === "string"
+  ) {
+    return [item.call_id];
+  }
+  return [];
 }
 
 function fitContextLedgerSelection(
@@ -2672,7 +2734,10 @@ function normalizeContextLedgerOptions(options) {
     "summarizer",
     "summarizerTimeoutMs",
     "valueAwareCompaction",
-    "valueAwareTargetChars"
+    "valueAwareTargetChars",
+    "valueAwareStage",
+    "currentTaskCallIds",
+    "currentTaskOutputSignatures"
   ]) {
     let descriptor;
     try {
@@ -2703,11 +2768,40 @@ function normalizeContextLedgerOptions(options) {
       if (typeof value === "boolean") normalized[key] = value;
       continue;
     }
+    if (key === "currentTaskCallIds" || key === "currentTaskOutputSignatures") {
+      const strings = normalizeContextLedgerStringList(value, {
+        pattern: key === "currentTaskCallIds"
+          ? /^[\x21-\x7e]{1,240}$/
+          : /^[a-f0-9]{64}$/
+      });
+      if (strings) normalized[key] = strings;
+      continue;
+    }
     if (typeof value === "string" || typeof value === "number") {
       normalized[key] = value;
     }
   }
   return normalized;
+}
+
+function normalizeContextLedgerStringList(value, { pattern }) {
+  if (!Array.isArray(value) || utilTypes.isProxy(value)) return null;
+  try {
+    const descriptors = safeContextLedgerDescriptors(value);
+    const length = safeContextLedgerArrayLength(descriptors);
+    if (length > 64) return null;
+    const strings = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || !Object.hasOwn(descriptor, "value")) return null;
+      const item = descriptor.value;
+      if (typeof item !== "string" || !pattern.test(item)) return null;
+      strings.push(item);
+    }
+    return Object.freeze(strings);
+  } catch {
+    return null;
+  }
 }
 
 async function runBoundedContextLedgerSummarizer(
