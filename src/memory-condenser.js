@@ -38,6 +38,10 @@ export const CONTEXT_IN_LOOP_RATIO = 0.5;
 export const CONTEXT_GATEWAY_RATIO = 0.85;
 export const CONTEXT_VALUE_CASCADE_INITIAL_SCORE = 10;
 export const CONTEXT_VALUE_CASCADE_FLOOR_SCORE = 3;
+export const CONTEXT_VALUE_MILD_RATIO = 0.5;
+export const CONTEXT_VALUE_AGGRESSIVE_RATIO = 0.85;
+export const CONTEXT_VALUE_EMERGENCY_RATIO = 0.95;
+export const CONTEXT_VALUE_EMERGENCY_TARGET_RATIO = 0.6;
 
 const DEFAULT_LIVE_CONTEXT_KEEP_RECENT_HOPS = 4;
 const DEFAULT_LIVE_CONTEXT_DIGEST_CHARS = 4000;
@@ -340,6 +344,141 @@ export function contextCompressionTrigger({
     inputTokens: actual ?? estimated,
     thresholdTokens: null,
     contextWindowTokens: windowTokens
+  };
+}
+
+export function contextValueCompressionStage({
+  inputTokens,
+  contextWindowTokens,
+  mildRatio = CONTEXT_VALUE_MILD_RATIO,
+  aggressiveRatio = CONTEXT_VALUE_AGGRESSIVE_RATIO,
+  emergencyRatio = CONTEXT_VALUE_EMERGENCY_RATIO,
+  emergencyTargetRatio = CONTEXT_VALUE_EMERGENCY_TARGET_RATIO
+} = {}) {
+  const windowTokens = positiveTokenCount(contextWindowTokens);
+  const input = tokenCount(inputTokens);
+  if (windowTokens === null || input === null) {
+    return {
+      triggered: false,
+      stage: null,
+      reason: null,
+      inputTokens: input,
+      thresholdTokens: null,
+      targetTokens: null,
+      contextWindowTokens: windowTokens
+    };
+  }
+  let mild = liveBoundedNumber(
+    mildRatio,
+    CONTEXT_VALUE_MILD_RATIO,
+    Number.EPSILON,
+    1
+  );
+  let aggressive = liveBoundedNumber(
+    aggressiveRatio,
+    CONTEXT_VALUE_AGGRESSIVE_RATIO,
+    Number.EPSILON,
+    1
+  );
+  let emergency = liveBoundedNumber(
+    emergencyRatio,
+    CONTEXT_VALUE_EMERGENCY_RATIO,
+    Number.EPSILON,
+    1
+  );
+  let emergencyTarget = liveBoundedNumber(
+    emergencyTargetRatio,
+    CONTEXT_VALUE_EMERGENCY_TARGET_RATIO,
+    Number.EPSILON,
+    1
+  );
+  if (!(mild < aggressive && aggressive < emergency)) {
+    mild = CONTEXT_VALUE_MILD_RATIO;
+    aggressive = CONTEXT_VALUE_AGGRESSIVE_RATIO;
+    emergency = CONTEXT_VALUE_EMERGENCY_RATIO;
+  }
+  if (emergencyTarget >= emergency) {
+    emergencyTarget = CONTEXT_VALUE_EMERGENCY_TARGET_RATIO;
+  }
+
+  const thresholds = {
+    mild: Math.ceil(windowTokens * mild),
+    aggressive: Math.ceil(windowTokens * aggressive),
+    emergency: Math.ceil(windowTokens * emergency)
+  };
+  let stage = null;
+  if (input >= thresholds.emergency) stage = "emergency";
+  else if (input >= thresholds.aggressive) stage = "aggressive";
+  else if (input >= thresholds.mild) stage = "mild";
+  if (!stage) {
+    return {
+      triggered: false,
+      stage: null,
+      reason: null,
+      inputTokens: input,
+      thresholdTokens: thresholds.mild,
+      targetTokens: null,
+      contextWindowTokens: windowTokens
+    };
+  }
+  const targetRatio = stage === "emergency"
+    ? emergencyTarget
+    : stage === "aggressive"
+      ? aggressive
+      : mild;
+  return {
+    triggered: true,
+    stage,
+    reason: `value-${stage}`,
+    inputTokens: input,
+    thresholdTokens: thresholds[stage],
+    targetTokens: stage === "emergency"
+      ? Math.max(0, Math.floor(windowTokens * targetRatio))
+      : Math.max(0, Math.ceil(windowTokens * targetRatio) - 1),
+    contextWindowTokens: windowTokens
+  };
+}
+
+export function contextQuickRecountDecision({
+  quickInputTokens,
+  mildThresholdTokens,
+  consecutiveSkips = 0,
+  maxConsecutiveSkips = 5
+} = {}) {
+  const quick = tokenCount(quickInputTokens);
+  const threshold = positiveTokenCount(mildThresholdTokens);
+  const skips = Number.isSafeInteger(consecutiveSkips) && consecutiveSkips >= 0
+    ? consecutiveSkips
+    : null;
+  const maximum = Number.isSafeInteger(maxConsecutiveSkips)
+    && maxConsecutiveSkips > 0
+    ? maxConsecutiveSkips
+    : null;
+  if (quick === null || threshold === null || skips === null || maximum === null) {
+    return {
+      skipPreciseCount: false,
+      reason: "invalid",
+      nextConsecutiveSkips: 0
+    };
+  }
+  if (quick >= threshold) {
+    return {
+      skipPreciseCount: false,
+      reason: "threshold",
+      nextConsecutiveSkips: 0
+    };
+  }
+  if (skips + 1 >= maximum) {
+    return {
+      skipPreciseCount: false,
+      reason: "forced-recount",
+      nextConsecutiveSkips: 0
+    };
+  }
+  return {
+    skipPreciseCount: true,
+    reason: "quick-under-threshold",
+    nextConsecutiveSkips: skips + 1
   };
 }
 
@@ -699,7 +838,12 @@ async function prepareValueAwareContextLedgerCandidate({
   binding
 }) {
   const targetChars = positiveSafeInteger(options.valueAwareTargetChars);
-  const stage = options.valueAwareStage === "emergency" ? "emergency" : "mild";
+  const stage = ["aggressive", "emergency"].includes(options.valueAwareStage)
+    ? options.valueAwareStage
+    : "mild";
+  const floorScore = stage === "mild"
+    ? CONTEXT_VALUE_CASCADE_FLOOR_SCORE
+    : 1;
   const currentTaskOutputSignatures = Array.isArray(options.currentTaskOutputSignatures)
     ? options.currentTaskOutputSignatures
     : [];
@@ -728,6 +872,7 @@ async function prepareValueAwareContextLedgerCandidate({
   if (boundary <= summaryStart || boundary >= working.length) {
     return emptyCandidate({
       stage,
+      floorScore,
       targetChars,
       selectedIndexes: [],
       selectedScores: [],
@@ -757,7 +902,7 @@ async function prepareValueAwareContextLedgerCandidate({
     : [];
   for (
     let threshold = CONTEXT_VALUE_CASCADE_INITIAL_SCORE;
-    threshold >= CONTEXT_VALUE_CASCADE_FLOOR_SCORE;
+    threshold >= floorScore;
     threshold -= 1
   ) {
     for (const unit of units) {
@@ -798,6 +943,7 @@ async function prepareValueAwareContextLedgerCandidate({
   const selectedIndexes = [...selected].sort((left, right) => left - right);
   const cascade = {
     stage,
+    floorScore,
     targetChars,
     selectedIndexes,
     selectedScores,

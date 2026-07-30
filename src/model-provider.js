@@ -21,8 +21,14 @@ import { executeToolBatch } from "./tool-batch-executor.js";
 import { normalizeExecutionDecision } from "./execution-decision.js";
 import {
   CONTEXT_GATEWAY_RATIO,
+  CONTEXT_VALUE_AGGRESSIVE_RATIO,
+  CONTEXT_VALUE_EMERGENCY_RATIO,
+  CONTEXT_VALUE_EMERGENCY_TARGET_RATIO,
+  CONTEXT_VALUE_MILD_RATIO,
   contextCompressionTrigger,
   contextInputTokens,
+  contextQuickRecountDecision,
+  contextValueCompressionStage,
   createContextLedgerCandidate,
   estimateContextTokens,
   installContextLedgerCandidate,
@@ -104,11 +110,13 @@ const DEFAULT_CONTEXT_COMPACT_CHARS = 120000;
 const DEFAULT_CONTEXT_KEEP_RECENT_HOPS = 4;
 const DEFAULT_CONTEXT_DIGEST_CHARS = 4000;
 const DEFAULT_CONTEXT_ESTIMATE_CHARS_PER_TOKEN = 4;
+const DEFAULT_CONTEXT_QUICK_RECOUNT_SKIPS = 5;
 const MAX_CACHE_IDENTITY_SESSIONS = 1000;
 const RUNTIME_CACHE_IDENTITIES = new WeakMap();
 const RUNTIME_TOOL_OUTCOME_IDS = new WeakMap();
 const RESPONSE_CONTINUATION_CANDIDATES = new WeakMap();
 const CONTEXT_LEDGER_PREPARATIONS = new WeakMap();
+const CONTEXT_QUICK_ESTIMATE_STATES = new WeakMap();
 const CONTEXT_LEDGER_CACHE_KEY = randomBytes(32);
 const MAX_CONTEXT_LEDGER_REDACT_VALUES = 256;
 const MAX_CONTEXT_LEDGER_REDACT_VALUE_CHARS = 16_384;
@@ -380,6 +388,46 @@ function enabledOption(value) {
   }
 }
 
+function contextRatio(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 1
+    ? parsed
+    : fallback;
+}
+
+function resolveContextValueRatios(options, env) {
+  const mild = contextRatio(
+    options.contextMildRatio ?? env?.OPENAGI_CONTEXT_MILD_RATIO,
+    CONTEXT_VALUE_MILD_RATIO
+  );
+  const aggressive = contextRatio(
+    options.contextAggressiveRatio ?? env?.OPENAGI_CONTEXT_AGGRESSIVE_RATIO,
+    CONTEXT_VALUE_AGGRESSIVE_RATIO
+  );
+  const emergency = contextRatio(
+    options.contextEmergencyRatio ?? env?.OPENAGI_CONTEXT_EMERGENCY_RATIO,
+    CONTEXT_VALUE_EMERGENCY_RATIO
+  );
+  const emergencyTarget = contextRatio(
+    options.contextEmergencyTargetRatio
+      ?? env?.OPENAGI_CONTEXT_EMERGENCY_TARGET_RATIO,
+    CONTEXT_VALUE_EMERGENCY_TARGET_RATIO
+  );
+  if (
+    mild < aggressive
+    && aggressive < emergency
+    && emergencyTarget < emergency
+  ) {
+    return { mild, aggressive, emergency, emergencyTarget };
+  }
+  return {
+    mild: CONTEXT_VALUE_MILD_RATIO,
+    aggressive: CONTEXT_VALUE_AGGRESSIVE_RATIO,
+    emergency: CONTEXT_VALUE_EMERGENCY_RATIO,
+    emergencyTarget: CONTEXT_VALUE_EMERGENCY_TARGET_RATIO
+  };
+}
+
 export function resolveReasoningEffort(options = {}, env = process.env) {
   try {
     const raw = options?.reasoningEffort !== undefined
@@ -502,6 +550,19 @@ function applyIterationSettings(provider, options) {
     options.valueAwareCompaction
       ?? provider.env?.OPENAGI_VALUE_AWARE_COMPACTION
   );
+  const contextRatios = resolveContextValueRatios(options, provider.env);
+  provider.contextMildRatio = contextRatios.mild;
+  provider.contextAggressiveRatio = contextRatios.aggressive;
+  provider.contextEmergencyRatio = contextRatios.emergency;
+  provider.contextEmergencyTargetRatio = contextRatios.emergencyTarget;
+  provider.contextQuickRecountSkips = positiveInteger(
+    options.contextQuickRecountSkips
+      ?? provider.env?.OPENAGI_CONTEXT_QUICK_RECOUNT_SKIPS,
+    DEFAULT_CONTEXT_QUICK_RECOUNT_SKIPS
+  );
+  provider.contextPreciseTokenCounter = typeof options.contextPreciseTokenCounter === "function"
+    ? options.contextPreciseTokenCounter
+    : null;
   provider.cacheWarningLog = typeof options.cacheWarningLog === "function"
     ? options.cacheWarningLog
     : (message) => console.warn(message);
@@ -3130,9 +3191,100 @@ function estimateProviderConversationTokens(providerInstance, conversation, {
         }),
         ...(tools.length > 0 ? { tools } : {})
       };
+  if (
+    providerInstance.valueAwareCompaction === true
+    && typeof providerInstance.contextPreciseTokenCounter === "function"
+  ) {
+    try {
+      const counted = Number(providerInstance.contextPreciseTokenCounter(request, {
+        charsPerToken: providerInstance.contextEstimateCharsPerToken,
+        format,
+        model
+      }));
+      if (Number.isFinite(counted) && counted >= 0) {
+        return Math.min(Number.MAX_SAFE_INTEGER, Math.ceil(counted));
+      }
+    } catch {
+      // Optional precise counters fail open to the full legacy recount below.
+    }
+  }
   return estimateContextTokens(request, {
     charsPerToken: providerInstance.contextEstimateCharsPerToken
   });
+}
+
+function quickProviderConversationEstimate(providerInstance, conversation, {
+  format,
+  instructions,
+  tools,
+  model
+}) {
+  try {
+    const state = CONTEXT_QUICK_ESTIMATE_STATES.get(conversation);
+    if (
+      !state
+      || state.format !== format
+      || state.instructions !== instructions
+      || state.tools !== tools
+      || state.model !== model
+      || state.length > conversation.length
+      || (state.length > 0 && conversation[state.length - 1] !== state.tail)
+      || (state.length > 0 && conversation[0] !== state.head)
+    ) {
+      return null;
+    }
+    const appended = conversation.slice(state.length);
+    const deltaTokens = appended.length > 0
+      ? estimateContextTokens(appended, {
+          charsPerToken: providerInstance.contextEstimateCharsPerToken
+        })
+      : 0;
+    if (!Number.isSafeInteger(deltaTokens) || deltaTokens === Number.MAX_SAFE_INTEGER) {
+      return null;
+    }
+    return {
+      inputTokens: Math.min(
+        Number.MAX_SAFE_INTEGER,
+        state.inputTokens
+          + deltaTokens
+          + (appended.length > 0 ? (appended.length * 8) + 16 : 0)
+      ),
+      consecutiveSkips: state.consecutiveSkips,
+      state
+    };
+  } catch {
+    return null;
+  }
+}
+
+function recordPreciseProviderConversationEstimate(
+  conversation,
+  inputTokens,
+  { format, instructions, tools, model }
+) {
+  try {
+    if (
+      !Array.isArray(conversation)
+      || !Number.isSafeInteger(inputTokens)
+      || inputTokens < 0
+    ) {
+      return false;
+    }
+    CONTEXT_QUICK_ESTIMATE_STATES.set(conversation, {
+      format,
+      instructions,
+      tools,
+      model,
+      length: conversation.length,
+      head: conversation[0],
+      tail: conversation.at(-1),
+      inputTokens,
+      consecutiveSkips: 0
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function warnUnknownContextWindow(providerInstance, model) {
@@ -3683,7 +3835,8 @@ function contextLedgerPreparationKey(options) {
 function contextLedgerOptions(providerInstance, format, context, {
   maxDigestChars = providerInstance.contextDigestChars,
   redactValues = [],
-  valueAwareTargetChars = null
+  valueAwareTargetChars = null,
+  valueAwareStage = "mild"
 } = {}) {
   const redaction = contextLedgerRedactValues(
     providerInstance,
@@ -3714,7 +3867,7 @@ function contextLedgerOptions(providerInstance, format, context, {
     redactValues: redaction.values,
     redactionOverflow: redaction.overflow,
     valueAwareCompaction: providerInstance.valueAwareCompaction === true,
-    valueAwareStage: "mild",
+    valueAwareStage,
     currentTaskCallIds: Object.freeze([
       ...new Set(progressOutputs.map((record) => record.callId))
     ]),
@@ -3831,29 +3984,86 @@ async function prepareProviderConversation(providerInstance, conversation, {
     baseLedgerOptions
   );
   const actualInputTokens = contextInputTokens(usage, { provider: format });
-  const estimate = (candidate) => estimateProviderConversationTokens(providerInstance, candidate, {
+  const estimateMetadata = {
     format,
     instructions,
     tools,
     model
-  });
-  const estimatedInputTokens = estimate(conversation);
-  const trigger = contextCompressionTrigger({
-    actualInputTokens,
-    estimatedInputTokens,
-    contextWindowTokens
-  });
+  };
+  const estimate = (candidate) => estimateProviderConversationTokens(
+    providerInstance,
+    candidate,
+    estimateMetadata
+  );
+  let estimatedInputTokens;
+  let quickEstimateUsed = false;
+  if (providerInstance.valueAwareCompaction === true) {
+    const mildThresholdTokens = Math.ceil(
+      contextWindowTokens * providerInstance.contextMildRatio
+    );
+    const quick = quickProviderConversationEstimate(
+      providerInstance,
+      conversation,
+      estimateMetadata
+    );
+    if (
+      quick
+      && (actualInputTokens === null || actualInputTokens < mildThresholdTokens)
+    ) {
+      const quickDecision = contextQuickRecountDecision({
+        quickInputTokens: quick.inputTokens,
+        mildThresholdTokens,
+        consecutiveSkips: quick.consecutiveSkips,
+        maxConsecutiveSkips: providerInstance.contextQuickRecountSkips
+      });
+      quick.state.consecutiveSkips = quickDecision.nextConsecutiveSkips;
+      if (quickDecision.skipPreciseCount) {
+        estimatedInputTokens = quick.inputTokens;
+        quickEstimateUsed = true;
+      }
+    }
+  }
+  if (!quickEstimateUsed) {
+    estimatedInputTokens = estimate(conversation);
+    if (providerInstance.valueAwareCompaction === true) {
+      recordPreciseProviderConversationEstimate(
+        conversation,
+        estimatedInputTokens,
+        estimateMetadata
+      );
+    }
+  }
+  const trigger = providerInstance.valueAwareCompaction === true
+    ? contextValueCompressionStage({
+        inputTokens: Math.max(actualInputTokens ?? 0, estimatedInputTokens),
+        contextWindowTokens,
+        mildRatio: providerInstance.contextMildRatio,
+        aggressiveRatio: providerInstance.contextAggressiveRatio,
+        emergencyRatio: providerInstance.contextEmergencyRatio,
+        emergencyTargetRatio: providerInstance.contextEmergencyTargetRatio
+      })
+    : contextCompressionTrigger({
+        actualInputTokens,
+        estimatedInputTokens,
+        contextWindowTokens
+      });
   if (!trigger.triggered) {
     return {
       ...trigger,
       compressed: false,
       requestAllowed: true,
       estimatedInputTokens,
-      postCompressionEstimatedTokens: estimatedInputTokens
+      postCompressionEstimatedTokens: estimatedInputTokens,
+      ...(providerInstance.valueAwareCompaction === true
+        ? { quickEstimateUsed }
+        : {})
     };
   }
 
   const safeTokenLimit = Math.max(0, Math.ceil(contextWindowTokens * CONTEXT_GATEWAY_RATIO) - 1);
+  const compressionTokenLimit = providerInstance.valueAwareCompaction === true
+    ? Math.min(safeTokenLimit, trigger.targetTokens)
+    : safeTokenLimit;
   const charsPerToken = providerInstance.contextEstimateCharsPerToken;
   if (providerInstance.valueAwareCompaction === true) {
     const conversationTokens = estimateContextTokens(conversation, {
@@ -3865,7 +4075,7 @@ async function prepareProviderConversation(providerInstance, conversation, {
     );
     valueAwareTargetChars = Math.max(
       1,
-      (safeTokenLimit - requestOverheadTokens) * charsPerToken
+      (compressionTokenLimit - requestOverheadTokens) * charsPerToken
     );
     baseLedgerOptions = contextLedgerOptions(
       providerInstance,
@@ -3874,7 +4084,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
       {
         maxDigestChars: sourceDigestChars,
         redactValues,
-        valueAwareTargetChars
+        valueAwareTargetChars,
+        valueAwareStage: trigger.stage
       }
     );
     preparedCandidate = scheduledContextLedgerCandidate(
@@ -3892,7 +4103,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
       : contextLedgerOptions(providerInstance, format, context, {
           maxDigestChars,
           redactValues,
-          valueAwareTargetChars
+          valueAwareTargetChars,
+          valueAwareStage: trigger.stage
         });
     const result = await (
       pending
@@ -3926,7 +4138,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
         {
           maxDigestChars: options.maxDigestChars,
           redactValues,
-          valueAwareTargetChars
+          valueAwareTargetChars,
+          valueAwareStage: trigger.stage
         }
       );
       return contextLedgerPreparationKey(current)
@@ -3954,8 +4167,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
       postCompressionEstimatedTokens: attempt.estimatedTokens
     };
   };
-  if (attempt.result.compressed && attempt.estimatedTokens > safeTokenLimit) {
-    const excessChars = (attempt.estimatedTokens - safeTokenLimit) * charsPerToken;
+  if (attempt.result.compressed && attempt.estimatedTokens > compressionTokenLimit) {
+    const excessChars = (attempt.estimatedTokens - compressionTokenLimit) * charsPerToken;
     const attemptedDigestChars = Math.max(
       MIN_CONTEXT_DIGEST_CHARS,
       String(attempt.result.marker ?? "").length
@@ -3968,12 +4181,12 @@ async function prepareProviderConversation(providerInstance, conversation, {
       attempt = await tryCompression(reducedDigestChars);
     }
   }
-  if ((!attempt.result.compressed || attempt.estimatedTokens > safeTokenLimit)
+  if ((!attempt.result.compressed || attempt.estimatedTokens > compressionTokenLimit)
     && sourceDigestChars > MIN_CONTEXT_DIGEST_CHARS) {
     attempt = await tryCompression(MIN_CONTEXT_DIGEST_CHARS);
   }
 
-  if (!attempt.result.compressed || attempt.estimatedTokens > safeTokenLimit) {
+  if (!attempt.result.compressed || attempt.estimatedTokens > compressionTokenLimit) {
     return rejectCompression();
   }
 
@@ -3986,7 +4199,7 @@ async function prepareProviderConversation(providerInstance, conversation, {
   }
   if (
     !attempt.result.compressed
-    || attempt.estimatedTokens > safeTokenLimit
+    || attempt.estimatedTokens > compressionTokenLimit
     || !redactionOptionsAreCurrent(attempt.options)
   ) {
     return rejectCompression();
@@ -4007,7 +4220,7 @@ async function prepareProviderConversation(providerInstance, conversation, {
     );
     if (
       attempt.result.compressed
-      && attempt.estimatedTokens <= safeTokenLimit
+      && attempt.estimatedTokens <= compressionTokenLimit
       && redactionOptionsAreCurrent(attempt.options)
     ) {
       installation = installContextLedgerCandidate(
@@ -4042,7 +4255,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
     summarizedItems: attempt.result.summarizedItems,
     keptItems: attempt.result.keptItems,
     estimatedInputTokens: attempt.estimatedTokens,
-    thresholdTokens: safeTokenLimit + 1
+    thresholdTokens: compressionTokenLimit + 1,
+    stage: trigger.stage ?? null
   });
   return {
     ...trigger,

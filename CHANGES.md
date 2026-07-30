@@ -2206,3 +2206,29 @@ MUTATION LEASE WAVE 2 COMPLETE
 - Env flag: no new flag. This behavior remains contained by the existing
   default-off `OPENAGI_VALUE_AWARE_COMPACTION`; when it is unset, both provider
   formats continue using the legacy positional path.
+
+## 2026-07-29 - Wave 3 Fix 4: graded context-pressure ladder
+
+- Added a default 50% mild, 85% aggressive, and 95% emergency ladder in the
+  flag-gated provider path. Mild protects current-task lineage and sheds scores
+  10 through 3; aggressive and emergency include current-task units and widen
+  the cascade through score 1. Emergency targets 60% of the context window,
+  while the existing 85% request-safety ceiling remains authoritative.
+- Added a per-conversation quick estimate cache that reuses the existing
+  `contextEstimateCharsPerToken` heuristic, counts only appended transcript
+  items between full serialized-request recounts, and forces the full recount
+  after five consecutive skips. Any invalid cache state or counter error takes
+  the legacy full recount path; no background timer or dependency was added.
+- Locking test: `test/context-value-ladder.test.js` failed first on its missing
+  stage and recount exports. It now proves all inclusive boundaries, emergency
+  target recovery, the fifth-skip recount, full-count error fallback, and
+  configuration persistence. Existing dual-threshold tests remain unchanged
+  and green when the master flag is off.
+- Env flag: the ladder remains disabled unless
+  `OPENAGI_VALUE_AWARE_COMPACTION=1`. Its new tunables are
+  `OPENAGI_CONTEXT_MILD_RATIO` (default/unset `0.5`),
+  `OPENAGI_CONTEXT_AGGRESSIVE_RATIO` (default/unset `0.85`),
+  `OPENAGI_CONTEXT_EMERGENCY_RATIO` (default/unset `0.95`),
+  `OPENAGI_CONTEXT_EMERGENCY_TARGET_RATIO` (default/unset `0.6`), and
+  `OPENAGI_CONTEXT_QUICK_RECOUNT_SKIPS` (default/unset `5`). Invalid or
+  non-monotonic ratio sets fall back atomically to those defaults.
