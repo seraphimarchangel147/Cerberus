@@ -1923,3 +1923,19 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - The complete Windows-compatible `npm test` lane passes 2081 tests with zero
   failures and two pre-existing skips. No environment variable, dependency,
   or package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 2: provider retry window (Codex)
+
+- Updated the verified retry constants in `src/model-provider.js`: the
+  default retry budget is now five and the maximum computed single delay is
+  30 seconds. Retry classification, `Retry-After` precedence, request-only
+  scope, and non-retryable behavior are unchanged.
+- A four-consecutive-429 regression failed red because the old default
+  exhausted before the fifth request. The computed-delay regression also
+  failed red with 8/8-second waits instead of 20/30 seconds.
+- The retry, error-classifier, and malformed Anthropic input lane passes
+  23/23. It includes the existing single-attempt 400 and explicit
+  `Retry-After` precedence locks.
+- The complete Windows-compatible `npm test` lane passes 2083 tests with zero
+  failures and two pre-existing skips. No environment variable, dependency,
+  or package manifest changed.

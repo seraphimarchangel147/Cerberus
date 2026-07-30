@@ -78,9 +78,11 @@ const DEFAULT_STALL_TIMEOUT_MS = 120000;
 // cut short (stall / timeout / iteration-cap). Mirrors Hermes forcing a reply
 // at the iteration limit instead of returning nothing.
 const DEFAULT_FORCE_ANSWER_MS = 60000;
-const DEFAULT_PROVIDER_MAX_RETRIES = 3;
+// Five retries at the 500ms base, combined with the 30s single-delay cap,
+// can cover roughly a minute of provider unavailability before giving up.
+const DEFAULT_PROVIDER_MAX_RETRIES = 5;
 const DEFAULT_PROVIDER_RETRY_BASE_MS = 500;
-const MAX_PROVIDER_RETRY_DELAY_MS = 8000;
+const MAX_PROVIDER_RETRY_DELAY_MS = 30000;
 const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 8000;
 const MIN_TRUNCATED_TOOL_OUTPUT_CHARS = 200;
 const DEFAULT_CONTEXT_COMPACT_CHARS = 120000;
