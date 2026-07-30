@@ -2092,3 +2092,22 @@ CLINE RSI PORT WAVE 1 COMPLETE
   The literal Linux `npm test` lane passes 2110 tests with zero failures and
   zero skips. No environment variable, dependency, or package manifest
   changed.
+
+## 2026-07-29 - Mutation lease Wave 2 Fix 3: actionable conflicts (Codex)
+
+- Replaced all six generic foreground, durable, and quarantined mutation and
+  workspace-reservation conflict messages at the verified
+  `src/job-manager.js` anchors with one bounded diagnostic formatter. Errors
+  retain the built-in `Error` shape and recognizable conflict category while
+  naming the safe holder, shortened lease ID, injected-clock age, bounded
+  normalized locks, and `mutation_lease_status` recovery action.
+- Quarantined entries now retain the same bounded holder/session metadata at
+  quarantine time so diagnostics remain useful if their durable record can no
+  longer supply it. No tool arguments are stored or interpolated.
+- The regression was written first and failed 0/1 against the old generic
+  message. It now proves an 18m4s holder is identified, secret-shaped lock
+  content is redacted, the message is single-line and at most 700 characters,
+  and the existing error class is unchanged.
+- The focused durable-job lane passes 18/18. The literal Linux `npm test` lane
+  passes 2111 tests with zero failures and zero skips. No environment variable,
+  dependency, or package manifest changed.

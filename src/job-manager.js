@@ -20,6 +20,7 @@ const MAX_WAITERS = 128;
 const MAX_GOAL_CHARS = 8_000;
 const MAX_CONTEXT_CHARS = 64_000;
 const MAX_DURABLE_RESULT_BYTES = 32 * 1024 * 1024;
+const MAX_MUTATION_CONFLICT_ERROR_CHARS = 700;
 const FORBIDDEN_OBJECT_KEYS = new Set([
   "__proto__",
   "constructor",
@@ -366,27 +367,46 @@ export class JobManager {
       return () => {};
     }
 
-    for (const record of this.store.listAll({ limit: 2_000 })) {
+    const durableRecords = this.store.listAll({ limit: 2_000 });
+    const durableById = new Map(
+      durableRecords.map((record) => [record.id, record])
+    );
+    for (const record of durableRecords) {
       if (
         (record.status === "running" || record.status === "cancel_requested")
         && lockSetsConflict(record.resourceLocks, required)
       ) {
-        throw new Error(
-          `Mutation conflicts with active durable job '${record.id}'.`
-        );
+        throw mutationLeaseConflictError(this, {
+          action: "Mutation",
+          category: "active durable job",
+          lease: durableMutationLeaseSnapshot(record),
+          source: "durable"
+        });
       }
     }
     const state = privateState(this);
-    for (const lease of state.quarantined.values()) {
+    for (const [quarantinedJobId, lease] of state.quarantined.entries()) {
       if (lockSetsConflict(lease.resourceLocks, required)) {
-        throw new Error(
-          "Mutation conflicts with a quarantined durable invocation."
-        );
+        throw mutationLeaseConflictError(this, {
+          action: "Mutation",
+          category: "a quarantined durable invocation",
+          lease: quarantinedMutationLeaseSnapshot(
+            quarantinedJobId,
+            lease,
+            durableById.get(quarantinedJobId)
+          ),
+          source: "quarantined"
+        });
       }
     }
-    for (const lease of state.foreground.values()) {
+    for (const [foregroundLeaseId, lease] of state.foreground.entries()) {
       if (lockSetsConflict(lease.resourceLocks, required)) {
-        throw new Error("Mutation conflicts with another active invocation.");
+        throw mutationLeaseConflictError(this, {
+          action: "Mutation",
+          category: "another active invocation",
+          lease: mutationLeaseSnapshot(foregroundLeaseId, lease),
+          source: "foreground"
+        });
       }
     }
     const leaseId = crypto.randomUUID();
@@ -838,9 +858,14 @@ export class JobManager {
         };
         const completion = invocation.then(cleanup, cleanup);
         state.quarantined.set(record.id, {
+          acquiredAt: mutationLeaseNow(this),
+          jobId: mutationLeaseContextId(record.id),
           owner: this,
+          ownerId: mutationLeaseOwnerId(record.target),
+          persistent: true,
           promise: completion,
-          resourceLocks: record.resourceLocks ?? []
+          resourceLocks: record.resourceLocks ?? [],
+          sessionId: mutationLeaseContextId(record.sessionId)
         });
         resolveGuard({
           ok: false,
@@ -1031,25 +1056,46 @@ function reserveWorkspaceLease(manager, project, ownerId, context = {}) {
     resource: `project/${project.id}/workspace`,
     mode: "write"
   }];
-  for (const record of manager.store.listAll({ limit: 2_000 })) {
+  const durableRecords = manager.store.listAll({ limit: 2_000 });
+  const durableById = new Map(
+    durableRecords.map((record) => [record.id, record])
+  );
+  for (const record of durableRecords) {
     if (
       (record.status === "running" || record.status === "cancel_requested")
       && lockSetsConflict(record.resourceLocks, required)
     ) {
-      throw new Error(
-        `Workspace lease conflicts with active durable job '${record.id}'.`
-      );
+      throw mutationLeaseConflictError(manager, {
+        action: "Workspace lease",
+        category: "active durable job",
+        lease: durableMutationLeaseSnapshot(record),
+        source: "durable"
+      });
     }
   }
   const state = privateState(manager);
-  for (const lease of state.quarantined.values()) {
+  for (const [quarantinedJobId, lease] of state.quarantined.entries()) {
     if (lockSetsConflict(lease.resourceLocks, required)) {
-      throw new Error("Workspace lease conflicts with a quarantined invocation.");
+      throw mutationLeaseConflictError(manager, {
+        action: "Workspace lease",
+        category: "a quarantined invocation",
+        lease: quarantinedMutationLeaseSnapshot(
+          quarantinedJobId,
+          lease,
+          durableById.get(quarantinedJobId)
+        ),
+        source: "quarantined"
+      });
     }
   }
-  for (const lease of state.foreground.values()) {
+  for (const [foregroundLeaseId, lease] of state.foreground.entries()) {
     if (lockSetsConflict(lease.resourceLocks, required)) {
-      throw new Error("Workspace lease conflicts with another active invocation.");
+      throw mutationLeaseConflictError(manager, {
+        action: "Workspace lease",
+        category: "another active invocation",
+        lease: mutationLeaseSnapshot(foregroundLeaseId, lease),
+        source: "foreground"
+      });
     }
   }
   const leaseId = crypto.randomUUID();
@@ -1906,6 +1952,53 @@ function redactMutationLeaseStatus(runtime, status) {
     audit,
     snapshot?.records?.map((record) => record.value) ?? []
   );
+}
+
+function mutationLeaseConflictError(manager, {
+  action,
+  category,
+  lease,
+  source
+}) {
+  const status = mutationLeaseStatusSnapshot(
+    lease,
+    mutationLeaseNow(manager),
+    source
+  );
+  const rawLeaseId = String(status.leaseId ?? "unknown");
+  const leaseId = rawLeaseId.length > 12
+    ? `${rawLeaseId.slice(0, 12)}...`
+    : rawLeaseId;
+  const locks = status.resourceLocks
+    .slice(0, 4)
+    .map((lock) => String(lock.resource ?? "").slice(0, 96))
+    .filter(Boolean)
+    .join(", ") || "unknown";
+  const body = redactMutationLeaseText(
+    manager.runtime,
+    `${action} conflicts with ${category} '${status.ownerId}' `
+      + `(lease ${leaseId}, held ${status.humanAge}, locks: ${locks}).`
+  );
+  const suffix = " Call mutation_lease_status for detail.";
+  const boundedBody = String(body)
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_MUTATION_CONFLICT_ERROR_CHARS - suffix.length)
+    .trimEnd();
+  return new Error(`${boundedBody}${suffix}`);
+}
+
+function redactMutationLeaseText(runtime, value) {
+  const audit = String(sanitizeForAudit(value));
+  const snapshot = secretsStoreRedactionSnapshot(runtime?.secrets);
+  if (snapshot?.overflow) {
+    return "Mutation conflict details are withheld because secret redaction is incomplete.";
+  }
+  return String(redactKnownValues(
+    audit,
+    snapshot?.records?.map((record) => record.value) ?? []
+  ));
 }
 
 function privateState(manager) {

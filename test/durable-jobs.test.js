@@ -282,6 +282,63 @@ test("mutation lease status is redacted, aged, and never blocked by held writes"
   releaseSecond();
 });
 
+test("mutation conflicts name the bounded holder, age, and recovery tool", (t) => {
+  let now = 1_000;
+  const h = harness(t, { now: () => now });
+  const secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890";
+  const holder = h.tools.register({
+    name: "job_test_conflict_holder",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-conflict-v1",
+    jobResources: ({ secret: value }) => [
+      "workspace/conflict-detail",
+      `workspace/${value}`
+    ],
+    handler: async () => ({ ok: true })
+  });
+  const contender = h.tools.register({
+    name: "job_test_conflict_contender",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-conflict-v1",
+    jobResources: ({ secret: value }) => [
+      "workspace/conflict-detail",
+      `workspace/${value}`
+    ],
+    handler: async () => ({ ok: true })
+  });
+  const release = h.jobs.acquireToolInvocation(
+    holder,
+    { secret },
+    h.context({ sessionId: "lease-conflict-holder" })
+  );
+  const [lease] = h.jobs.inspectMutationLeases();
+  now = 1_085_000;
+
+  assert.throws(
+    () => h.jobs.acquireToolInvocation(
+      contender,
+      { secret },
+      h.context({ sessionId: "lease-conflict-contender" })
+    ),
+    (error) => {
+      assert.equal(error.constructor, Error);
+      assert.match(error.message, /another active invocation 'job_test_conflict_holder'/u);
+      assert.match(error.message, new RegExp(`lease ${lease.leaseId.slice(0, 12)}`));
+      assert.match(error.message, /held 18m4s/u);
+      assert.match(error.message, /locks: project\/default\/workspace\/conflict-detail/u);
+      assert.match(error.message, /Call mutation_lease_status for detail/u);
+      assert.doesNotMatch(error.message, /sk-abcdefghijklmnopqrstuvwxyz/u);
+      assert.doesNotMatch(error.message, /[\r\n]/u);
+      assert.ok(error.message.length <= 700, error.message);
+      return true;
+    }
+  );
+
+  release();
+});
+
 test("job manager rejects lock aliases and prototype-bearing JSON keys", (t) => {
   const h = harness(t);
   const context = h.context();
