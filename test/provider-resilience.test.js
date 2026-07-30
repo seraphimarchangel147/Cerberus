@@ -44,6 +44,48 @@ test("requestWithRetry classifies a generic 429 and honors its 60-second backoff
   assert.deepEqual(waits, [60_000]);
 });
 
+test("requestWithRetry survives four consecutive 429s with the default budget", async () => {
+  let attempts = 0;
+  const waits = [];
+
+  const response = await requestWithRetry(async () => {
+    attempts += 1;
+    return attempts <= 4
+      ? fakeResponse(429, { error: { message: "temporarily rate limited" } })
+      : fakeResponse(200, { ok: true });
+  }, {
+    random: () => 1,
+    sleep: async (ms) => {
+      waits.push(ms);
+    }
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(attempts, 5);
+  assert.equal(waits.length, 4);
+});
+
+test("computed provider retry delays use the 30-second ceiling", async () => {
+  let attempts = 0;
+  const waits = [];
+
+  await requestWithRetry(async () => {
+    attempts += 1;
+    return attempts <= 2
+      ? fakeResponse(503, { error: { message: "temporarily unavailable" } })
+      : fakeResponse(200);
+  }, {
+    retries: 2,
+    baseDelayMs: 20_000,
+    random: () => 1,
+    sleep: async (ms) => {
+      waits.push(ms);
+    }
+  });
+
+  assert.deepEqual(waits, [20_000, 30_000]);
+});
+
 test("requestWithRetry kill switch restores the former jittered 429 delay", async () => {
   const scripted = [
     fakeResponse(429, { error: { message: "slow down" } }),

@@ -1053,7 +1053,7 @@ export function registerCodeTools(registry, runtime, options = {}) {
 
   registry.register({
     name: "code_shell",
-    description: "Run a shell command in the current project workspace. THIS REQUIRES USER APPROVAL because arbitrary commands are dangerous. Prefer the specific code_* tools when they cover the need.",
+    description: "Run a shell command in the current project workspace. THIS REQUIRES USER APPROVAL because arbitrary commands are dangerous. Prefer the specific code_* tools when they cover the need. Commands must be non-interactive; use flags like `git --no-pager` to avoid pagers. When you start background work, capture its PID or process group and use that exact identifier to stop it later. Never use broad command-line matching such as `pkill -f` or `killall` - the pattern can match this agent's own supervising process and terminate the harness mid-task.",
     needsConfirmation: true,
     parameters: {
       type: "object",

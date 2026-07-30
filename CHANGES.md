@@ -1898,3 +1898,149 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - 2026-07-29T12:49:18.575Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend verification checklist with dashboard/auth/provider-state section for 2026-07-29 re-issue
 - 2026-07-29T13:19:04.328Z · **azazel** · create `drafts/deep-work-block-provider-auth-dashboard.md` — Draft 3h deep-work calendar block proposal (draft-only, not scheduled)
 - 2026-07-29T13:19:29.903Z · **azazel** · create `drafts/eod-progress-reminder-2026-07-29.md` — Draft 5:30 PM ET end-of-day progress reminder (draft-only, not scheduled)
+
+## 2026-07-29 - Cline RSI port Wave 1 baseline (Codex)
+
+- The verified Linux baseline is 2083 tests, 2059 passing, zero failing, and
+  24 browser-dependent skips.
+- Untouched Windows discovery ran the same 2083 tests with 2080 passing, one
+  failing, and two skips. The sole failure is the pre-existing POSIX mailbox
+  mode assertion: NTFS reports 0666 where the Linux contract requires 0700.
+  Each fix will be gated with the complete Windows-compatible lane plus the
+  three compatible mailbox tests, and final raw `npm test` counts will also
+  be reported honestly.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 1: safe shell lifecycle guidance (Codex)
+
+- Extended the `code_shell` description at the verified
+  `src/code-tools.js:1056` anchor without removing its existing approval and
+  specific-tool guidance.
+- The agent-facing contract now requires non-interactive commands, exact PID
+  or process-group capture for background work, and rejects broad `pkill -f`
+  or `killall` cleanup that can terminate the supervising harness.
+- The new registry-description regression failed red at 8 passing and one
+  failing, then passed 9/9 after the guidance was added.
+- The complete Windows-compatible `npm test` lane passes 2081 tests with zero
+  failures and two pre-existing skips. No environment variable, dependency,
+  or package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 3: direct unref regression guard (Codex)
+
+- Added a zero-dependency repository scanner and test that reject direct
+  `.unref()` calls anywhere under `src/**/*.js`. A future legitimate direct
+  unref must add an explicit allowlist entry with a comment proving no
+  foreground caller awaits the timer.
+- Reality was narrower than the assessment wording: direct `.unref()` calls
+  are absent as verified, but intentional optional `.unref?.()` calls already
+  exist on background timers and child processes. The guard's synthetic
+  cases lock that distinction instead of falsely failing existing explicit
+  background lifecycle sites.
+- The regression failed red because the guard module did not exist, then
+  passed 2/2 after the scanner was added.
+- The complete Windows-compatible `npm test` lane passes 2085 tests with zero
+  failures and two pre-existing skips. No environment variable, dependency,
+  or package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 2: provider retry window (Codex)
+
+- Updated the verified retry constants in `src/model-provider.js`: the
+  default retry budget is now five and the maximum computed single delay is
+  30 seconds. Retry classification, `Retry-After` precedence, request-only
+  scope, and non-retryable behavior are unchanged.
+- A four-consecutive-429 regression failed red because the old default
+  exhausted before the fifth request. The computed-delay regression also
+  failed red with 8/8-second waits instead of 20/30 seconds.
+- The retry, error-classifier, and malformed Anthropic input lane passes
+  23/23. It includes the existing single-attempt 400 and explicit
+  `Retry-After` precedence locks.
+- The complete Windows-compatible `npm test` lane passes 2083 tests with zero
+  failures and two pre-existing skips. No environment variable, dependency,
+  or package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 4: reasoning-effort requests (Codex)
+
+- Added the canonical `minimal | low | medium | high | xhigh | max` resolver
+  and threaded optional reasoning configuration through every OpenAI
+  Responses and Anthropic request path, including goal judges, forced
+  answers, and context estimates.
+- OpenAI reasoning-capable models receive `reasoning: { effort }`. Supported
+  Anthropic models receive `thinking: { type: "enabled", budget_tokens }`
+  using one model-independent proportional budget calculation rather than a
+  per-model downgrade table. Unsupported routes omit the field and emit a
+  deduplicated debug note.
+- `OPENAGI_REASONING_EFFORT` is now setup-wizard persistable. Its default,
+  unset, blank, invalid, and unreadable behaviors all omit reasoning fields
+  entirely, preserving the pre-feature request bytes and prompt-cache keys.
+- The first regression failed red because the exported canonical resolver
+  did not exist. A separate hostile-value regression then failed red at
+  provider construction and drove the fail-open configuration boundary.
+  All seven reasoning tests now pass.
+- Existing provider, prompt-cache, routing, iteration, compression, and
+  context-ledger coverage passes 97/97. The complete Windows-compatible
+  `npm test` lane passes 2092 tests with zero failures and two pre-existing
+  skips. No dependency or package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 5: output-aware progress (Codex)
+
+- Extended the existing per-turn tool-call fingerprint entries with bounded
+  successful-output signatures and independent repeated-success counters.
+  Changing output resets its call's streak and emits a progress verdict;
+  identical output emits one `repeated_no_progress` advisory exactly at the
+  configured threshold without suppressing tool dispatch.
+- The pure exported `evaluateRepeatedOutcome` comparison implements the Cline
+  PR #12465 rule inside OpenAGI's existing tracker. `src/tool-registry.js`
+  carries the required Apache-2.0 attribution header. Existing failure
+  damping and `allowedAttempts` behavior are unchanged.
+- Output hashing reuses `toolFailureFingerprint` after the existing semantic
+  result snapshot bound. If comparison or hashing fails, the registry restores
+  the prior delete-on-success behavior and never blocks the turn.
+- `OPENAGI_REPEATED_SUCCESS_LIMIT` is now setup-wizard persistable. It defaults
+  to 8 when unset; blank, non-integer, unsafe, or values below 2 also fail open
+  to 8.
+- The new test file failed red because the pure comparison export did not
+  exist. The focused comparison, polling, failure, security, and outcome lane
+  passes 41/41. The complete Windows-compatible `npm test` lane passes 2100
+  tests with zero failures and two pre-existing skips. No dependency or
+  package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 6: progress-aware wall clock (Codex)
+
+- Added one trusted per-turn progress counter fed by Fix 5's already-computed
+  successful-output verdict. The provider does not hash or compare tool output
+  a second time.
+- A checkpoint with new progress now grants a free extension without
+  decrementing the existing charged budget, up to a separate bounded cap.
+  Once that cap is exhausted, or when output made no progress, charged
+  checkpoints behave exactly as before. The absolute bound is
+  `maxTurnSeconds * (1 + checkpoints + freeExtensions)`.
+- Checkpoint prompts, lifecycle events, and Discord activity messages expose
+  whether progress was observed and whether the extension was free or charged.
+  Forced-answer guidance and local hard-stop summaries now distinguish a stop
+  while making progress from a stop with no new output-aware progress.
+- `OPENAGI_WALL_CLOCK_FREE_EXTENSIONS` is setup-wizard persistable. It defaults
+  to 3 when unset, blank, invalid, unsafe, or unreadable. An explicit `0`
+  disables progress-aware free extensions.
+- The clock-injected regression file failed red at 0 passing and 3 failing
+  before implementation. Its final OpenAI, Anthropic, no-progress, bounded
+  forever-progress, Discord visibility, and fail-open coverage passes 5/5
+  without sleeping. The broader related provider and registry lane passes
+  78/78.
+- The complete Windows-compatible `npm test` lane passes 2105 tests with zero
+  failures and two pre-existing skips. No dependency or package manifest
+  changed.
+
+## 2026-07-29 - Cline RSI port Wave 1 completion (Codex)
+
+- The final literal Linux `npm test` ran in this exact clone under WSL and
+  passed all 2108 tests with zero failures and zero skips. This is 25 new
+  passing tests above the verified 2059-pass Linux baseline.
+- The literal Windows-native run continued to expose the baseline NTFS mailbox
+  mode mismatch and also caught one load-sensitive 10ms wall-clock fixture.
+  That timing fixture immediately passed 1/1 in isolation, while the complete
+  Windows-compatible lane passed 2105 tests with zero failures. The Linux raw
+  lane is authoritative for the POSIX permission assertion.
+- All six independently revertable fix commits are pushed to
+  `origin/codex/cline-rsi-wave-1`. No daemon was restarted or modified, no npm
+  dependency was added, and no package manifest changed.
+
+CLINE RSI PORT WAVE 1 COMPLETE
