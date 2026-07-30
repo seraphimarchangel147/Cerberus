@@ -2139,3 +2139,28 @@ CLINE RSI PORT WAVE 1 COMPLETE
   zero skips. No dependency or package manifest changed.
 
 MUTATION LEASE WAVE 2 COMPLETE
+
+## 2026-07-29 - Context value Wave 3 baseline (Codex)
+
+- Untouched `codex/wave-3-context-value` at `735f723` passed the literal Linux
+  `npm test` lane with 2116 tests passing, zero failures, and zero skips. The
+  available Node 25 runner executes the 24 tests skipped in the verified
+  2092-pass baseline, so both measurements satisfy the required floor.
+- No daemon or process was restarted, no environment variable was pinned, and
+  no dependency or package manifest changed.
+
+## 2026-07-29 - Wave 3 Fix 1: deterministic substitutability scoring
+
+- Added the pure, total `scoreContextSubstitutability` foundation in
+  `src/context-value.js`. It assigns bounded 0-10 substitutability scores from
+  durable refs, sampled redundancy, structure, size, code-diff, and
+  error-bearing signals; high means safe to replace, while errors and invalid
+  inputs remain protected at the bottom of the scale.
+- Work is capped to a 12,288-character head/middle/tail sample, hostile
+  accessors and proxies are never invoked, and binary or malformed values fail
+  safely without I/O, clocks, randomness, dependencies, or model calls.
+- Locking test: `test/context-value.test.js` failed first with
+  `ERR_MODULE_NOT_FOUND`, then passed 3/3 after the scorer was implemented.
+- Env flag: none for Fix 1 because this pure module has no runtime call site and
+  therefore changes no behavior until the default-off Fix 2 integration is
+  enabled.
