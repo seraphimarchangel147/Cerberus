@@ -2232,3 +2232,25 @@ MUTATION LEASE WAVE 2 COMPLETE
   `OPENAGI_CONTEXT_EMERGENCY_TARGET_RATIO` (default/unset `0.6`), and
   `OPENAGI_CONTEXT_QUICK_RECOUNT_SKIPS` (default/unset `5`). Invalid or
   non-monotonic ratio sets fall back atomically to those defaults.
+
+## 2026-07-29 - Wave 3 Fix 5: RRF hybrid retrieval
+
+- Added the pure `reciprocalRankFusion` helper to `src/vector-store.js` with
+  `k=60`, exact reciprocal-rank math, per-list duplicate suppression, and
+  stable-id tie breaking. The opt-in search path fuses the existing cosine
+  ranking with a lexical ranking built from `tokenOverlapScore`, the same
+  primitive already used by `memory-system.js`.
+- Hybrid results retain the legacy fields and add normalized fused `score`,
+  raw `rrfScore`, `vectorScore`, and `lexicalScore` observability. Lexical-only
+  evidence may be recalled, while any fusion, ranking, or cloning error falls
+  back to the literal cosine-only branch.
+- Added the required TencentDB Agent Memory MIT attribution header. No
+  dependency, BM25 implementation, tokenizer, or memory-tier change was added,
+  and `src/memory-system.js` remains untouched.
+- Locking test: `test/vector-store-rrf.test.js` failed first on the missing RRF
+  export. It now locks hand-computed math, shared-rank promotion, empty and
+  single-list handling, deterministic ties, lexical recovery, env wiring, and
+  byte-identical flag-off output.
+- Env flag: `OPENAGI_VECTOR_HYBRID_SEARCH` defaults to off; unset, false, or
+  unrecognized values retain cosine-only retrieval. A per-search
+  `hybrid: true|false` option provides a reversible caller override.

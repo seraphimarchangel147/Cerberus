@@ -1,8 +1,14 @@
+// Portions adapted from TencentDB Agent Memory
+// (https://github.com/TencentCloud/TencentDB-Agent-Memory), MIT.
+// Copyright (C) 2026 Tencent. Derived from commit 104e9d8:
+// src/core/store/search-utils.ts (Reciprocal Rank Fusion) and
+// src/offload/hooks/llm-input-l3.ts (substitutability score cascade).
+
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { cosine } from "./embeddings.js";
-import { nowIso } from "./utils.js";
+import { nowIso, tokenOverlapScore } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 
 // Namespaced cosine vector store. File-backed for persistence across restarts.
@@ -12,6 +18,40 @@ const LOCK_RETRY_MS = 10;
 const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
 const DEFAULT_STALE_LOCK_MS = 60_000;
 const LOCK_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+const DEFAULT_RRF_K = 60;
+
+export function reciprocalRankFusion(rankedLists, { k = DEFAULT_RRF_K } = {}) {
+  if (!Array.isArray(rankedLists)) return [];
+  const offset = Number.isFinite(Number(k)) && Number(k) >= 0
+    ? Number(k)
+    : DEFAULT_RRF_K;
+  const scores = new Map();
+  const ranks = new Map();
+  for (let listIndex = 0; listIndex < rankedLists.length; listIndex += 1) {
+    const list = rankedLists[listIndex];
+    if (!Array.isArray(list)) continue;
+    const seen = new Set();
+    for (let rank = 0; rank < list.length; rank += 1) {
+      const id = stableRrfId(list[rank]);
+      if (id === null || seen.has(id)) continue;
+      seen.add(id);
+      scores.set(id, (scores.get(id) ?? 0) + (1 / (offset + rank + 1)));
+      const itemRanks = ranks.get(id) ?? [];
+      itemRanks.push({ list: listIndex, rank });
+      ranks.set(id, itemRanks);
+    }
+  }
+  return [...scores.entries()]
+    .map(([id, score]) => ({
+      id,
+      score,
+      ranks: ranks.get(id) ?? []
+    }))
+    .sort((left, right) => (
+      right.score - left.score
+      || compareStableIds(left.id, right.id)
+    ));
+}
 
 export class VectorStore {
   constructor(options = {}) {
@@ -30,6 +70,11 @@ export class VectorStore {
     this.lockDepth = 0;
     this.entries = new Map();
     this.dim = options.dim ?? this.embedder?.dim ?? 256;
+    const env = options.env ?? process.env;
+    this.hybridSearch = enabledFlag(
+      options.hybridSearch
+        ?? env?.OPENAGI_VECTOR_HYBRID_SEARCH
+    );
     ensureDir(this.dir);
     this._withLock(() => this._load());
   }
@@ -90,7 +135,11 @@ export class VectorStore {
     });
   }
 
-  async search(namespace, queryText, { limit = 5, minScore = 0.05 } = {}) {
+  async search(namespace, queryText, {
+    limit = 5,
+    minScore = 0.05,
+    hybrid = this.hybridSearch
+  } = {}) {
     if (!this.embedder) return [];
     let queryEmbedding;
     try {
@@ -100,21 +149,84 @@ export class VectorStore {
     }
     return this._withLock(() => {
       this._load();
-      const output = [];
-      for (const entry of this.entries.values()) {
-        if (entry.namespace !== namespace) continue;
-        const score = cosine(queryEmbedding, entry.embedding);
-        if (score < minScore) continue;
-        output.push({
-          id: entry.id,
-          score,
-          text: entry.text,
-          payload: structuredClone(entry.payload)
-        });
+      const legacySearch = () => {
+        const output = [];
+        for (const entry of this.entries.values()) {
+          if (entry.namespace !== namespace) continue;
+          const score = cosine(queryEmbedding, entry.embedding);
+          if (score < minScore) continue;
+          output.push({
+            id: entry.id,
+            score,
+            text: entry.text,
+            payload: structuredClone(entry.payload)
+          });
+        }
+        return output
+          .sort((left, right) => right.score - left.score)
+          .slice(0, limit);
+      };
+      if (hybrid !== true) return legacySearch();
+      try {
+        const entries = [...this.entries.values()]
+          .filter((entry) => entry.namespace === namespace)
+          .sort((left, right) => compareStableIds(left.id, right.id));
+        const vectorRanked = entries
+          .map((entry) => ({
+            id: entry.id,
+            score: cosine(queryEmbedding, entry.embedding)
+          }))
+          .filter((item) => item.score >= minScore)
+          .sort((left, right) => (
+            right.score - left.score
+            || compareStableIds(left.id, right.id)
+          ));
+        const boundedQuery = String(queryText ?? "").slice(0, 4_096);
+        const lexicalRanked = entries
+          .map((entry) => ({
+            id: entry.id,
+            score: tokenOverlapScore(boundedQuery, entry.text)
+          }))
+          .filter((item) => item.score > 0)
+          .sort((left, right) => (
+            right.score - left.score
+            || compareStableIds(left.id, right.id)
+          ));
+        const fused = reciprocalRankFusion([
+          vectorRanked,
+          lexicalRanked
+        ]);
+        const byId = new Map(entries.map((entry) => [String(entry.id), entry]));
+        const vectorScores = new Map(
+          vectorRanked.map((item) => [String(item.id), item.score])
+        );
+        const lexicalScores = new Map(
+          lexicalRanked.map((item) => [String(item.id), item.score])
+        );
+        const activeLists = [vectorRanked, lexicalRanked]
+          .filter((list) => list.length > 0)
+          .length;
+        const maximumRrfScore = activeLists > 0
+          ? activeLists / (DEFAULT_RRF_K + 1)
+          : 1;
+        return fused
+          .slice(0, limit)
+          .map((item) => {
+            const entry = byId.get(item.id);
+            if (!entry) throw new Error("Fused vector result lost its source entry.");
+            return {
+              id: entry.id,
+              score: item.score / maximumRrfScore,
+              rrfScore: item.score,
+              vectorScore: vectorScores.get(item.id) ?? 0,
+              lexicalScore: lexicalScores.get(item.id) ?? 0,
+              text: entry.text,
+              payload: structuredClone(entry.payload)
+            };
+          });
+      } catch {
+        return legacySearch();
       }
-      return output
-        .sort((left, right) => right.score - left.score)
-        .slice(0, limit);
     });
   }
 
@@ -301,6 +413,38 @@ export class VectorStore {
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number > 0 ? number : fallback;
+}
+
+function enabledFlag(value) {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) return false;
+  try {
+    return ["1", "true", "yes", "on"].includes(
+      String(value).trim().toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+function stableRrfId(item) {
+  try {
+    if (!item || typeof item !== "object") return null;
+    const descriptor = Object.getOwnPropertyDescriptor(item, "id");
+    if (!descriptor || !Object.hasOwn(descriptor, "value")) return null;
+    const value = descriptor.value;
+    if (typeof value !== "string" && typeof value !== "number") return null;
+    const id = String(value);
+    return id ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+function compareStableIds(left, right) {
+  const a = String(left);
+  const b = String(right);
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function processIsAlive(pid) {
