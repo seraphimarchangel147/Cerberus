@@ -2164,3 +2164,25 @@ MUTATION LEASE WAVE 2 COMPLETE
 - Env flag: none for Fix 1 because this pure module has no runtime call site and
   therefore changes no behavior until the default-off Fix 2 integration is
   enabled.
+
+## 2026-07-29 - Wave 3 Fix 2: substitutability compaction cascade
+
+- Extended the ledger preparation path at
+  `src/memory-condenser.js:prepareContextLedgerCandidate` with a descending
+  10-to-3 substitutability cascade. It selects deterministic, age-ordered
+  atomic tool-pair units, stops at the configured context target, preserves
+  lower-score entries verbatim, and retains the existing single-use restore
+  binding.
+- Cascade exceptions fall through to the unchanged positional implementation.
+  Surviving calls and results remain paired, target fitting retains mandatory
+  references and ledger sections, and selection is capped at 2,048 units.
+- Wired the target through `src/model-provider.js` and allowlisted the flag in
+  `src/setup-wizard.js`. The request path still performs its authoritative
+  post-compression estimate and refuses an oversized request.
+- Locking test: `test/context-value-cascade.test.js` failed first because the
+  enabled path was still positional and the provider flag was absent. It now
+  proves high-score-first shedding, traceback protection, pair integrity,
+  deterministic replay, exact restoration, and byte-identical legacy output
+  when disabled.
+- Env flag: `OPENAGI_VALUE_AWARE_COMPACTION` defaults to off; when unset,
+  false, or unrecognized, compaction remains the prior positional algorithm.

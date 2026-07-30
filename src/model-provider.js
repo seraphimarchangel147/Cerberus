@@ -369,6 +369,16 @@ function optionalPositiveNumber(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function enabledOption(value) {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) return false;
+  try {
+    return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export function resolveReasoningEffort(options = {}, env = process.env) {
   try {
     const raw = options?.reasoningEffort !== undefined
@@ -486,6 +496,10 @@ function applyIterationSettings(provider, options) {
   provider.contextEstimateCharsPerToken = positiveNumber(
     options.contextEstimateCharsPerToken,
     DEFAULT_CONTEXT_ESTIMATE_CHARS_PER_TOKEN
+  );
+  provider.valueAwareCompaction = enabledOption(
+    options.valueAwareCompaction
+      ?? provider.env?.OPENAGI_VALUE_AWARE_COMPACTION
   );
   provider.cacheWarningLog = typeof options.cacheWarningLog === "function"
     ? options.cacheWarningLog
@@ -3641,6 +3655,10 @@ function contextLedgerPreparationKey(options) {
   hmac.update(String(options.keepRecentHops), "utf8");
   hmac.update("\0", "utf8");
   hmac.update(String(options.maxDigestChars), "utf8");
+  hmac.update("\0", "utf8");
+  hmac.update(options.valueAwareCompaction === true ? "value-aware" : "positional", "utf8");
+  hmac.update("\0", "utf8");
+  hmac.update(String(options.valueAwareTargetChars ?? ""), "utf8");
   hmac.update(options.redactionOverflow === true ? "\0overflow" : "\0complete", "utf8");
   for (const value of options.redactValues ?? []) {
     hmac.update("\0", "utf8");
@@ -3653,7 +3671,8 @@ function contextLedgerPreparationKey(options) {
 
 function contextLedgerOptions(providerInstance, format, context, {
   maxDigestChars = providerInstance.contextDigestChars,
-  redactValues = []
+  redactValues = [],
+  valueAwareTargetChars = null
 } = {}) {
   const redaction = contextLedgerRedactValues(
     providerInstance,
@@ -3665,7 +3684,11 @@ function contextLedgerOptions(providerInstance, format, context, {
     keepRecentHops: providerInstance.contextKeepRecentHops,
     maxDigestChars,
     redactValues: redaction.values,
-    redactionOverflow: redaction.overflow
+    redactionOverflow: redaction.overflow,
+    valueAwareCompaction: providerInstance.valueAwareCompaction === true,
+    ...(Number.isSafeInteger(valueAwareTargetChars) && valueAwareTargetChars > 0
+      ? { valueAwareTargetChars }
+      : {})
   };
 }
 
@@ -3758,7 +3781,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
     MIN_CONTEXT_DIGEST_CHARS,
     providerInstance.contextDigestChars
   );
-  const baseLedgerOptions = contextLedgerOptions(
+  let valueAwareTargetChars = null;
+  let baseLedgerOptions = contextLedgerOptions(
     providerInstance,
     format,
     context,
@@ -3767,7 +3791,7 @@ async function prepareProviderConversation(providerInstance, conversation, {
       redactValues
     }
   );
-  const preparedCandidate = scheduledContextLedgerCandidate(
+  let preparedCandidate = scheduledContextLedgerCandidate(
     conversation,
     baseLedgerOptions
   );
@@ -3796,6 +3820,33 @@ async function prepareProviderConversation(providerInstance, conversation, {
 
   const safeTokenLimit = Math.max(0, Math.ceil(contextWindowTokens * CONTEXT_GATEWAY_RATIO) - 1);
   const charsPerToken = providerInstance.contextEstimateCharsPerToken;
+  if (providerInstance.valueAwareCompaction === true) {
+    const conversationTokens = estimateContextTokens(conversation, {
+      charsPerToken
+    });
+    const requestOverheadTokens = Math.max(
+      0,
+      estimatedInputTokens - conversationTokens
+    );
+    valueAwareTargetChars = Math.max(
+      1,
+      (safeTokenLimit - requestOverheadTokens) * charsPerToken
+    );
+    baseLedgerOptions = contextLedgerOptions(
+      providerInstance,
+      format,
+      context,
+      {
+        maxDigestChars: sourceDigestChars,
+        redactValues,
+        valueAwareTargetChars
+      }
+    );
+    preparedCandidate = scheduledContextLedgerCandidate(
+      conversation,
+      baseLedgerOptions
+    );
+  }
   const tryCompression = async (
     maxDigestChars,
     pending = null,
@@ -3805,7 +3856,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
       ? baseLedgerOptions
       : contextLedgerOptions(providerInstance, format, context, {
           maxDigestChars,
-          redactValues
+          redactValues,
+          valueAwareTargetChars
         });
     const result = await (
       pending
@@ -3838,7 +3890,8 @@ async function prepareProviderConversation(providerInstance, conversation, {
         context,
         {
           maxDigestChars: options.maxDigestChars,
-          redactValues
+          redactValues,
+          valueAwareTargetChars
         }
       );
       return contextLedgerPreparationKey(current)

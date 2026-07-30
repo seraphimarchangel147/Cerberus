@@ -1,7 +1,14 @@
+// Portions adapted from TencentDB Agent Memory
+// (https://github.com/TencentCloud/TencentDB-Agent-Memory), MIT.
+// Copyright (C) 2026 Tencent. Derived from commit 104e9d8:
+// src/core/store/search-utils.ts (Reciprocal Rank Fusion) and
+// src/offload/hooks/llm-input-l3.ts (substitutability score cascade).
+
 import { createHash } from "node:crypto";
 import { types as utilTypes } from "node:util";
 import { createContext, runInContext } from "node:vm";
 import { Worker } from "node:worker_threads";
+import { scoreContextSubstitutability } from "./context-value.js";
 import { nowIso, tokenize, tokenOverlapScore } from "./utils.js";
 import {
   isCredentialHeaderName,
@@ -29,12 +36,15 @@ const QUARANTINE_DAYS = 7;
 
 export const CONTEXT_IN_LOOP_RATIO = 0.5;
 export const CONTEXT_GATEWAY_RATIO = 0.85;
+export const CONTEXT_VALUE_CASCADE_INITIAL_SCORE = 10;
+export const CONTEXT_VALUE_CASCADE_FLOOR_SCORE = 3;
 
 const DEFAULT_LIVE_CONTEXT_KEEP_RECENT_HOPS = 4;
 const DEFAULT_LIVE_CONTEXT_DIGEST_CHARS = 4000;
 const MIN_LIVE_CONTEXT_DIGEST_CHARS = 40;
 const DEFAULT_CONTEXT_ESTIMATE_MAX_CHARS = 8_000_000;
 const DEFAULT_CONTEXT_ESTIMATE_CHARS_PER_TOKEN = 4;
+const CONTEXT_VALUE_MAX_CASCADE_UNITS = 2_048;
 const LIVE_CONTEXT_SUMMARY = Symbol("liveContextSummary");
 const LIVE_CONTEXT_SYNTHETIC_TURN = Symbol("liveContextSyntheticTurn");
 const CONTEXT_LEDGER_CANDIDATES = new WeakMap();
@@ -539,6 +549,23 @@ async function prepareContextLedgerCandidate(source, options, binding) {
   boundary = adjustLiveToolPairBoundary(working, format, boundary);
   let summaryStart = liveContextSummaryStart(working, boundary);
   summaryStart = adjustLiveToolPairSummaryStart(working, format, summaryStart, boundary);
+  if (options.valueAwareCompaction === true) {
+    try {
+      return await prepareValueAwareContextLedgerCandidate({
+        original,
+        working,
+        format,
+        summaryStart,
+        boundary,
+        maxDigestChars,
+        options,
+        binding
+      });
+    } catch {
+      // Value-aware selection is an optimization. Any scorer or cascade fault
+      // falls through to the exact positional implementation below.
+    }
+  }
   if (boundary <= summaryStart || boundary >= working.length) {
     return attachContextLedgerRestore({
       compressed: false,
@@ -659,6 +686,317 @@ async function prepareContextLedgerCandidate(source, options, binding) {
     }),
     failedOpen: false
   }, original, binding);
+}
+
+async function prepareValueAwareContextLedgerCandidate({
+  original,
+  working,
+  format,
+  summaryStart,
+  boundary,
+  maxDigestChars,
+  options,
+  binding
+}) {
+  const targetChars = positiveSafeInteger(options.valueAwareTargetChars);
+  const emptyCandidate = (cascade = null, digest = null) => attachContextLedgerRestore({
+    compressed: false,
+    conversation: working,
+    format,
+    summarizedItems: 0,
+    keptItems: working.length,
+    summarySource: null,
+    digest,
+    preview: contextLedgerPreview(original, working, {
+      summaryStart,
+      boundary,
+      summarizedItems: 0
+    }),
+    failedOpen: false,
+    valueAware: true,
+    cascade
+  }, original, binding);
+
+  if (boundary <= summaryStart || boundary >= working.length) {
+    return emptyCandidate({
+      targetChars,
+      selectedIndexes: [],
+      selectedScores: [],
+      thresholdReached: null
+    });
+  }
+
+  const units = buildContextValueUnits(
+    working,
+    format,
+    summaryStart,
+    boundary
+  );
+  if (units.length > CONTEXT_VALUE_MAX_CASCADE_UNITS) {
+    throw new RangeError("Value-aware cascade exceeds its bounded unit count.");
+  }
+
+  const ordered = [];
+  for (
+    let threshold = CONTEXT_VALUE_CASCADE_INITIAL_SCORE;
+    threshold >= CONTEXT_VALUE_CASCADE_FLOOR_SCORE;
+    threshold -= 1
+  ) {
+    for (const unit of units) {
+      if (unit.score === threshold) ordered.push(unit);
+    }
+  }
+
+  const beforeChars = liveContextSerializedChars(working);
+  const selected = new Set();
+  const selectedScores = [];
+  let selectedChars = 0;
+  let thresholdReached = null;
+  for (const unit of ordered) {
+    for (const index of unit.indexes) {
+      selected.add(index);
+      selectedChars += liveContextSerializedChars(working[index]) + 1;
+    }
+    selectedScores.push(unit.score);
+    thresholdReached = unit.score;
+    if (targetChars !== null) {
+      const markerReserve = Math.min(
+        maxDigestChars + 64,
+        Math.max(MIN_LIVE_CONTEXT_DIGEST_CHARS + 32, selectedChars)
+      );
+      const projectedChars = Math.max(
+        0,
+        beforeChars - selectedChars + markerReserve
+      );
+      if (projectedChars <= targetChars) break;
+    }
+  }
+
+  const selectedIndexes = [...selected].sort((left, right) => left - right);
+  const cascade = {
+    targetChars,
+    selectedIndexes,
+    selectedScores,
+    thresholdReached
+  };
+  if (selectedIndexes.length === 0) return emptyCandidate(cascade);
+
+  const prefix = selectedIndexes.map((index) => working[index]);
+  const redactionOptions = contextLedgerRedactionOptions(options);
+  if (redactionOptions.overflow) {
+    throw new RangeError("Context ledger redaction values exceed the safe bound.");
+  }
+  const digest = buildStructuredContextLedger(prefix, {
+    format,
+    redactValues: redactionOptions.redactValues
+  });
+  let providedOverview = null;
+  let summarySource = "deterministic";
+  if (typeof options.summarizer === "function") {
+    try {
+      const proposed = await runBoundedContextLedgerSummarizer(
+        options.summarizer,
+        sanitizeContextLedgerPrefix(prefix, redactionOptions),
+        {
+          format,
+          maxChars: maxDigestChars,
+          ledger: cloneContextValue(digest)
+        },
+        options.summarizerTimeoutMs
+      );
+      if (typeof proposed === "string" && proposed.trim()) {
+        providedOverview = sanitizeContextLedgerText(
+          proposed,
+          redactionOptions.redactValues
+        );
+        summarySource = "provided";
+      }
+    } catch {
+      // The deterministic digest remains authoritative and available.
+    }
+  }
+  if (providedOverview) digest.overview = providedOverview;
+  const mandatoryReferences = contextLedgerReferences(digest);
+  const fitDigest = () => {
+    const markerDigest = freezeContextLedgerValue(cloneContextValue(digest));
+    return fitContextLedgerSelection(
+      working,
+      selected,
+      renderStructuredContextLedger(digest),
+      maxDigestChars,
+      mandatoryReferences,
+      markerDigest,
+      targetChars
+    );
+  };
+  const isUsableFit = (candidate, { requireOverview = false } = {}) => (
+    candidate.referencesComplete
+    && candidate.sectionsComplete
+    && (
+      !requireOverview
+      || String(candidate.marker).includes("\nOptional overview:\n- ")
+    )
+    && candidate.afterChars < beforeChars
+    && (targetChars === null || candidate.afterChars <= targetChars)
+  );
+  let fitted = fitDigest();
+  if (!isUsableFit(fitted, { requireOverview: Boolean(providedOverview) })
+    && providedOverview) {
+    delete digest.overview;
+    summarySource = "deterministic";
+    fitted = fitDigest();
+  }
+  if (!isUsableFit(fitted)) return emptyCandidate(cascade, digest);
+
+  const firstSelected = selectedIndexes[0];
+  const lastSelected = selectedIndexes.at(-1);
+  return attachContextLedgerRestore({
+    compressed: true,
+    conversation: fitted.conversation,
+    format,
+    summarizedItems: selectedIndexes.length,
+    keptItems: working.length - selectedIndexes.length,
+    summarySource,
+    marker: fitted.marker,
+    digest,
+    preview: contextLedgerPreview(original, fitted.conversation, {
+      summaryStart: firstSelected,
+      boundary: lastSelected + 1,
+      summarizedItems: selectedIndexes.length
+    }),
+    failedOpen: false,
+    valueAware: true,
+    cascade
+  }, original, binding);
+}
+
+function buildContextValueUnits(conversation, format, summaryStart, boundary) {
+  const parent = new Map();
+  for (let index = summaryStart; index < boundary; index += 1) {
+    parent.set(index, index);
+  }
+  const find = (index) => {
+    let root = index;
+    while (parent.get(root) !== root) root = parent.get(root);
+    while (parent.get(index) !== index) {
+      const next = parent.get(index);
+      parent.set(index, root);
+      index = next;
+    }
+    return root;
+  };
+  const union = (left, right) => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot === rightRoot) return;
+    parent.set(
+      Math.max(leftRoot, rightRoot),
+      Math.min(leftRoot, rightRoot)
+    );
+  };
+  const pairs = liveContextToolPairs(conversation, format)
+    .filter(([callIndex, resultIndex]) => (
+      callIndex >= summaryStart
+      && callIndex < boundary
+      && resultIndex >= summaryStart
+      && resultIndex < boundary
+    ))
+    .sort(([leftCall, leftResult], [rightCall, rightResult]) => (
+      leftCall - rightCall || leftResult - rightResult
+    ));
+  for (const [callIndex, resultIndex] of pairs) union(callIndex, resultIndex);
+
+  const grouped = new Map();
+  for (let index = summaryStart; index < boundary; index += 1) {
+    const root = find(index);
+    const indexes = grouped.get(root) ?? [];
+    indexes.push(index);
+    grouped.set(root, indexes);
+  }
+  return [...grouped.values()]
+    .map((indexes) => {
+      const scored = indexes
+        .map((index) => scoreContextSubstitutability(conversation[index]))
+        .filter((value) => value.reason !== "invalid");
+      const protectedScore = scored.length > 0
+        ? scored.reduce((lowest, value) => (
+            value.score < lowest.score ? value : lowest
+          ))
+        : { score: 0, reason: "invalid" };
+      return {
+        indexes,
+        score: protectedScore.score,
+        reason: protectedScore.reason
+      };
+    })
+    .sort((left, right) => (
+      left.indexes[0] - right.indexes[0]
+      || left.indexes.length - right.indexes.length
+    ));
+}
+
+function fitContextLedgerSelection(
+  working,
+  selected,
+  summary,
+  requestedMaxChars,
+  mandatoryReferences = [],
+  markerDigest = null,
+  targetChars = null
+) {
+  const beforeChars = liveContextSerializedChars(working);
+  const firstSelected = Math.min(...selected);
+  const build = (markerLimit) => {
+    const marker = liveContextSummaryMarker(
+      summary,
+      markerLimit,
+      mandatoryReferences,
+      markerDigest
+    );
+    const conversation = [];
+    for (let index = 0; index < working.length; index += 1) {
+      if (index === firstSelected) {
+        conversation.push(
+          createLiveContextSummaryMessage(marker, mandatoryReferences, markerDigest)
+        );
+      }
+      if (!selected.has(index)) conversation.push(working[index]);
+    }
+    return {
+      marker,
+      conversation,
+      afterChars: liveContextSerializedChars(conversation)
+    };
+  };
+  const maximumAfterChars = targetChars === null
+    ? beforeChars - 1
+    : Math.min(beforeChars - 1, targetChars);
+  let fitted = build(requestedMaxChars);
+  if (fitted.afterChars > maximumAfterChars) {
+    let low = MIN_LIVE_CONTEXT_DIGEST_CHARS;
+    let high = Math.max(low, requestedMaxChars);
+    let best = null;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = build(middle);
+      if (candidate.afterChars <= maximumAfterChars) {
+        best = candidate;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    fitted = best ?? build(MIN_LIVE_CONTEXT_DIGEST_CHARS);
+  }
+  return {
+    ...fitted,
+    referencesComplete: fitted.marker.length <= requestedMaxChars
+      && mandatoryReferences.every((reference) => fitted.marker.includes(reference)),
+    sectionsComplete: contextLedgerMarkerSectionsComplete(
+      fitted.marker,
+      markerDigest
+    )
+  };
 }
 
 function fitContextLedgerReplacement(
@@ -2003,6 +2341,11 @@ function positiveTokenCount(value) {
   return parsed !== null && parsed > 0 ? parsed : null;
 }
 
+function positiveSafeInteger(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function sumTokenCounts(values) {
   let total = 0;
   for (const value of values) {
@@ -2327,7 +2670,9 @@ function normalizeContextLedgerOptions(options) {
     "redactValues",
     "redactionOverflow",
     "summarizer",
-    "summarizerTimeoutMs"
+    "summarizerTimeoutMs",
+    "valueAwareCompaction",
+    "valueAwareTargetChars"
   ]) {
     let descriptor;
     try {
@@ -2351,6 +2696,10 @@ function normalizeContextLedgerOptions(options) {
       continue;
     }
     if (key === "redactionOverflow") {
+      if (typeof value === "boolean") normalized[key] = value;
+      continue;
+    }
+    if (key === "valueAwareCompaction") {
       if (typeof value === "boolean") normalized[key] = value;
       continue;
     }
