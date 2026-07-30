@@ -2,6 +2,39 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-30 — Send lane stops lying: real delivery confirmation + read-only channel history (Seraphim)
+
+Closes F3, F4, and the headline meta-bug from the 2026-07-29 QA battery (all found by Azazel).
+
+**The meta-bug (most serious).** `send_message` reported `delivered: true` for messages that never
+rendered. `DiscordChannel.deliverAgentReply` returned no delivery field and no message id, and
+`finalize` used `raw?.delivered !== false` — so `undefined` was promoted to success and *every* send
+claimed delivery unconditionally. That converts message loss into **silent** message loss, which is
+worse than a hard failure. Default inverted: a transport must now assert delivery affirmatively.
+`deliverAgentReply` derives `delivered` from Discord's REST echo and returns the created `messageId`;
+anything without an id reports `delivered: false` + `confirmation: "unverified"`.
+
+**F4 — new `channel_history` tool.** Read-only (`sideEffects: false`) wrapper over
+`GET /channels/:id/messages`; limit clamped to Discord's max of 100; accepts a channel id or a sibling
+name. Returns id / author / bot flag / content / timestamp / mention ids / reply target. Closes the
+send loop — `send_message` returns a `messageId`, `channel_history({ after: id })` proves it rendered.
+Added to `CHAT_CORE_TOOLS`: a send lane without a read-back lane is how the defect above stayed
+invisible. Cannot post, edit, delete, or react.
+
+**F3 — advisory shape survives the `execute_code` boundary.** Two-layer collapse: the host discarded
+the structured `outcome` and forwarded only the error string, then the worker threw a bare `Error`.
+A `blocked` / `repeated_no_progress` advisory was therefore indistinguishable from a crash. Both
+fixed — structured fields are copied onto the thrown error (`err.status`, `err.code`, `err.retryable`,
+`err.nextSteps`, `err.tool`). Also added `innerFailures[]` to the wrapper result, because a script
+that catches and continues previously left no trace at all that an inner call failed. Absent on the
+happy path.
+
+- Fixture note: `tool-outcome.js reportedFailure` reads **top-level** `status`/`code`/`retryable`/
+  `nextSteps` from a handler result — a nested `outcome` object is not what it inspects.
+- Regressions: `test/execute-code-inner-failure-shape.test.js` (5),
+  `test/discord-delivery-confirmation.test.js` (8). Negative controls: 4/5 and 3/8 fail on pre-fix
+  code. Suite 2154 tests / 2130 pass / 0 fail; QA pre-check 13/13.
+
 ## 2026-07-30 — execute_code can batch mutations: nested mutation-lease re-entrancy (Seraphim)
 
 Wave 4, closing F1 from the 2026-07-29 QA battery (found by Azazel). `execute_code` held the

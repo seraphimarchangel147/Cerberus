@@ -182,6 +182,65 @@ the 18-minute-freeze shape is *not* eliminated, only made useful. TTL reaping re
 The tool description now states the two live constraints (sequential nested mutations; no
 broadening) instead of the old blanket "mutations always fail here".
 
+### F3 — FIXED (2026-07-30, Wave 4)
+
+Root-caused as a **two-layer collapse**, not one:
+
+1. `execute-code.js` discarded the whole structured `outcome` on an inner failure and forwarded only
+   `outcome.error` as a string.
+2. `execute-code-worker.js` then did `throw new Error(envelope.error)` — a bare `Error`, erasing any
+   remaining shape.
+
+So `status: "blocked"` / `code: "repeated_no_progress"` / `nextSteps` arrived at user code as an
+indistinguishable crash. This confirms the earlier read: the advisory **was** spec-shaped all along;
+the wrapper was lying about it.
+
+Both halves fixed. The structured outcome now crosses the worker boundary and is copied onto the
+thrown error (`err.status`, `err.code`, `err.retryable`, `err.nextSteps`, `err.tool`), so a script can
+branch on it instead of regex-matching a message. Additionally the wrapper result carries a new
+`innerFailures[]` array — because the nastier variant of F3 is a script that *catches* the rejection
+and continues, which previously left **no trace whatsoever** that an inner call had failed. Absent on
+the happy path, so nothing changes when nothing fails.
+
+Regression: `test/execute-code-inner-failure-shape.test.js`, 5 cases. Negative control: reverting
+both layers fails 4/5. Note for future fixtures — `tool-outcome.js reportedFailure` derives the
+semantic outcome from **top-level** `status`/`code`/`retryable`/`nextSteps` on a handler result; a
+nested `outcome` object is not what it reads.
+
+### F4 + the headline meta-bug — FIXED (2026-07-30, Wave 4)
+
+Azazel's framing was right and this was the most serious finding in the battery: **the transport
+reported `delivered: true` for messages that never rendered.** Mechanism, now confirmed at both ends:
+
+- `DiscordChannel.deliverAgentReply` returned `{ text, candidates, successfulCandidates }` — **no
+  delivery field and no message id at all.**
+- `send_message`'s `finalize` computed `const delivered = raw?.delivered !== false`. Because
+  `undefined !== false`, an **absent** signal was silently promoted to success. Every send in the
+  system claimed delivery unconditionally.
+
+That is a false-confirmation defect in the strict sense: it converts message loss into *silent*
+message loss. Fixed by inverting the default — a transport must now assert delivery **affirmatively**.
+`deliverAgentReply` reports `delivered` from Discord's own REST echo and returns the created
+`messageId`; anything without an id is reported `delivered: false` with
+`confirmation: "unverified"` and an explicit "treat as UNCONFIRMED" status string.
+
+**F4 proper:** new read-only `channel_history` tool (`sideEffects: false`) wrapping
+`GET /channels/:id/messages`, limit clamped to Discord's max of 100, accepting either a channel id or
+a sibling name. It returns id / author / bot flag / content / timestamp / mention ids / reply target.
+This closes the loop: `send_message` hands back a `messageId`, and `channel_history({ after: id })`
+proves it rendered. Added to `CHAT_CORE_TOOLS` — a send lane without a read-back lane is exactly how
+this defect hid for so long. It cannot post, edit, delete, or react.
+
+This also retires the "card-verbatim probes can't be closed from the agent seat" caveat: they can now.
+
+Regression: `test/discord-delivery-confirmation.test.js`, 8 cases (absent signal → unconfirmed, id →
+delivered, explicit failure preserved, REST-echo behaviour both ways, history read-only + clamped +
+normalized, send→read-back loop, unknown target refused, chat-lane reachability). Negative control:
+restoring the `!== false` default fails 3/8.
+
+**Combined Wave 4 state:** suite **2154 tests / 2130 pass / 0 fail**, pre-check **13/13**. F1, F2, F3,
+F4 and the meta-bug are all closed.
+
 ---
 
 ## Addendum — A4 live capture

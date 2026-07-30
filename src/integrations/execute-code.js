@@ -62,6 +62,9 @@ function finalizeOutput(output, details) {
     stdout = "";
     error = `execute_code output rejected: suspicious character ${ghost.codePoint} at line ${ghost.line}`;
   }
+  const innerFailures = Array.isArray(details.innerFailures)
+    ? details.innerFailures
+    : [];
   return {
     stdout,
     toolCallsMade: details.toolCallsMade,
@@ -69,6 +72,10 @@ function finalizeOutput(output, details) {
     truncated: output.truncated,
     timedOut: Boolean(details.timedOut),
     cancelled: Boolean(details.cancelled),
+    // Advisory-shaped inner failures are reported alongside stdout instead of
+    // being collapsed into the wrapper's error string. Present only when a
+    // nested call actually failed, so the happy path is unchanged.
+    ...(innerFailures.length ? { innerFailures } : {}),
     ...(error ? { error } : {})
   };
 }
@@ -78,6 +85,11 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
   const timeoutMs = boundedTimeout(args.timeoutMs);
   const output = { parts: [], bytes: 0, truncated: false };
   const receipts = [];
+  // F3: inner tool failures, kept structured. A script that swallows a
+  // callTool rejection (try/catch, or one that keeps going) previously left NO
+  // trace of why the inner call failed, so an advisory like
+  // repeated_no_progress vanished entirely from the model's view.
+  const innerFailures = [];
   let toolCallsMade = 0;
   if (context?.__abortSignal?.aborted) {
     return finalizeOutput(output, {
@@ -117,7 +129,12 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
       clearTimeout(timer);
       abortSignal?.removeEventListener?.("abort", onAbort);
       await worker.terminate().catch(() => {});
-      resolve(finalizeOutput(output, { toolCallsMade, receipts, ...details }));
+      resolve(finalizeOutput(output, {
+        toolCallsMade,
+        receipts,
+        innerFailures,
+        ...details
+      }));
     };
 
     const timer = setTimeout(() => {
@@ -151,11 +168,44 @@ export async function runExecuteCode(runtime, args = {}, context = {}) {
         try {
           const outcome = await runtime.tools.invoke(name, message.args ?? {}, nestedToolContext(context));
           if (outcome?.receipt) receipts.push(outcome.receipt);
-          envelope = outcome.ok
-            ? safeEnvelope({ ok: true, result: outcome.result ?? null })
-            : safeEnvelope({ ok: false, error: outcome.error ?? `Tool ${name} failed` });
+          if (outcome.ok) {
+            envelope = safeEnvelope({ ok: true, result: outcome.result ?? null });
+          } else {
+            // F3: an inner failure used to cross as a bare error string, so
+            // advisory-shaped envelopes (status: blocked, code:
+            // repeated_no_progress, nextSteps) were indistinguishable from a
+            // hard crash and unobservable from the model seat. Carry the
+            // structured outcome through so the script can inspect it and so
+            // the final result can report why the inner call actually failed.
+            const failure = {
+              ok: false,
+              error: outcome.error ?? `Tool ${name} failed`,
+              tool: name,
+              ...(outcome.outcome ? { outcome: outcome.outcome } : {}),
+              ...(outcome.blocked === true ? { blocked: true } : {}),
+              ...(outcome.code ? { code: outcome.code } : {})
+            };
+            innerFailures.push({
+              tool: name,
+              error: failure.error,
+              status: outcome.outcome?.status ?? (outcome.blocked ? "blocked" : "failed"),
+              code: outcome.outcome?.code ?? outcome.code ?? null,
+              retryable: outcome.outcome?.retryable ?? null,
+              nextSteps: [...(outcome.outcome?.nextSteps ?? [])]
+            });
+            envelope = safeEnvelope(failure);
+          }
         } catch (error) {
-          envelope = safeEnvelope({ ok: false, error: error.message ?? String(error) });
+          const message_ = error?.message ?? String(error);
+          innerFailures.push({
+            tool: name,
+            error: message_,
+            status: "failed",
+            code: error?.code ?? null,
+            retryable: null,
+            nextSteps: []
+          });
+          envelope = safeEnvelope({ ok: false, error: message_, tool: name });
         }
       }
       if (!finalizing) worker.postMessage({ type: "tool-result", id: message.id, envelope });

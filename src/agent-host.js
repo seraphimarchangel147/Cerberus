@@ -80,6 +80,10 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   // — those are injected dynamically by the tool-search controller, and baking
   // them in falsely trips toolSearchBridgesActive() on plain chat turns.
   "send_message",
+  // send_message's verification partner. A send lane without a read-back lane
+  // is how "delivered: true" for a message that never rendered went unnoticed:
+  // the agent had no way to check its own claim. Strictly read-only.
+  "channel_history",
   "searcmcp_tools"
 ]);
 export const DEFAULT_CHAT_MAX_ITERATIONS = 4;

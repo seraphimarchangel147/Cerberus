@@ -48,7 +48,28 @@ const makeCallTool = new vm.Script(`
       throw new Error("callTool arguments must be JSON-serializable: " + error.message);
     }
     const envelope = JSON.parse(await bridge(request));
-    if (!envelope.ok) throw new Error(envelope.error);
+    if (!envelope.ok) {
+      // F3: a bare Error erased the advisory shape of inner failures, so a
+      // blocked/repeated_no_progress outcome looked identical to a crash. Copy
+      // the structured fields onto the thrown error so a script can branch on
+      // err.status / err.code / err.nextSteps instead of parsing the message.
+      const error = new Error(envelope.error);
+      if (envelope.tool) error.tool = envelope.tool;
+      if (envelope.outcome && typeof envelope.outcome === "object") {
+        error.outcome = envelope.outcome;
+        if (envelope.outcome.status) error.status = envelope.outcome.status;
+        if (envelope.outcome.code) error.code = envelope.outcome.code;
+        if (envelope.outcome.retryable !== undefined) {
+          error.retryable = envelope.outcome.retryable;
+        }
+        if (Array.isArray(envelope.outcome.nextSteps)) {
+          error.nextSteps = envelope.outcome.nextSteps.slice();
+        }
+      }
+      if (envelope.blocked === true) error.blocked = true;
+      if (envelope.code && !error.code) error.code = envelope.code;
+      throw error;
+    }
     return envelope.result;
   }
 `).runInContext(context, { timeout: workerData.timeoutMs });

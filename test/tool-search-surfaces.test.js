@@ -184,14 +184,20 @@ test("AgentHost keeps chat-core tools direct and indexes the full eligible omitt
     text: "What is the capital of France?"
   });
 
-  // `registerToolSearchTools` re-registers real `send_message` / `searcmcp_tools`
-  // implementations AFTER the fixture's stubs, and those replacements are not
-  // part of the `only: CHAT_CORE_TOOLS` plan snapshot — so on this fixture they
-  // fall into the omitted (but still reachable) universe rather than the
-  // directly advertised set. Production registers core tools first and does not
-  // hit this ordering; assert the fixture's real shape instead of the ideal one.
+  // `registerToolSearchTools` re-registers real `send_message` /
+  // `channel_history` / `searcmcp_tools` implementations AFTER the fixture's
+  // stubs, and those replacements are not part of the `only: CHAT_CORE_TOOLS`
+  // plan snapshot — so on this fixture they fall into the omitted (but still
+  // reachable) universe rather than the directly advertised set. Production
+  // registers core tools first and does not hit this ordering; assert the
+  // fixture's real shape instead of the ideal one.
+  const fixtureLateRegistered = new Set([
+    "send_message",
+    "channel_history",
+    "searcmcp_tools"
+  ]);
   const fixtureAdvertised = CHAT_CORE_TOOLS.filter(
-    (name) => name !== "send_message" && name !== "searcmcp_tools"
+    (name) => !fixtureLateRegistered.has(name)
   );
   assert.equal(requests.length, 1);
   assert.deepEqual(requests[0].tools.map((tool) => tool.name), [
@@ -208,7 +214,7 @@ test("AgentHost keeps chat-core tools direct and indexes the full eligible omitt
   assert.equal(requests[0].context.__toolSearchActive, true);
   assert.deepEqual(
     requests[0].context.__toolRadarOmitted,
-    ["send_message", "searcmcp_tools", "plugin_weather"]
+    ["send_message", "channel_history", "searcmcp_tools", "plugin_weather"]
   );
   assert.equal(Object.isFrozen(requests[0].context.__toolRadarOmitted), true);
 });
@@ -275,7 +281,13 @@ test("Anthropic consumes the exact request-local host plan without rebuilding it
     plan.tools.find((tool) => tool.name === "recall")?.parameters
   );
   assert.equal(body.tools.some((tool) => tool.name === "plugin_weather"), false);
-  // Same fixture ordering as above: the real send_message/search_tools
-  // registrations land after the stubs and therefore sit in the omitted set.
-  assert.deepEqual(plan.omittedNames, ["send_message", "searcmcp_tools", "plugin_weather"]);
+  // Same fixture ordering as above: the real
+  // send_message/channel_history/searcmcp_tools registrations land after the stubs
+  // and therefore sit in the omitted set.
+  assert.deepEqual(plan.omittedNames, [
+    "send_message",
+    "channel_history",
+    "searcmcp_tools",
+    "plugin_weather"
+  ]);
 });

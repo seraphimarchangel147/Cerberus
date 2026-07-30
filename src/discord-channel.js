@@ -579,17 +579,67 @@ export class DiscordChannel {
           text: cleaned,
           candidates,
           successfulCandidates,
-          streamed: true
+          streamed: true,
+          // Streamed edits are confirmed by the stream itself; it only reports
+          // success after the REST edit landed.
+          delivered: true,
+          messageId: replyStream.messageId ?? null,
+          channelId
         };
       }
     }
-    await this.sendMessage(channelId, cleaned, replyToId);
+    // F4/meta-bug: this used to return no delivery signal at all, so the
+    // send_message tool's `raw?.delivered !== false` default made EVERY send
+    // report delivered:true — including sends that never rendered. Report
+    // ground truth from the REST response instead: Discord echoes the created
+    // message (with its id) on success, so a missing id means we cannot claim
+    // delivery. Callers that want proof can read the id back.
+    const sent = await this.sendMessage(channelId, cleaned, replyToId);
+    const messageId = sent?.id ? String(sent.id) : null;
     return {
       text: cleaned,
       candidates,
       successfulCandidates,
-      streamed: false
+      streamed: false,
+      delivered: Boolean(messageId),
+      ...(messageId ? {} : {
+        reason: "Discord accepted the request but returned no message id, so delivery is unconfirmed."
+      }),
+      messageId,
+      channelId
     };
+  }
+
+  // F4: read-only channel history. Without this there is no way to close the
+  // loop on a send — the transport could claim success for a message that never
+  // rendered, and nothing could check. Deliberately read-only and bounded.
+  async fetchMessages(channelId, { limit = 20, before = null, after = null } = {}) {
+    const bounded = Math.max(1, Math.min(100, Math.trunc(Number(limit) || 20)));
+    const query = new URLSearchParams({ limit: String(bounded) });
+    if (before) query.set("before", String(before));
+    if (after) query.set("after", String(after));
+    const rows = await this.rest(
+      `/channels/${channelId}/messages?${query.toString()}`
+    );
+    if (!Array.isArray(rows)) return [];
+    return rows.map((row) => ({
+      id: String(row?.id ?? ""),
+      authorId: String(row?.author?.id ?? ""),
+      authorName: String(row?.author?.username ?? ""),
+      bot: row?.author?.bot === true,
+      content: String(row?.content ?? ""),
+      timestamp: String(row?.timestamp ?? ""),
+      hasEmbeds: Array.isArray(row?.embeds) && row.embeds.length > 0,
+      attachmentCount: Array.isArray(row?.attachments)
+        ? row.attachments.length
+        : 0,
+      mentionIds: Array.isArray(row?.mentions)
+        ? row.mentions.map((m) => String(m?.id ?? "")).filter(Boolean)
+        : [],
+      replyToId: row?.message_reference?.message_id
+        ? String(row.message_reference.message_id)
+        : null
+    }));
   }
 
   logDeliverableFailure(phase, candidate, error) {

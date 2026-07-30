@@ -4884,14 +4884,28 @@ export function registerCoreTools(registry, runtime) {
       // has zero candidates, which a model can misread as "nothing delivered."
       // Normalize so the agent sees a clear delivered flag.
       const finalize = (raw, deliveredChannel, deliveredTarget) => {
-        const delivered = raw?.delivered !== false;
+        // Meta-bug from the 2026-07-29 QA battery: this used to be
+        // `raw?.delivered !== false`, which treats an ABSENT delivery signal as
+        // success. The Discord transport returned no such field, so every send
+        // reported delivered:true — converting message loss into SILENT message
+        // loss, which is worse than a hard failure. Now a transport must state
+        // delivery affirmatively; anything else is unconfirmed, not delivered.
+        const messageId = raw?.messageId
+          ?? raw?.message?.id
+          ?? (raw?.id ? String(raw.id) : null);
+        const claimed = raw?.delivered === true || Boolean(messageId);
+        const unknown = raw?.delivered === undefined && !messageId;
         return {
-          delivered,
+          delivered: claimed,
+          ...(unknown ? { confirmation: "unverified" } : {}),
           channel: deliveredChannel,
           target: deliveredTarget,
-          status: delivered
+          ...(messageId ? { messageId: String(messageId) } : {}),
+          status: claimed
             ? `Message delivered to ${deliveredChannel} target ${deliveredTarget}.`
-            : (raw?.reason ?? "Delivery reported failure."),
+            : (raw?.reason ?? (unknown
+                ? `Transport for ${deliveredChannel} returned no delivery confirmation; treat as UNCONFIRMED and verify before relying on it.`
+                : "Delivery reported failure.")),
           transport: raw
         };
       };
@@ -4945,6 +4959,63 @@ export function registerCoreTools(registry, runtime) {
         projectId: context.__projectId ?? "default"
       });
       return finalize(raw, args.channel, args.target);
+    }
+  });
+
+  registry.register({
+    name: "channel_history",
+    sideEffects: false,
+    description: "Read recent messages from a Discord channel you can already reach. READ-ONLY: it cannot post, edit, delete, or react. Use it to close the loop after send_message — confirm a message actually rendered (match the returned messageId), read what a sibling agent replied, or check whether a long message was truncated or dropped. Returns id, author, bot flag, content, timestamp, mention ids, and reply target for each message, newest first.",
+    parameters: {
+      type: "object",
+      properties: {
+        target: {
+          type: "string",
+          description: "Discord channel id to read, or a Legion sibling name (ziz, azazel, …) to read that sibling's channel."
+        },
+        limit: {
+          type: "integer",
+          description: "How many recent messages to return (1-100, default 20)."
+        },
+        before: {
+          type: "string",
+          description: "Only messages older than this message id (pagination)."
+        },
+        after: {
+          type: "string",
+          description: "Only messages newer than this message id. Use with the messageId from a send_message result to verify delivery."
+        }
+      },
+      required: ["target"],
+      additionalProperties: false
+    },
+    handler: async (args) => {
+      const discord = runtime.channels?.discord;
+      if (!discord?.fetchMessages) {
+        throw new Error("Discord channel history is unavailable: no Discord transport is bound to this runtime.");
+      }
+      // Accept a sibling name as a convenience, same resolution the send lane
+      // uses, so verifying a sibling send does not require knowing channel ids.
+      const rawTarget = String(args.target ?? "").trim();
+      if (!rawTarget) throw new Error("channel_history requires a target.");
+      const channelId = /^\d{5,}$/.test(rawTarget)
+        ? rawTarget
+        : resolveSibling(rawTarget, process.env, runtime.dataDir ?? null);
+      if (!channelId) {
+        throw new Error(
+          `Unknown channel target "${rawTarget}". Pass a numeric Discord channel id or a known sibling: ${siblingNames(process.env, runtime.dataDir ?? null).join(", ")}.`
+        );
+      }
+      const messages = await discord.fetchMessages(channelId, {
+        limit: args.limit ?? 20,
+        before: args.before ?? null,
+        after: args.after ?? null
+      });
+      return {
+        channelId,
+        count: messages.length,
+        messages
+      };
     }
   });
 
