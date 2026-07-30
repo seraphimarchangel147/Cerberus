@@ -30,7 +30,8 @@ const JOB_TOOL_NAMES = new Set([
   "job_status",
   "job_wait",
   "job_collect",
-  "job_cancel"
+  "job_cancel",
+  "mutation_lease_status"
 ]);
 const JOB_WRAPPER_TARGETS = new Set([
   "delegate_task",
@@ -417,6 +418,51 @@ export class JobManager {
         left.acquiredAt - right.acquiredAt
         || left.leaseId.localeCompare(right.leaseId)
       ));
+  }
+
+  mutationLeaseStatus() {
+    const state = privateState(this);
+    const checkedAt = mutationLeaseNow(this);
+    const durableRecords = safeMutationLeaseRecords(this);
+    const durableById = new Map(
+      durableRecords.records.map((record) => [record.id, record])
+    );
+    const leases = [
+      ...[...state.foreground.entries()].map(([leaseId, lease]) => (
+        mutationLeaseStatusSnapshot(
+          mutationLeaseSnapshot(leaseId, lease),
+          checkedAt,
+          "foreground"
+        )
+      )),
+      ...durableRecords.records
+        .filter((record) => (
+          record.status === "running"
+          || record.status === "cancel_requested"
+        ))
+        .map((record) => mutationLeaseStatusSnapshot(
+          durableMutationLeaseSnapshot(record),
+          checkedAt,
+          "durable"
+        )),
+      ...[...state.quarantined.entries()].map(([jobId, lease]) => (
+        mutationLeaseStatusSnapshot(
+          quarantinedMutationLeaseSnapshot(
+            jobId,
+            lease,
+            durableById.get(jobId)
+          ),
+          checkedAt,
+          "quarantined"
+        )
+      ))
+    ].sort(compareMutationLeaseStatus);
+    return redactMutationLeaseStatus(this.runtime, {
+      checkedAt,
+      leaseCount: leases.length,
+      leases,
+      partial: durableRecords.partial
+    });
   }
 
   acquireWorkspaceLease(context = {}, { ownerId } = {}) {
@@ -1028,6 +1074,18 @@ function reserveWorkspaceLease(manager, project, ownerId, context = {}) {
 }
 
 export function registerJobTools(registry, runtime) {
+  registry.register({
+    name: "mutation_lease_status",
+    sideEffects: false,
+    description: "Inspect redacted foreground, durable, and quarantined mutation lease holders, ages, and resource locks. This read remains callable while writes are blocked.",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    handler: async () => runtime.jobs.mutationLeaseStatus()
+  });
+
   registry.register({
     name: "job_start",
     sideEffects: true,
@@ -1724,6 +1782,130 @@ function mutationLeaseSnapshot(leaseId, lease) {
       : [],
     sessionId: mutationLeaseContextId(lease?.sessionId)
   };
+}
+
+function mutationLeaseStatusSnapshot(lease, checkedAt, source) {
+  const acquiredAt = Number.isFinite(lease?.acquiredAt)
+    ? Math.max(0, Math.floor(lease.acquiredAt))
+    : null;
+  const ageMs = Number.isFinite(checkedAt) && acquiredAt != null
+    ? Math.max(0, Math.floor(checkedAt - acquiredAt))
+    : null;
+  return {
+    ...lease,
+    acquiredAt,
+    ageMs,
+    humanAge: ageMs == null ? "unknown" : formatMutationLeaseAge(ageMs),
+    source
+  };
+}
+
+function durableMutationLeaseSnapshot(record) {
+  const jobId = mutationLeaseContextId(record?.id);
+  return {
+    acquiredAt: mutationLeaseTimestamp(record?.startedAt ?? record?.updatedAt),
+    jobId,
+    leaseId: `job:${jobId ?? "unknown"}`,
+    ownerId: mutationLeaseOwnerId(record?.target),
+    persistent: true,
+    resourceLocks: mutationLeaseResourceLocks(record?.resourceLocks),
+    sessionId: mutationLeaseContextId(record?.sessionId)
+  };
+}
+
+function quarantinedMutationLeaseSnapshot(jobId, lease, record) {
+  const boundedJobId = mutationLeaseContextId(jobId);
+  return {
+    acquiredAt: mutationLeaseTimestamp(
+      record?.startedAt
+      ?? record?.updatedAt
+      ?? lease?.acquiredAt
+    ),
+    jobId: boundedJobId,
+    leaseId: `quarantine:${boundedJobId ?? "unknown"}`,
+    ownerId: mutationLeaseOwnerId(record?.target ?? lease?.ownerId ?? "durable_job"),
+    persistent: true,
+    resourceLocks: mutationLeaseResourceLocks(
+      lease?.resourceLocks ?? record?.resourceLocks
+    ),
+    sessionId: mutationLeaseContextId(record?.sessionId ?? lease?.sessionId)
+  };
+}
+
+function mutationLeaseResourceLocks(value) {
+  return Array.isArray(value)
+    ? value.slice(0, 64).map((lock) => ({
+        resource: String(lock?.resource ?? "").slice(0, 192),
+        mode: lock?.mode === "write" ? "write" : "read"
+      }))
+    : [];
+}
+
+function mutationLeaseTimestamp(value) {
+  if (Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatMutationLeaseAge(value) {
+  let remaining = Math.max(0, Math.floor(Number(value) || 0));
+  const units = [
+    ["d", 24 * 60 * 60 * 1000],
+    ["h", 60 * 60 * 1000],
+    ["m", 60 * 1000],
+    ["s", 1000]
+  ];
+  let text = "";
+  for (const [suffix, size] of units) {
+    const count = Math.floor(remaining / size);
+    if (count > 0) {
+      text += `${count}${suffix}`;
+      remaining -= count * size;
+    }
+  }
+  if (remaining > 0 || !text) text += `${remaining}ms`;
+  return text;
+}
+
+function compareMutationLeaseStatus(left, right) {
+  return (
+    (left.acquiredAt ?? Number.MAX_SAFE_INTEGER)
+    - (right.acquiredAt ?? Number.MAX_SAFE_INTEGER)
+    || left.source.localeCompare(right.source)
+    || left.leaseId.localeCompare(right.leaseId)
+  );
+}
+
+function safeMutationLeaseRecords(manager) {
+  try {
+    return {
+      partial: false,
+      records: manager.store.listAll({ limit: 2_000 })
+    };
+  } catch {
+    return {
+      partial: true,
+      records: []
+    };
+  }
+}
+
+function redactMutationLeaseStatus(runtime, status) {
+  const audit = sanitizeForAudit(status);
+  const snapshot = secretsStoreRedactionSnapshot(runtime?.secrets);
+  if (snapshot?.overflow) {
+    return {
+      checkedAt: audit.checkedAt ?? null,
+      leaseCount: audit.leaseCount ?? 0,
+      leases: [],
+      partial: true,
+      redactionOverflow: true
+    };
+  }
+  return redactKnownValues(
+    audit,
+    snapshot?.records?.map((record) => record.value) ?? []
+  );
 }
 
 function privateState(manager) {

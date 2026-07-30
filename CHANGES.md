@@ -2071,3 +2071,24 @@ CLINE RSI PORT WAVE 1 COMPLETE
 - The focused job, locking, receipt, and hostile-value lane passes 48/48. The
   literal Linux `npm test` lane passes 2109 tests with zero failures and zero
   skips. No environment variable, dependency, or package manifest changed.
+
+## 2026-07-29 - Mutation lease Wave 2 Fix 2: unblockable status (Codex)
+
+- Registered `mutation_lease_status` with `sideEffects: false` beside the
+  durable job controls. It returns bounded, redacted foreground, active
+  durable, and quarantined holders with owner, source, age, session/job,
+  persistence, and normalized resource-lock metadata; raw arguments are never
+  read or returned.
+- Added the tool to the chat core, the tool-radar always-direct set, and the
+  model-visible tool instructions. This keeps lease diagnosis directly
+  advertised on a trimmed casual turn and callable while a conflicting write
+  lease is held.
+- The locking regression was written first and failed 0/2 because the tool and
+  descriptor did not exist. It now proves two held foreground leases retain
+  deterministic injected-clock ages, secret-shaped arguments stay absent,
+  status dispatch succeeds through `ToolRegistry`, and durable/quarantined
+  blockers also appear.
+- The focused durable-job, chat-fastlane, and tool-search lane passes 35/35.
+  The literal Linux `npm test` lane passes 2110 tests with zero failures and
+  zero skips. No environment variable, dependency, or package manifest
+  changed.

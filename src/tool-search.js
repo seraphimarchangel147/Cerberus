@@ -33,6 +33,7 @@ const ALWAYS_DIRECT_TOOL_NAMES = new Set([
   "resume_goal",
   "clear_goal",
   "list_checkpoints",
+  "mutation_lease_status",
   "delegate_task",
   "web_search"
 ]);

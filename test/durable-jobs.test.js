@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { CHAT_CORE_TOOLS } from "../src/agent-host.js";
 import { JobManager, registerJobTools } from "../src/job-manager.js";
 import { JobStore } from "../src/job-store.js";
 import { registerDelegateTaskTool } from "../src/integrations/delegate-task.js";
@@ -132,13 +133,16 @@ test("all durable job controls are registered with correct effects and documente
   assert.equal(descriptors.get("job_wait").sideEffects, false);
   assert.equal(descriptors.get("job_collect").sideEffects, false);
   assert.equal(descriptors.get("job_cancel").sideEffects, true);
+  assert.equal(descriptors.get("mutation_lease_status").sideEffects, false);
+  assert.ok(CHAT_CORE_TOOLS.includes("mutation_lease_status"));
   const prompt = buildDefaultInstructions({ agent: { name: "Job Tester" } });
   for (const name of [
     "job_start",
     "job_status",
     "job_wait",
     "job_collect",
-    "job_cancel"
+    "job_cancel",
+    "mutation_lease_status"
   ]) {
     assert.match(prompt, new RegExp(`\\b${name}\\b`));
   }
@@ -209,6 +213,73 @@ test("mutation leases retain bounded metadata and release idempotently", (t) => 
   releasePersistent();
   releasePersistent();
   assert.deepEqual(h.jobs.inspectMutationLeases(), []);
+});
+
+test("mutation lease status is redacted, aged, and never blocked by held writes", async (t) => {
+  let now = 10_000;
+  const h = harness(t, { now: () => now });
+  const secret = "sk-test-status-secret-12345678901234567890";
+  const first = h.tools.register({
+    name: "job_test_status_first",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-status-v1",
+    jobResources: () => ["workspace/status-first"],
+    handler: async () => ({ ok: true })
+  });
+  const second = h.tools.register({
+    name: "job_test_status_second",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-status-v1",
+    jobResources: () => ["workspace/status-second"],
+    handler: async () => ({ ok: true })
+  });
+  const releaseFirst = h.jobs.acquireToolInvocation(
+    first,
+    { secret },
+    h.context({ sessionId: "lease-status-first" })
+  );
+  now = 12_500;
+  const releaseSecond = h.jobs.acquireToolInvocation(
+    second,
+    { secret },
+    h.context({ sessionId: "lease-status-second" })
+  );
+  now = 15_000;
+
+  const status = await h.tools.invoke(
+    "mutation_lease_status",
+    {},
+    h.context({ sessionId: "lease-status-reader" })
+  );
+  assert.equal(status.ok, true, JSON.stringify(status));
+  assert.deepEqual(
+    status.result.leases.map((lease) => ({
+      age: lease.humanAge,
+      ageMs: lease.ageMs,
+      ownerId: lease.ownerId,
+      source: lease.source
+    })),
+    [
+      {
+        age: "5s",
+        ageMs: 5_000,
+        ownerId: "job_test_status_first",
+        source: "foreground"
+      },
+      {
+        age: "2s500ms",
+        ageMs: 2_500,
+        ownerId: "job_test_status_second",
+        source: "foreground"
+      }
+    ]
+  );
+  assert.doesNotMatch(JSON.stringify(status), /sk-test-status-secret/u);
+
+  releaseFirst();
+  releaseSecond();
 });
 
 test("job manager rejects lock aliases and prototype-bearing JSON keys", (t) => {
@@ -362,6 +433,14 @@ test("foreground mutations honor active durable resource leases", async (t) => {
     resourceLocks: ["workspace/shared"]
   }, context);
   await until(() => typeof release === "function");
+  const held = await h.tools.invoke("mutation_lease_status", {}, context);
+  assert.equal(held.ok, true);
+  assert.ok(held.result.leases.some((lease) => (
+    lease.source === "durable"
+    && lease.jobId === started.id
+    && lease.ownerId === "job_test_foreground_lock"
+    && lease.persistent === true
+  )));
   const foreground = await h.tools.invoke(
     "job_test_foreground_lock",
     { mode: "foreground" },
@@ -545,6 +624,14 @@ test("non-cooperative jobs are quarantined without releasing conflicting locks",
     context
   );
   assert.equal(terminal.status, "cancelled");
+  const held = await h.tools.invoke("mutation_lease_status", {}, context);
+  assert.equal(held.ok, true);
+  assert.ok(held.result.leases.some((lease) => (
+    lease.source === "quarantined"
+    && lease.jobId === stuck.id
+    && lease.ownerId === "job_test_watchdog"
+    && lease.persistent === true
+  )));
 
   const conflict = h.jobs.start({
     kind: "tool",

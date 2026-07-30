@@ -6273,6 +6273,7 @@ Tools available to you (call them when useful):
 - job_status(jobId) / job_wait(jobId, timeoutMs?) - inspect or briefly wait for durable background work
 - job_collect(jobId, offset?, maxChars?) - collect an inline result or a bounded chunk from a large durable result
 - job_cancel(jobId) - request cancellation of queued or running background work
+- mutation_lease_status() - inspect redacted foreground, durable, and quarantined mutation lease holders, ages, and resource locks; remains available while writes are blocked
 - code_read(path, offset?, limit?) / code_search(pattern, dir?, glob?) - inspect source and obtain full SHA-256 content tags before editing
 - code_edit(path, tag, edits, summary?) - apply line-anchored edits only against the exact version read; syntax-invalid or stale candidates leave the file untouched
 - code_write(path, content, expectedTag?, summary?) - atomically create a file, or replace an existing file only with its latest SHA-256 expectedTag

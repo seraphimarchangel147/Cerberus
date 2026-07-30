@@ -68,6 +68,9 @@ export const CHAT_CORE_TOOLS = Object.freeze([
   "resume_goal",
   "clear_goal",
   "list_checkpoints",
+  // Lease diagnosis must remain reachable when a stuck write lease blocks
+  // every mutation lane. Its registry descriptor is strictly read-only.
+  "mutation_lease_status",
   // Even on a casual turn the agent must be able to reach out and to discover
   // the rest of its toolset — otherwise it looks (to itself) like it has no
   // send lane and no way to escalate, which is exactly the "I can't reach

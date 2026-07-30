@@ -200,6 +200,10 @@ test("AgentHost keeps chat-core tools direct and indexes the full eligible omitt
   ]);
   assert.ok(requests[0].tools.some((tool) => tool.name === "create_skill"));
   assert.ok(requests[0].tools.some((tool) => tool.name === "edit_skill"));
+  assert.ok(
+    requests[0].tools.some((tool) => tool.name === "mutation_lease_status"),
+    "mutation lease diagnosis was deferred from the chat lane"
+  );
   assert.deepEqual(requests[0].context.__advertisedTools, CHAT_CORE_TOOLS);
   assert.equal(requests[0].context.__toolSearchActive, true);
   assert.deepEqual(
