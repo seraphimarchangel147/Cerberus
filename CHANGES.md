@@ -2044,3 +2044,30 @@ UPGRADE BATCH PHASE 1 COMPLETE
   dependency was added, and no package manifest changed.
 
 CLINE RSI PORT WAVE 1 COMPLETE
+
+## 2026-07-29 - Mutation lease Wave 2 baseline (Codex)
+
+- Untouched `codex/wave-2-mutation-lease` at `f5e1115` passed the literal
+  Linux `npm test` lane with 2108 tests passing, zero failures, and zero skips.
+  The available Node 25 runner executes the 24 tests skipped in the verified
+  Node/browser-dependent baseline, so both measurements satisfy the required
+  2084-pass floor.
+- No daemon or process was restarted, no environment variable was pinned, and
+  no package manifest changed.
+
+## 2026-07-29 - Mutation lease Wave 2 Fix 1: lease metadata (Codex)
+
+- Extended the verified foreground entry at `src/job-manager.js:386` with its
+  stable lease ID, bounded tool owner ID, acquisition time, session/job IDs
+  when available, an explicit non-persistent flag, and the existing normalized
+  resource locks. Raw tool arguments are never stored.
+- Persistent workspace reservations retain `persistent: true` and now carry
+  the same safe metadata. A manager-level snapshot clones only diagnostic
+  fields and is the foundation for the read-only status tool.
+- Added an injected `now` seam without changing the existing release path.
+  The regression failed red because `inspectMutationLeases` did not exist,
+  then passed while proving foreground and persistent metadata, secret
+  exclusion, removal, and idempotent release.
+- The focused job, locking, receipt, and hostile-value lane passes 48/48. The
+  literal Linux `npm test` lane passes 2109 tests with zero failures and zero
+  skips. No environment variable, dependency, or package manifest changed.

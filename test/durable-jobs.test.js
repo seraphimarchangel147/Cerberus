@@ -42,7 +42,8 @@ function harness(t, options = {}) {
     maxRuntimeMs: options.maxRuntimeMs,
     abortGraceMs: options.abortGraceMs,
     authorizationPollMs: options.authorizationPollMs,
-    replayBatchSize: options.replayBatchSize
+    replayBatchSize: options.replayBatchSize,
+    now: options.now
   });
   runtime.jobStore = store;
   runtime.jobs = jobs;
@@ -141,6 +142,73 @@ test("all durable job controls are registered with correct effects and documente
   ]) {
     assert.match(prompt, new RegExp(`\\b${name}\\b`));
   }
+});
+
+test("mutation leases retain bounded metadata and release idempotently", (t) => {
+  let now = 1_000;
+  const h = harness(t, { now: () => now });
+  const tool = h.tools.register({
+    name: "job_test_lease_metadata",
+    parameters: {
+      type: "object",
+      properties: {
+        secret: { type: "string" }
+      },
+      required: ["secret"],
+      additionalProperties: false
+    },
+    sideEffects: true,
+    jobResourceRevision: "lease-metadata-v1",
+    jobResources: () => ["workspace/metadata"],
+    handler: async () => ({ ok: true })
+  });
+  const context = h.context({
+    sessionId: "lease-session",
+    jobId: "lease-job"
+  });
+  const release = h.jobs.acquireToolInvocation(
+    tool,
+    { secret: "sk-test-must-not-appear" },
+    context
+  );
+
+  assert.deepEqual(h.jobs.inspectMutationLeases(), [{
+    acquiredAt: 1_000,
+    jobId: "lease-job",
+    leaseId: h.jobs.inspectMutationLeases()[0].leaseId,
+    ownerId: "job_test_lease_metadata",
+    persistent: false,
+    resourceLocks: [{
+      resource: "project/default/workspace/metadata",
+      mode: "write"
+    }],
+    sessionId: "lease-session"
+  }]);
+  assert.match(h.jobs.inspectMutationLeases()[0].leaseId, /^[a-f0-9-]{36}$/u);
+  assert.doesNotMatch(
+    JSON.stringify(h.jobs.inspectMutationLeases()),
+    /sk-test-must-not-appear/u
+  );
+
+  release();
+  release();
+  assert.deepEqual(h.jobs.inspectMutationLeases(), []);
+
+  now = 2_000;
+  const releasePersistent = h.jobs.acquireWorkspaceLease(context, {
+    ownerId: "workspace_owner"
+  });
+  const [persistent] = h.jobs.inspectMutationLeases();
+  assert.equal(persistent.acquiredAt, 2_000);
+  assert.equal(persistent.ownerId, "workspace_owner");
+  assert.equal(persistent.persistent, true);
+  assert.equal(persistent.sessionId, "lease-session");
+  assert.equal(persistent.jobId, "lease-job");
+  assert.match(persistent.leaseId, /^[a-f0-9-]{36}$/u);
+
+  releasePersistent();
+  releasePersistent();
+  assert.deepEqual(h.jobs.inspectMutationLeases(), []);
 });
 
 test("job manager rejects lock aliases and prototype-bearing JSON keys", (t) => {

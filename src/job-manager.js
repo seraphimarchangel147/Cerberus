@@ -50,7 +50,8 @@ export class JobManager {
     abortGraceMs = DEFAULT_ABORT_GRACE_MS,
     authorizationPollMs = DEFAULT_AUTHORIZATION_POLL_MS,
     maxQuarantined = DEFAULT_MAX_QUARANTINED,
-    replayBatchSize = DEFAULT_REPLAY_BATCH_SIZE
+    replayBatchSize = DEFAULT_REPLAY_BATCH_SIZE,
+    now = null
   } = {}) {
     if (!runtime) throw new Error("JobManager requires a runtime.");
     if (!store) throw new Error("JobManager requires a JobStore.");
@@ -79,6 +80,11 @@ export class JobManager {
       replayBatchSize,
       DEFAULT_REPLAY_BATCH_SIZE
     );
+    this.now = typeof now === "function"
+      ? now
+      : typeof runtime.now === "function"
+        ? runtime.now.bind(runtime)
+        : Date.now;
     this.emitsEvents = true;
     this.schedulerLease = this.store.acquireSchedulerLease?.({
       shareProcess: true
@@ -384,7 +390,13 @@ export class JobManager {
     }
     const leaseId = crypto.randomUUID();
     state.foreground.set(leaseId, {
+      acquiredAt: mutationLeaseNow(this),
+      jobId: mutationLeaseContextId(context.__jobId ?? context.jobId),
+      leaseId,
       owner: this,
+      ownerId: mutationLeaseOwnerId(tool?.name),
+      persistent: false,
+      sessionId: mutationLeaseContextId(context.sessionId),
       resourceLocks: required
     });
     let released = false;
@@ -397,12 +409,22 @@ export class JobManager {
     };
   }
 
+  inspectMutationLeases() {
+    const state = privateState(this);
+    return [...state.foreground.entries()]
+      .map(([leaseId, lease]) => mutationLeaseSnapshot(leaseId, lease))
+      .sort((left, right) => (
+        left.acquiredAt - right.acquiredAt
+        || left.leaseId.localeCompare(right.leaseId)
+      ));
+  }
+
   acquireWorkspaceLease(context = {}, { ownerId } = {}) {
     const project = authorizeContextProject(this.runtime, context, {
       includeArchived: false,
       requireSession: true
     });
-    return reserveWorkspaceLease(this, project, ownerId);
+    return reserveWorkspaceLease(this, project, ownerId, context);
   }
 
   acquireProjectWorkspaceLease(projectId, { ownerId } = {}) {
@@ -954,7 +976,7 @@ export class JobManager {
   }
 }
 
-function reserveWorkspaceLease(manager, project, ownerId) {
+function reserveWorkspaceLease(manager, project, ownerId, context = {}) {
   const owner = String(ownerId ?? "").trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(owner)) {
     throw new TypeError("Workspace lease ownerId is invalid.");
@@ -986,9 +1008,13 @@ function reserveWorkspaceLease(manager, project, ownerId) {
   }
   const leaseId = crypto.randomUUID();
   state.foreground.set(leaseId, {
+    acquiredAt: mutationLeaseNow(manager),
+    jobId: mutationLeaseContextId(context.__jobId ?? context.jobId),
+    leaseId,
     owner: manager,
     ownerId: owner,
     persistent: true,
+    sessionId: mutationLeaseContextId(context.sessionId),
     resourceLocks: required
   });
   let released = false;
@@ -1649,6 +1675,55 @@ function safeErrorCode(value) {
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function mutationLeaseNow(manager) {
+  try {
+    const value = Number(manager?.now?.());
+    if (Number.isFinite(value) && value >= 0) return Math.floor(value);
+  } catch {
+    // Metadata is diagnostic; lock acquisition retains its prior behavior.
+  }
+  return Date.now();
+}
+
+function mutationLeaseContextId(value) {
+  try {
+    const text = String(value ?? "").trim();
+    return text ? text.slice(0, 256) : null;
+  } catch {
+    return null;
+  }
+}
+
+function mutationLeaseOwnerId(value) {
+  try {
+    const text = String(value ?? "").trim();
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(text)
+      ? text
+      : "unknown_tool";
+  } catch {
+    return "unknown_tool";
+  }
+}
+
+function mutationLeaseSnapshot(leaseId, lease) {
+  return {
+    acquiredAt: Number.isFinite(lease?.acquiredAt)
+      ? Math.max(0, Math.floor(lease.acquiredAt))
+      : 0,
+    jobId: mutationLeaseContextId(lease?.jobId),
+    leaseId: String(lease?.leaseId ?? leaseId).slice(0, 128),
+    ownerId: mutationLeaseOwnerId(lease?.ownerId),
+    persistent: lease?.persistent === true,
+    resourceLocks: Array.isArray(lease?.resourceLocks)
+      ? lease.resourceLocks.map((lock) => ({
+          resource: String(lock?.resource ?? "").slice(0, 192),
+          mode: lock?.mode === "write" ? "write" : "read"
+        }))
+      : [],
+    sessionId: mutationLeaseContextId(lease?.sessionId)
+  };
 }
 
 function privateState(manager) {
