@@ -14365,8 +14365,10 @@ switchTab(initialTab);
     var pal=isAlpha?PAL5:PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
     var gx=P.gazeX||0, gy=P.gazeY||0, squash=P.squash||1, sad=P.sad||0, lean=P.lean||0;
     var clawFlex = reduced?0:(0.5+0.5*Math.sin(flick*0.06));
-    omegaFlameWall(ctx, W, H, flick, pal, flameI);
-    omegaLavaCrust(ctx, W, H, flick, pal);
+    /* ALPHA gets its own cold backdrop (crystal spires over a frozen crust);
+       OMEGA keeps the flame wall over lava. Not a recolor — different geometry. */
+    if (isAlpha) { alphaCrystalWall(ctx, W, H, flick, pal, flameI); alphaFrostCrust(ctx, W, H, flick, pal); }
+    else { omegaFlameWall(ctx, W, H, flick, pal, flameI); omegaLavaCrust(ctx, W, H, flick, pal); }
 
     /* Skeletal side sprite: OMEGA fire-beast or ALPHA armored art. The baked
        pose is a walking stride; the rig adds gait-bounce + head bob. Falls
@@ -14441,9 +14443,12 @@ switchTab(initialTab);
     pxLine(ctx,52+nl,62+bob+droop*0.5,56,94+bob*0.3,12,pal.furDark);
     pxLine(ctx,70+nl,72+bob*0.8+droop,68,94+bob*0.3,10,pal.furDark);
     var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
-    omegaHead(ctx,34+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal);
-    omegaHead(ctx,52+nl,54+bob+droop*0.5+(lean?1:0),{dir:-1,size:1.25,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal);
-    omegaHead(ctx,70+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy},pal);
+    /* ALPHA wears armored helms with visor slits; OMEGA keeps its flame-maned
+       skulls. Same anchor points, entirely different head art. */
+    var headFn = isAlpha ? alphaHead : omegaHead;
+    headFn(ctx,34+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
+    headFn(ctx,52+nl,54+bob+droop*0.5+(lean?1:0),{dir:-1,size:1.25,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
+    headFn(ctx,70+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
     if (walk) for (var ei=0;ei<6;ei++){var ex=118+((flick*0.8+ei*9)%30),ey=60+((ei*7+flick*0.3)%30);ctx.fillStyle=ei%2?pal.flameOrg:pal.goldHi;ctx.globalAlpha=0.8-(ex-118)/36;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
     }
 
@@ -14480,10 +14485,410 @@ switchTab(initialTab);
     ctx.globalAlpha = 1;
   }
 
-  function drawAlphaFront(ctx, P) {
-    drawOmegaFront(ctx, P, true);
-    alphaCorona(ctx, 160, 160, P.flick || 0, PAL5);
+  /* ── ALPHA head: an ANGULAR ARMORED HELM, not OMEGA's flame-maned skull.
+     Faceted gunmetal plate, a glowing visor slit instead of two soft eyes, a
+     crown of crystal shards instead of a fire mane, riveted cheek plates and
+     an exposed segmented jaw. Same call signature as omegaHead so it drops
+     into both the front and side rigs. ── */
+  function alphaHead(ctx, cx, cy, o, pal) {
+    var dir = o.dir||0, s = o.size||1, roar = o.roar||false, blink = o.blink||0;
+    var gx = o.gazeX||0, gy = o.gazeY||0, jaw = o.jaw||0, ff = o.crestFlick||0;
+    var hw = Math.round(11*s), hh = Math.round(10*s);
+    var pulse = reduced ? 0.8 : (0.6 + 0.4*Math.sin(ff*0.14));
+
+    /* faceted helm — two mirrored triangles give hard angular cheekbones that
+       an ellipse cannot, so the silhouette reads as forged plate not fur */
+    pxTri(ctx, cx-hw-1, cy-2, cx, cy-hh-2, cx+hw+1, cy-2, pal.outline);
+    pxTri(ctx, cx-hw-1, cy-2, cx, cy+hh+2, cx+hw+1, cy-2, pal.outline);
+    pxTri(ctx, cx-hw, cy-2, cx, cy-hh, cx+hw, cy-2, pal.furDark);
+    pxTri(ctx, cx-hw, cy-2, cx, cy+hh, cx+hw, cy-2, pal.furMid);
+    /* top facet catching the cold key light + a central skull ridge */
+    pxTri(ctx, cx-Math.round(hw*0.62), cy-4, cx, cy-hh+1, cx+Math.round(hw*0.62), cy-4, pal.furLight);
+    pxLine(ctx, cx, cy-hh+1, cx, cy+3, 1, pal.furHi);
+    /* plate seam running the jawline, lit by the core energy */
+    ctx.globalAlpha = pulse*0.8;
+    pxLine(ctx, cx-hw+2, cy+2, cx, cy+hh-2, 1, pal.gem);
+    pxLine(ctx, cx+hw-2, cy+2, cx, cy+hh-2, 1, pal.gem);
+    ctx.globalAlpha = 1;
+    /* riveted cheek plates */
+    for (var rv=0; rv<2; rv++) {
+      var rvs = rv ? 1 : -1;
+      pxTri(ctx, cx+rvs*(hw-2), cy-1, cx+rvs*(hw-8), cy-3, cx+rvs*(hw-5), cy+5, pal.furDark);
+      pxTri(ctx, cx+rvs*(hw-3), cy-1, cx+rvs*(hw-8), cy-2, cx+rvs*(hw-6), cy+3, pal.furLight);
+      pxRect(ctx, cx+rvs*(hw-4), cy, 1, 1, pal.gem);
+    }
+
+    /* crown of crystal shards — the ALPHA answer to OMEGA's fire mane */
+    var shards = 5;
+    for (var k=0; k<shards; k++) {
+      var u = k - (shards-1)/2;
+      var sx0 = cx + Math.round(u*hw*0.46);
+      var boost = (k===2) ? 8 : (k===1||k===3) ? 4 : 0;
+      var hgt = Math.round((8 + boost)*s);
+      var sway = reduced ? 0 : Math.sin(ff*0.06 + k)*0.8;
+      pxTri(ctx, sx0+sway, cy-hh-hgt, sx0-3, cy-hh+2, sx0+3, cy-hh+2, pal.outline);
+      pxTri(ctx, sx0+sway, cy-hh-hgt+1, sx0-2, cy-hh+1, sx0+2, cy-hh+1, pal.furMid);
+      pxTri(ctx, sx0+sway, cy-hh-hgt+2, sx0-1, cy-hh, sx0+1, cy-hh, pal.furLight);
+      ctx.globalAlpha = pulse;
+      pxLine(ctx, sx0+sway, cy-hh-hgt+2, sx0+sway, cy-hh, 1, pal.gem);
+      pxRect(ctx, Math.round(sx0+sway), Math.round(cy-hh-hgt+1), 1, 2, pal.gemCore);
+      ctx.globalAlpha = 1;
+    }
+    /* swept horn blades on the center head only */
+    if (dir === 0) {
+      var hb = Math.round(13*s);
+      pxLine(ctx, cx-hw+2, cy-hh+2, cx-hw-7, cy-hh-hb*0.55, 3, pal.furDark);
+      pxLine(ctx, cx-hw-7, cy-hh-hb*0.55, cx-hw-13, cy-hh-hb, 2, pal.furMid);
+      pxLine(ctx, cx+hw-2, cy-hh+2, cx+hw+7, cy-hh-hb*0.55, 3, pal.furDark);
+      pxLine(ctx, cx+hw+7, cy-hh-hb*0.55, cx+hw+13, cy-hh-hb, 2, pal.furMid);
+      ctx.globalAlpha = pulse;
+      pxRect(ctx, cx-hw-13, cy-hh-hb, 2, 2, pal.gemCore);
+      pxRect(ctx, cx+hw+13, cy-hh-hb, 2, 2, pal.gemCore);
+      ctx.globalAlpha = 1;
+    }
+
+    /* brow plate + VISOR SLIT (one continuous glowing band, not two eyes) */
+    var ey = cy-2;
+    pxLine(ctx, cx-hw+1, ey-4, cx+hw-1, ey-4, 3, pal.furDeep);
+    pxLine(ctx, cx-hw+1, ey-5, cx+hw-1, ey-5, 1, pal.furHi);
+    if (blink > 0.9) {
+      pxRect(ctx, cx-hw+2, ey, (hw-2)*2, 1, pal.outline);
+    } else {
+      pxRect(ctx, cx-hw+2, ey-1, (hw-2)*2, 1, pal.outline);
+      ctx.globalAlpha = 0.55*pulse;
+      pxRect(ctx, cx-hw+2, ey, (hw-2)*2, 3, pal.gem);
+      ctx.globalAlpha = 1;
+      /* twin bright pupils sliding inside the slit as the gaze tracks */
+      var pL = cx - Math.round(hw*0.48) + gx*2, pR = cx + Math.round(hw*0.48) + gx*2;
+      pxRect(ctx, pL, ey+Math.round(gy*0.5), 3, 3, pal.gem);
+      pxRect(ctx, pL+1, ey+1+Math.round(gy*0.5), 1, 1, pal.gemCore);
+      pxRect(ctx, pR, ey+Math.round(gy*0.5), 3, 3, pal.gem);
+      pxRect(ctx, pR+1, ey+1+Math.round(gy*0.5), 1, 1, pal.gemCore);
+    }
+
+    /* muzzle — an angular armored wedge with a segmented mandible */
+    var mx = cx + dir*Math.round(4*s);
+    var mo = roar ? Math.round(4*s) : Math.round(jaw);
+    pxTri(ctx, mx-Math.round(6*s), cy+3, mx+dir*Math.round(8*s), cy+5, mx-Math.round(6*s), cy+Math.round(9*s), pal.outline);
+    pxTri(ctx, mx-Math.round(5*s), cy+4, mx+dir*Math.round(7*s), cy+5, mx-Math.round(5*s), cy+Math.round(8*s), pal.furDark);
+    pxLine(ctx, mx-Math.round(4*s), cy+5, mx+dir*Math.round(6*s), cy+5, 1, pal.furLight);
+    /* nostril vent */
+    pxRect(ctx, mx+dir*Math.round(6*s), cy+4, 2, 1, pal.nose);
+    /* lower mandible drops open on roar */
+    pxTri(ctx, mx-Math.round(5*s), cy+Math.round(8*s)+mo, mx+dir*Math.round(6*s), cy+Math.round(7*s)+mo, mx-Math.round(5*s), cy+Math.round(11*s)+mo, pal.furDark);
+    ctx.globalAlpha = pulse*0.9;
+    pxLine(ctx, mx-Math.round(4*s), cy+Math.round(9*s)+mo, mx+dir*Math.round(5*s), cy+Math.round(8*s)+mo, 1, pal.gem);
+    ctx.globalAlpha = 1;
+    /* fangs bracketing the gap */
+    for (var fg=0; fg<3; fg++) {
+      var fx0 = mx - Math.round(3*s) + fg*Math.round(3*s)*(dir||1);
+      pxTri(ctx, fx0, cy+Math.round(6*s), fx0-1, cy+Math.round(8*s)+mo*0.5, fx0+1, cy+Math.round(6*s), pal.fang);
+    }
+    /* throat energy glow visible when the jaw is open */
+    if (mo > 1) {
+      ctx.globalAlpha = pulse*0.7;
+      pxEllipse(ctx, mx, cy+Math.round(8*s)+mo*0.5, Math.round(3*s), Math.round(mo*0.6), pal.gem);
+      ctx.globalAlpha = 1;
+    }
   }
+
+  /* ── ALPHA chest: a HEXAGONAL REACTOR CORE in layered plate, replacing
+     OMEGA's gold chain-and-rhombus heraldry entirely. ── */
+  function alphaChestPlate(ctx, cx, cy, flick, pal, flare, breathe) {
+    var pulse = flare ? 1 : (reduced ? 0.8 : (0.6 + 0.4*Math.sin(flick*0.12)));
+    var by = cy + breathe;
+    var i, ang, x0, y0;
+
+    /* collar: overlapping angular gorget plates instead of a spiked ring */
+    for (i=0; i<5; i++) {
+      var gu = i - 2;
+      var gx0 = cx + gu*9;
+      pxTri(ctx, gx0, by-17, gx0-5, by-9, gx0+5, by-9, pal.outline);
+      pxTri(ctx, gx0, by-16, gx0-4, by-9, gx0+4, by-9, pal.furMid);
+      pxTri(ctx, gx0, by-15, gx0-2, by-10, gx0+2, by-10, pal.furLight);
+      ctx.globalAlpha = pulse*0.7;
+      pxRect(ctx, gx0, by-15, 1, 3, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+    pxRect(ctx, cx-22, by-9, 44, 2, pal.furDark);
+    ctx.globalAlpha = pulse*0.8;
+    pxRect(ctx, cx-22, by-9, 44, 1, pal.gem);
+    ctx.globalAlpha = 1;
+
+    /* stacked pectoral plates flanking the core, hard-edged and layered */
+    for (i=0; i<3; i++) {
+      var py = by - 4 + i*7;
+      var pw = 20 - i*3;
+      pxTri(ctx, cx-9, py, cx-9-pw, py-3, cx-9-pw+4, py+6, pal.outline);
+      pxTri(ctx, cx-9, py+1, cx-8-pw, py-2, cx-9-pw+5, py+5, pal.furMid);
+      pxLine(ctx, cx-10, py+1, cx-7-pw, py-1, 1, pal.furLight);
+      pxTri(ctx, cx+9, py, cx+9+pw, py-3, cx+9+pw-4, py+6, pal.outline);
+      pxTri(ctx, cx+9, py+1, cx+8+pw, py-2, cx+9+pw-5, py+5, pal.furMid);
+      pxLine(ctx, cx+10, py+1, cx+7+pw, py-1, 1, pal.furLight);
+      ctx.globalAlpha = pulse*0.55;
+      pxLine(ctx, cx-11, py+4, cx-6-pw, py+1, 1, pal.gem);
+      pxLine(ctx, cx+11, py+4, cx+6+pw, py+1, 1, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+
+    /* THE CORE — a hexagon, not a rhombus. Bezel, rotating rune ring, and a
+       white-hot centre whose bloom breathes with the pulse. */
+    var gy2 = by + 2;
+    var hexR = 11, i2;
+    ctx.globalAlpha = pulse*0.30;
+    pxEllipse(ctx, cx, gy2, hexR+7, hexR+7, pal.gemHalo);
+    ctx.globalAlpha = 1;
+    /* bezel ring: six struts framing the hexagon */
+    for (i2=0; i2<6; i2++) {
+      ang = i2*(Math.PI/3);
+      x0 = cx + Math.cos(ang)*hexR;
+      y0 = gy2 + Math.sin(ang)*hexR;
+      var xn = cx + Math.cos(ang+Math.PI/3)*hexR;
+      var yn = gy2 + Math.sin(ang+Math.PI/3)*hexR;
+      pxLine(ctx, x0, y0, xn, yn, 3, pal.outline);
+      pxLine(ctx, x0, y0, xn, yn, 2, pal.furLight);
+      pxRect(ctx, Math.round(x0), Math.round(y0), 2, 2, pal.furHi);
+    }
+    /* inner hex fill + molten-cyan centre */
+    ctx.globalAlpha = 0.85;
+    pxEllipse(ctx, cx, gy2, hexR-3, hexR-3, pal.gemHalo);
+    ctx.globalAlpha = pulse;
+    pxEllipse(ctx, cx, gy2, hexR-5, hexR-5, pal.gem);
+    pxEllipse(ctx, cx, gy2, hexR-8, hexR-8, pal.gemCore);
+    ctx.globalAlpha = 1;
+    /* rotating rune ring — six glyph ticks orbiting the bezel */
+    for (i2=0; i2<6; i2++) {
+      ang = flick*0.04 + i2*(Math.PI/3);
+      x0 = cx + Math.cos(ang)*(hexR+5);
+      y0 = gy2 + Math.sin(ang)*(hexR+5);
+      ctx.globalAlpha = 0.45 + 0.45*Math.sin(flick*0.1 + i2);
+      pxRect(ctx, Math.round(x0), Math.round(y0), 2, 2, pal.gemCore);
+      ctx.globalAlpha = 1;
+    }
+    /* power conduits feeding the core from each shoulder */
+    for (i2=0; i2<2; i2++) {
+      var cs = i2 ? 1 : -1;
+      pxLine(ctx, cx+cs*22, by-6, cx+cs*(hexR+2), gy2-2, 2, pal.furDark);
+      ctx.globalAlpha = pulse*0.8;
+      pxLine(ctx, cx+cs*21, by-6, cx+cs*(hexR+2), gy2-2, 1, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+
+    /* abdominal segment bands below the core — banded, not a chevron */
+    for (i2=0; i2<3; i2++) {
+      var ab = by + 16 + i2*5;
+      var aw = 15 - i2*4;
+      pxLine(ctx, cx-aw, ab, cx+aw, ab, 4, pal.outline);
+      pxLine(ctx, cx-aw, ab, cx+aw, ab, 3, pal.furMid);
+      pxLine(ctx, cx-aw+1, ab-1, cx+aw-1, ab-1, 1, pal.furLight);
+      ctx.globalAlpha = pulse*0.5;
+      pxLine(ctx, cx-aw+1, ab+2, cx+aw-1, ab+2, 1, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /* ── ALPHA forelimb: a segmented armored gauntlet — banded vambrace plates,
+     a knuckle guard and four bladed talons. Replaces OMEGA's furred limb. ── */
+  function alphaForelimb(ctx, sx, sy, dir, flick, pal, flex) {
+    var curl = (flex||0)*1.4;
+    var pulse = reduced ? 0.8 : (0.6 + 0.4*Math.sin(flick*0.12));
+    /* angular pauldron capping the shoulder */
+    pxTri(ctx, sx, sy-10, sx - dir*13, sy-4, sx - dir*4, sy+7, pal.outline);
+    pxTri(ctx, sx, sy-9, sx - dir*12, sy-4, sx - dir*4, sy+6, pal.furMid);
+    pxTri(ctx, sx-dir*2, sy-7, sx - dir*10, sy-4, sx - dir*5, sy+1, pal.furLight);
+    ctx.globalAlpha = pulse;
+    pxLine(ctx, sx - dir*11, sy-3, sx - dir*4, sy+5, 1, pal.gem);
+    ctx.globalAlpha = 1;
+    /* upper arm + vambrace: three stacked bands down the limb */
+    var ax = sx + dir*6;
+    pxLine(ctx, sx+dir*2, sy+6, ax, sy+26, 10, pal.outline);
+    pxLine(ctx, sx+dir*2, sy+6, ax, sy+26, 8, pal.furDark);
+    for (var bd=0; bd<3; bd++) {
+      var bt = 0.22 + bd*0.28;
+      var bx0 = sx + dir*2 + (ax - (sx+dir*2))*bt;
+      var by0 = sy + 6 + 20*bt;
+      pxLine(ctx, bx0-5, by0, bx0+5, by0-1, 4, pal.furMid);
+      pxLine(ctx, bx0-4, by0-1, bx0+4, by0-2, 1, pal.furLight);
+      ctx.globalAlpha = pulse*0.7;
+      pxLine(ctx, bx0-4, by0+2, bx0+4, by0+1, 1, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+    /* knuckle guard */
+    pxEllipse(ctx, ax, sy+28, 9, 5, pal.outline);
+    pxEllipse(ctx, ax, sy+28, 8, 4, pal.furMid);
+    pxEllipse(ctx, ax-dir*2, sy+27, 4, 2, pal.furLight);
+    for (var kg=0; kg<3; kg++) {
+      ctx.globalAlpha = pulse;
+      pxRect(ctx, Math.round(ax-5+kg*4), sy+26, 2, 2, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+    /* four bladed talons */
+    var clawLen = 11;
+    for (var d=0; d<4; d++) {
+      var dx = ax - dir*6 + dir*d*4;
+      var cy0 = sy + 32;
+      var cx1 = dx + dir*2 + curl*dir, cy1 = cy0 + clawLen*0.55;
+      var cx2 = dx + dir*3 + curl*1.6*dir, cy2 = cy0 + clawLen;
+      pxLine(ctx, dx, cy0, cx1, cy1, 3, pal.outline);
+      pxLine(ctx, cx1, cy1, cx2, cy2, 2, pal.outline);
+      pxLine(ctx, dx, cy0, cx1, cy1, 2, pal.claw);
+      pxLine(ctx, cx1, cy1, cx2, cy2, 1, pal.clawHi);
+    }
+  }
+
+  /* ── ALPHA backdrop: a CRYSTAL SPIRE FIELD, the cold inverse of OMEGA's
+     flame wall — faceted shards jutting up from a frozen crust. ── */
+  function alphaCrystalWall(ctx, W, H, flick, pal, flameI) {
+    flameI = flameI==null?1:flameI;
+    var groundY = H-16;
+    var g = ctx.createRadialGradient(W/2, H*0.62, 10, W/2, H*0.62, W*0.62);
+    g.addColorStop(0, palA(pal.flameOrg, 0.30));
+    g.addColorStop(0.55, palA(pal.flameRed, 0.14));
+    g.addColorStop(1, palA(pal.flameDeep, 0));
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    /* faceted spires: each is a hard triangle with a lit left face and a dark
+       right face, so they read as crystal rather than as blue fire. Kept SHORT
+       and WIDE — tall thin ones read as vertical light streaks and swallowed
+       the creature, which is the subject. Backdrop stays subordinate. */
+    for (var i=0;i<9;i++){
+      var fx = 8 + i*((W-16)/8) + ((i%3)-1)*3;
+      var cB = 1 + 0.30*Math.cos(((fx-W/2)/(W/2))*Math.PI/2);
+      /* flameI is 1.95 on ALPHA, which would triple these and turn the spires
+         back into full-height light streaks. Damp it, then hard-cap at 40% of
+         canvas height so the backdrop can never out-compete the creature. */
+      var fi2 = 1 + (flameI-1)*0.25;
+      var hgt = Math.max(10, Math.min(Math.round(H*0.40), Math.round((26 + 16*Math.abs(Math.sin(i*2.3+1)))*fi2*cB)));
+      var wid = 9 + (i%3)*4;
+      var shimmer = reduced ? 0 : Math.sin(flick*0.09 + i)*1.2;
+      ctx.globalAlpha = 0.55;
+      pxTri(ctx, fx+shimmer, groundY-hgt, fx-wid, groundY, fx+wid, groundY, pal.flameDeep);
+      pxTri(ctx, fx+shimmer, groundY-hgt+3, fx-wid+2, groundY, fx+2, groundY, pal.flameRed);
+      pxTri(ctx, fx+shimmer, groundY-hgt+6, fx-wid+5, groundY, fx-1, groundY, pal.flameOrg);
+      /* hot inner seam + tip spark */
+      ctx.globalAlpha = 0.30 + (reduced?0:0.16*Math.sin(flick*0.13+i));
+      pxLine(ctx, fx+shimmer, groundY-hgt+4, fx+shimmer, groundY-4, 1, pal.flameYel);
+      pxRect(ctx, Math.round(fx+shimmer), Math.round(groundY-hgt), 1, 3, pal.flameCore);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /* ── ALPHA ground: frozen crust with fracture lines, replacing lava crust ── */
+  function alphaFrostCrust(ctx, W, H, flick, pal) {
+    var groundY = H-16;
+    pxRect(ctx, 0, groundY, W, H-groundY, pal.furDeep);
+    pxRect(ctx, 0, groundY, W, 1, pal.furMid);
+    for (var i=0;i<9;i++){
+      var fx = 6 + i*((W-12)/8);
+      var fy = groundY + 3 + (i%3)*4;
+      ctx.globalAlpha = 0.35 + (reduced?0:0.3*Math.sin(flick*0.1+i));
+      pxLine(ctx, fx-6, fy, fx+5, fy+2, 1, pal.gem);
+      pxLine(ctx, fx, fy+1, fx+3, fy+5, 1, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+    /* reflected core glow pooling under the beast */
+    ctx.globalAlpha = 0.18 + (reduced?0:0.06*Math.sin(flick*0.11));
+    pxEllipse(ctx, W/2, groundY+5, 46, 5, pal.gem);
+    ctx.globalAlpha = 1;
+  }
+
+  /* ── ALPHA FRONT — its own composition, NOT drawOmegaFront recolored ──── */
+  function drawAlphaFront(ctx, P) {
+    var W=160, H=160; ctx.clearRect(0,0,W,H);
+    var pal = PAL5;
+    var bob=P.bob||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
+    var gx=P.gazeX||0, gy=P.gazeY||0, sad=P.sad||0, droop=sad*3, howl=P.howl||0;
+    var hl=P.headL||0, hr=P.headR||0, hc=P.headC||0, headLift=howl*8;
+    var breathe = reduced?0:Math.sin(flick*0.09)*2;
+    var shoulderB = reduced?0:Math.sin(flick*0.09+0.8)*1;
+    var clawFlex = reduced?0:(0.5+0.5*Math.sin(flick*0.06));
+    var jawChatter = reduced?0:Math.max(0, Math.sin(flick*0.5))*1.5;
+    var yawL = reduced?0:Math.sin(flick*0.043+1)*1.5;
+    var yawR = reduced?0:Math.sin(flick*0.037+3)*1.5;
+    var yawC = reduced?0:Math.sin(flick*0.03+5)*0.8;
+    var blinkL = ((flick+40)%130<4)?1:0;
+    var blinkR = ((flick+85)%150<4)?1:0;
+    var blinkC = P.blink||0;
+    var pulse = reduced ? 0.8 : (0.6 + 0.4*Math.sin(flick*0.12));
+
+    alphaCrystalWall(ctx, W, H, flick, pal, flameI);
+    alphaFrostCrust(ctx, W, H, flick, pal);
+
+    /* grounding shadows behind the planted forelimbs */
+    pxEllipse(ctx, 40, 150, 17, 6, pal.outline);
+    pxEllipse(ctx, 118, 150, 17, 6, pal.outline);
+
+    /* torso: dark gunmetal mass, then HARD ANGULAR PLATES layered over it so
+       the body reads as forged armor rather than OMEGA's organic hide */
+    pxEllipse(ctx, 80, 108+breathe*0.5, 44, 26, pal.outline);
+    pxEllipse(ctx, 80, 108+breathe*0.5, 42, 24, pal.furDark);
+    pxEllipse(ctx, 80, 100+breathe*0.5, 34, 22, pal.furMid);
+    /* cold interior glow — the core lights the plate from inside */
+    ctx.globalAlpha = 0.14 + 0.05*Math.sin(flick*0.1);
+    pxEllipse(ctx, 80, 102+breathe*0.5, 28, 18, pal.gemHalo);
+    ctx.globalAlpha = 1;
+    /* flank plating: three angular slabs each side, hard top highlights */
+    for (var fp=0; fp<3; fp++) {
+      var fy2 = 96 + fp*9 + breathe*0.5;
+      var fw = 18 - fp*3;
+      pxTri(ctx, 62, fy2, 62-fw, fy2-4, 62-fw+5, fy2+7, pal.outline);
+      pxTri(ctx, 62, fy2+1, 61-fw, fy2-3, 62-fw+6, fy2+6, pal.furMid);
+      pxLine(ctx, 61, fy2, 60-fw, fy2-2, 1, pal.furLight);
+      pxTri(ctx, 98, fy2, 98+fw, fy2-4, 98+fw-5, fy2+7, pal.outline);
+      pxTri(ctx, 98, fy2+1, 99+fw, fy2-3, 98+fw-6, fy2+6, pal.furMid);
+      pxLine(ctx, 99, fy2, 100+fw, fy2-2, 1, pal.furLight);
+      ctx.globalAlpha = pulse*0.45;
+      pxLine(ctx, 60, fy2+4, 59-fw, fy2+1, 1, pal.gem);
+      pxLine(ctx, 100, fy2+4, 101+fw, fy2+1, 1, pal.gem);
+      ctx.globalAlpha = 1;
+    }
+    /* deltoid armor caps */
+    pxTri(ctx, 46, 90+shoulderB, 34, 100+shoulderB, 58, 100+shoulderB, pal.outline);
+    pxTri(ctx, 46, 91+shoulderB, 36, 99+shoulderB, 56, 99+shoulderB, pal.furMid);
+    pxTri(ctx, 46, 93+shoulderB, 40, 98+shoulderB, 52, 98+shoulderB, pal.furLight);
+    pxTri(ctx, 114, 90+shoulderB, 102, 100+shoulderB, 126, 100+shoulderB, pal.outline);
+    pxTri(ctx, 114, 91+shoulderB, 104, 99+shoulderB, 124, 99+shoulderB, pal.furMid);
+    pxTri(ctx, 114, 93+shoulderB, 108, 98+shoulderB, 120, 98+shoulderB, pal.furLight);
+
+    /* armored forelimbs */
+    alphaForelimb(ctx, 46, 104+shoulderB, -1, flick, pal, clawFlex);
+    alphaForelimb(ctx, 114, 104+shoulderB, 1, flick, pal, clawFlex);
+
+    /* necks: segmented vertebral columns with glowing inter-plate seams */
+    var neckSpec = [[62, 96, 48+hl+yawL, 66], [80, 94, 80+hc+yawC, 54], [98, 96, 112+hr+yawR, 66]];
+    for (var nk=0; nk<3; nk++) {
+      var ns = neckSpec[nk];
+      var bx0 = ns[0], by0 = ns[1]+breathe*0.5;
+      var tx0 = ns[2], ty0 = ns[3] + (nk===1 ? bob+droop*0.5 : bob*0.8+droop) - headLift;
+      pxLine(ctx, bx0, by0, tx0, ty0, nk===1?14:12, pal.outline);
+      pxLine(ctx, bx0, by0, tx0, ty0, nk===1?12:10, pal.furDark);
+      for (var sg=0; sg<4; sg++) {
+        var st = 0.18 + sg*0.22;
+        var sgx = bx0 + (tx0-bx0)*st, sgy = by0 + (ty0-by0)*st;
+        var sgw = (nk===1?6:5) - sg*0.6;
+        pxLine(ctx, sgx-sgw, sgy+1, sgx+sgw, sgy, 3, pal.furMid);
+        pxLine(ctx, sgx-sgw+1, sgy, sgx+sgw-1, sgy-1, 1, pal.furLight);
+        ctx.globalAlpha = pulse*0.7;
+        pxLine(ctx, sgx-sgw+1, sgy+2, sgx+sgw-1, sgy+1, 1, pal.gem);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    /* reactor breastplate, drawn over the necks so the core sits in front */
+    alphaChestPlate(ctx, 80, 96+breathe*0.5, flick, pal, P.runeFlare, breathe*0.5);
+
+    /* three armored helms */
+    var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
+    alphaHead(ctx, 48+hl+yawL, 62+bob*0.8+droop-headLift, {dir:-1,size:1.05,roar:P.roarSide||false,blink:blinkL,gazeX:hgx,gazeY:hgy,jaw:jawChatter,crestFlick:flick}, pal);
+    alphaHead(ctx, 112+hr+yawR, 62+bob*0.8+droop-headLift, {dir:1,size:1.05,roar:P.roarSide||false,blink:blinkR,gazeX:hgx,gazeY:hgy,jaw:jawChatter,crestFlick:flick}, pal);
+    alphaHead(ctx, 80+hc+yawC, 50+bob+droop*0.5-headLift, {dir:0,size:1.3,roar:P.roarCenter!==false,blink:blinkC,gazeX:hgx,gazeY:hgy,jaw:0,crestFlick:flick}, pal);
+
+    /* signature effects */
+    alphaEnergyFX(ctx, W, H, flick, pal);
+    if (P.runeFlare) for (var oi=0;oi<8;oi++){var ang2=flick*0.15+oi*(Math.PI*2/8);ctx.fillStyle=oi%2?pal.gemCore:pal.gem;ctx.globalAlpha=0.9;ctx.fillRect(Math.round(80+Math.cos(ang2)*52),Math.round(60+Math.sin(ang2)*26),2,2);ctx.globalAlpha=1;}
+    if (P.fireBreath) drawFireBreath(ctx, 80, 40, 110, 20, P.fireBreath, flick, pal);
+    alphaCorona(ctx, W, H, flick, pal);
+  }
+
   function drawAlphaSide(ctx, P) {
     drawOmegaSide(ctx, P, true);
     alphaCorona(ctx, 160, 160, P.flick || 0, PAL5);
@@ -15155,10 +15560,14 @@ switchTab(initialTab);
       var ox = Math.round((DW-sw)/2), oy = DH-sh;
       pxEllipse(nctx, DW/2, DH-2*res, Math.round(sw*0.42), 2*res, "rgba(0,0,0,0.5)");
       nctx.save();
-      /* Procedural forms (0-2) face LEFT; baked sprite forms (3-4) face RIGHT.
-         Flip the canvas horizontally so the pet faces its travel direction. */
-      var bakedArt = settings.stage >= 3;
-      var needFlip = bakedArt ? (facing < 0) : (facing > 0);
+      /* EVERY side pose is drawn facing LEFT — the procedural rigs for forms
+         0-2 and, since the Option-A rewrite, the fully-procedural OMEGA/ALPHA
+         rigs too (drawOmegaSide fans its heads at x=34..70, i.e. left). The old
+         bakedArt branch dated from the baked-sprite era, when forms 3-4 came
+         from a right-facing PNG atlas; that art is no longer drawn (skelOK is
+         hard-false), so the branch inverted the walk direction for OMEGA and
+         ALPHA. One rule now: flip only when travelling RIGHT. */
+      var needFlip = facing > 0;
       if (P.view === "side" && needFlip) { nctx.translate(DW, 0); nctx.scale(-1, 1); ox = DW-ox-sw; }
       nctx.drawImage(b.canvas, ox, oy);
       nctx.restore();
