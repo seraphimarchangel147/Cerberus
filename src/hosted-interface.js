@@ -14067,7 +14067,7 @@ switchTab(initialTab);
 
     /* Skeletal sprite: OMEGA uses the fire-beast art, ALPHA uses its own unique
        armored art. Falls back to the procedural rig until the PNGs decode. */
-    var skelOK = isAlpha ? drawAlphaSprite(ctx, P) : drawOmegaSprite(ctx, P);
+    var skelOK = false; /* Option A: full procedural — every frame drawn from scratch */
     if (!skelOK) {
 
     /* torso — broad inverted trapezoid, chest out, cropped at the forelimbs */
@@ -14122,7 +14122,7 @@ switchTab(initialTab);
     }
 
     /* ALPHA unique effects: cyan chest-crystal pulse + spectral wisps */
-    if (isAlpha && skelOK) alphaEnergyFX(ctx, W, H, flick, pal);
+    if (isAlpha) alphaEnergyFX(ctx, W, H, flick, pal);
 
     if (P.runeFlare) for (var oi=0;oi<8;oi++){var ang=flick*0.15+oi*(Math.PI*2/8);ctx.fillStyle=oi%2?pal.goldHi:pal.gem;ctx.globalAlpha=0.9;ctx.fillRect(Math.round(80+Math.cos(ang)*52),Math.round(60+Math.sin(ang)*26),2,2);ctx.globalAlpha=1;}
     if (P.fireBreath) drawFireBreath(ctx, 80, 40, 110, 20, P.fireBreath, flick, pal);
@@ -14160,38 +14160,66 @@ switchTab(initialTab);
     /* Skeletal side sprite: OMEGA fire-beast or ALPHA armored art. The baked
        pose is a walking stride; the rig adds gait-bounce + head bob. Falls
        back to the procedural rig until the PNGs decode. */
-    var skelOK = isAlpha ? drawAlphaSpriteSide(ctx, P) : drawOmegaSpriteSide(ctx, P);
+    var skelOK = false; /* Option A: full procedural — every frame drawn from scratch */
     if (!skelOK) {
-    var legAmp=walk?10:0; function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
-    /* far-side legs (behind the body) */
-    pxLine(ctx,52+legSwing(Math.PI),104,50+legSwing(Math.PI),132,9,pal.furDark);
-    pxRect(ctx,44+legSwing(Math.PI),130,12,4,pal.furDark);
-    pxLine(ctx,104+legSwing(0),104,106+legSwing(0),132,9,pal.furDark);
-    pxRect(ctx,98+legSwing(0),130,12,4,pal.furDark);
+    var legAmp=walk?12:0;
+    function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
+    /* ── far-side legs (behind body, darker) ── */
+    var ffS=legSwing(Math.PI), frS=legSwing(0);
+    /* far-front: thigh ellipse → shin ellipse → paw */
+    pxEllipse(ctx,50+ffS,104,7,10,pal.furDeep);
+    pxEllipse(ctx,44+ffS,120,5,8,pal.furDeep);
+    pxEllipse(ctx,50+ffS,136,6,4,pal.furDeep);
+    for (var fc=0;fc<3;fc++){pxLine(ctx,46+ffS+fc*3,140,47+ffS+fc*3+clawFlex,148,2,pal.goldDk);}
+    /* far-rear: haunch → shin → paw */
+    pxEllipse(ctx,108+frS,102,9,10,pal.furDeep);
+    pxEllipse(ctx,100+frS,120,5,9,pal.furDeep);
+    pxEllipse(ctx,106+frS,138,6,4,pal.furDeep);
+    for (var rc=0;rc<3;rc++){pxLine(ctx,102+frS+rc*3,142,103+frS+rc*3+clawFlex,150,2,pal.goldDk);}
     omegaTail(ctx, 122, 96, Math.sin((P.tailWag||0))*4, flick, flameI, pal, 1);
-    /* barrel torso */
+    /* ── barrel torso ── */
     pxEllipse(ctx,80,98+bob*0.3,44*squash,24/squash,pal.furDark);
     pxEllipse(ctx,52,94+bob*0.3,22*squash,20/squash,pal.furMid);
     pxEllipse(ctx,108,94+bob*0.3,20*squash,20/squash,pal.furDark);
     pxEllipse(ctx,76,84+bob*0.3,32,5,pal.furLight);
+    /* shoulder + haunch masses */
+    pxEllipse(ctx,56,92+bob*0.3,14,12,pal.furMid);
+    pxEllipse(ctx,54,87+bob*0.3,8,5,pal.furLight);
+    pxEllipse(ctx,110,92+bob*0.3,14,12,pal.furDark);
+    pxEllipse(ctx,112,87+bob*0.3,8,5,pal.furMid);
     omegaScales(ctx, 80, 84+bob*0.3, 5, 2, 11, pal);
     omegaVeins(ctx, 80, 100+bob*0.3, flick, pal);
-    /* near-side legs with 3-tone curved claws */
-    pxLine(ctx,60+legSwing(0),102,58+legSwing(0),134,10,pal.furMid);
-    pxRect(ctx,50+legSwing(0),132,14,4,pal.furMid);
-    omegaBracer(ctx, 59+legSwing(0), 122, pal);
+    /* ── near-side legs (in front, brighter, organic muscle shapes) ── */
+    var nfS=legSwing(0), nrS=legSwing(Math.PI);
+    /* near-front: big shoulder mass → tapered thigh → knee bulge → shin → paw */
+    pxEllipse(ctx,58+nfS,96+bob*0.3,10,9,pal.furMid);
+    pxEllipse(ctx,56+nfS,92+bob*0.3,6,4,pal.furLight);
+    pxEllipse(ctx,50+nfS,110,7,11,pal.furMid);
+    pxEllipse(ctx,48+nfS,108,4,6,pal.furLight);
+    pxEllipse(ctx,44+nfS,122,5,5,pal.furLight);
+    pxEllipse(ctx,50+nfS,132,5,9,pal.furMid);
+    pxEllipse(ctx,49+nfS,130,3,5,pal.furLight);
+    pxEllipse(ctx,54+nfS,142,7,4,pal.furMid);
+    omegaBracer(ctx, 50+nfS, 134, pal);
     for (var c3=0;c3<4;c3++){
-      var dx3=51+legSwing(0)+c3*3.4;
-      pxLine(ctx,dx3,136,dx3+1+clawFlex,146,2,pal.claw);
-      pxLine(ctx,dx3,136,dx3+1+clawFlex,146,1,pal.clawHi);
+      var dx3=49+nfS+c3*3.4;
+      pxLine(ctx,dx3,146,dx3+1+clawFlex,156,2,pal.claw);
+      pxLine(ctx,dx3,146,dx3+1+clawFlex,156,1,pal.clawHi);
     }
-    pxLine(ctx,112+legSwing(Math.PI),102,114+legSwing(Math.PI),134,10,pal.furMid);
-    pxRect(ctx,104+legSwing(Math.PI),132,14,4,pal.furMid);
-    omegaBracer(ctx, 113+legSwing(Math.PI), 122, pal);
+    /* near-rear: massive haunch → thigh → hock → shin → paw */
+    pxEllipse(ctx,112+nrS,94+bob*0.3,14,12,pal.furMid);
+    pxEllipse(ctx,114+nrS,89+bob*0.3,8,5,pal.furLight);
+    pxEllipse(ctx,104+nrS,110,8,12,pal.furMid);
+    pxEllipse(ctx,102+nrS,108,4,6,pal.furLight);
+    pxEllipse(ctx,98+nrS,124,5,5,pal.furLight);
+    pxEllipse(ctx,104+nrS,134,5,9,pal.furMid);
+    pxEllipse(ctx,103+nrS,132,3,5,pal.furLight);
+    pxEllipse(ctx,108+nrS,144,7,4,pal.furMid);
+    omegaBracer(ctx, 104+nrS, 136, pal);
     for (var c4=0;c4<4;c4++){
-      var dx4=105+legSwing(Math.PI)+c4*3.4;
-      pxLine(ctx,dx4,136,dx4+1+clawFlex,146,2,pal.claw);
-      pxLine(ctx,dx4,136,dx4+1+clawFlex,146,1,pal.clawHi);
+      var dx4=103+nrS+c4*3.4;
+      pxLine(ctx,dx4,148,dx4+1+clawFlex,158,2,pal.claw);
+      pxLine(ctx,dx4,148,dx4+1+clawFlex,158,1,pal.clawHi);
     }
     /* necks + three heads fanned at the front (facing left) */
     var droop=sad*3, nl=-lean;
@@ -14206,7 +14234,7 @@ switchTab(initialTab);
     }
 
     /* ALPHA unique effects on the side view too */
-    if (isAlpha && skelOK) alphaEnergyFX(ctx, W, H, flick, pal);
+    if (isAlpha) alphaEnergyFX(ctx, W, H, flick, pal);
   }
 
   /* ── ALPHA — ascended armored form ──────────────────────────────────────
