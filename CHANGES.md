@@ -1956,3 +1956,26 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - The complete Windows-compatible `npm test` lane passes 2083 tests with zero
   failures and two pre-existing skips. No environment variable, dependency,
   or package manifest changed.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 4: reasoning-effort requests (Codex)
+
+- Added the canonical `minimal | low | medium | high | xhigh | max` resolver
+  and threaded optional reasoning configuration through every OpenAI
+  Responses and Anthropic request path, including goal judges, forced
+  answers, and context estimates.
+- OpenAI reasoning-capable models receive `reasoning: { effort }`. Supported
+  Anthropic models receive `thinking: { type: "enabled", budget_tokens }`
+  using one model-independent proportional budget calculation rather than a
+  per-model downgrade table. Unsupported routes omit the field and emit a
+  deduplicated debug note.
+- `OPENAGI_REASONING_EFFORT` is now setup-wizard persistable. Its default,
+  unset, blank, invalid, and unreadable behaviors all omit reasoning fields
+  entirely, preserving the pre-feature request bytes and prompt-cache keys.
+- The first regression failed red because the exported canonical resolver
+  did not exist. A separate hostile-value regression then failed red at
+  provider construction and drove the fail-open configuration boundary.
+  All seven reasoning tests now pass.
+- Existing provider, prompt-cache, routing, iteration, compression, and
+  context-ledger coverage passes 97/97. The complete Windows-compatible
+  `npm test` lane passes 2092 tests with zero failures and two pre-existing
+  skips. No dependency or package manifest changed.

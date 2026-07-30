@@ -83,6 +83,15 @@ const DEFAULT_FORCE_ANSWER_MS = 60000;
 const DEFAULT_PROVIDER_MAX_RETRIES = 5;
 const DEFAULT_PROVIDER_RETRY_BASE_MS = 500;
 const MAX_PROVIDER_RETRY_DELAY_MS = 30000;
+export const REASONING_EFFORTS = Object.freeze([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+const REASONING_EFFORT_SET = new Set(REASONING_EFFORTS);
 const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 8000;
 const MIN_TRUNCATED_TOOL_OUTPUT_CHARS = 200;
 const DEFAULT_CONTEXT_COMPACT_CHARS = 120000;
@@ -101,6 +110,7 @@ const MAX_CONTEXT_LEDGER_REDACT_INSPECTIONS = 1_024;
 const MAX_CONTEXT_LEDGER_ENV_KEYS = 2_048;
 const MAX_CONTEXT_LEDGER_POOL_STATES = 512;
 const CONTEXT_LEDGER_REDACTION_OVERFLOW = new WeakSet();
+const REASONING_DEBUG_NOTES = new WeakMap();
 const TRUSTED_TURN_BUDGETS = new WeakSet();
 const TRUSTED_TURN_BUDGET_STATE = new WeakMap();
 const TURN_BUDGET_REQUEST_LEASE = Symbol("turn-budget-request-lease");
@@ -336,6 +346,21 @@ function optionalPositiveNumber(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+export function resolveReasoningEffort(options = {}, env = process.env) {
+  try {
+    const raw = options?.reasoningEffort !== undefined
+      ? options.reasoningEffort
+      : env?.OPENAGI_REASONING_EFFORT;
+    if (raw === undefined || raw === null || String(raw).trim() === "") {
+      return null;
+    }
+    const normalized = String(raw).trim().toLowerCase();
+    return REASONING_EFFORT_SET.has(normalized) ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveMaxIterations(options) {
   if (options.maxIterations !== undefined) {
     return positiveInteger(options.maxIterations, DEFAULT_MAX_ITERATIONS);
@@ -354,6 +379,28 @@ function resolveMaxIterations(options) {
 
 function applyIterationSettings(provider, options) {
   provider.env = options.env ?? process.env;
+  provider.reasoningDebugLog = typeof options.reasoningDebugLog === "function"
+    ? options.reasoningDebugLog
+    : () => {};
+  provider.reasoningEffort = resolveReasoningEffort(options, provider.env);
+  try {
+    const configuredReasoningEffort = options.reasoningEffort
+      ?? provider.env?.OPENAGI_REASONING_EFFORT;
+    if (
+      configuredReasoningEffort !== undefined
+      && configuredReasoningEffort !== null
+      && String(configuredReasoningEffort).trim() !== ""
+      && provider.reasoningEffort === null
+    ) {
+      noteReasoningOmission(
+        provider,
+        `invalid:${String(configuredReasoningEffort)}`,
+        `[reasoning-effort] Omitted unsupported effort "${String(configuredReasoningEffort)}".`
+      );
+    }
+  } catch {
+    // Hostile optional configuration falls back to exact pre-feature behavior.
+  }
   provider.maxIterations = resolveMaxIterations(options);
   // Tests and embedders may provide both names while migrating: in that case
   // maxIterations is the outer cap and the old option remains the inner hop
@@ -420,6 +467,109 @@ function applyIterationSettings(provider, options) {
   // Keep this readable for integrations that inspect the old property. The
   // value now represents the whole-turn iteration cap.
   provider.maxToolHops = provider.maxIterations;
+}
+
+function noteReasoningOmission(provider, key, message) {
+  try {
+    let notes = REASONING_DEBUG_NOTES.get(provider);
+    if (!notes) {
+      notes = new Set();
+      REASONING_DEBUG_NOTES.set(provider, notes);
+    }
+    if (notes.has(key)) return;
+    notes.add(key);
+    provider?.reasoningDebugLog?.(message);
+  } catch {
+    // Reasoning configuration is optional and must never block a request.
+  }
+}
+
+function openAIModelSupportsReasoning(model) {
+  const normalized = String(model ?? "").trim().toLowerCase();
+  return /^(?:gpt-5(?:[.-]|$)|o(?:1|3|4)(?:[.-]|$))/u.test(normalized);
+}
+
+function anthropicModelSupportsThinking(model) {
+  const normalized = String(model ?? "").trim().toLowerCase();
+  return /^claude-(?:3-7(?:-|$)|(?:opus|sonnet|haiku)-4(?:-|$)|4(?:-|$))/u
+    .test(normalized);
+}
+
+function anthropicReasoningBudget(effort, maxTokens) {
+  const rank = REASONING_EFFORTS.indexOf(effort);
+  const outputTokens = Math.floor(Number(maxTokens));
+  if (rank < 0 || !Number.isFinite(outputTokens) || outputTokens <= 1024) {
+    return null;
+  }
+  return Math.min(
+    outputTokens - 1,
+    Math.max(
+      1024,
+      Math.floor(
+        outputTokens * (rank + 1) / (REASONING_EFFORTS.length + 1)
+      )
+    )
+  );
+}
+
+function reasoningRequestFields(provider, {
+  format,
+  model,
+  maxTokens = null
+}) {
+  try {
+    const effort = provider?.reasoningEffort;
+    if (!effort) return {};
+    if (!REASONING_EFFORT_SET.has(effort)) {
+      noteReasoningOmission(
+        provider,
+        `invalid-runtime:${String(effort)}`,
+        `[reasoning-effort] Omitted unsupported effort "${String(effort)}".`
+      );
+      return {};
+    }
+    if (format === "openai") {
+      if (!openAIModelSupportsReasoning(model)) {
+        noteReasoningOmission(
+          provider,
+          `openai:${String(model)}:${effort}`,
+          `[reasoning-effort] Omitted "${effort}" for unsupported OpenAI model "${String(model)}".`
+        );
+        return {};
+      }
+      return { reasoning: { effort } };
+    }
+    if (format === "anthropic") {
+      const budgetTokens = anthropicReasoningBudget(effort, maxTokens);
+      if (!anthropicModelSupportsThinking(model) || budgetTokens === null) {
+        noteReasoningOmission(
+          provider,
+          `anthropic:${String(model)}:${effort}:${String(maxTokens)}`,
+          `[reasoning-effort] Omitted "${effort}" for unsupported Anthropic model "${String(model)}".`
+        );
+        return {};
+      }
+      return {
+        thinking: {
+          type: "enabled",
+          budget_tokens: budgetTokens
+        }
+      };
+    }
+    noteReasoningOmission(
+      provider,
+      `format:${String(format)}:${effort}`,
+      `[reasoning-effort] Omitted "${effort}" for unsupported wire format "${String(format)}".`
+    );
+    return {};
+  } catch (error) {
+    noteReasoningOmission(
+      provider,
+      "reasoning-field-error",
+      `[reasoning-effort] Omitted optional request field: ${error?.message ?? String(error)}`
+    );
+    return {};
+  }
 }
 
 function providerRetryOptions(provider, context, signal) {
@@ -2827,6 +2977,11 @@ function estimateProviderConversationTokens(providerInstance, conversation, {
         system: instructions,
         messages: requestMessages,
         stream: true,
+        ...reasoningRequestFields(providerInstance, {
+          format: "anthropic",
+          model,
+          maxTokens: providerInstance.maxTokens
+        }),
         ...(tools.length > 0 ? { tools } : {})
       }
     : {
@@ -2840,6 +2995,10 @@ function estimateProviderConversationTokens(providerInstance, conversation, {
         }),
         instructions,
         input: requestMessages,
+        ...reasoningRequestFields(providerInstance, {
+          format: "openai",
+          model
+        }),
         ...(tools.length > 0 ? { tools } : {})
       };
   return estimateContextTokens(request, {
@@ -3861,17 +4020,22 @@ export class OpenAIResponsesProvider {
 
   async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null, usageAccumulator = null) {
     checkRequestBudget(this, turnBudget);
+    const goalModel = this.resolveModel({ task: "goal" });
     const response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
-      model: this.resolveModel({ task: "goal" }),
+      model: goalModel,
       max_output_tokens: GOAL_JUDGE_MAX_TOKENS,
       store: false,
       prompt_cache_key: createOpenAIPromptCacheKey({
-        model: this.resolveModel({ task: "goal" }),
+        model: goalModel,
         stableInstructions: GOAL_JUDGE_INSTRUCTIONS,
         tools: []
       }),
       instructions: GOAL_JUDGE_INSTRUCTIONS,
-      input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
+      input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }],
+      ...reasoningRequestFields(this, {
+        format: "openai",
+        model: goalModel
+      })
     }, context, {
       timeoutMs: remainingMs,
       turnBudget,
@@ -4156,7 +4320,11 @@ export class OpenAIResponsesProvider {
         ...(usePreviousResponse
           ? { previous_response_id: continuationResponseId }
           : {}),
-        ...(wantStream ? { stream: true } : {})
+        ...(wantStream ? { stream: true } : {}),
+        ...reasoningRequestFields(this, {
+          format: "openai",
+          model
+        })
       };
       if (toolList.length > 0) body.tools = toolList;
 
@@ -4577,7 +4745,11 @@ export class OpenAIResponsesProvider {
               tools: []
             }),
             instructions: baseInstructions,
-            input: conversationInput
+            input: conversationInput,
+            ...reasoningRequestFields(this, {
+              format: "openai",
+              model
+            })
           }, context, {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
@@ -4921,11 +5093,17 @@ export class AnthropicProvider {
 
   async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null, usageAccumulator = null) {
     checkRequestBudget(this, turnBudget);
+    const goalModel = this.resolveModel({ task: "goal" });
     const response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
-      model: this.resolveModel({ task: "goal" }),
+      model: goalModel,
       max_tokens: GOAL_JUDGE_MAX_TOKENS,
       system: GOAL_JUDGE_INSTRUCTIONS,
-      messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }]
+      messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }],
+      ...reasoningRequestFields(this, {
+        format: "anthropic",
+        model: goalModel,
+        maxTokens: GOAL_JUDGE_MAX_TOKENS
+      })
     }, context, {
       timeoutMs: remainingMs,
       turnBudget,
@@ -5152,7 +5330,12 @@ export class AnthropicProvider {
           system,
           messages: withAnthropicCacheBreakpoints(convo),
           ...(wantStream ? { stream: true } : {}),
-          ...(tools.length > 0 ? { tools } : {})
+          ...(tools.length > 0 ? { tools } : {}),
+          ...reasoningRequestFields(this, {
+            format: "anthropic",
+            model,
+            maxTokens: this.maxTokens
+          })
         }, context, {
           timeoutMs: remainingMs,
           turnBudget,
@@ -5477,7 +5660,12 @@ export class AnthropicProvider {
             model,
             max_tokens: this.maxTokens,
             system,
-            messages: withAnthropicCacheBreakpoints(convo)
+            messages: withAnthropicCacheBreakpoints(convo),
+            ...reasoningRequestFields(this, {
+              format: "anthropic",
+              model,
+              maxTokens: this.maxTokens
+            })
           }, context, {
             timeoutMs: this.forceAnswerMs,
             turnBudget,
