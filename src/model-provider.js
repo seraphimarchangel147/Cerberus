@@ -4061,9 +4061,16 @@ async function prepareProviderConversation(providerInstance, conversation, {
   }
 
   const safeTokenLimit = Math.max(0, Math.ceil(contextWindowTokens * CONTEXT_GATEWAY_RATIO) - 1);
+  // The value-aware emergency stage aims BELOW the gateway (0.60 of the window
+  // vs 0.85) to buy headroom. That lower number is an aspiration for how much to
+  // shed — not a delivery gate. Accepting a compaction is still governed by the
+  // real gateway, otherwise a conversation with an irreducible recent turn that
+  // lands between the two ratios gets blocked with the flag on while the
+  // flag-off path delivers it fine.
   const compressionTokenLimit = providerInstance.valueAwareCompaction === true
     ? Math.min(safeTokenLimit, trigger.targetTokens)
     : safeTokenLimit;
+  const acceptTokenLimit = safeTokenLimit;
   const charsPerToken = providerInstance.contextEstimateCharsPerToken;
   if (providerInstance.valueAwareCompaction === true) {
     const conversationTokens = estimateContextTokens(conversation, {
@@ -4167,26 +4174,62 @@ async function prepareProviderConversation(providerInstance, conversation, {
       postCompressionEstimatedTokens: attempt.estimatedTokens
     };
   };
+  // Track the best candidate that actually clears the real gateway across every
+  // attempt, so a later, more aggressive retry can never lose a usable result.
+  let bestUsable = attempt.result.compressed
+    && attempt.estimatedTokens <= acceptTokenLimit
+    ? attempt
+    : null;
+  const considerUsable = (candidate) => {
+    if (!candidate.result.compressed) return;
+    if (candidate.estimatedTokens > acceptTokenLimit) return;
+    if (!bestUsable || candidate.estimatedTokens < bestUsable.estimatedTokens) {
+      bestUsable = candidate;
+    }
+  };
   if (attempt.result.compressed && attempt.estimatedTokens > compressionTokenLimit) {
-    const excessChars = (attempt.estimatedTokens - compressionTokenLimit) * charsPerToken;
     const attemptedDigestChars = Math.max(
       MIN_CONTEXT_DIGEST_CHARS,
       String(attempt.result.marker ?? "").length
     );
-    const reducedDigestChars = Math.max(
-      MIN_CONTEXT_DIGEST_CHARS,
-      Math.floor(attemptedDigestChars - excessChars)
-    );
-    if (reducedDigestChars < attemptedDigestChars && reducedDigestChars > MIN_CONTEXT_DIGEST_CHARS) {
+    // Reduce the digest proportionally to the overshoot. Try the aspirational
+    // target first, then the real gateway: when the value-aware target sits far
+    // below the gateway the first reduction can floor straight past digest sizes
+    // that would in fact have been deliverable.
+    const reductionLimits = [...new Set([compressionTokenLimit, acceptTokenLimit])];
+    for (const limit of reductionLimits) {
+      if (attempt.result.compressed && attempt.estimatedTokens <= limit) break;
+      const excessChars = (attempt.estimatedTokens - limit) * charsPerToken;
+      const reducedDigestChars = Math.max(
+        MIN_CONTEXT_DIGEST_CHARS,
+        Math.floor(attemptedDigestChars - excessChars)
+      );
+      if (reducedDigestChars >= attemptedDigestChars || reducedDigestChars <= MIN_CONTEXT_DIGEST_CHARS) {
+        continue;
+      }
       attempt = await tryCompression(reducedDigestChars);
+      considerUsable(attempt);
+      if (bestUsable) break;
     }
   }
   if ((!attempt.result.compressed || attempt.estimatedTokens > compressionTokenLimit)
     && sourceDigestChars > MIN_CONTEXT_DIGEST_CHARS) {
+    // A floor-digest retry is a best-effort push toward the aspirational target.
+    // It can legitimately fail (the value-aware target sits below the gateway, so
+    // the reduction math can floor straight past digest sizes that would have
+    // fit). Never let that failure discard a candidate that was already
+    // deliverable.
     attempt = await tryCompression(MIN_CONTEXT_DIGEST_CHARS);
+    considerUsable(attempt);
+  }
+  if (
+    bestUsable
+    && (!attempt.result.compressed || attempt.estimatedTokens > acceptTokenLimit)
+  ) {
+    attempt = bestUsable;
   }
 
-  if (!attempt.result.compressed || attempt.estimatedTokens > compressionTokenLimit) {
+  if (!attempt.result.compressed || attempt.estimatedTokens > acceptTokenLimit) {
     return rejectCompression();
   }
 
@@ -4199,7 +4242,7 @@ async function prepareProviderConversation(providerInstance, conversation, {
   }
   if (
     !attempt.result.compressed
-    || attempt.estimatedTokens > compressionTokenLimit
+    || attempt.estimatedTokens > acceptTokenLimit
     || !redactionOptionsAreCurrent(attempt.options)
   ) {
     return rejectCompression();
@@ -4220,7 +4263,7 @@ async function prepareProviderConversation(providerInstance, conversation, {
     );
     if (
       attempt.result.compressed
-      && attempt.estimatedTokens <= compressionTokenLimit
+      && attempt.estimatedTokens <= acceptTokenLimit
       && redactionOptionsAreCurrent(attempt.options)
     ) {
       installation = installContextLedgerCandidate(

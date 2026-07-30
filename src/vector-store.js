@@ -209,6 +209,12 @@ export class VectorStore {
         const maximumRrfScore = activeLists > 0
           ? activeLists / (DEFAULT_RRF_K + 1)
           : 1;
+        // Fusion decides ORDER only. `score` stays the cosine similarity so it
+        // remains magnitude-comparable across hybrid/legacy: callers such as
+        // signal-axes (novelty = 1 - score) and specialist-router (blends score
+        // against a keyword score, then gates on an absolute threshold) read it
+        // as a similarity, not as a rank. Normalized fusion strength is exposed
+        // separately as `fusedScore` for rank-aware consumers.
         return fused
           .slice(0, limit)
           .map((item) => {
@@ -216,7 +222,8 @@ export class VectorStore {
             if (!entry) throw new Error("Fused vector result lost its source entry.");
             return {
               id: entry.id,
-              score: item.score / maximumRrfScore,
+              score: vectorScores.get(item.id) ?? 0,
+              fusedScore: item.score / maximumRrfScore,
               rrfScore: item.score,
               vectorScore: vectorScores.get(item.id) ?? 0,
               lexicalScore: lexicalScores.get(item.id) ?? 0,

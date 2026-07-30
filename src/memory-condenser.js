@@ -42,6 +42,8 @@ export const CONTEXT_VALUE_MILD_RATIO = 0.5;
 export const CONTEXT_VALUE_AGGRESSIVE_RATIO = 0.85;
 export const CONTEXT_VALUE_EMERGENCY_RATIO = 0.95;
 export const CONTEXT_VALUE_EMERGENCY_TARGET_RATIO = 0.6;
+// Sentinel: the value-aware cascade declines and defers to positional compaction.
+const CONTEXT_VALUE_FALL_BACK_TO_POSITIONAL = Symbol("contextValueFallBackToPositional");
 
 const DEFAULT_LIVE_CONTEXT_KEEP_RECENT_HOPS = 4;
 const DEFAULT_LIVE_CONTEXT_DIGEST_CHARS = 4000;
@@ -690,7 +692,7 @@ async function prepareContextLedgerCandidate(source, options, binding) {
   summaryStart = adjustLiveToolPairSummaryStart(working, format, summaryStart, boundary);
   if (options.valueAwareCompaction === true) {
     try {
-      return await prepareValueAwareContextLedgerCandidate({
+      const valueAware = await prepareValueAwareContextLedgerCandidate({
         original,
         working,
         format,
@@ -700,6 +702,10 @@ async function prepareContextLedgerCandidate(source, options, binding) {
         options,
         binding
       });
+      // The cascade may decline explicitly when positional compaction would do
+      // strictly better. Falling through costs one extra pass and never returns
+      // a weaker result than the flag-off path.
+      if (valueAware !== CONTEXT_VALUE_FALL_BACK_TO_POSITIONAL) return valueAware;
     } catch {
       // Value-aware selection is an optimization. Any scorer or cascade fault
       // falls through to the exact positional implementation below.
@@ -951,7 +957,10 @@ async function prepareValueAwareContextLedgerCandidate({
     protectedCurrentTaskIndexes,
     currentTaskSignatureCount: currentTaskOutputSignatures.length
   };
-  if (selectedIndexes.length === 0) return emptyCandidate(cascade);
+  // Nothing was eligible to shed (everything scored below the floor, or the mild
+  // stage exempted it all). Positional compaction would still have shrunk this
+  // conversation, so fall back rather than return it untouched.
+  if (selectedIndexes.length === 0) return CONTEXT_VALUE_FALL_BACK_TO_POSITIONAL;
 
   const prefix = selectedIndexes.map((index) => working[index]);
   const redactionOptions = contextLedgerRedactionOptions(options);
@@ -1018,7 +1027,11 @@ async function prepareValueAwareContextLedgerCandidate({
     summarySource = "deterministic";
     fitted = fitDigest();
   }
-  if (!isUsableFit(fitted)) return emptyCandidate(cascade, digest);
+  // The cascade shed everything it was allowed to and still could not reach the
+  // target. Declining here would leave the caller MORE loaded than the positional
+  // ledger would have, so hand off instead of returning uncompressed: value-aware
+  // selection is an optimization, never a reason to compress less.
+  if (!isUsableFit(fitted)) return CONTEXT_VALUE_FALL_BACK_TO_POSITIONAL;
 
   const firstSelected = selectedIndexes[0];
   const lastSelected = selectedIndexes.at(-1);
