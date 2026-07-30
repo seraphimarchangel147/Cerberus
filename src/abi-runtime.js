@@ -545,6 +545,7 @@ export class AbiRuntime {
     this.jobs = options.jobs ?? new JobManager({
       runtime: this,
       store: this.jobStore,
+      env: runtimeEnv,
       ...(options.jobOptions ?? {})
     });
     if (options.terminals === false) {

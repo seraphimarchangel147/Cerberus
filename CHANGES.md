@@ -2111,3 +2111,29 @@ CLINE RSI PORT WAVE 1 COMPLETE
 - The focused durable-job lane passes 18/18. The literal Linux `npm test` lane
   passes 2111 tests with zero failures and zero skips. No environment variable,
   dependency, or package manifest changed.
+
+## 2026-07-29 - Mutation lease Wave 2 Fix 4: lazy loud TTL reap (Codex)
+
+- Added a 15-minute default TTL for non-persistent foreground mutation leases,
+  evaluated synchronously and only when a conflicting mutation or workspace
+  reservation scans that lease. No background timer was added, and the
+  existing `ToolRegistry` release `finally` was not moved or restructured.
+- `OPENAGI_MUTATION_LEASE_TTL_MS` is new and setup-wizard allowlisted. Unset or
+  blank means the 900000ms default; `0` disables reaping; malformed, negative,
+  accessor-failing, or unsafe-integer values also disable it fail-safe.
+- Every successful reap emits a redacted warning with lease ID, owner, age,
+  and bounded locks before deletion. Deletion is the final operation after the
+  injected clock, redaction, warning sink, and bounded 64-entry status history
+  all succeed. `mutation_lease_status` exposes that history with `reapedAt` and
+  `reapedReason`.
+- Persistent workspace leases are rejected before any TTL clock access and
+  can never be reaped. Durable and quarantined blockers remain outside this
+  reaper. Clock and warning failures retain the lease and preserve the prior
+  conflict behavior.
+- The required expiry regression was written first and failed 0/1 against the
+  no-TTL implementation. Five injected-clock regressions now prove lazy
+  unstick, loud diagnostics, persistent immunity, the `0` kill switch, and
+  fail-safe throwing clock/logger behavior without sleeping.
+- The focused durable-job, chat-fastlane, and tool-search lane passes 41/41.
+  The literal Linux `npm test` lane passes 2116 tests with zero failures and
+  zero skips. No dependency or package manifest changed.

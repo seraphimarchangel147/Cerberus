@@ -5,11 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CHAT_CORE_TOOLS } from "../src/agent-host.js";
-import { JobManager, registerJobTools } from "../src/job-manager.js";
+import {
+  JOB_DEFAULTS,
+  JobManager,
+  registerJobTools
+} from "../src/job-manager.js";
 import { JobStore } from "../src/job-store.js";
 import { registerDelegateTaskTool } from "../src/integrations/delegate-task.js";
 import { buildDefaultInstructions } from "../src/model-provider.js";
 import { ProjectStore } from "../src/project-store.js";
+import { SETUP_FIELDS } from "../src/setup-wizard.js";
 import { ToolOutputStore } from "../src/tool-output-store.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
@@ -44,7 +49,9 @@ function harness(t, options = {}) {
     abortGraceMs: options.abortGraceMs,
     authorizationPollMs: options.authorizationPollMs,
     replayBatchSize: options.replayBatchSize,
-    now: options.now
+    now: options.now,
+    env: options.env ?? {},
+    logger: options.logger
   });
   runtime.jobStore = store;
   runtime.jobs = jobs;
@@ -284,7 +291,10 @@ test("mutation lease status is redacted, aged, and never blocked by held writes"
 
 test("mutation conflicts name the bounded holder, age, and recovery tool", (t) => {
   let now = 1_000;
-  const h = harness(t, { now: () => now });
+  const h = harness(t, {
+    now: () => now,
+    env: { OPENAGI_MUTATION_LEASE_TTL_MS: "0" }
+  });
   const secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890";
   const holder = h.tools.register({
     name: "job_test_conflict_holder",
@@ -336,6 +346,192 @@ test("mutation conflicts name the bounded holder, age, and recovery tool", (t) =
     }
   );
 
+  release();
+});
+
+test("expired non-persistent mutation leases reap lazily and warn with history", (t) => {
+  let now = 1_000;
+  const warnings = [];
+  const h = harness(t, {
+    now: () => now,
+    env: { OPENAGI_MUTATION_LEASE_TTL_MS: "5000" },
+    logger: {
+      warn(message) {
+        warnings.push(String(message));
+      }
+    }
+  });
+  const holder = h.tools.register({
+    name: "job_test_ttl_holder",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-ttl-v1",
+    jobResources: () => ["workspace/ttl-shared"],
+    handler: async () => ({ ok: true })
+  });
+  const contender = h.tools.register({
+    name: "job_test_ttl_contender",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-ttl-v1",
+    jobResources: () => ["workspace/ttl-shared"],
+    handler: async () => ({ ok: true })
+  });
+  const releaseExpired = h.jobs.acquireToolInvocation(
+    holder,
+    {},
+    h.context({ sessionId: "ttl-holder" })
+  );
+  const [expired] = h.jobs.inspectMutationLeases();
+  now = 6_001;
+
+  const releaseReplacement = h.jobs.acquireToolInvocation(
+    contender,
+    {},
+    h.context({ sessionId: "ttl-contender" })
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /job_test_ttl_holder/u);
+  assert.match(warnings[0], new RegExp(expired.leaseId.slice(0, 12)));
+  assert.match(warnings[0], /5s1ms/u);
+  assert.match(warnings[0], /project\/default\/workspace\/ttl-shared/u);
+
+  const status = h.jobs.mutationLeaseStatus();
+  assert.ok(status.leases.some((lease) => (
+    lease.ownerId === "job_test_ttl_contender"
+  )));
+  assert.ok(status.reaped.some((lease) => (
+    lease.leaseId === expired.leaseId
+    && lease.ownerId === "job_test_ttl_holder"
+    && lease.reapedAt === 6_001
+    && lease.reapedReason === "ttl_expired"
+  )));
+  assert.ok(SETUP_FIELDS.includes("OPENAGI_MUTATION_LEASE_TTL_MS"));
+  assert.equal(JOB_DEFAULTS.mutationLeaseTtlMs, 15 * 60 * 1000);
+
+  releaseReplacement();
+  releaseExpired();
+});
+
+test("persistent mutation leases are never TTL-reaped", (t) => {
+  let now = 1_000;
+  const warnings = [];
+  const h = harness(t, {
+    now: () => now,
+    env: { OPENAGI_MUTATION_LEASE_TTL_MS: "100" },
+    logger: { warn: (message) => warnings.push(String(message)) }
+  });
+  const contender = h.tools.register({
+    name: "job_test_ttl_persistent_contender",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-ttl-persistent-v1",
+    jobResources: () => ["workspace/persistent"],
+    handler: async () => ({ ok: true })
+  });
+  const release = h.jobs.acquireWorkspaceLease(h.context(), {
+    ownerId: "persistent_workspace_owner"
+  });
+  now = 1_000_000;
+
+  assert.throws(
+    () => h.jobs.acquireToolInvocation(contender, {}, h.context()),
+    /persistent_workspace_owner/u
+  );
+  assert.equal(warnings.length, 0);
+  assert.equal(h.jobs.inspectMutationLeases()[0].persistent, true);
+  release();
+});
+
+test("mutation lease TTL zero disables reaping", (t) => {
+  let now = 1_000;
+  const warnings = [];
+  const h = harness(t, {
+    now: () => now,
+    env: { OPENAGI_MUTATION_LEASE_TTL_MS: "0" },
+    logger: { warn: (message) => warnings.push(String(message)) }
+  });
+  const tool = h.tools.register({
+    name: "job_test_ttl_disabled",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-ttl-disabled-v1",
+    jobResources: () => ["workspace/ttl-disabled"],
+    handler: async () => ({ ok: true })
+  });
+  const release = h.jobs.acquireToolInvocation(tool, {}, h.context());
+  now = 100_000_000;
+
+  assert.throws(
+    () => h.jobs.acquireToolInvocation(tool, {}, h.context()),
+    /job_test_ttl_disabled/u
+  );
+  assert.equal(warnings.length, 0);
+  assert.equal(h.jobs.inspectMutationLeases().length, 1);
+  release();
+});
+
+test("a throwing TTL clock fails safe and leaves the lease held", (t) => {
+  let now = 1_000;
+  let clockThrows = false;
+  const warnings = [];
+  const h = harness(t, {
+    now: () => {
+      if (clockThrows) throw new Error("planned clock failure");
+      return now;
+    },
+    env: { OPENAGI_MUTATION_LEASE_TTL_MS: "100" },
+    logger: { warn: (message) => warnings.push(String(message)) }
+  });
+  const tool = h.tools.register({
+    name: "job_test_ttl_clock",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-ttl-clock-v1",
+    jobResources: () => ["workspace/ttl-clock"],
+    handler: async () => ({ ok: true })
+  });
+  const release = h.jobs.acquireToolInvocation(tool, {}, h.context());
+  now = 1_000_000;
+  clockThrows = true;
+
+  assert.throws(
+    () => h.jobs.acquireToolInvocation(tool, {}, h.context()),
+    /job_test_ttl_clock/u
+  );
+  assert.equal(warnings.length, 0);
+  assert.equal(h.jobs.inspectMutationLeases().length, 1);
+  clockThrows = false;
+  release();
+});
+
+test("a failed reap warning fails safe and leaves the lease held", (t) => {
+  let now = 1_000;
+  const h = harness(t, {
+    now: () => now,
+    env: { OPENAGI_MUTATION_LEASE_TTL_MS: "100" },
+    logger: {
+      warn() {
+        throw new Error("planned logger failure");
+      }
+    }
+  });
+  const tool = h.tools.register({
+    name: "job_test_ttl_logger",
+    parameters: { type: "object", additionalProperties: true },
+    sideEffects: true,
+    jobResourceRevision: "lease-ttl-logger-v1",
+    jobResources: () => ["workspace/ttl-logger"],
+    handler: async () => ({ ok: true })
+  });
+  const release = h.jobs.acquireToolInvocation(tool, {}, h.context());
+  now = 1_000_000;
+
+  assert.throws(
+    () => h.jobs.acquireToolInvocation(tool, {}, h.context()),
+    /job_test_ttl_logger/u
+  );
+  assert.equal(h.jobs.inspectMutationLeases().length, 1);
   release();
 });
 

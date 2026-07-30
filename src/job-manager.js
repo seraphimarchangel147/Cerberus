@@ -14,6 +14,8 @@ const DEFAULT_ABORT_GRACE_MS = 1_000;
 const DEFAULT_AUTHORIZATION_POLL_MS = 250;
 const DEFAULT_MAX_QUARANTINED = 3;
 const DEFAULT_REPLAY_BATCH_SIZE = 500;
+const DEFAULT_MUTATION_LEASE_TTL_MS = 15 * 60 * 1000;
+const MAX_MUTATION_LEASE_REAP_HISTORY = 64;
 const MAX_WAIT_MS = 30_000;
 const MAX_ARGUMENT_BYTES = 2 * 1024 * 1024;
 const MAX_WAITERS = 128;
@@ -53,7 +55,9 @@ export class JobManager {
     authorizationPollMs = DEFAULT_AUTHORIZATION_POLL_MS,
     maxQuarantined = DEFAULT_MAX_QUARANTINED,
     replayBatchSize = DEFAULT_REPLAY_BATCH_SIZE,
-    now = null
+    now = null,
+    env = process.env,
+    logger = console
   } = {}) {
     if (!runtime) throw new Error("JobManager requires a runtime.");
     if (!store) throw new Error("JobManager requires a JobStore.");
@@ -87,6 +91,8 @@ export class JobManager {
       : typeof runtime.now === "function"
         ? runtime.now.bind(runtime)
         : Date.now;
+    this.mutationLeaseTtlMs = resolveMutationLeaseTtlMs(env);
+    this.logger = logger;
     this.emitsEvents = true;
     this.schedulerLease = this.store.acquireSchedulerLease?.({
       shareProcess: true
@@ -98,8 +104,10 @@ export class JobManager {
       ?? {
         foreground: new Map(),
         quarantined: new Map(),
+        reaped: [],
         references: 0
       };
+    if (!Array.isArray(coordinator.reaped)) coordinator.reaped = [];
     coordinator.references += 1;
     PROCESS_JOB_COORDINATORS.set(this.coordinatorKey, coordinator);
     LIVE_STATE.set(this, {
@@ -112,6 +120,7 @@ export class JobManager {
       events: null,
       foreground: coordinator.foreground,
       quarantined: coordinator.quarantined,
+      reaped: coordinator.reaped,
       closed: false
     });
     this.runtime.tools?.bindJobCoordinator?.(this);
@@ -399,15 +408,21 @@ export class JobManager {
         });
       }
     }
-    for (const [foregroundLeaseId, lease] of state.foreground.entries()) {
-      if (lockSetsConflict(lease.resourceLocks, required)) {
-        throw mutationLeaseConflictError(this, {
-          action: "Mutation",
-          category: "another active invocation",
-          lease: mutationLeaseSnapshot(foregroundLeaseId, lease),
-          source: "foreground"
-        });
-      }
+    const foregroundConflict = conflictingForegroundMutationLease(
+      this,
+      state,
+      required
+    );
+    if (foregroundConflict) {
+      throw mutationLeaseConflictError(this, {
+        action: "Mutation",
+        category: "another active invocation",
+        lease: mutationLeaseSnapshot(
+          foregroundConflict.leaseId,
+          foregroundConflict.lease
+        ),
+        source: "foreground"
+      });
     }
     const leaseId = crypto.randomUUID();
     state.foreground.set(leaseId, {
@@ -481,7 +496,12 @@ export class JobManager {
       checkedAt,
       leaseCount: leases.length,
       leases,
-      partial: durableRecords.partial
+      partial: durableRecords.partial,
+      reaped: state.reaped.map((lease) => ({
+        ...lease,
+        resourceLocks: mutationLeaseResourceLocks(lease.resourceLocks)
+      })),
+      reapedCount: state.reaped.length
     });
   }
 
@@ -1088,15 +1108,21 @@ function reserveWorkspaceLease(manager, project, ownerId, context = {}) {
       });
     }
   }
-  for (const [foregroundLeaseId, lease] of state.foreground.entries()) {
-    if (lockSetsConflict(lease.resourceLocks, required)) {
-      throw mutationLeaseConflictError(manager, {
-        action: "Workspace lease",
-        category: "another active invocation",
-        lease: mutationLeaseSnapshot(foregroundLeaseId, lease),
-        source: "foreground"
-      });
-    }
+  const foregroundConflict = conflictingForegroundMutationLease(
+    manager,
+    state,
+    required
+  );
+  if (foregroundConflict) {
+    throw mutationLeaseConflictError(manager, {
+      action: "Workspace lease",
+      category: "another active invocation",
+      lease: mutationLeaseSnapshot(
+        foregroundConflict.leaseId,
+        foregroundConflict.lease
+      ),
+      source: "foreground"
+    });
   }
   const leaseId = crypto.randomUUID();
   state.foreground.set(leaseId, {
@@ -1945,6 +1971,8 @@ function redactMutationLeaseStatus(runtime, status) {
       leaseCount: audit.leaseCount ?? 0,
       leases: [],
       partial: true,
+      reaped: [],
+      reapedCount: audit.reapedCount ?? 0,
       redactionOverflow: true
     };
   }
@@ -1989,16 +2017,115 @@ function mutationLeaseConflictError(manager, {
   return new Error(`${boundedBody}${suffix}`);
 }
 
-function redactMutationLeaseText(runtime, value) {
+function redactMutationLeaseText(runtime, value, { requireComplete = false } = {}) {
   const audit = String(sanitizeForAudit(value));
   const snapshot = secretsStoreRedactionSnapshot(runtime?.secrets);
   if (snapshot?.overflow) {
+    if (requireComplete) {
+      throw new Error("Mutation lease warning redaction is incomplete.");
+    }
     return "Mutation conflict details are withheld because secret redaction is incomplete.";
   }
   return String(redactKnownValues(
     audit,
     snapshot?.records?.map((record) => record.value) ?? []
   ));
+}
+
+function conflictingForegroundMutationLease(manager, state, required) {
+  for (const [leaseId, lease] of state.foreground.entries()) {
+    if (!lockSetsConflict(lease.resourceLocks, required)) continue;
+    if (reapExpiredForegroundMutationLease(manager, state, leaseId, lease)) {
+      continue;
+    }
+    return { leaseId, lease };
+  }
+  return null;
+}
+
+function reapExpiredForegroundMutationLease(manager, state, leaseId, lease) {
+  try {
+    if (lease?.persistent === true) return false;
+    const ttlMs = manager.mutationLeaseTtlMs;
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) return false;
+    const acquiredAt = Number(lease?.acquiredAt);
+    if (!Number.isFinite(acquiredAt) || acquiredAt < 0) return false;
+    const now = strictMutationLeaseNow(manager);
+    const ageMs = now - acquiredAt;
+    if (!Number.isFinite(ageMs) || ageMs < ttlMs) return false;
+    const status = mutationLeaseStatusSnapshot(
+      mutationLeaseSnapshot(leaseId, lease),
+      now,
+      "foreground"
+    );
+    reportMutationLeaseReap(manager, status);
+    if (state.foreground.get(leaseId) !== lease) return false;
+    state.reaped.push({
+      ...status,
+      reapedAt: now,
+      reapedReason: "ttl_expired"
+    });
+    if (state.reaped.length > MAX_MUTATION_LEASE_REAP_HISTORY) {
+      state.reaped.splice(
+        0,
+        state.reaped.length - MAX_MUTATION_LEASE_REAP_HISTORY
+      );
+    }
+    // Deletion is deliberately the final operation: every fallible clock,
+    // redaction, warning, and history step has completed before the lock can
+    // stop blocking writes.
+    return state.foreground.delete(leaseId);
+  } catch {
+    // A clock, redaction, logging, or bookkeeping fault must retain the lock.
+    return false;
+  }
+}
+
+function reportMutationLeaseReap(manager, status) {
+  const locks = status.resourceLocks
+    .slice(0, 4)
+    .map((lock) => String(lock.resource ?? "").slice(0, 96))
+    .filter(Boolean)
+    .join(", ") || "unknown";
+  const message = redactMutationLeaseText(
+    manager.runtime,
+    `[mutation-lease] reaping expired non-persistent lease `
+      + `${status.leaseId} held by '${status.ownerId}' for `
+      + `${status.humanAge} (ageMs=${status.ageMs}, locks: ${locks})`,
+    { requireComplete: true }
+  );
+  const logger = manager.logger;
+  const warn = typeof logger?.warn === "function"
+    ? logger.warn
+    : console.warn;
+  const receiver = typeof logger?.warn === "function" ? logger : console;
+  if (typeof warn !== "function") {
+    throw new Error("Mutation lease warning sink is unavailable.");
+  }
+  warn.call(receiver, message);
+}
+
+function strictMutationLeaseNow(manager) {
+  const value = Number(manager?.now?.());
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Mutation lease clock returned an invalid value.");
+  }
+  return Math.floor(value);
+}
+
+function resolveMutationLeaseTtlMs(env) {
+  try {
+    const raw = env?.OPENAGI_MUTATION_LEASE_TTL_MS;
+    if (raw == null || String(raw).trim() === "") {
+      return DEFAULT_MUTATION_LEASE_TTL_MS;
+    }
+    const text = String(raw).trim();
+    if (!/^\d+$/.test(text)) return 0;
+    const parsed = Number(text);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
 }
 
 function privateState(manager) {
@@ -2011,5 +2138,6 @@ export const JOB_DEFAULTS = Object.freeze({
   maxConcurrency: DEFAULT_MAX_CONCURRENCY,
   maxInlineResultBytes: DEFAULT_MAX_INLINE_RESULT_BYTES,
   closeTimeoutMs: DEFAULT_CLOSE_TIMEOUT_MS,
-  maxWaitMs: MAX_WAIT_MS
+  maxWaitMs: MAX_WAIT_MS,
+  mutationLeaseTtlMs: DEFAULT_MUTATION_LEASE_TTL_MS
 });
