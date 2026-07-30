@@ -1898,3 +1898,28 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - 2026-07-29T12:49:18.575Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend verification checklist with dashboard/auth/provider-state section for 2026-07-29 re-issue
 - 2026-07-29T13:19:04.328Z · **azazel** · create `drafts/deep-work-block-provider-auth-dashboard.md` — Draft 3h deep-work calendar block proposal (draft-only, not scheduled)
 - 2026-07-29T13:19:29.903Z · **azazel** · create `drafts/eod-progress-reminder-2026-07-29.md` — Draft 5:30 PM ET end-of-day progress reminder (draft-only, not scheduled)
+
+## 2026-07-29 - Cline RSI port Wave 1 baseline (Codex)
+
+- The verified Linux baseline is 2083 tests, 2059 passing, zero failing, and
+  24 browser-dependent skips.
+- Untouched Windows discovery ran the same 2083 tests with 2080 passing, one
+  failing, and two skips. The sole failure is the pre-existing POSIX mailbox
+  mode assertion: NTFS reports 0666 where the Linux contract requires 0700.
+  Each fix will be gated with the complete Windows-compatible lane plus the
+  three compatible mailbox tests, and final raw `npm test` counts will also
+  be reported honestly.
+
+## 2026-07-29 - Cline RSI Wave 1 Fix 1: safe shell lifecycle guidance (Codex)
+
+- Extended the `code_shell` description at the verified
+  `src/code-tools.js:1056` anchor without removing its existing approval and
+  specific-tool guidance.
+- The agent-facing contract now requires non-interactive commands, exact PID
+  or process-group capture for background work, and rejects broad `pkill -f`
+  or `killall` cleanup that can terminate the supervising harness.
+- The new registry-description regression failed red at 8 passing and one
+  failing, then passed 9/9 after the guidance was added.
+- The complete Windows-compatible `npm test` lane passes 2081 tests with zero
+  failures and two pre-existing skips. No environment variable, dependency,
+  or package manifest changed.

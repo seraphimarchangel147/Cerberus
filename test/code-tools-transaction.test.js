@@ -202,3 +202,11 @@ test("static tool guidance documents transactional code contracts", () => {
   assert.match(prompt, /SHA-256 expectedTag/u);
   assert.match(prompt, /Read before editing/u);
 });
+
+test("code_shell guidance requires exact PID cleanup and rejects broad pkill", (t) => {
+  const { definitions } = harness(t);
+  const description = definitions.get("code_shell").description;
+
+  assert.match(description, /PID/u);
+  assert.match(description, /pkill/u);
+});
