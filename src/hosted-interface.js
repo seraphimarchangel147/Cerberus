@@ -14249,6 +14249,106 @@ switchTab(initialTab);
     }
   }
 
+
+  /* ── ALPHA ascended armor — side view ─────────────────────────────────
+     Unique obsidian-plate + cyan energy design. Crystalline spine ridge,
+     plasma-seamed plates, spectral wisps. Cold divine warrior — the
+     opposite of OMEGA's volcanic gold. NOT shared with OMEGA. */
+  function alphaArmorSide(ctx, cx, cy, flick, pal, bob) {
+    var pulse = 0.7 + 0.3*Math.sin(flick*0.13);
+    /* crystalline spine ridge — sharp cyan-tipped crystals, not round spikes */
+    for (var sp=0; sp<7; sp++) {
+      var spx = cx-30 + sp*10;
+      var spy = cy-16 + Math.sin(sp*0.9)*3 + bob*0.3;
+      var hgt = 8 + (sp===3?5:0) + (sp===2||sp===4?3:0);
+      /* crystal shard — narrow, angular */
+      pxTri(ctx, spx, spy-hgt, spx-3, spy+2, spx+3, spy+2, pal.outline);
+      pxTri(ctx, spx, spy-hgt+1, spx-2, spy+1, spx+2, spy+1, pal.furMid);
+      pxTri(ctx, spx, spy-hgt+2, spx-1, spy, spx+1, spy, pal.furLight);
+      /* cyan energy tip */
+      pxRect(ctx, spx, spy-hgt+1, 1, 3, pal.gem);
+      ctx.globalAlpha = pulse;
+      pxRect(ctx, spx, spy-hgt, 1, 2, pal.gemCore);
+      ctx.globalAlpha = 1;
+      /* energy arc between crystals */
+      if (sp < 6) {
+        ctx.globalAlpha = pulse*0.5;
+        pxLine(ctx, spx+2, spy-hgt+3, spx+8, spy-hgt+1, 1, pal.gem);
+        ctx.globalAlpha = 1;
+      }
+    }
+    /* obsidian pauldron — dark plate with cyan energy rim */
+    pxEllipse(ctx, cx-24, cy-6+bob*0.3, 15, 11, pal.outline);
+    pxEllipse(ctx, cx-24, cy-7+bob*0.3, 14, 10, pal.furDark);
+    pxEllipse(ctx, cx-24, cy-8+bob*0.3, 12, 8, pal.furMid);
+    pxEllipse(ctx, cx-26, cy-10+bob*0.3, 7, 4, pal.furLight);
+    /* cyan energy rim arc */
+    for (var pa=0; pa<5; pa++) {
+      var pang = Math.PI*0.15 + pa*Math.PI*0.18;
+      var px0 = cx-24 + Math.cos(pang)*13;
+      var py0 = cy-7 + Math.sin(pang)*9 + bob*0.3;
+      ctx.globalAlpha = pulse;
+      pxRect(ctx, Math.round(px0), Math.round(py0), 2, 2, pal.gem);
+      pxRect(ctx, Math.round(px0), Math.round(py0), 1, 1, pal.gemCore);
+      ctx.globalAlpha = 1;
+    }
+    /* plasma seam under pauldron */
+    ctx.globalAlpha = pulse*0.7;
+    pxEllipse(ctx, cx-24, cy+1+bob*0.3, 12, 2, pal.gem);
+    ctx.globalAlpha = 1;
+    /* cyan rivets */
+    for (var rv=0; rv<3; rv++) {
+      var rvx = cx-32 + rv*8;
+      pxRect(ctx, rvx, cy-9+bob*0.3, 2, 2, pal.gem);
+      pxRect(ctx, rvx, cy-9+bob*0.3, 1, 1, pal.gemCore);
+    }
+    /* rib guards — obsidian plates with cyan plasma seams */
+    for (var rb=0; rb<3; rb++) {
+      var rby = cy+3 + rb*7 + bob*0.3;
+      var rbx = cx-8 + rb*2;
+      pxLine(ctx, rbx-15, rby, rbx+11, rby-2, 5, pal.outline);
+      pxLine(ctx, rbx-14, rby, rbx+10, rby-2, 4, pal.furMid);
+      pxLine(ctx, rbx-13, rby-1, rbx+9, rby-3, 2, pal.furLight);
+      pxLine(ctx, rbx-12, rby-1, rbx+8, rby-3, 1, pal.gem);
+      /* cyan plasma seam */
+      ctx.globalAlpha = pulse*0.85;
+      pxLine(ctx, rbx-13, rby+3, rbx+9, rby+1, 2, pal.gem);
+      pxLine(ctx, rbx-12, rby+3, rbx+8, rby+1, 1, pal.gemCore);
+      ctx.globalAlpha = 1;
+    }
+    /* haunch plate — obsidian with cyan rim */
+    pxEllipse(ctx, cx+28, cy-4+bob*0.3, 13, 10, pal.outline);
+    pxEllipse(ctx, cx+28, cy-5+bob*0.3, 12, 9, pal.furMid);
+    pxEllipse(ctx, cx+28, cy-6+bob*0.3, 10, 7, pal.furLight);
+    pxEllipse(ctx, cx+30, cy-8+bob*0.3, 6, 4, pal.furHi);
+    for (var ha=0; ha<4; ha++) {
+      var hang = Math.PI*0.3 + ha*Math.PI*0.2;
+      var hx0 = cx+28 + Math.cos(hang)*11;
+      var hy0 = cy-5 + Math.sin(hang)*8 + bob*0.3;
+      ctx.globalAlpha = pulse;
+      pxRect(ctx, Math.round(hx0), Math.round(hy0), 2, 2, pal.gem);
+      pxRect(ctx, Math.round(hx0), Math.round(hy0), 1, 1, pal.gemCore);
+      ctx.globalAlpha = 1;
+    }
+    ctx.globalAlpha = pulse*0.7;
+    pxEllipse(ctx, cx+28, cy+2+bob*0.3, 10, 2, pal.gem);
+    ctx.globalAlpha = 1;
+    /* cyan rivets on haunch */
+    pxRect(ctx, cx+22, cy-7+bob*0.3, 2, 2, pal.gem);
+    pxRect(ctx, cx+34, cy-7+bob*0.3, 2, 2, pal.gem);
+    /* spectral wisps — cold cyan motes rising (opposite of OMEGA's hot embers) */
+    if (!reduced) {
+      for (var hs=0; hs<6; hs++) {
+        var shx = cx-28 + ((hs*23 + Math.round(flick*0.35)) % 60);
+        var shy = cy-14 - ((flick*0.6 + hs*19) % 24);
+        ctx.globalAlpha = 0.6 * (1 - ((flick*0.6 + hs*19) % 24)/24);
+        ctx.fillStyle = hs%2 ? pal.gemCore : pal.gem;
+        ctx.fillRect(Math.round(shx), Math.round(shy), 1, hs%3===0?2:1);
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
   function drawOmegaSide(ctx, P, isAlpha) {
     var W=160,H=160; ctx.clearRect(0,0,W,H);
     var pal=isAlpha?PAL5:PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
@@ -14291,6 +14391,7 @@ switchTab(initialTab);
     omegaVeins(ctx, 80, 100+bob*0.3, flick, pal);
     /* OMEGA volcanic armor — unique to this form */
     if (!isAlpha) omegaArmorSide(ctx, 80, 96+bob*0.3, flick, pal, bob);
+    if (isAlpha) alphaArmorSide(ctx, 80, 96+bob*0.3, flick, pal, bob);
     /* ── near-side legs (in front, brighter, organic muscle shapes) ── */
     var nfS=legSwing(0), nrS=legSwing(Math.PI);
     /* near-front: big shoulder mass → tapered thigh → knee bulge → shin → paw */
