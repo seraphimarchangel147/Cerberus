@@ -14149,6 +14149,106 @@ switchTab(initialTab);
     ctx.globalAlpha = 1;
   }
 
+
+  /* ── OMEGA volcanic armor — side view ──────────────────────────────────
+     Unique molten-obsidian plate: spine ridge, pauldron, rib guards,
+     haunch plate, heat shimmer from armor seams. NOT shared with ALPHA.
+     High-contrast: bright gold rims + hot lava seams so plates POP
+     against the dark body instead of blending in. */
+  function omegaArmorSide(ctx, cx, cy, flick, pal, bob) {
+    var pulse = 0.7 + 0.3*Math.sin(flick*0.1);
+    /* spine ridge — jagged volcanic plates along the back, gold-rimmed */
+    for (var sp=0; sp<7; sp++) {
+      var spx = cx-30 + sp*10;
+      var spy = cy-16 + Math.sin(sp*0.9)*3 + bob*0.3;
+      var hgt = 7 + (sp===3?5:0) + (sp===2||sp===4?3:0);
+      pxTri(ctx, spx, spy-hgt, spx-5, spy+2, spx+5, spy+2, pal.outline);
+      pxTri(ctx, spx, spy-hgt+1, spx-4, spy+1, spx+4, spy+1, pal.goldDk);
+      pxTri(ctx, spx, spy-hgt+2, spx-3, spy, spx+3, spy, pal.gold);
+      pxRect(ctx, spx, spy-hgt+2, 1, 3, pal.goldHi);
+      /* hot lava glow between plates */
+      if (sp < 6) {
+        ctx.globalAlpha = pulse*0.7;
+        pxRect(ctx, spx+4, spy-1, 3, 2, pal.lava4);
+        ctx.globalAlpha = 1;
+      }
+    }
+    /* shoulder pauldron — raised plate, LIGHTER than body so it pops */
+    pxEllipse(ctx, cx-24, cy-6+bob*0.3, 15, 11, pal.outline);
+    pxEllipse(ctx, cx-24, cy-7+bob*0.3, 14, 10, pal.furMid);
+    pxEllipse(ctx, cx-24, cy-8+bob*0.3, 12, 8, pal.furLight);
+    pxEllipse(ctx, cx-26, cy-10+bob*0.3, 8, 5, pal.furHi);
+    /* engraved plate line */
+    pxLine(ctx, cx-33, cy-6+bob*0.3, cx-15, cy-9+bob*0.3, 1, pal.goldDk);
+    /* gold rim arc on the pauldron edge */
+    for (var pa=0; pa<5; pa++) {
+      var pang = Math.PI*0.15 + pa*Math.PI*0.18;
+      var px0 = cx-24 + Math.cos(pang)*13;
+      var py0 = cy-7 + Math.sin(pang)*9 + bob*0.3;
+      pxRect(ctx, Math.round(px0), Math.round(py0), 2, 2, pal.gold);
+      pxRect(ctx, Math.round(px0), Math.round(py0), 1, 1, pal.goldHi);
+    }
+    /* molten seam under pauldron */
+    ctx.globalAlpha = pulse*0.7;
+    pxEllipse(ctx, cx-24, cy+1+bob*0.3, 12, 2, pal.lava3);
+    ctx.globalAlpha = 1;
+    /* pauldron rivets — bright gold studs */
+    for (var rv=0; rv<3; rv++) {
+      var rvx = cx-32 + rv*8;
+      pxRect(ctx, rvx, cy-9+bob*0.3, 2, 2, pal.gold);
+      pxRect(ctx, rvx, cy-9+bob*0.3, 1, 1, pal.goldHi);
+    }
+    /* rib guards — three raised lighter plates with HOT lava seams between */
+    for (var rb=0; rb<3; rb++) {
+      var rby = cy+3 + rb*7 + bob*0.3;
+      var rbx = cx-8 + rb*2;
+      /* plate face — lighter than body */
+      pxLine(ctx, rbx-15, rby, rbx+11, rby-2, 5, pal.outline);
+      pxLine(ctx, rbx-14, rby, rbx+10, rby-2, 4, pal.furMid);
+      pxLine(ctx, rbx-13, rby-1, rbx+9, rby-3, 2, pal.furLight);
+      pxLine(ctx, rbx-12, rby-1, rbx+8, rby-3, 1, pal.gold);
+      /* bright lava seam under each rib — the money shot */
+      ctx.globalAlpha = pulse*0.85;
+      pxLine(ctx, rbx-13, rby+3, rbx+9, rby+1, 2, pal.lava3);
+      pxLine(ctx, rbx-12, rby+3, rbx+8, rby+1, 1, pal.lava4);
+      ctx.globalAlpha = 1;
+    }
+    /* haunch plate — raised plate, LIGHTER than body so it pops */
+    pxEllipse(ctx, cx+28, cy-4+bob*0.3, 13, 10, pal.outline);
+    pxEllipse(ctx, cx+28, cy-5+bob*0.3, 12, 9, pal.furMid);
+    pxEllipse(ctx, cx+28, cy-6+bob*0.3, 10, 7, pal.furLight);
+    pxEllipse(ctx, cx+30, cy-8+bob*0.3, 6, 4, pal.furHi);
+    /* engraved plate line */
+    pxLine(ctx, cx+20, cy-3+bob*0.3, cx+36, cy-7+bob*0.3, 1, pal.goldDk);
+    /* gold rim arc on haunch */
+    for (var ha=0; ha<4; ha++) {
+      var hang = Math.PI*0.3 + ha*Math.PI*0.2;
+      var hx0 = cx+28 + Math.cos(hang)*11;
+      var hy0 = cy-5 + Math.sin(hang)*8 + bob*0.3;
+      pxRect(ctx, Math.round(hx0), Math.round(hy0), 2, 2, pal.gold);
+      pxRect(ctx, Math.round(hx0), Math.round(hy0), 1, 1, pal.goldHi);
+    }
+    ctx.globalAlpha = pulse*0.7;
+    pxEllipse(ctx, cx+28, cy+2+bob*0.3, 10, 2, pal.lava3);
+    ctx.globalAlpha = 1;
+    /* haunch rivets */
+    pxRect(ctx, cx+22, cy-7+bob*0.3, 2, 2, pal.gold);
+    pxRect(ctx, cx+34, cy-7+bob*0.3, 2, 2, pal.gold);
+    pxRect(ctx, cx+22, cy-7+bob*0.3, 1, 1, pal.goldHi);
+    pxRect(ctx, cx+34, cy-7+bob*0.3, 1, 1, pal.goldHi);
+    /* heat shimmer — rising embers from armor seams */
+    if (!reduced) {
+      for (var hs=0; hs<6; hs++) {
+        var shx = cx-28 + ((hs*23 + Math.round(flick*0.4)) % 60);
+        var shy = cy-14 - ((flick*0.7 + hs*17) % 22);
+        ctx.globalAlpha = 0.7 * (1 - ((flick*0.7 + hs*17) % 22)/22);
+        ctx.fillStyle = hs%2 ? pal.flameYel : pal.lava4;
+        ctx.fillRect(Math.round(shx), Math.round(shy), 1, 1);
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
   function drawOmegaSide(ctx, P, isAlpha) {
     var W=160,H=160; ctx.clearRect(0,0,W,H);
     var pal=isAlpha?PAL5:PAL4, bob=P.bob||0, walk=P.walk||0, flameI=P.flameI==null?1:P.flameI, flick=P.flick||0;
@@ -14189,6 +14289,8 @@ switchTab(initialTab);
     pxEllipse(ctx,112,87+bob*0.3,8,5,pal.furMid);
     omegaScales(ctx, 80, 84+bob*0.3, 5, 2, 11, pal);
     omegaVeins(ctx, 80, 100+bob*0.3, flick, pal);
+    /* OMEGA volcanic armor — unique to this form */
+    if (!isAlpha) omegaArmorSide(ctx, 80, 96+bob*0.3, flick, pal, bob);
     /* ── near-side legs (in front, brighter, organic muscle shapes) ── */
     var nfS=legSwing(0), nrS=legSwing(Math.PI);
     /* near-front: big shoulder mass → tapered thigh → knee bulge → shin → paw */
