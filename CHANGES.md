@@ -2028,3 +2028,19 @@ UPGRADE BATCH PHASE 1 COMPLETE
 - The complete Windows-compatible `npm test` lane passes 2105 tests with zero
   failures and two pre-existing skips. No dependency or package manifest
   changed.
+
+## 2026-07-29 - Cline RSI port Wave 1 completion (Codex)
+
+- The final literal Linux `npm test` ran in this exact clone under WSL and
+  passed all 2108 tests with zero failures and zero skips. This is 25 new
+  passing tests above the verified 2059-pass Linux baseline.
+- The literal Windows-native run continued to expose the baseline NTFS mailbox
+  mode mismatch and also caught one load-sensitive 10ms wall-clock fixture.
+  That timing fixture immediately passed 1/1 in isolation, while the complete
+  Windows-compatible lane passed 2105 tests with zero failures. The Linux raw
+  lane is authoritative for the POSIX permission assertion.
+- All six independently revertable fix commits are pushed to
+  `origin/codex/cline-rsi-wave-1`. No daemon was restarted or modified, no npm
+  dependency was added, and no package manifest changed.
+
+CLINE RSI PORT WAVE 1 COMPLETE
