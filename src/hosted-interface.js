@@ -12326,6 +12326,17 @@ switchTab(initialTab);
       ctx.fillRect(x-half, y, half*2+1, 1);
     }
   }
+  /* Palette-driven translucent colour. Takes a "#rrggbb" from the active palette
+     and returns "rgba(r,g,b,alpha)" so ambient gradients/glows follow the form's
+     palette instead of being hardcoded warm. Without this, ALPHA (a cold cyan
+     form) inherited OMEGA's orange ambient wash. */
+  function palA(hex, alpha) {
+    if (typeof hex !== "string" || hex.charAt(0) !== "#" || hex.length < 7) return hex;
+    var r = parseInt(hex.slice(1, 3), 16),
+        g = parseInt(hex.slice(3, 5), 16),
+        b = parseInt(hex.slice(5, 7), 16);
+    return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+  }
   /* sinuous flame tongue — per-column phase-offset horizontal sine displacement
      so adjacent tongues lean opposite ways instead of marching in lockstep;
      width tapers full-at-base to 1px-at-tip (a constant-width tongue is a bar).
@@ -12952,18 +12963,18 @@ switchTab(initialTab);
     var groundY = H-16;
     /* deep ambient glow, hottest at the creature's waist height */
     var g = ctx.createRadialGradient(W/2, H*0.62, 10, W/2, H*0.62, W*0.62);
-    g.addColorStop(0, "rgba(255,110,26,0.34)");
-    g.addColorStop(0.55, "rgba(214,64,14,0.16)");
-    g.addColorStop(1, "rgba(120,20,4,0)");
+    g.addColorStop(0, palA(pal.flameOrg, 0.34));
+    g.addColorStop(0.55, palA(pal.flameRed, 0.16));
+    g.addColorStop(1, palA(pal.flameDeep, 0));
     ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
     /* continuous heat band — the tongues merge into a solid sheet at waist
        height (brightest there), so only their tips keep black negative space.
        Fades to transparent well above the waist so the top stays dark. */
     var band = ctx.createLinearGradient(0, groundY, 0, H*0.42);
-    band.addColorStop(0, "rgba(255,138,32,0.60)");
-    band.addColorStop(0.35, "rgba(232,84,16,0.42)");
-    band.addColorStop(0.7, "rgba(160,40,8,0.20)");
-    band.addColorStop(1, "rgba(120,24,4,0)");
+    band.addColorStop(0, palA(pal.flameOrg, 0.60));
+    band.addColorStop(0.35, palA(pal.flameRed, 0.42));
+    band.addColorStop(0.7, palA(pal.flameDeep, 0.20));
+    band.addColorStop(1, palA(pal.flameDeep, 0));
     ctx.fillStyle = band; ctx.fillRect(0, Math.round(H*0.42), W, groundY-H*0.42);
     /* discrete sinuous tongues — each with its own phase offset (col*0.7) so
        neighbours lean opposite ways, its own advection speed, and a seeded
@@ -13037,8 +13048,8 @@ switchTab(initialTab);
     ctx.globalAlpha = 1;
     /* hot pooling glow directly under the creature (the key light) */
     var hg = ctx.createRadialGradient(W/2, gy+4, 2, W/2, gy+4, 34);
-    hg.addColorStop(0, "rgba(255,150,40,0.5)");
-    hg.addColorStop(1, "rgba(255,90,20,0)");
+    hg.addColorStop(0, palA(pal.lava2, 0.5));
+    hg.addColorStop(1, palA(pal.lava1, 0));
     ctx.fillStyle = hg; ctx.fillRect(W/2-36, gy, 72, H-gy);
     /* bright nodes at seam junctions */
     var nodes=[[26,gy+2],[80,gy+3],[134,gy+3],[52,gy+4],[108,gy+5]];
@@ -13132,10 +13143,10 @@ switchTab(initialTab);
       pxRect(ctx, Math.round(sx1), Math.round(sy1), 1, 1, pal.goldHi);
     }
     pxDiamond(ctx, cx, gy2, 9*throb, 12*throb, pal.gold);
-    pxDiamond(ctx, cx, gy2, 8*throb, 11*throb, "#e01a0a");
+    pxDiamond(ctx, cx, gy2, 8*throb, 11*throb, pal.gem);
     ctx.globalAlpha = pulse;
     pxRect(ctx, cx-1, Math.round(gy2-7*throb), 2, Math.round(14*throb), pal.gemCore);
-    pxRect(ctx, cx, Math.round(gy2-2), 1, 4, "#ffffff");
+    pxRect(ctx, cx, Math.round(gy2-2), 1, 4, pal.gemCore);
     ctx.globalAlpha = 1;
     /* tier 4 — lower chevron plate ending in a point, with side flanges */
     pxLine(ctx, cx-14, by+8, cx, by+22, 3, pal.goldDk);
@@ -13206,7 +13217,7 @@ switchTab(initialTab);
       pxLine(ctx, cx0, cy0, cx1, cy1, 2, pal.claw);
       pxLine(ctx, cx1, cy1, cx2, cy2, 2, pal.claw);
       pxLine(ctx, cx1, cy1, cx2, cy2, 1, pal.clawHi);
-      pxRect(ctx, Math.round(cx2), Math.round(cy2), 1, 2, "#fff4d0");
+      pxRect(ctx, Math.round(cx2), Math.round(cy2), 1, 2, pal.flameCore);
     }
   }
 
