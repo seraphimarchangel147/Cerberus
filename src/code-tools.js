@@ -41,6 +41,12 @@ export const REPO_ROOT = path.resolve(__dirname, "..");
 const MAX_READ_LINES = 400;
 const MAX_SEARCH_RESULTS = 60;
 const MAX_OUTPUT = 12000;
+// A store value under a non-credential name is only treated as a redaction
+// needle at or above this length. Short configuration values ("1", "3", "off")
+// would otherwise mask ordinary digits and words throughout child-process
+// stdout, destroying diagnostic output; anything this long under an unexpected
+// name is still masked so a misnamed credential cannot leak.
+const MIN_UNNAMED_SECRET_REDACTION_LENGTH = 12;
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
 
 // ── tags ─────────────────────────────────────────────────────────────
@@ -359,8 +365,22 @@ function buildShellEnvironment(runtime, {
   for (const name of Object.keys(env)) {
     if (isCredentialEnvName(name)) delete env[name];
   }
+  // Only credential-shaped names become redaction needles. The store also owns
+  // ordinary configuration (OPENAGI_AUTO_APPROVE=1, OPENAGI_CHECKPOINTS=3,
+  // ANTHROPIC_MODEL), and treating a value such as "1" or "3" as a secret makes
+  // every digit in stdout a needle - masking commit hashes, counts, ages and
+  // lease ids in exactly the diagnostic output you are reading when debugging.
+  // buildTestExecution already applies this filter for the same reason.
+  // Values under a non-credential name are still redacted when they are long
+  // enough to be secret-shaped, so a misnamed credential cannot leak.
   const redactValues = new Set();
-  for (const value of Object.values(configuredEnv)) {
+  for (const [name, value] of Object.entries(configuredEnv)) {
+    if (
+      !isCredentialEnvName(name)
+      && String(value ?? "").length < MIN_UNNAMED_SECRET_REDACTION_LENGTH
+    ) {
+      continue;
+    }
     addSecretRedactionSpellings(redactValues, value);
   }
   addParentCredentialRedactions(redactValues, process.env);

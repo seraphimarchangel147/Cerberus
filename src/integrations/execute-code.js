@@ -176,7 +176,7 @@ export function registerExecuteCodeTool(runtime) {
   runtime.tools.register({
     name: "execute_code",
     sideEffects: true,
-    description: "Run a short JS script that can call your tools via await callTool(name, args). Use for 3+ dependent tool calls with logic between them, or to reduce large tool output before it reaches you. Print the final result with console.log.",
+    description: "Run a short JS script that can call your tools via await callTool(name, args). Use for 3+ dependent tool calls with logic between them, or to reduce large tool output before it reaches you. Print the final result with console.log. Read-only tools work normally, but this script holds the workspace mutation lease for its entire run, so any tool that WRITES (code_write, delegate_task, and similar) fails inside it with a lease conflict naming 'execute_code' as the holder. Batch reads here and make mutating calls directly instead.",
     parameters: {
       type: "object",
       properties: {

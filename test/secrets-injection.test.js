@@ -1761,3 +1761,69 @@ test("static OAuth client secrets stay in memory and are scrubbed from cache", a
   assert.equal(persisted.includes(staticSecret), false);
   assert.equal(JSON.parse(persisted).client.client_secret, undefined);
 });
+
+// Regression: the secrets store also holds ordinary configuration
+// (OPENAGI_AUTO_APPROVE=1, OPENAGI_CHECKPOINTS=3, OPENAGI_MAX_TURN_SECONDS=1200).
+// Treating those short values as redaction needles made every matching digit or
+// word in child stdout a mask, so commit hashes, counts, ages and lease ids came
+// back mangled ("129446d" -> "[REDACTED]29446d") exactly when they were being
+// read for debugging. Short non-credential values must not become needles, while
+// a secret-length value under an unexpected name must still be redacted.
+test("code_shell does not mask diagnostics with short non-credential config values", async () => {
+  const definitions = new Map();
+  const calls = [];
+  const misnamedSecret = `misnamed-${"z".repeat(32)}`;
+  registerCodeTools({
+    register(definition) {
+      definitions.set(definition.name, definition);
+    }
+  }, {
+    secrets: makeSecretStore({
+      OPENAGI_AUTO_APPROVE: "1",
+      OPENAGI_CHECKPOINTS: "3",
+      OPENAGI_MAX_TURN_SECONDS: "1200",
+      OPENAGI_DAILY_USD_LIMIT: "99",
+      OPENAGI_VECTOR_HYBRID_SEARCH: "off",
+      SHELL_DIAGNOSTIC_HANDLE: misnamedSecret
+    }, calls, [
+      "OPENAGI_AUTO_APPROVE",
+      "OPENAGI_CHECKPOINTS",
+      "OPENAGI_MAX_TURN_SECONDS",
+      "OPENAGI_DAILY_USD_LIMIT",
+      "OPENAGI_VECTOR_HYBRID_SEARCH",
+      "SHELL_DIAGNOSTIC_HANDLE"
+    ])
+  }, {
+    runShell: async () => ({
+      code: 0,
+      stdout: [
+        "commit 129446d",
+        "leaseCount:0",
+        "ageMs 223",
+        "OPENAGI_MEMTREE=1",
+        "held 1200ms",
+        "3 files changed, 99 insertions",
+        "hybrid search off",
+        `handle ${misnamedSecret}`
+      ].join("\n"),
+      stderr: ""
+    })
+  });
+
+  const result = await definitions.get("code_shell")
+    .handler({ command: "git --no-pager log -1" }, { from: "test-user" });
+
+  // Diagnostics survive intact.
+  assert.match(result.stdout, /commit 129446d/);
+  assert.match(result.stdout, /leaseCount:0/);
+  assert.match(result.stdout, /ageMs 223/);
+  assert.match(result.stdout, /OPENAGI_MEMTREE=1/);
+  assert.match(result.stdout, /held 1200ms/);
+  assert.match(result.stdout, /3 files changed, 99 insertions/);
+  assert.match(result.stdout, /hybrid search off/);
+
+  // A secret-length value under a non-credential name is still masked.
+  assert.equal(result.stdout.includes(misnamedSecret), false);
+  assert.equal(JSON.stringify(result).includes(misnamedSecret), false);
+  assert.match(result.stdout, /handle \[REDACTED\]/);
+});

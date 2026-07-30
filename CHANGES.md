@@ -2256,3 +2256,7 @@ MUTATION LEASE WAVE 2 COMPLETE
   `hybrid: true|false` option provides a reversible caller override.
 
 CONTEXT VALUE WAVE 3 COMPLETE
+
+- 2026-07-30T04:38:18.709Z · **azazel** · create `docs/qa/wave-live-qa-2026-07-29.md`
+- 2026-07-30 · **seraphim** · fix `buildShellEnvironment` redaction needles: only credential-named store values (plus a 12-char floor for unexpected names) become needles, so short config values like `1`/`3`/`off` no longer mask commit hashes, counts and lease ids in child stdout (QA finding F2). Regression test added.
+- 2026-07-30 · **seraphim** · document in the `execute_code` description that the script holds the workspace mutation lease for its whole run, so nested mutating calls fail with a self-conflict (QA finding F1; re-entrancy deferred to Wave 4).
