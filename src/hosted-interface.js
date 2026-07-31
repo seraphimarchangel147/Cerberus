@@ -12179,7 +12179,7 @@ switchTab(initialTab);
     { key:"omega", name:"OMEGA CERBERUS", w:160, h:160, xpMax:1500, flame:1.65, pal:3, res:3 },
     { key:"alpha", name:"ALPHA CERBERUS", w:160, h:160, xpMax:0,  flame:1.95, pal:4, res:3 }
   ];
-  var FPS = 15, FRAME_MS = 1000 / FPS;
+  var FPS = 24, FRAME_MS = 1000 / FPS;
   var TICKS_PER_FRAME = Math.round(60 / FPS);
   /* Buffer size is per-form (w*res × h*res) and the display canvas tracks the
      active form, so there is no single global MAX — each form carries its own
@@ -14211,12 +14211,13 @@ switchTab(initialTab);
      haunch plate, heat shimmer from armor seams. NOT shared with ALPHA.
      High-contrast: bright gold rims + hot lava seams so plates POP
      against the dark body instead of blending in. */
-  function omegaArmorSide(ctx, cx, cy, flick, pal, bob) {
+  function omegaArmorSide(ctx, cx, cy, flick, pal, bob, walk) {
     var pulse = 0.7 + 0.3*Math.sin(flick*0.1);
     /* spine ridge — jagged volcanic plates along the back, gold-rimmed */
+    var armorRattle = walk?Math.sin(walk*4)*1.2:0;
     for (var sp=0; sp<7; sp++) {
       var spx = cx-30 + sp*10;
-      var spy = cy-16 + Math.sin(sp*0.9)*3 + bob*0.3;
+      var spy = cy-16 + Math.sin(sp*0.9)*3 + bob*0.3 + Math.sin(walk*4+sp*0.8)*1.2*(walk?1:0);
       var hgt = 7 + (sp===3?5:0) + (sp===2||sp===4?3:0);
       pxTri(ctx, spx, spy-hgt, spx-5, spy+2, spx+5, spy+2, pal.outline);
       pxTri(ctx, spx, spy-hgt+1, spx-4, spy+1, spx+4, spy+1, pal.goldDk);
@@ -14310,7 +14311,7 @@ switchTab(initialTab);
      Unique obsidian-plate + cyan energy design. Crystalline spine ridge,
      plasma-seamed plates, spectral wisps. Cold divine warrior — the
      opposite of OMEGA's volcanic gold. NOT shared with OMEGA. */
-  function alphaArmorSide(ctx, cx, cy, flick, pal, bob) {
+  function alphaArmorSide(ctx, cx, cy, flick, pal, bob, walk) {
     var pulse = 0.7 + 0.3*Math.sin(flick*0.13);
     /* crystalline spine ridge — sharp cyan-tipped crystals, not round spikes */
     for (var sp=0; sp<7; sp++) {
@@ -14422,6 +14423,13 @@ switchTab(initialTab);
     if (!skelOK) {
     var legAmp=walk?12:0;
     function legSwing(ph){return Math.round(Math.sin(walk+ph)*legAmp);}
+    /* ── walk secondary motion — richer per-frame animation ── */
+    var walkBounce = walk ? Math.abs(Math.sin(walk*2))*3 : 0;
+    var shoulderRoll = walk ? Math.sin(walk)*2.5 : 0;
+    var haunchPump = walk ? Math.sin(walk+Math.PI)*2.5 : 0;
+    var headCounterBob = walk ? -Math.abs(Math.sin(walk*2))*2 : 0;
+    var armorRattle = walk ? Math.sin(walk*4)*1.2 : 0;
+    var bodySquash = walk ? 1 + Math.sin(walk*2)*0.03 : 1;
     /* ── far-side legs (behind body, darker) ── */
     var ffS=legSwing(Math.PI), frS=legSwing(0);
     /* far-front: thigh ellipse → shin ellipse → paw */
@@ -14435,21 +14443,22 @@ switchTab(initialTab);
     pxEllipse(ctx,106+frS,138,6,4,pal.furDeep);
     for (var rc=0;rc<3;rc++){pxLine(ctx,102+frS+rc*3,142,103+frS+rc*3+clawFlex,150,2,pal.goldDk);}
     omegaTail(ctx, 122, 96, Math.sin((P.tailWag||0))*4, flick, flameI, pal, 1);
-    /* ── barrel torso ── */
-    pxEllipse(ctx,80,98+bob*0.3,44*squash,24/squash,pal.furDark);
-    pxEllipse(ctx,52,94+bob*0.3,22*squash,20/squash,pal.furMid);
-    pxEllipse(ctx,108,94+bob*0.3,20*squash,20/squash,pal.furDark);
-    pxEllipse(ctx,76,84+bob*0.3,32,5,pal.furLight);
-    /* shoulder + haunch masses */
-    pxEllipse(ctx,56,92+bob*0.3,14,12,pal.furMid);
-    pxEllipse(ctx,54,87+bob*0.3,8,5,pal.furLight);
-    pxEllipse(ctx,110,92+bob*0.3,14,12,pal.furDark);
-    pxEllipse(ctx,112,87+bob*0.3,8,5,pal.furMid);
+    /* ── barrel torso (walk bounce + squash) ── */
+    var tY = bob*0.3 - walkBounce;
+    pxEllipse(ctx,80,98+tY,44*squash*bodySquash,24/squash/bodySquash,pal.furDark);
+    pxEllipse(ctx,52+shoulderRoll,94+tY,22*squash,20/squash,pal.furMid);
+    pxEllipse(ctx,108+haunchPump,94+tY,20*squash,20/squash,pal.furDark);
+    pxEllipse(ctx,76,84+tY,32,5,pal.furLight);
+    /* shoulder + haunch masses (roll with stride) */
+    pxEllipse(ctx,56+shoulderRoll,92+tY,14,12,pal.furMid);
+    pxEllipse(ctx,54+shoulderRoll,87+tY,8,5,pal.furLight);
+    pxEllipse(ctx,110+haunchPump,92+tY,14,12,pal.furDark);
+    pxEllipse(ctx,112+haunchPump,87+tY,8,5,pal.furMid);
     omegaScales(ctx, 80, 84+bob*0.3, 5, 2, 11, pal);
     omegaVeins(ctx, 80, 100+bob*0.3, flick, pal);
     /* OMEGA volcanic armor — unique to this form */
-    if (!isAlpha) omegaArmorSide(ctx, 80, 96+bob*0.3, flick, pal, bob);
-    if (isAlpha) alphaArmorSide(ctx, 80, 96+bob*0.3, flick, pal, bob);
+    if (!isAlpha) omegaArmorSide(ctx, 80, 96+bob*0.3, flick, pal, bob, walk);
+    if (isAlpha) alphaArmorSide(ctx, 80, 96+bob*0.3, flick, pal, bob, walk);
     /* ── near-side legs (in front, brighter, organic muscle shapes) ── */
     var nfS=legSwing(0), nrS=legSwing(Math.PI);
     /* near-front: big shoulder mass → tapered thigh → knee bulge → shin → paw */
@@ -14482,19 +14491,44 @@ switchTab(initialTab);
       pxLine(ctx,dx4,148,dx4+1+clawFlex,158,2,pal.claw);
       pxLine(ctx,dx4,148,dx4+1+clawFlex,158,1,pal.clawHi);
     }
-    /* necks + three heads fanned at the front (facing left) */
+    /* necks + three heads fanned at the front (facing left) — counter-bob in walk */
     var droop=sad*3, nl=-lean;
-    pxLine(ctx,34+nl,72+bob*0.8+droop,44,94+bob*0.3,10,pal.furDark);
-    pxLine(ctx,52+nl,62+bob+droop*0.5,56,94+bob*0.3,12,pal.furDark);
-    pxLine(ctx,70+nl,72+bob*0.8+droop,68,94+bob*0.3,10,pal.furDark);
+    var hY = headCounterBob;
+    pxLine(ctx,34+nl,72+bob*0.8+droop+hY,44,94+bob*0.3,10,pal.furDark);
+    pxLine(ctx,52+nl,62+bob+droop*0.5+hY,56,94+bob*0.3,12,pal.furDark);
+    pxLine(ctx,70+nl,72+bob*0.8+droop+hY,68,94+bob*0.3,10,pal.furDark);
     var hgx=Math.max(-1,Math.min(1,gx)), hgy=Math.max(-1,Math.min(1,gy));
     /* ALPHA wears armored helms with visor slits; OMEGA keeps its flame-maned
        skulls. Same anchor points, entirely different head art. */
     var headFn = isAlpha ? alphaHead : omegaHead;
-    headFn(ctx,34+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
-    headFn(ctx,52+nl,54+bob+droop*0.5+(lean?1:0),{dir:-1,size:1.25,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
-    headFn(ctx,70+nl,66+bob*0.8+droop+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
+    headFn(ctx,34+nl,66+bob*0.8+droop+hY+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
+    headFn(ctx,52+nl,54+bob+droop*0.5+hY+(lean?1:0),{dir:-1,size:1.25,roar:P.roarCenter!==false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
+    headFn(ctx,70+nl,66+bob*0.8+droop+hY+(lean?1:0),{dir:-1,size:1.0,roar:P.roarSide||false,blink:P.blink,gazeX:hgx,gazeY:hgy,crestFlick:flick},pal);
     if (walk) for (var ei=0;ei<6;ei++){var ex=118+((flick*0.8+ei*9)%30),ey=60+((ei*7+flick*0.3)%30);ctx.fillStyle=ei%2?pal.flameOrg:pal.goldHi;ctx.globalAlpha=0.8-(ex-118)/36;ctx.fillRect(Math.round(ex),Math.round(ey),1,1);ctx.globalAlpha=1;}
+    /* ── dust impact particles at paw contact (walk only) ── */
+    if (walk && !reduced) {
+      var contactF = Math.abs(Math.sin(walk)); /* 1 at full extension */
+      var contactR = Math.abs(Math.sin(walk+Math.PI));
+      if (contactF > 0.92) { /* front paw just hit ground */
+        for (var dp=0;dp<4;dp++) {
+          var dpx = 50+nfS + (dp-2)*4 + Math.sin(flick*0.7+dp)*2;
+          var dpy = 152 - dp*2 - Math.random()*2;
+          ctx.globalAlpha = 0.5*(1-dp/4);
+          ctx.fillStyle = pal.furLight;
+          ctx.fillRect(Math.round(dpx), Math.round(dpy), 2, 1);
+        }
+      }
+      if (contactR > 0.92) { /* rear paw just hit ground */
+        for (var dp2=0;dp2<4;dp2++) {
+          var dpx2 = 104+nrS + (dp2-2)*4 + Math.sin(flick*0.7+dp2)*2;
+          var dpy2 = 154 - dp2*2 - Math.random()*2;
+          ctx.globalAlpha = 0.5*(1-dp2/4);
+          ctx.fillStyle = pal.furLight;
+          ctx.fillRect(Math.round(dpx2), Math.round(dpy2), 2, 1);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
     }
 
     /* ALPHA unique effects on the side view too */
