@@ -14082,18 +14082,17 @@ switchTab(initialTab);
   }
 
   /* ── Public entry points ─────────────────────────────────────────────── */
-  function drawOmegaSprite(ctx, P) {
-    return drawSpriteFront(ctx, P, "omega_front", PAL4, 1);
-  }
-  function drawOmegaSpriteSide(ctx, P) {
-    return drawSpriteSide(ctx, P, "omega_side", PAL4, 1);
-  }
-  function drawAlphaSprite(ctx, P) {
-    return drawSpriteFront(ctx, P, "alpha_front", PAL5, 1.35);
-  }
-  function drawAlphaSpriteSide(ctx, P) {
-    return drawSpriteSide(ctx, P, "alpha_side", PAL5, 1.35);
-  }
+  /* NOTE: the four sprite wrappers that used to live here (drawOmegaSprite,
+     drawOmegaSpriteSide, drawAlphaSprite, drawAlphaSpriteSide -> the
+     drawSpriteFront/drawSpriteSide/CERB_ANIM family) were DEAD CODE and have
+     been removed. drawAlphaSprite was declared twice in this same scope, and
+     JS function hoisting means the LATER declaration (the atlas state machine
+     around the ALPHA_SPR_ROWS table below) silently won for every caller -
+     including the callers written between the two. Nothing in the render
+     dispatch reached this family. A fix was once shipped into it and never
+     executed. If you add a sprite path here, trace it down from the stage
+     dispatch in the frame builder before you trust it. */
+
 
 
   function drawOmegaFront(ctx, P, isAlpha) {
@@ -14861,9 +14860,20 @@ switchTab(initialTab);
      through once, until the engine state changes. */
   var alphaSprState = "idle", alphaSprStart = 0;
   var ALPHA_CELL = 160;
-  /* col0 = starting column inside the row, n = frame count, loop = cycles */
+  /* col0 = starting column inside the row, n = frame count, loop = cycles
+     order = optional explicit column sequence (overrides col0..col0+n-1).
+
+     IDLE POP: measured on the LIVE atlas (ALPHA_SPRITE_SRC, 1280x640). Idle
+     frame 0 is not an idle pose at all - it is 118px wide vs 84-95px for
+     frames 1-7 (mass 10146 vs ~8200, 39.4% deviation from the mean of the
+     others), because the outer two heads are turned outward and the forelimbs
+     are spread. Cycling through it gives a 32px silhouette-width step once per
+     loop; frames 1-7 alone step at most 11px. Dropping it takes the worst
+     frame-to-frame change from 35.8% -> 29.2% of body mass.
+     The row is a genuine 7-frame cycle with one odd frame baked in, so this is
+     an ART bug and the correct renderer-side mitigation is to not play f0. */
   var ALPHA_SPR_ROWS = {
-    idle:   { row:0, col0:0, n:8, loop:true  },
+    idle:   { row:0, col0:0, n:7, loop:true, order:[1,2,3,4,5,6,7] },
     walk:   { row:1, col0:0, n:8, loop:true  },
     attack: { row:2, col0:0, n:4, loop:false },
     jump:   { row:2, col0:4, n:4, loop:false },
@@ -14887,17 +14897,16 @@ switchTab(initialTab);
     var idx = spec.loop ? (((elapsed % spec.n) + spec.n) % spec.n)
                         : Math.min(elapsed, spec.n - 1);
     if (reduced) idx = 0;
-    var sx = (spec.col0 + idx) * ALPHA_CELL, sy = spec.row * ALPHA_CELL;
-    /* procedural micro-motion: breathing scale + subtle sway so the body
-       lives between keyframes, not just on them */
-    var flick = P.flick || 0;
-    var breathe = reduced ? 0 : Math.sin(flick * 0.09) * 0.008;
-    var sway = reduced ? 0 : Math.sin(flick * 0.05) * 0.6;
-    var bobY = reduced ? 0 : Math.sin(flick * 0.09) * 0.8;
+    var col = spec.order ? spec.order[idx] : (spec.col0 + idx);
+    var sx = col * ALPHA_CELL, sy = spec.row * ALPHA_CELL;
+    /* Procedural micro-motion. The baked frames already carry the breath AND
+       keep the paws planted (idle foot line spread 2px across the row), so any
+       translation/scale here stacks a second breath on top of the baked one and
+       lifts the planted feet. Measured on the live transform: bobY 0.8 plus the
+       scale about pivot y=80 displaced the y=144 foot line by +/-0.54px, with
+       +/-0.60px of horizontal sway. Small, but it is drift the art did not ask
+       for, so during a baked state the body does not translate or scale. */
     ctx.save();
-    ctx.translate(80 + sway, 80 + bobY);
-    ctx.scale(1 + breathe, 1 - breathe * 0.5);
-    ctx.translate(-80, -80);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(alphaSprite, sx, sy, ALPHA_CELL, ALPHA_CELL, 0, 0, 160, 160);
     ctx.restore();
