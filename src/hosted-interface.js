@@ -14910,6 +14910,7 @@ switchTab(initialTab);
      Non-loop rows (attack, jump, wave) hold their last frame after playing
      through once, until the engine state changes. */
   var alphaSprState = "idle", alphaSprStart = 0;
+  var alphaSprLastCol = -1, alphaSprAdvances = 0;
   var ALPHA_CELL = 160;
   /* Baked-atlas playback rate, in RENDERED FRAMES per atlas column.
      The atlas advances one column per render, so a row's duration is
@@ -14958,6 +14959,15 @@ switchTab(initialTab);
                         : Math.min(elapsed, spec.n - 1);
     if (reduced) idx = 0;
     var col = spec.order ? spec.order[idx] : (spec.col0 + idx);
+    /* Test hook: the baked-atlas column actually on screen. The procedural FX
+       (flame, corona, crystal wall) repaint the whole canvas every frame, so a
+       pixel probe measures the render loop, not the atlas cadence - both
+       obvious probes (silhouette width, dark-body mass) tracked the compositor
+       instead. Exposing the column makes atlas timing directly observable, so
+       a regression in ATLAS_HOLD or the play order is caught by measurement
+       rather than re-derived from the source. */
+    alphaSprLastCol = col;
+    alphaSprAdvances++;
     var sx = col * ALPHA_CELL, sy = spec.row * ALPHA_CELL;
     /* Procedural micro-motion. The baked frames already carry the breath AND
        keep the paws planted (idle foot line spread 2px across the row), so any
@@ -15396,7 +15406,10 @@ switchTab(initialTab);
   window.cerbPetGetInfo = function () {
     return { stage:settings.stage, form:FORMS[settings.stage].key, name:FORMS[settings.stage].name,
              xp:settings.xp, xpMax:FORMS[settings.stage].xpMax, enabled:settings.enabled,
-             scale:settings.scale, glow:settings.glow, autoEvolve:settings.autoEvolve, state:state };
+             scale:settings.scale, glow:settings.glow, autoEvolve:settings.autoEvolve, state:state,
+             /* animation timing, for automated verification (see drawAlphaSprite) */
+             fps:FPS, ticksPerFrame:TICKS_PER_FRAME, atlasHold:ATLAS_HOLD,
+             atlasCol:alphaSprLastCol, atlasRow:alphaSprState, atlasDraws:alphaSprAdvances };
   };
 
   document.addEventListener("visibilitychange", function () { paused = document.hidden; });
