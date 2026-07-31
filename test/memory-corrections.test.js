@@ -158,3 +158,72 @@ test("correct_memory tool wires through with scope + recall exposes confidence f
   assert.equal(typeof top.strength, "number");
   assert.ok(["specific", "normal", "compressed"].includes(top.fidelity));
 });
+
+// A known-wrong NON-curated memory (background-review note, raw runtime item)
+// must stay retirable when the curated store is nearly full. correct() is the
+// only lane that can supersede such an item — remember(replaceIds) rejects it
+// as non-curated — so if the correction were force-charged to the curated
+// budget, a full store would make the wrong fact permanently unretirable.
+test("correcting a non-curated memory does not consume curated capacity", () => {
+  const memory = new MemorySystem({ curatedMemoryMaxChars: 300 });
+  const filler = "x".repeat(120);
+  memory.remember({ source: "t", scope: "main", content: filler }, { capacityManaged: true, tier: "medium" });
+  memory.remember({ source: "t", scope: "main", content: filler }, { capacityManaged: true, tier: "medium" });
+  const before = memory.curatedUsage({ scope: "main" });
+  assert.ok(before.percent >= 80, `expected a near-full curated store, got ${before.percent}%`);
+
+  const stale = memory.remember(
+    { source: "background-review", scope: "main", content: "Screenshots need a standalone tool." },
+    { tier: "long" }
+  );
+  assert.notEqual(stale.metadata?.capacityManaged, true);
+
+  const { item, superseded } = memory.correct({
+    id: stale.id,
+    content: "Screenshots are built in; no standalone tool is needed.",
+    scope: "main"
+  });
+
+  assert.equal(superseded.length, 1);
+  assert.equal(superseded[0].id, stale.id);
+  assert.equal(memory.inspect(stale.id).metadata.supersededBy, item.id);
+  assert.notEqual(item.metadata?.capacityManaged, true);
+  assert.equal(memory.curatedUsage({ scope: "main" }).usedChars, before.usedChars);
+
+  // The correction still wins recall, and the stale copy is gone from it.
+  const hits = memory.retrieve("standalone screenshot tool", { scope: "main" });
+  assert.equal(hits[0].item.id, item.id);
+  assert.ok(!hits.some((hit) => hit.item.id === stale.id));
+});
+
+// Correcting a CURATED memory must stay curated — it reclaims the stale item's
+// chars, so it belongs in the same budget and keeps surfacing in the cover.
+test("correcting a curated memory stays curated and reclaims its chars", () => {
+  const memory = new MemorySystem({ curatedMemoryMaxChars: 300 });
+  const stale = memory.remember(
+    { source: "tool", scope: "main", content: "Deploys run on Tuesdays." },
+    { capacityManaged: true, tier: "medium" }
+  );
+  const { item, superseded } = memory.correct({
+    id: stale.id,
+    content: "Deploys run on Wednesdays, not Tuesdays.",
+    scope: "main"
+  });
+  assert.equal(superseded.length, 1);
+  assert.equal(item.metadata.capacityManaged, true);
+  const usage = memory.curatedUsage({ scope: "main" });
+  assert.ok(usage.items.some((entry) => entry.id === item.id));
+  assert.ok(!usage.items.some((entry) => entry.id === stale.id));
+});
+
+// A correction with no matching target is a user-facing fact in its own right.
+test("a targetless correction is still curated", () => {
+  const memory = new MemorySystem();
+  const { item, superseded } = memory.correct({
+    query: "nothing at all matches this phrasing xyzzy",
+    content: "The office moved to the 4th floor.",
+    scope: "main"
+  });
+  assert.equal(superseded.length, 0);
+  assert.equal(item.metadata.capacityManaged, true);
+});

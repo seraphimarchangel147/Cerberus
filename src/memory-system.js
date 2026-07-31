@@ -322,6 +322,17 @@ export class MemorySystem {
     const targetTier = targets.reduce((best, t) => (tierRank[t.tier] > tierRank[best] ? t.tier : best), "medium");
     const inheritedTags = [...new Set(targets.flatMap((t) => t.tags ?? []))];
 
+    // A correction inherits the CURATION of what it replaces, not just its
+    // tier. Superseding a non-curated item (background-review notes, raw
+    // runtime memories) reclaims nothing from the curated char budget, so
+    // forcing the correction into the curated store charges it as a net-new
+    // write. At high curated occupancy that made retiring a known-wrong
+    // non-curated memory impossible: the only tool that can supersede it
+    // failed closed with MEMORY_CAPACITY_EXCEEDED. Corrections with no
+    // target are still curated — that path is a user-facing fact.
+    const capacityManaged = targets.length === 0
+      || targets.some((target) => target.metadata?.capacityManaged === true);
+
     const corrected = this.remember(
       {
         source,
@@ -339,7 +350,7 @@ export class MemorySystem {
       {
         strength: 1.0,
         tier: targetTier,
-        capacityManaged: true,
+        capacityManaged,
         supersedeIds: targets.map((target) => target.id),
         persistenceOp: "correct"
       }
