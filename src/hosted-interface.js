@@ -12180,7 +12180,14 @@ switchTab(initialTab);
     { key:"alpha", name:"ALPHA CERBERUS", w:160, h:160, xpMax:0,  flame:1.95, pal:4, res:3 }
   ];
   var FPS = 24, FRAME_MS = 1000 / FPS;
-  var TICKS_PER_FRAME = Math.round(60 / FPS);
+  /* TICKS_PER_FRAME converts a rendered frame into the legacy 60Hz "tick" unit
+     that every tuned sin(flick*k) motion constant is calibrated against. The
+     invariant is FPS * TICKS_PER_FRAME === 60, i.e. the sim always advances 60
+     ticks per real second regardless of the render rate. Do NOT round this:
+     Math.round(60/24) = 3 gives 72 ticks/sec, running every tuned animation
+     20% fast (and the baked ALPHA atlas rows 38% short). 60/24 = 2.5 exactly,
+     and the frame accumulator is a float, so a fractional step is fine. */
+  var TICKS_PER_FRAME = 60 / FPS;
   /* Buffer size is per-form (w*res × h*res) and the display canvas tracks the
      active form, so there is no single global MAX — each form carries its own
      resolution via FORMS[i].res. */
@@ -14894,6 +14901,15 @@ switchTab(initialTab);
      through once, until the engine state changes. */
   var alphaSprState = "idle", alphaSprStart = 0;
   var ALPHA_CELL = 160;
+  /* Baked-atlas playback rate, in RENDERED FRAMES per atlas column.
+     The atlas advances one column per render, so a row's duration is
+     n/FPS seconds and is NOT governed by TICKS_PER_FRAME. When FPS went
+     15 -> 24 that silently sped every baked row up by 38% (the ALPHA idle
+     breath went 0.467s -> 0.292s per cycle, 2.14Hz -> 3.43Hz, which reads
+     as panting rather than breathing). ATLAS_HOLD restores the tuned
+     cadence: hold each column for FPS/15 renders so baked rows keep their
+     15fps-era duration no matter what the render rate is. */
+  var ATLAS_HOLD = FPS / 15;
   /* col0 = starting column inside the row, n = frame count, loop = cycles
      order = optional explicit column sequence (overrides col0..col0+n-1).
 
@@ -14927,7 +14943,7 @@ switchTab(initialTab);
     var spec = ALPHA_SPR_ROWS[st];
     if (!spec) return false;
     if (st !== alphaSprState) { alphaSprState = st; alphaSprStart = P.flick; }
-    var elapsed = Math.floor((P.flick - alphaSprStart) / TICKS_PER_FRAME);
+    var elapsed = Math.floor((P.flick - alphaSprStart) / (TICKS_PER_FRAME * ATLAS_HOLD));
     var idx = spec.loop ? (((elapsed % spec.n) + spec.n) % spec.n)
                         : Math.min(elapsed, spec.n - 1);
     if (reduced) idx = 0;
