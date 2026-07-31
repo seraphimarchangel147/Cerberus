@@ -12179,7 +12179,17 @@ switchTab(initialTab);
     { key:"omega", name:"OMEGA CERBERUS", w:160, h:160, xpMax:1500, flame:1.65, pal:3, res:3 },
     { key:"alpha", name:"ALPHA CERBERUS", w:160, h:160, xpMax:0,  flame:1.95, pal:4, res:3 }
   ];
-  var FPS = 24, FRAME_MS = 1000 / FPS;
+  /* FPS is a real throttle, not just calibration: tick() gates on
+     (now - lastDraw) < (FRAME_MS - 1), so the loop draws on the first vsync at
+     or past FRAME_MS. On a 60Hz display that quantises to whole vsync
+     intervals, which means only DIVISORS OF 60 land honestly - 15, 20, 30, 60.
+     FPS=24 asks for a 41.7ms budget, misses the 2-vsync mark (33.3ms) and
+     draws every 3rd vsync instead: a measured 20.1fps for the cost of a 24fps
+     target, 17% of the budget wasted. FPS=30 hits 2 vsyncs exactly and
+     measured 30.1fps on this machine, so the loop is NOT compute-bound - 24
+     was purely a quantisation loss. 30 also restores integer constants
+     (TICKS_PER_FRAME=2, ATLAS_HOLD=2). */
+  var FPS = 30, FRAME_MS = 1000 / FPS;
   /* TICKS_PER_FRAME converts a rendered frame into the legacy 60Hz "tick" unit
      that every tuned sin(flick*k) motion constant is calibrated against. The
      invariant is FPS * TICKS_PER_FRAME === 60, i.e. the sim always advances 60
