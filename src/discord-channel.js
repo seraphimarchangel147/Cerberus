@@ -63,20 +63,19 @@ export function discordStreamingEnabled() {
 }
 
 export function formatWallClockCheckpointActivity(event = {}) {
-  const chargedLeft = Number.isSafeInteger(event?.extensionsLeft)
-    ? Math.max(0, event.extensionsLeft)
+  const idleLeft = Number.isSafeInteger(event?.idleStrikesLeft)
+    ? Math.max(0, event.idleStrikesLeft)
     : "?";
-  const freeLeft = Number.isSafeInteger(event?.freeExtensionsLeft)
-    ? Math.max(0, event.freeExtensionsLeft)
-    : "?";
-  const verdict = event?.progressSinceLastCheckpoint === true
-    ? event?.extensionKind === "free"
-      ? "progress detected; free extension granted"
-      : "progress detected; free cap exhausted, charged extension used"
-    : event?.progressSinceLastCheckpoint === false
-      ? "no new progress; charged extension used"
-      : "progress unknown; fail-safe charged extension used";
-  return `Wall-clock checkpoint - long turn still working (${chargedLeft} charged, ${freeLeft} progress extensions left; ${verdict})`;
+  if (event?.extensionKind === "progress") {
+    const granted = Number.isSafeInteger(event?.progressExtensions)
+      ? Math.max(0, event.progressExtensions)
+      : "?";
+    return `Checkpoint - turn still producing output, extended free (${granted} progress extension${granted === 1 ? "" : "s"} granted; idle allowances restored to ${idleLeft})`;
+  }
+  const verdict = event?.progressSinceLastCheckpoint === false
+    ? "no new output"
+    : "progress unreadable; idle fail-safe";
+  return `Idle checkpoint - ${verdict} (${idleLeft} idle allowance${idleLeft === 1 ? "" : "s"} left before the turn is stopped as stalled)`;
 }
 
 export function formatEmptyTurnFallback(result = {}) {

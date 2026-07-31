@@ -76,11 +76,12 @@ import { memtreeEnabled } from "../lib/memtree.js";
 const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_MAX_REQUEST_HOPS = 6;
 const DEFAULT_MAX_TURN_SECONDS = 900;
-// Soft wall-clock checkpoints: how many times a turn may extend its own
-// deadline (by maxTurnSeconds each time) with a synthetic status ping before
-// the guard hard-stops it. 0 restores the original hard-stop behaviour.
-const DEFAULT_WALL_CLOCK_CHECKPOINTS = 3;
-const DEFAULT_WALL_CLOCK_FREE_EXTENSIONS = 3;
+// Soft checkpoints. maxTurnSeconds is NOT a turn deadline any more -- it is the
+// interval at which a long turn is asked "are you still producing output?". A
+// turn that keeps producing output is extended indefinitely; only consecutive
+// IDLE checkpoints deplete this strike budget and eventually stop the turn as
+// stalled. 0 restores the original hard stop at the first checkpoint.
+const DEFAULT_WALL_CLOCK_IDLE_STRIKES = 3;
 // Max silence (no streamed tokens/events) before a single request is treated
 // as stalled. A model that keeps producing output — even slowly, like Kimi —
 // resets this on every event and is never aborted for being slow. 0 disables
@@ -224,22 +225,27 @@ function nonNegativeInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-function resolveWallClockFreeExtensions(value) {
-  try {
-    if (
-      value === undefined
-      || value === null
-      || String(value).trim() === ""
-    ) {
-      return DEFAULT_WALL_CLOCK_FREE_EXTENSIONS;
+// Idle-strike budget. Accepts the new OPENAGI_WALL_CLOCK_IDLE_STRIKES knob and
+// still honours the two legacy names so existing .env files keep working: the
+// old CHECKPOINTS/FREE_EXTENSIONS pair both described "how much slack before a
+// hard stop", which is exactly what the idle budget now expresses.
+function resolveWallClockIdleStrikes(...values) {
+  for (const value of values) {
+    try {
+      if (
+        value === undefined
+        || value === null
+        || String(value).trim() === ""
+      ) {
+        continue;
+      }
+      const parsed = Number(value);
+      if (Number.isSafeInteger(parsed) && parsed >= 0) return parsed;
+    } catch {
+      // fall through to the next candidate
     }
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) && parsed >= 0
-      ? parsed
-      : DEFAULT_WALL_CLOCK_FREE_EXTENSIONS;
-  } catch {
-    return DEFAULT_WALL_CLOCK_FREE_EXTENSIONS;
   }
+  return DEFAULT_WALL_CLOCK_IDLE_STRIKES;
 }
 
 function retryAfterMs(response, now = Date.now()) {
@@ -494,13 +500,15 @@ function applyIterationSettings(provider, options) {
     options.maxTurnSeconds ?? process.env.OPENAGI_MAX_TURN_SECONDS,
     DEFAULT_MAX_TURN_SECONDS
   );
-  provider.wallClockCheckpoints = nonNegativeInteger(
-    options.wallClockCheckpoints ?? process.env.OPENAGI_WALL_CLOCK_CHECKPOINTS,
-    DEFAULT_WALL_CLOCK_CHECKPOINTS
-  );
-  provider.wallClockFreeExtensions = resolveWallClockFreeExtensions(
-    options.wallClockFreeExtensions
-      ?? provider.env?.OPENAGI_WALL_CLOCK_FREE_EXTENSIONS
+  provider.wallClockIdleStrikes = resolveWallClockIdleStrikes(
+    options.wallClockIdleStrikes,
+    options.wallClockFreeExtensions,
+    options.wallClockCheckpoints,
+    provider.env?.OPENAGI_WALL_CLOCK_IDLE_STRIKES,
+    provider.env?.OPENAGI_WALL_CLOCK_FREE_EXTENSIONS,
+    provider.env?.OPENAGI_WALL_CLOCK_CHECKPOINTS,
+    process.env.OPENAGI_WALL_CLOCK_IDLE_STRIKES,
+    process.env.OPENAGI_WALL_CLOCK_CHECKPOINTS
   );
   provider.maxTurnUsd = optionalPositiveNumber(
     options.maxTurnUsd ?? process.env.OPENAGI_MAX_TURN_USD
@@ -1018,20 +1026,25 @@ function extendTurnDeadline(provider, context, maxTurnSeconds) {
 function createWallClockCheckpointState(provider, context) {
   const progressCounter = bindTurnProgressCounter(context);
   const progressCount = readTurnProgressCount(progressCounter);
-  // Both budgets decrease monotonically. Therefore absolute turn time is
-  // bounded by maxTurnSeconds * (1 + checkpoints + freeExtensions).
+  // A productive turn is NEVER stopped by the clock. Time is not evidence of
+  // being stuck -- absence of new output is. So extensions are unlimited while
+  // output-aware progress keeps arriving, and the only budget that depletes is
+  // the idle-strike budget, which is spent solely on checkpoints that observed
+  // NO new progress (or could not read progress at all). The real bounds on a
+  // turn remain the iteration cap, the USD budget cap, and per-request stall
+  // detection -- all of which measure work, not wall time.
   return {
-    total: provider.wallClockCheckpoints,
-    left: provider.wallClockCheckpoints,
-    freeTotal: provider.wallClockFreeExtensions,
-    freeLeft: provider.wallClockFreeExtensions,
+    total: provider.wallClockIdleStrikes,
+    left: provider.wallClockIdleStrikes,
     progressCounter,
     lastProgressCount: progressCount,
+    progressExtensions: 0,
     stoppedWhileMakingProgress: null
   };
 }
 
-function chargedWallClockDecision(state, progressSinceLastCheckpoint = null) {
+// An idle (or progress-unreadable) checkpoint: spend a strike, or stop.
+function idleWallClockDecision(state, progressSinceLastCheckpoint = null) {
   if (!state || !Number.isSafeInteger(state.left) || state.left <= 0) {
     if (state) {
       state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
@@ -1046,7 +1059,7 @@ function chargedWallClockDecision(state, progressSinceLastCheckpoint = null) {
   state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
   return {
     extend: true,
-    extensionKind: "charged",
+    extensionKind: "idle",
     progressSinceLastCheckpoint
   };
 }
@@ -1061,29 +1074,29 @@ function evaluateWallClockCheckpoint(state) {
       || !Number.isSafeInteger(state?.lastProgressCount)
       || state.lastProgressCount < 0
     ) {
-      return chargedWallClockDecision(state);
+      return idleWallClockDecision(state);
     }
     const progressSinceLastCheckpoint = currentProgressCount
       > state.lastProgressCount;
     state.lastProgressCount = currentProgressCount;
     state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
-    if (
-      progressSinceLastCheckpoint
-      && Number.isSafeInteger(state.freeLeft)
-      && state.freeLeft > 0
-    ) {
-      state.freeLeft -= 1;
+    if (progressSinceLastCheckpoint) {
+      // Work is still landing: extend for free, forever, and forgive earlier
+      // idle strikes so an intermittent slow patch cannot accumulate into a
+      // stop while the turn is demonstrably still producing output.
+      state.left = state.total;
+      state.progressExtensions += 1;
       return {
         extend: true,
-        extensionKind: "free",
+        extensionKind: "progress",
         progressSinceLastCheckpoint
       };
     }
-    return chargedWallClockDecision(state, progressSinceLastCheckpoint);
+    return idleWallClockDecision(state, progressSinceLastCheckpoint);
   } catch {
-    // If progress accounting is ever unreadable, charge the checkpoint exactly
-    // as the pre-feature wall-clock guard did.
-    return chargedWallClockDecision(state);
+    // If progress accounting is ever unreadable, spend a bounded idle strike
+    // rather than running unbounded on an unverifiable signal.
+    return idleWallClockDecision(state);
   }
 }
 
@@ -1091,8 +1104,8 @@ function emitWallClockCheckpoint(context, state, decision) {
   try {
     context?.__onToolEvent?.({
       phase: "wall-clock-checkpoint",
-      extensionsLeft: state.left,
-      freeExtensionsLeft: state.freeLeft,
+      idleStrikesLeft: state.left,
+      progressExtensions: state.progressExtensions,
       progressSinceLastCheckpoint: decision.progressSinceLastCheckpoint,
       extensionKind: decision.extensionKind
     });
@@ -1101,24 +1114,27 @@ function emitWallClockCheckpoint(context, state, decision) {
   }
 }
 
-// The synthetic ping injected when the wall-clock guard fires but checkpoint
-// extensions remain: a status check, not a stop order. The model answers if
+// The synthetic ping injected when the wall-clock guard fires but the turn is
+// allowed to continue: a status check, not a stop order. The model answers if
 // the work is done, keeps working if it is not, or says plainly that it is
 // stuck -- the turn continues autonomously either way.
 function wallClockCheckpointPrompt(state, decision, maxTurnSeconds) {
-  const progressVerdict = decision.progressSinceLastCheckpoint === true
-    ? decision.extensionKind === "free"
-      ? "Output-aware progress was observed since the previous checkpoint, so this extension did not consume a charged checkpoint. "
-      : "Output-aware progress was observed, but the free-extension cap is exhausted, so this extension consumed a charged checkpoint. "
-    : decision.progressSinceLastCheckpoint === false
-      ? "No output-aware progress was observed since the previous checkpoint, so this extension consumed a charged checkpoint. "
-      : "Progress status was unavailable, so the fail-safe path consumed a charged checkpoint. ";
-  return "[system] Wall-clock checkpoint: the turn's time budget was reached, so the deadline was extended "
-    + `by ~${Math.round(maxTurnSeconds)}s. ${progressVerdict}`
-    + `${state.left} charged extension${state.left === 1 ? "" : "s"} and `
-    + `${state.freeLeft} progress extension${state.freeLeft === 1 ? "" : "s"} remain before a hard stop. `
+  if (decision.extensionKind === "progress") {
+    return "[system] Checkpoint: new output-aware progress was observed since the last check, "
+      + `so the turn was extended by ~${Math.round(maxTurnSeconds)}s at no cost. `
+      + "Productive turns are not stopped by elapsed time -- keep going. "
+      + "Status check: if the user's request is already answered, give the final answer now. "
+      + "If work remains, keep working -- do not stop or summarise yet. "
+      + "If you are stuck or looping, say so plainly and name what is blocking you.";
+  }
+  const verdict = decision.progressSinceLastCheckpoint === false
+    ? "No new output-aware progress was observed since the last check"
+    : "Progress could not be read, so this was treated as an idle check";
+  return `[system] Idle checkpoint: ${verdict}, so this consumed one of a bounded number of idle allowances `
+    + `and extended the turn by ~${Math.round(maxTurnSeconds)}s. `
+    + `${state.left} idle allowance${state.left === 1 ? "" : "s"} remain before the turn is stopped as stalled. `
     + "Status check: if the user's request is already answered, give the final answer now. "
-    + "If work remains, keep working -- do not stop or summarise yet. "
+    + "If work remains, make concrete progress now -- produce output, do not just re-plan. "
     + "If you are stuck or looping, say so plainly and name what is blocking you.";
 }
 
@@ -4317,8 +4333,7 @@ function wallClockStopSnapshot(state) {
   return {
     total: Math.max(0, Number(state?.total) || 0),
     left: Math.max(0, Number(state?.left) || 0),
-    freeTotal: Math.max(0, Number(state?.freeTotal) || 0),
-    freeLeft: Math.max(0, Number(state?.freeLeft) || 0),
+    progressExtensions: Math.max(0, Number(state?.progressExtensions) || 0),
     stoppedWhileMakingProgress: state?.stoppedWhileMakingProgress === true
       ? true
       : state?.stoppedWhileMakingProgress === false
@@ -4329,26 +4344,23 @@ function wallClockStopSnapshot(state) {
 
 function wallClockStopProgressText(wallClock) {
   if (wallClock?.stoppedWhileMakingProgress === true) {
-    return "The turn was stopped while making progress because both bounded extension budgets were exhausted.";
+    return "The turn was still producing output at the stop, so elapsed time did not end it.";
   }
   if (wallClock?.stoppedWhileMakingProgress === false) {
-    return "The turn was stopped without new output-aware progress since the previous checkpoint.";
+    return "The turn was stopped as STALLED: no new output-aware progress across every idle allowance, not because it ran long.";
   }
-  return "Output-aware progress at the stop could not be determined.";
+  return "Output-aware progress at the stop could not be determined, so the idle fail-safe applied.";
 }
 
 function wallClockConsumptionText(wallClock) {
-  const freeUsed = Math.max(
-    0,
-    (wallClock.freeTotal ?? 0) - (wallClock.freeLeft ?? 0)
-  );
-  const chargedDetail = wallClock?.total > 0
-    ? ` All ${wallClock.total} checkpoint extension${wallClock.total === 1 ? "" : "s"} were consumed before this stop (the base window plus ${wallClock.total} charged extension${wallClock.total === 1 ? "" : "s"} ran).`
+  const idleDetail = wallClock?.total > 0
+    ? ` All ${wallClock.total} idle allowance${wallClock.total === 1 ? "" : "s"} were consumed without new output.`
     : "";
-  const freeDetail = freeUsed > 0
-    ? ` The turn also used ${freeUsed} bounded progress-aware free extension${freeUsed === 1 ? "" : "s"}.`
+  const progressUsed = Math.max(0, wallClock?.progressExtensions ?? 0);
+  const progressDetail = progressUsed > 0
+    ? ` ${progressUsed} free progress extension${progressUsed === 1 ? "" : "s"} were granted earlier while output was still landing.`
     : "";
-  return `${chargedDetail}${freeDetail}`;
+  return `${idleDetail}${progressDetail}`;
 }
 
 function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
@@ -4366,7 +4378,7 @@ function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
     return `${base} The provider stayed unavailable after bounded retries; summarise completed work and give your best current answer.`;
   }
   // turn-timeout
-  return `${base} The overall time budget is exhausted. ${wallClockStopProgressText(wallClock)} Be concise and note OPENAGI_MAX_TURN_SECONDS, OPENAGI_WALL_CLOCK_CHECKPOINTS, or OPENAGI_WALL_CLOCK_FREE_EXTENSIONS can be raised.`;
+  return `${base} ${wallClockStopProgressText(wallClock)} Be concise, and if work remains say what is blocking it (OPENAGI_WALL_CLOCK_IDLE_STRIKES tunes how many idle checks are tolerated).`;
 }
 
 function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText, wallClock }) {
@@ -4377,7 +4389,7 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
     : "No tool calls completed.";
   const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
   if (reason === "turn-timeout") {
-    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the wall-clock guard was reached.${wallClockConsumptionText(wallClock)} ${wallClockStopProgressText(wallClock)} ${detail} Raise OPENAGI_MAX_TURN_SECONDS, OPENAGI_WALL_CLOCK_CHECKPOINTS, or OPENAGI_WALL_CLOCK_FREE_EXTENSIONS if this task needs more time.${prior}`;
+    return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because it went idle — no new output-aware progress across every idle allowance.${wallClockConsumptionText(wallClock)} ${wallClockStopProgressText(wallClock)} ${detail} Long-running turns are NOT stopped for elapsed time; raise OPENAGI_WALL_CLOCK_IDLE_STRIKES to tolerate more quiet checks, or OPENAGI_MAX_TURN_SECONDS to check less often.${prior}`;
   }
   if (reason === "stalled") {
     return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model went silent (no output for the stall window) and could not be revived. ${detail} This usually means a transient provider hiccup — retry the request. OPENAGI_STALL_TIMEOUT_MS tunes how long silence is tolerated.${prior}`;

@@ -342,3 +342,61 @@ test("oversized enqueue arguments still fail closed with byte counts", (t) => {
   );
   assert.equal(store.list().length, 0);
 });
+// Regression: a tool's summarize() interpolates RAW arguments, so a multi-line
+// shell command or a diff-shaped reason put \n / \t straight into the derived
+// summary/reason. validBoundedString rejects every control character, so the
+// action failed persistence validation and the TOOL NEVER RAN — real work died
+// on a display-text formatting artifact. Derived text must be flattened, never
+// fail the call closed.
+test("control characters in derived summary/reason never fail the tool call", (t) => {
+  const dir = tempDir(t, "openagi-pending-control-chars-");
+  const store = new PendingActionStore({ dir });
+  const action = store.enqueue({
+    toolName: "code_shell",
+    args: { command: "ls -la\ncat foo" },
+    summary: "shell: ls -la ~/.openagi\ncat foo\tbar\r",
+    reason: "scrutiny verdict 'ask'\n-removed\n+added",
+    severity: "medium\n"
+  });
+
+  assert.equal(store.list().length, 1);
+  assert.doesNotMatch(action.summary, /[\u0000-\u001f\u007f]/);
+  assert.doesNotMatch(action.reason, /[\u0000-\u001f\u007f]/);
+  assert.doesNotMatch(action.severity, /[\u0000-\u001f\u007f]/);
+  // Content is preserved, only the control characters collapse to spaces.
+  assert.match(action.summary, /ls -la ~\/\.openagi cat foo bar/);
+  assert.match(action.reason, /scrutiny verdict 'ask' -removed \+added/);
+  assert.equal(action.severity, "medium");
+
+  // And it survives a reload — the durable record is what validation rejected.
+  const reloaded = new PendingActionStore({ dir });
+  assert.equal(reloaded.get(action.id)?.summary, action.summary);
+});
+
+test("derived summary/reason are bounded instead of failing validation", (t) => {
+  const dir = tempDir(t, "openagi-pending-long-summary-");
+  const store = new PendingActionStore({ dir });
+  const action = store.enqueue({
+    toolName: "code_shell",
+    args: {},
+    summary: "s".repeat(5000),
+    reason: "r".repeat(9000)
+  });
+  assert.equal(action.summary.length, 1000);
+  assert.equal(action.reason.length, 4000);
+  assert.equal(store.list().length, 1);
+});
+
+test("whitespace-only derived summary falls back instead of failing closed", (t) => {
+  const dir = tempDir(t, "openagi-pending-blank-summary-");
+  const store = new PendingActionStore({ dir });
+  const action = store.enqueue({
+    toolName: "code_shell",
+    args: {},
+    summary: "\n\t  \r",
+    reason: "\n"
+  });
+  assert.equal(action.summary, "Run code_shell");
+  assert.equal(action.reason, null);
+  assert.equal(store.list().length, 1);
+});

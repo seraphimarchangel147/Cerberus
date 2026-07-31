@@ -152,6 +152,17 @@ export class PendingActionStore {
       throw new TypeError("Pending action toolName must be an ASCII tool name.");
     }
     const persistedContext = normalizeActionContext(serializableContext(context));
+    // Summaries and reasons are DERIVED display text, not authored fields: a
+    // tool's summarize() interpolates raw arguments, so a multi-line shell
+    // command or a diff-shaped reason carries \n / \t straight into them.
+    // validBoundedString rejects every control character, so the whole action
+    // failed persistence validation and the tool NEVER RAN — a formatting
+    // artifact silently killed real work. Flatten control characters here so
+    // the durable record stays single-line (the property the validator
+    // actually cares about) instead of failing the call closed.
+    const safeSummary = flattenControlCharacters(summary, 1000) ?? `Run ${toolName}`;
+    const safeReason = flattenControlCharacters(reason, 4000);
+    const safeSeverity = flattenControlCharacters(severity, 128);
     const argsReplayable = privateInput === true
       ? false
       : persistedArgumentsRemainExecutable(args);
@@ -160,9 +171,9 @@ export class PendingActionStore {
       toolName,
       args: args ?? {},
       context: persistedContext,
-      summary: summary ?? `Run ${toolName}`,
-      reason: reason ?? null,
-      severity: severity ?? null,
+      summary: safeSummary,
+      reason: safeReason,
+      severity: safeSeverity,
       approvalIdentity: approvalIdentity ?? null,
       ...(privateInput === true ? { privateInput: true } : {}),
       argsReplayable,
@@ -1108,6 +1119,24 @@ function validContextGrant(field, value) {
     return value === "*" || TOOL_NAME_RE.test(value);
   }
   return CAPABILITY_NAME_RE.test(value);
+}
+
+// Derived display text (summary/reason/severity) is built by interpolating raw
+// tool arguments, so newlines and tabs routinely appear in it. The persistence
+// validator rejects control characters, which used to fail the ENTIRE action —
+// and therefore the tool call — closed. Collapse them to spaces instead; the
+// bound is about keeping the durable record single-line and printable, not
+// about rejecting the work.
+function flattenControlCharacters(value, maxLength = null) {
+  if (value === null || value === undefined) return null;
+  let text = String(value)
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .replace(/ {2,}/gu, " ")
+    .trim();
+  if (Number.isSafeInteger(maxLength) && maxLength > 0 && text.length > maxLength) {
+    text = text.slice(0, maxLength);
+  }
+  return text.length > 0 ? text : null;
 }
 
 function validBoundedString(value, maxLength, { allowEmpty = true } = {}) {

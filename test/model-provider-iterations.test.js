@@ -53,7 +53,7 @@ test("providers default to 25 iterations and a 900-second turn guard", (t) => {
     assert.equal(provider.maxIterations, 25);
     assert.equal(provider.maxTurnSeconds, 900);
     assert.equal(provider.maxTurnUsd, null);
-    assert.equal(provider.wallClockCheckpoints, 3);
+    assert.equal(provider.wallClockIdleStrikes, 3);
   }
 });
 
@@ -141,12 +141,12 @@ test("OPENAGI_MAX_ITERATIONS overrides the deprecated tool-hop alias", (t) => {
   }
 });
 
-test("OPENAGI_WALL_CLOCK_CHECKPOINTS honors env, constructor option wins", (t) => {
+test("OPENAGI_WALL_CLOCK_CHECKPOINTS remains a legacy alias for the idle-strike budget", (t) => {
   isolateIterationEnv(t);
   process.env.OPENAGI_WALL_CLOCK_CHECKPOINTS = "1";
-  assert.equal(new OpenAIResponsesProvider({ apiKey: "test" }).wallClockCheckpoints, 1);
-  assert.equal(new AnthropicProvider({ apiKey: "test" }).wallClockCheckpoints, 1);
-  assert.equal(new OpenAIResponsesProvider({ apiKey: "test", wallClockCheckpoints: 0 }).wallClockCheckpoints, 0);
+  assert.equal(new OpenAIResponsesProvider({ apiKey: "test" }).wallClockIdleStrikes, 1);
+  assert.equal(new AnthropicProvider({ apiKey: "test" }).wallClockIdleStrikes, 1);
+  assert.equal(new OpenAIResponsesProvider({ apiKey: "test", wallClockCheckpoints: 0 }).wallClockIdleStrikes, 0);
 });
 
 test("OPENAGI_MAX_TOOL_HOPS remains a fallback when iterations is unset or blank", (t) => {
@@ -1151,7 +1151,7 @@ test("a wall-clock checkpoint pings, extends, and the turn finishes normally", a
   assert.notEqual(result.stopReason, "turn-timeout");
   assert.match(result.text, /finished after checkpoint/);
   assert.ok(
-    events.some((e) => e.phase === "wall-clock-checkpoint" && e.extensionsLeft === 0),
+    events.some((e) => e.phase === "wall-clock-checkpoint" && e.idleStrikesLeft === 0),
     `expected a wall-clock-checkpoint event, got: ${JSON.stringify(events)}`
   );
 });
@@ -1176,7 +1176,7 @@ test("checkpoint budget exhaustion still hard-stops with turn-timeout", async ()
   );
 });
 
-test("checkpoint exhaustion summary names the consumed extensions", async () => {
+test("idle exhaustion summary names the consumed allowances and blames idleness, not time", async () => {
   const provider = new OpenAIResponsesProvider({
     apiKey: "test-key",
     maxIterations: 5,
@@ -1188,7 +1188,7 @@ test("checkpoint exhaustion summary names the consumed extensions", async () => 
     calls += 1;
     await new Promise((resolve) => setTimeout(resolve, 50));
     // The forced final answer yields no text, so the turn must fall back to
-    // the canned wall-clock summary — which now reports checkpoint usage.
+    // the canned summary — which now reports idle-allowance usage.
     if (calls >= 3) return { id: "forced", output: [] };
     return { id: "late", output_text: "still working", output: [] };
   };
@@ -1196,9 +1196,12 @@ test("checkpoint exhaustion summary names the consumed extensions", async () => 
   assert.equal(result.stopReason, "turn-timeout");
   assert.match(
     result.text,
-    /All 1 checkpoint extension were consumed/,
-    `expected the summary to name the consumed extension, got: ${result.text}`
+    /All 1 idle allowance were consumed without new output/,
+    `expected the summary to name the consumed allowance, got: ${result.text}`
   );
+  // The stop must be attributed to going idle, never to running long.
+  assert.match(result.text, /stopped as STALLED/);
+  assert.match(result.text, /NOT stopped for elapsed time/);
 });
 
 // REGRESSION: a single slow model request (fetch exceeds the per-request

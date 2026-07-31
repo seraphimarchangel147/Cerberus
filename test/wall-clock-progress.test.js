@@ -40,55 +40,75 @@ function toolResponse(index) {
   };
 }
 
-test("wall-clock free-extension defaults and setup persistence are explicit", () => {
+test("idle-strike defaults, legacy aliases, and setup persistence are explicit", () => {
   const defaults = new OpenAIResponsesProvider({
-    apiKey: "test-key",
+    apiKey: "test",
     env: {}
   });
   const envOverride = new OpenAIResponsesProvider({
-    apiKey: "test-key",
-    env: { OPENAGI_WALL_CLOCK_FREE_EXTENSIONS: "5" }
+    apiKey: "test",
+    env: { OPENAGI_WALL_CLOCK_IDLE_STRIKES: "5" }
+  });
+  // Existing .env files predate the rename; both legacy names still resolve so
+  // an upgrade never silently changes a deployed agent's tolerance.
+  const legacyFreeEnv = new OpenAIResponsesProvider({
+    apiKey: "test",
+    env: { OPENAGI_WALL_CLOCK_FREE_EXTENSIONS: "7" }
+  });
+  const legacyCheckpointEnv = new OpenAIResponsesProvider({
+    apiKey: "test",
+    env: { OPENAGI_WALL_CLOCK_CHECKPOINTS: "2" }
   });
   const optionOverride = new OpenAIResponsesProvider({
-    apiKey: "test-key",
-    env: { OPENAGI_WALL_CLOCK_FREE_EXTENSIONS: "5" },
-    wallClockFreeExtensions: 0
+    apiKey: "test",
+    env: { OPENAGI_WALL_CLOCK_IDLE_STRIKES: "5" },
+    wallClockIdleStrikes: 0
   });
   const invalid = new OpenAIResponsesProvider({
-    apiKey: "test-key",
-    env: { OPENAGI_WALL_CLOCK_FREE_EXTENSIONS: "unsafe" }
+    apiKey: "test",
+    env: { OPENAGI_WALL_CLOCK_IDLE_STRIKES: "unsafe" }
   });
 
-  assert.equal(defaults.wallClockFreeExtensions, 3);
-  assert.equal(envOverride.wallClockFreeExtensions, 5);
-  assert.equal(optionOverride.wallClockFreeExtensions, 0);
-  assert.equal(invalid.wallClockFreeExtensions, 3);
+  assert.equal(defaults.wallClockIdleStrikes, 3);
+  assert.equal(envOverride.wallClockIdleStrikes, 5);
+  assert.equal(legacyFreeEnv.wallClockIdleStrikes, 7);
+  assert.equal(legacyCheckpointEnv.wallClockIdleStrikes, 2);
+  assert.equal(optionOverride.wallClockIdleStrikes, 0);
+  assert.equal(invalid.wallClockIdleStrikes, 3);
   assert.equal(
-    SETUP_FIELDS.includes("OPENAGI_WALL_CLOCK_FREE_EXTENSIONS"),
+    SETUP_FIELDS.includes("OPENAGI_WALL_CLOCK_IDLE_STRIKES"),
     true
   );
   assert.match(
     formatWallClockCheckpointActivity({
-      extensionsLeft: 2,
-      freeExtensionsLeft: 1,
+      idleStrikesLeft: 3,
+      progressExtensions: 4,
       progressSinceLastCheckpoint: true,
-      extensionKind: "free"
+      extensionKind: "progress"
     }),
-    /2 charged, 1 progress extensions left; progress detected; free extension granted/u
+    /still producing output, extended free \(4 progress extensions granted/u
+  );
+  assert.match(
+    formatWallClockCheckpointActivity({
+      idleStrikesLeft: 1,
+      progressExtensions: 0,
+      progressSinceLastCheckpoint: false,
+      extensionKind: "idle"
+    }),
+    /Idle checkpoint - no new output \(1 idle allowance left/u
   );
 });
 
-test("no progress preserves charged checkpoint timing exactly", async () => {
+test("no progress spends bounded idle strikes then stops as stalled", async () => {
   let now = 0;
   let requests = 0;
   let dispatches = 0;
   const events = [];
   const provider = new OpenAIResponsesProvider({
-    apiKey: "test-key",
+    apiKey: "test",
     maxIterations: 20,
     maxTurnSeconds: 1,
-    wallClockCheckpoints: 2,
-    wallClockFreeExtensions: 3,
+    wallClockIdleStrikes: 2,
     now: () => now,
     stallTimeoutMs: 0
   });
@@ -107,7 +127,7 @@ test("no progress preserves charged checkpoint timing exactly", async () => {
   };
 
   const result = await provider.generate({
-    input: "run until the bounded wall guard stops",
+    input: "run until the idle guard stops it",
     agent,
     toolRegistry: registry,
     context: {
@@ -123,25 +143,25 @@ test("no progress preserves charged checkpoint timing exactly", async () => {
   assert.equal(result.stopReason, "turn-timeout");
   assert.equal(result.iterations, 3);
   assert.equal(dispatches, 0);
-  assert.equal(now, 3000, "base window plus two charged extensions");
+  assert.equal(now, 3000, "base window plus two idle allowances");
   assert.equal(checkpoints.length, 2);
-  assert.ok(checkpoints.every((event) => event.extensionKind === "charged"));
+  assert.ok(checkpoints.every((event) => event.extensionKind === "idle"));
   assert.ok(checkpoints.every(
     (event) => event.progressSinceLastCheckpoint === false
   ));
-  assert.match(result.text, /stopped without new output-aware progress/i);
+  assert.match(result.text, /went idle/i);
+  assert.match(result.text, /stopped as STALLED/i);
 });
 
-test("unavailable progress accounting fails open to charged checkpoints", async () => {
+test("unavailable progress accounting fails closed onto bounded idle strikes", async () => {
   let now = 0;
   let requests = 0;
   const events = [];
   const provider = new OpenAIResponsesProvider({
-    apiKey: "test-key",
+    apiKey: "test",
     maxIterations: 20,
     maxTurnSeconds: 1,
-    wallClockCheckpoints: 1,
-    wallClockFreeExtensions: 3,
+    wallClockIdleStrikes: 1,
     now: () => now,
     stallTimeoutMs: 0
   });
@@ -162,7 +182,7 @@ test("unavailable progress accounting fails open to charged checkpoints", async 
   });
 
   const result = await provider.generate({
-    input: "use the legacy charged guard",
+    input: "use the bounded idle fail-safe",
     agent,
     toolRegistry: registry,
     context
@@ -178,31 +198,36 @@ test("unavailable progress accounting fails open to charged checkpoints", async 
       kind: event.extensionKind,
       progress: event.progressSinceLastCheckpoint
     })),
-    [{ kind: "charged", progress: null }]
+    [{ kind: "idle", progress: null }]
   );
 });
 
-test("changing output earns bounded free extensions then charged extensions", async () => {
+// The behaviour the Creator asked for: a turn that keeps producing output is
+// never stopped by elapsed time. The old design capped free extensions, so a
+// productive turn eventually died on the clock; now only idle checks bound it.
+test("changing output earns UNLIMITED free extensions - the clock never stops a productive turn", async () => {
   let now = 0;
   let requests = 0;
   let revision = 0;
   const events = [];
   const bodies = [];
   const provider = new OpenAIResponsesProvider({
-    apiKey: "test-key",
-    maxIterations: 20,
+    apiKey: "test",
+    maxIterations: 12,
     maxTurnSeconds: 1,
-    wallClockCheckpoints: 2,
-    wallClockFreeExtensions: 3,
+    wallClockIdleStrikes: 2,
     now: () => now,
     stallTimeoutMs: 0
   });
   const registry = new ToolRegistry({
     env: { OPENAGI_REPEATED_SUCCESS_LIMIT: "100" }
   });
+  // Every dispatch both advances the clock past a checkpoint AND produces new
+  // output, so under the old rules this turn would have been killed after the
+  // free cap; under the new rules it runs until the ITERATION cap instead.
   registerProgressTool(registry, () => {
     revision += 1;
-    if (revision >= 2) now += 1000;
+    now += 1000;
     return { state: "running", revision };
   });
   provider.postResponses = async (body) => {
@@ -215,7 +240,7 @@ test("changing output earns bounded free extensions then charged extensions", as
   };
 
   const result = await provider.generate({
-    input: "keep polling while output changes",
+    input: "keep working while output changes",
     agent,
     toolRegistry: registry,
     context: {
@@ -228,57 +253,114 @@ test("changing output earns bounded free extensions then charged extensions", as
   const checkpoints = events.filter(
     (event) => event.phase === "wall-clock-checkpoint"
   );
-  assert.equal(result.stopReason, "turn-timeout");
-  assert.equal(revision, 7);
   assert.equal(
-    now,
-    6000,
-    "bounded by maxTurnSeconds * (1 + checkpoints + freeExtensions)"
+    result.stopReason,
+    "iteration-cap",
+    "a productive turn ends on work-based limits, never on the clock"
   );
-  assert.deepEqual(
-    checkpoints.map((event) => event.extensionKind),
-    ["free", "free", "free", "charged", "charged"]
+  assert.ok(
+    checkpoints.length > 3,
+    `expected more extensions than the old free cap allowed, got ${checkpoints.length}`
   );
-  assert.ok(checkpoints.every(
+  // The very first checkpoint can land before the first tool result registers
+  // as progress, so it may legitimately spend one idle allowance. Every
+  // checkpoint after output starts landing must be a free progress extension.
+  assert.ok(
+    checkpoints.slice(1).every((event) => event.extensionKind === "progress"),
+    "every extension of a productive turn is free"
+  );
+  assert.ok(checkpoints.slice(1).every(
     (event) => event.progressSinceLastCheckpoint === true
   ));
-  assert.match(result.text, /stopped while making progress/i);
+  assert.ok(
+    now > 6000,
+    `elapsed time exceeded the old hard bound without stopping the turn (${now}ms)`
+  );
 
   const requestsText = JSON.stringify(bodies);
-  assert.match(requestsText, /did not consume a charged checkpoint/i);
-  assert.match(
-    requestsText,
-    /free-extension cap is exhausted.*consumed a charged checkpoint/i
-  );
+  assert.match(requestsText, /extended by ~1s at no cost/i);
+  assert.match(requestsText, /not stopped by elapsed time/i);
 });
 
-test("Anthropic consumes the same bounded output-progress signal", async () => {
+test("intermittent idleness is forgiven once output resumes", async () => {
   let now = 0;
   let requests = 0;
   let revision = 0;
   const events = [];
-  const provider = new AnthropicProvider({
-    apiKey: "test-key",
-    maxIterations: 20,
+  const provider = new OpenAIResponsesProvider({
+    apiKey: "test",
+    maxIterations: 12,
     maxTurnSeconds: 1,
-    wallClockCheckpoints: 1,
-    wallClockFreeExtensions: 2,
+    wallClockIdleStrikes: 2,
     now: () => now,
     stallTimeoutMs: 0
   });
   const registry = new ToolRegistry({
     env: { OPENAGI_REPEATED_SUCCESS_LIMIT: "100" }
   });
+  // Dispatches 1-2 return an unchanged payload (idle), then output resumes.
   registerProgressTool(registry, () => {
     revision += 1;
-    if (revision >= 2) now += 1000;
-    return { state: "running", revision };
+    now += 1000;
+    return revision <= 2 ? { state: "same" } : { state: "running", revision };
   });
+  provider.postResponses = async (body) => {
+    if (!Array.isArray(body.tools) || body.tools.length === 0) {
+      return { id: "forced", output: [] };
+    }
+    requests += 1;
+    return toolResponse(requests);
+  };
+
+  const result = await provider.generate({
+    input: "go quiet, then resume producing output",
+    agent,
+    toolRegistry: registry,
+    context: {
+      sessionId: "wall-progress-recovery",
+      __turnId: "turn-progress-recovery",
+      __onToolEvent: (event) => events.push(event)
+    }
+  });
+
+  const checkpoints = events.filter(
+    (event) => event.phase === "wall-clock-checkpoint"
+  );
+  const kinds = checkpoints.map((event) => event.extensionKind);
+  assert.ok(kinds.includes("idle"), "a quiet stretch spends an idle allowance");
+  assert.ok(kinds.includes("progress"), "resumed output earns free extensions");
+  const firstProgressIndex = kinds.indexOf("progress");
+  assert.equal(
+    checkpoints[firstProgressIndex].idleStrikesLeft,
+    2,
+    "resumed output restores the full idle budget"
+  );
+  assert.notEqual(result.stopReason, "turn-timeout");
+});
+
+test("Anthropic consumes the same bounded idle signal", async () => {
+  let now = 0;
+  let requests = 0;
+  const events = [];
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    maxIterations: 20,
+    maxTurnSeconds: 1,
+    wallClockIdleStrikes: 2,
+    now: () => now,
+    stallTimeoutMs: 0
+  });
+  const registry = new ToolRegistry({
+    env: { OPENAGI_REPEATED_SUCCESS_LIMIT: "100" }
+  });
+  // Constant payload: no output-aware progress, so only idle strikes are spent.
+  registerProgressTool(registry, () => ({ state: "same" }));
   provider.postMessages = async (body) => {
     if (!Array.isArray(body.tools) || body.tools.length === 0) {
       return { id: "forced", stop_reason: "end_turn", content: [] };
     }
     requests += 1;
+    now += 1000;
     return {
       id: `message-${requests}`,
       stop_reason: "tool_use",
@@ -292,7 +374,7 @@ test("Anthropic consumes the same bounded output-progress signal", async () => {
   };
 
   const result = await provider.generate({
-    input: "keep polling while output changes",
+    input: "stay idle and hit the bounded guard",
     agent,
     toolRegistry: registry,
     context: {
@@ -303,12 +385,11 @@ test("Anthropic consumes the same bounded output-progress signal", async () => {
   });
 
   assert.equal(result.stopReason, "turn-timeout");
-  assert.equal(now, 4000);
   assert.deepEqual(
     events
       .filter((event) => event.phase === "wall-clock-checkpoint")
       .map((event) => event.extensionKind),
-    ["free", "free", "charged"]
+    ["idle", "idle"]
   );
-  assert.match(result.text, /stopped while making progress/i);
+  assert.match(result.text, /stopped as STALLED/i);
 });

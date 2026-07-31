@@ -2,6 +2,56 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-07-31 — Tool calls stop dying on formatting; the clock stops killing productive turns (Seraphim)
+
+Two independent defects that both made Azazel look broken while he was working correctly. Both root
+causes were located by **executable probe**, not inference.
+
+**Defect 1 — `⚠ Pending action failed persistence validation`: a tool call killed by display text.**
+`PendingActionStore.enqueue` stored `summary` / `reason` / `severity` verbatim, and
+`normalizePersistedAction` validated them with `validBoundedString`, which rejects **every** control
+character. But those fields are *derived* text: `code_shell.summarize()` interpolates the raw command,
+so any multi-line shell command — or a diff-shaped scrutiny `reason` — put a `\n` straight into the
+summary. The whole action then failed validation and **the tool never ran**. Real work died on a
+formatting artifact, and the error message named neither the field nor the cause.
+
+Probe (`test/pending-actions-hardening.test.js`) confirmed it precisely: a single-line summary
+enqueues fine; the identical action with `\n`, `\t`, or `\r` throws `PENDING_ACTION_CAPACITY`. This is
+why `act_c79f5a06ef994750` (a multi-line `ls ...; echo ---; find ...`) failed while its siblings
+passed.
+
+Fix: derived display text is now flattened (control characters → spaces, collapsed, trimmed) and
+bounded to the validator's own limits at enqueue time, with a `Run <tool>` fallback for text that
+flattens to empty. Content is preserved; only the control characters go. Over-long summaries truncate
+instead of failing the call. **A display-text artifact can no longer cancel real work.** Three
+regression tests added.
+
+**Defect 2 — the wall-clock guard stopped turns that were demonstrably still working.**
+The old design gave a turn `maxTurnSeconds`, then a bounded number of *free* progress extensions plus
+a bounded number of *charged* ones — so a turn that kept producing output still died once the free cap
+ran out. That is what ate the 33-iteration turn: it was stopped **while making progress**, with work
+half-applied and a pending `terminal_start` denied by `turn-cancelled`. Elapsed time was being treated
+as evidence of being stuck. It isn't.
+
+Replaced with the better mechanism the Creator asked for: **stop on stall, not on the clock.**
+`maxTurnSeconds` is no longer a deadline — it is the *interval* at which a long turn is asked "are you
+still producing output?".
+- **Output-aware progress since the last check → extend, free, unlimited**, and *restore* the idle
+  budget in full (an intermittent slow patch can't accumulate into a stop).
+- **No new progress (or progress unreadable) → spend one bounded idle allowance.** Exhaust them all
+  and the turn stops as **stalled**, with a message that says so instead of blaming elapsed time.
+
+A productive turn is now bounded only by the things that actually measure work: the iteration cap, the
+USD budget cap, and per-request stall detection. New knob `OPENAGI_WALL_CLOCK_IDLE_STRIKES` (default
+3); the legacy `OPENAGI_WALL_CLOCK_CHECKPOINTS` / `OPENAGI_WALL_CLOCK_FREE_EXTENSIONS` names are still
+honoured as aliases, so deployed `.env` files (including the live `~/.openagi/.env`) keep working
+unchanged. Checkpoint pings, the Discord activity line, and the partial-turn summary were all rewritten
+to the idle/progress vocabulary.
+
+Verification: full suite **2139 pass / 0 fail**. The `test/lsp-client.test.js` failure seen mid-run was
+environmental — a stray empty `/tmp/.git` made `/tmp` look like a git workspace; removing it cleared
+the test, and it is unrelated to these changes.
+
 ## 2026-07-30 — Send lane stops lying: real delivery confirmation + read-only channel history (Seraphim)
 
 Closes F3, F4, and the headline meta-bug from the 2026-07-29 QA battery (all found by Azazel).
@@ -2334,3 +2384,9 @@ CONTEXT VALUE WAVE 3 COMPLETE
 - 2026-07-30 · **seraphim** · fix value-aware compaction blocking deliverable requests: the emergency 0.60 target is an aspiration, not a delivery gate — acceptance is governed by the real 0.85 gateway, digest reduction retries against both limits, and a failed floor-digest retry can no longer discard an already-usable candidate (QA finding B3).
 
 - 2026-07-30 · **seraphim** · fix live-context compaction silently becoming a no-op whenever `keepRecentTurns` equals the transcript's role-message count: in a tool-heavy Responses transcript the recent-boundary walk landed on the FIRST role message, collapsing the summary region to empty. Compaction is now monotonic — keeping more never compacts less. Applies with the value-aware flag on or off; regression test added.
+
+- 2026-07-31T06:31:20.536Z · **azazel** · edit `src/memory-intake-policy.js` — Fix secret-scanner false positives in memory intake: only credential-named values or >=12-char values become needles (mirror of code-tools.js F2 fix)
+- 2026-07-31T06:36:51.233Z · **azazel** · edit `test/memory-intake-policy.test.js` — Regression test: short non-credential config values must not trigger MEMORY_SECRET_CONTENT; secret-shaped and credential-named values still rejected
+- 2026-07-31T12:29:51.017Z · **azazel** · create `drafts/provider-auth-dashboard-technical-outline.md` — Draft one-page technical outline for provider-auth dashboard (components, data flow, integration points)
+- 2026-07-31T12:30:21.028Z · **azazel** · create `drafts/eod-status-update-template.md` — Draft EOD status update template (shipped / loop verification / blockers)
+- 2026-07-31T12:30:44.842Z · **azazel** · create `drafts/4pm-full-loop-reminder-2026-07-31.md` — Draft 4 PM full-loop verification reminder proposal
