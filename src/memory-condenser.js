@@ -144,7 +144,18 @@ export class MemoryCondenser {
       candidates = candidates.filter((item) => !item.scope || item.scope === "main");
     }
     if (candidates.length < this.minGroupSize) {
-      return { groups: 0, principles: 0, reason: "not enough items in scope" };
+      // Still reap. A saturated tier full of already-distilled corpses lands
+      // exactly here (corpses are filtered out of `candidates`), so returning
+      // early without sweeping is what made the cap permanent.
+      const early = this.runtime.memory.reapCondensedSources?.({ now }) ?? { reaped: [], released: [], quarantined: [] };
+      return {
+        groups: 0,
+        principles: 0,
+        reason: "not enough items in scope",
+        reaped: early.reaped.length,
+        released: early.released.length,
+        quarantineHeld: early.quarantined.length
+      };
     }
     const groups = clusterByTagOverlap(candidates, this.minGroupSize).slice(0, this.maxGroupsPerRun);
     const principles = [];
@@ -206,8 +217,21 @@ export class MemoryCondenser {
       principles.push({ id: item.id, sources: group.map((m) => m.id), text: principle.text, confidence: principle.confidence });
     }
 
+    // Reclaim capacity from sources already distilled into committed
+    // principles. Without this the tier never drains: markCondensedSources
+    // only tags, and enforceLimits only fires on count overflow.
+    const reaped = this.runtime.memory.reapCondensedSources?.({ now }) ?? { reaped: [], released: [], quarantined: [] };
+
     if (typeof this.runtime.memory.persist === "function") this.runtime.memory.persist("condense", { count: principles.length });
-    return { groups: groups.length, principles: principles.length, duplicatesSkipped, items: principles };
+    return {
+      groups: groups.length,
+      principles: principles.length,
+      duplicatesSkipped,
+      items: principles,
+      reaped: reaped.reaped.length,
+      released: reaped.released.length,
+      quarantineHeld: reaped.quarantined.length
+    };
   }
 
   async distill(items) {

@@ -549,14 +549,82 @@ export class MemorySystem {
 
     // Locked corrections are exempt from cap eviction (low volume by nature;
     // a tier may briefly exceed its cap rather than forget a correction).
+    // Already-distilled sources are evicted FIRST regardless of strength: a
+    // condensed corpse's content survives inside its principle, so dropping
+    // it costs nothing, while evicting a live item to keep a corpse is a net
+    // loss of knowledge.
     tierItems
       .filter((item) => !item.locked && item.metadata?.capacityManaged !== true)
-      .sort((a, b) => a.strength - b.strength || a.lastAccessedAt.localeCompare(b.lastAccessedAt))
+      .sort((a, b) => {
+        const aDead = this.isReapableCondensedSource(a) ? 0 : 1;
+        const bDead = this.isReapableCondensedSource(b) ? 0 : 1;
+        if (aDead !== bDead) return aDead - bDead;
+        return a.strength - b.strength || a.lastAccessedAt.localeCompare(b.lastAccessedAt);
+      })
       .slice(0, Math.max(0, tierItems.length - limit))
       .forEach((item) => {
         this.items.delete(item.id);
         this.dropPrincipleVector(item.id);
       });
+  }
+
+  // A source is reapable only once its principle is genuinely load-bearing:
+  // present, not itself superseded, and past quarantine. Reaping a source
+  // whose principle is still quarantined would destroy the only evidence
+  // backing a distillation that has not yet been validated.
+  isReapableCondensedSource(item, now = Date.now()) {
+    const principleId = item?.metadata?.condensedInto;
+    if (!principleId || item.locked) return false;
+    const principle = this.items.get(principleId);
+    if (!principle || principle.metadata?.supersededBy) return false;
+    const quarantineUntil = principle.metadata?.quarantineUntil;
+    if (quarantineUntil && new Date(quarantineUntil).getTime() > now) return false;
+    return true;
+  }
+
+  // Reclaim tier capacity from sources that have already been distilled into a
+  // committed principle. `markCondensedSources` only tags sources; without this
+  // sweep nothing ever drains them, so a tier at its cap stays at its cap no
+  // matter how often condensation runs.
+  //
+  // Sources whose principle vanished or was superseded are NOT deleted — their
+  // `condensedInto` tag is cleared so they return to the condensation candidate
+  // pool instead of lingering as unreapable, unre-condensable corpses.
+  reapCondensedSources({ now = Date.now(), dryRun = false } = {}) {
+    const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+    const reaped = [];
+    const released = [];
+    const quarantined = [];
+
+    for (const item of [...this.items.values()]) {
+      const principleId = item?.metadata?.condensedInto;
+      if (!principleId) continue;
+      if (item.locked) continue;
+
+      const principle = this.items.get(principleId);
+      if (!principle || principle.metadata?.supersededBy) {
+        released.push(item.id);
+        if (!dryRun) {
+          const { condensedInto, ...rest } = item.metadata ?? {};
+          item.metadata = rest;
+        }
+        continue;
+      }
+
+      const quarantineUntil = principle.metadata?.quarantineUntil;
+      if (quarantineUntil && new Date(quarantineUntil).getTime() > nowMs) {
+        quarantined.push(item.id);
+        continue;
+      }
+
+      reaped.push(item.id);
+      if (!dryRun) {
+        this.items.delete(item.id);
+        this.dropPrincipleVector(item.id);
+      }
+    }
+
+    return { reaped, released, quarantined };
   }
 
   capacityReplacementItems(replaceIds, candidate) {
