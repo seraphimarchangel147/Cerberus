@@ -14824,15 +14824,75 @@ switchTab(initialTab);
     if (!alphaSpriteReady) return false;
     var st = alphaSpriteRowName(state);
     if (st !== alphaSprState) { alphaSprState = st; alphaSprStart = P.flick; }
-    var elapsed = Math.floor((P.flick - alphaSprStart) / 4);  /* TICKS_PER_FRAME=4 */
+    var elapsed = Math.floor((P.flick - alphaSprStart) / TICKS_PER_FRAME);
     var idx = ALPHA_SPR_LOOP[st] ? (elapsed % 4) : Math.min(elapsed, 3);
     if (reduced) idx = 0;
     var row = ALPHA_SPR_ROWS[st];
     var sx = idx * 256, sy = row * 256;
-    /* blit 256x256 cell into 160x160 logical space, nearest-neighbour */
+    /* procedural micro-motion: breathing scale + subtle sway so the body
+       lives between keyframes, not just on them */
+    var flick = P.flick || 0;
+    var breathe = reduced ? 0 : Math.sin(flick * 0.09) * 0.008;
+    var sway = reduced ? 0 : Math.sin(flick * 0.05) * 0.6;
+    var bobY = reduced ? 0 : Math.sin(flick * 0.09) * 0.8;
+    ctx.save();
+    ctx.translate(80 + sway, 80 + bobY);
+    ctx.scale(1 + breathe, 1 - breathe * 0.5);
+    ctx.translate(-80, -80);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(alphaSprite, sx, sy, 256, 256, 0, 0, 160, 160);
+    ctx.restore();
     return true;
+  }
+
+  /* ── ALPHA spectral flame overlay — cyan/blue flame tongues that lick up
+     from the shoulders, heads, and chest core. Renders ON TOP of the sprite
+     so the creature is always wreathed in animated energy. ── */
+  function alphaFlameOverlay(ctx, W, H, flick, pal) {
+    if (reduced) return;
+    var i, x, y, h, w, sway, a;
+    /* shoulder flames — two clusters rising from the pauldrons */
+    for (i = 0; i < 7; i++) {
+      var side = i < 4 ? -1 : 1;
+      var si = i < 4 ? i : i - 4;
+      x = (side < 0 ? 38 : 122) + si * 6 * side + Math.sin(flick * 0.11 + i * 1.7) * 2;
+      h = 10 + 8 * Math.abs(Math.sin(flick * 0.08 + i * 2.1)) + Math.sin(flick * 0.13 + i) * 3;
+      w = 3 + (i % 3);
+      sway = Math.sin(flick * 0.09 + i * 0.9) * 2;
+      a = 0.35 + 0.25 * Math.sin(flick * 0.14 + i);
+      ctx.globalAlpha = a;
+      pxTri(ctx, x + sway, 88 - h, x - w, 92, x + w, 92, pal.flameDeep);
+      pxTri(ctx, x + sway * 0.7, 88 - h + 3, x - w + 1, 92, x + 1, 92, pal.flameRed);
+      pxTri(ctx, x + sway * 0.5, 88 - h + 6, x - w + 2, 92, x, 92, pal.flameOrg);
+      ctx.globalAlpha = a * 0.8;
+      pxLine(ctx, x + sway * 0.3, 88 - h + 4, x + sway * 0.3, 90, 1, pal.flameYel);
+      ctx.globalAlpha = a * 0.6;
+      pxRect(ctx, Math.round(x + sway * 0.2), Math.round(88 - h), 1, 2, pal.flameCore);
+    }
+    /* head flames — spectral crests rising from each of the three helms */
+    var headX = [48, 80, 112], headY = [58, 46, 58];
+    for (i = 0; i < 9; i++) {
+      var hi = i % 3;
+      x = headX[hi] + (Math.floor(i / 3) - 1) * 5 + Math.sin(flick * 0.1 + i * 1.4) * 1.5;
+      h = 8 + 6 * Math.abs(Math.sin(flick * 0.07 + i * 1.9));
+      w = 2 + (i % 2);
+      sway = Math.sin(flick * 0.08 + i * 1.1) * 1.5;
+      a = 0.30 + 0.20 * Math.sin(flick * 0.12 + i * 0.8);
+      ctx.globalAlpha = a;
+      pxTri(ctx, x + sway, headY[hi] - h, x - w, headY[hi] + 2, x + w, headY[hi] + 2, pal.flameRed);
+      pxTri(ctx, x + sway * 0.6, headY[hi] - h + 3, x - w + 1, headY[hi] + 2, x, headY[hi] + 2, pal.flameOrg);
+      ctx.globalAlpha = a * 0.7;
+      pxLine(ctx, x + sway * 0.4, headY[hi] - h + 2, x + sway * 0.4, headY[hi], 1, pal.flameYel);
+    }
+    /* chest core flare — pulsing energy bloom over the hex core */
+    var corePulse = 0.20 + 0.15 * Math.sin(flick * 0.12);
+    ctx.globalAlpha = corePulse;
+    pxEllipse(ctx, 80, 96, 16, 12, pal.flameRed);
+    ctx.globalAlpha = corePulse * 0.7;
+    pxEllipse(ctx, 80, 96, 10, 7, pal.flameOrg);
+    ctx.globalAlpha = corePulse * 0.5;
+    pxEllipse(ctx, 80, 96, 5, 4, pal.flameYel);
+    ctx.globalAlpha = 1;
   }
 
   function drawAlphaFront(ctx, P) {
@@ -14930,6 +14990,9 @@ switchTab(initialTab);
     alphaHead(ctx, 112+hr+yawR, 62+bob*0.8+droop-headLift, {dir:1,size:1.05,roar:P.roarSide||false,blink:blinkR,gazeX:hgx,gazeY:hgy,jaw:jawChatter,crestFlick:flick}, pal);
     alphaHead(ctx, 80+hc+yawC, 50+bob+droop*0.5-headLift, {dir:0,size:1.3,roar:P.roarCenter!==false,blink:blinkC,gazeX:hgx,gazeY:hgy,jaw:0,crestFlick:flick}, pal);
     }
+
+    /* spectral flame overlay — always on top of the sprite body */
+    alphaFlameOverlay(ctx, W, H, flick, pal);
 
     /* signature effects */
     alphaEnergyFX(ctx, W, H, flick, pal);
