@@ -13769,6 +13769,30 @@ switchTab(initialTab);
     }
   })();
 
+  /* ── Idle breath: play order + anchor correction ──────────────────────
+     Measured on the baked atlas (see ~/cerb-fix-verify.py), not eyeballed.
+
+     POP: the four idle frames sample the breath at vertical head offsets
+     [0, -2, +2, 0] in file order. Frame-to-frame that is [-2, +4, -2, 0] —
+     a single 4px jump, which is the head "popping". A per-pair rigid-shift
+     alignment shows the head is NOT redrawn between frames (2.5-4.2% residual
+     after shifting), it is purely translating, so this is a timing/order bug,
+     not an art bug. Frame 3 is byte-identical to frame 0 (XOR = 0), so it is
+     a second rest pose: playing 0,1,3,2 yields offsets [0,-2,0,+2], deltas
+     [-2,+2,+2,-2] — max step halved to 2px and an exact 4-sample sine
+     (sine-fit error 4.0 -> 0.0).
+
+     FLOAT: the baked frames keep the paws planted (baseline spread 0px across
+     the row), so the breath is already IN the art. Translating the whole
+     baked frame by bob therefore adds a second breath and lifts the planted
+     feet off the ground (+/-1.35px idle, +/-2.03px running for ALPHA). The
+     body now draws unshifted and the overlays follow the BAKED head offset,
+     so eyes/jaw stay locked to the head they are drawn on. */
+  var CERB_ANIM_IDLE_FIX = {
+    order:  [0, 1, 3, 2],
+    headDy: [0, -2, 0, 2]
+  };
+
   function cerbAnimFrameIdx(setName, state, t) {
     /* t is the engine tick counter (flick), advancing ~60/sec.
        Convert to ms (tick * 1000/60) then to frame index by fps. */
@@ -13778,7 +13802,18 @@ switchTab(initialTab);
     if (!layout) return 0;
     var fps = layout.fps || 4;
     var count = layout.frame_count || 1;
-    return Math.floor(t / (60 / fps)) % count;
+    var step = Math.floor(t / (60 / fps)) % count;
+    if (state === "idle" && count === CERB_ANIM_IDLE_FIX.order.length) {
+      return CERB_ANIM_IDLE_FIX.order[step];
+    }
+    return step;
+  }
+
+  /* Vertical offset already baked into the idle frame being shown, so the
+     procedural overlays ride the baked head instead of an independent bob. */
+  function cerbAnimBakedDy(state, step, count) {
+    if (state !== "idle" || count !== CERB_ANIM_IDLE_FIX.order.length) return 0;
+    return CERB_ANIM_IDLE_FIX.headDy[step] || 0;
   }
 
   function drawSpriteSide(ctx, P, setName, pal, ampScale) {
@@ -13809,6 +13844,16 @@ switchTab(initialTab);
     var rect = layout.frames[idx];
     if (!rect) return false;
 
+    /* Idle breath is BAKED into these frames and the paws are planted, so the
+       body must NOT also be translated by bob or the feet leave the ground.
+       Overlays instead ride the offset already baked into this frame. */
+    var fps0 = layout.fps || 4;
+    var cnt0 = layout.frame_count || 1;
+    var step0 = Math.floor(t / (60 / fps0)) % cnt0;
+    var bakedDy = cerbAnimBakedDy(state, step0, cnt0);
+    var bodyDy = (state === "idle") ? 0 : bob;
+    var ovlDy = (state === "idle") ? bakedDy : bob;
+
     /* Direction flip: baked forms face RIGHT, flip when moving LEFT */
     var facing = P.facing || 1;
     var needFlip = facing < 0;
@@ -13821,7 +13866,7 @@ switchTab(initialTab);
 
     /* Draw the pre-rendered animation frame */
     var tw = A.tile[0], th = A.tile[1];
-    ctx.drawImage(im, rect.x, rect.y, rect.w, rect.h, 0, bob, tw, th);
+    ctx.drawImage(im, rect.x, rect.y, rect.w, rect.h, 0, bodyDy, tw, th);
     ctx.restore();
 
     /* ── Procedural overlays for living animation ────────────────── */
@@ -13837,8 +13882,9 @@ switchTab(initialTab);
         var head = S.heads[hn];
         var hbx = head.box;
         var hpx = head.pivot;
-        /* Atlas frames are pre-rendered at rest pose, so rot=0, offset=bob only */
-        skelEyes(ctx, setName, hn, hbx, hpx[0], hpx[1], 0, 1, 1, 0, bob, eyeOpts, pal);
+        /* Atlas frames are pre-rendered at rest pose, so rot=0; the vertical
+           offset must match the one baked into the frame on screen. */
+        skelEyes(ctx, setName, hn, hbx, hpx[0], hpx[1], 0, 1, 1, 0, ovlDy, eyeOpts, pal);
       }
     }
 
@@ -13847,7 +13893,7 @@ switchTab(initialTab);
     if (jawAmt > 0.1 && S && S.heads.headFront) {
       var hf = S.heads.headFront;
       skelJaw(ctx, setName, "headFront", hf.box, hf.pivot[0], hf.pivot[1],
-              0, 1, 1, 0, bob, { jaw: jawAmt }, pal);
+              0, 1, 1, 0, ovlDy, { jaw: jawAmt }, pal);
     }
 
     /* Tail: procedural, wags/droops */
@@ -13855,7 +13901,7 @@ switchTab(initialTab);
     var tailAngle = Math.sin(tailWag || t * 0.15) * 0.25 * amp - (P.sad || 0) * 0.35;
     ctx.save();
     if (needFlip) { ctx.translate(160, 0); ctx.scale(-1, 1); }
-    ctx.translate(128, 96 + bob);
+    ctx.translate(128, 96 + ovlDy);
     ctx.rotate(tailAngle);
     pxLine(ctx, 0, 0, 14, -8, 6, pal.furDark);
     pxLine(ctx, 14, -8, 24, -14, 5, pal.furMid);
