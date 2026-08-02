@@ -49,7 +49,7 @@ OMEGA_FRAMES = [
     "attack_windup", "attack_lunge", "attack_roar2", "attack_overdrive",
     "attack_recover", "special_ability",
     "victory_howl", "victory_howl2", "sleep_rest", "sleep_stir",
-    "walk_left", "walk_right", "base_lock",
+    "walk_left", "walk_right", "walk_step_left", "walk_step_right", "base_lock",
 ]
 
 ALPHA_FRAMES = [
@@ -57,7 +57,7 @@ ALPHA_FRAMES = [
     "idle_roar", "working_focus",
     "attack_overdrive", "attack_recover",
     "victory_howl", "victory_howl2", "sleep_rest", "sleep_stir",
-    "walk_left", "walk_right",
+    "walk_left", "walk_right", "walk_step_left", "walk_step_right",
 ]
 
 # ── Animation map ──────────────────────────────────────────────────────────
@@ -70,9 +70,12 @@ ALPHA_FRAMES = [
 # the art rows stay named after what they DEPICT, not after engine internals.
 OMEGA_STATES = {
     "idle": {
+        # Breathing cycle with occasional alert/recovery glances woven in so
+        # the idle reads as "alive and watchful", not a static chest pump.
         "seq": ["idle_neutral", "idle_calm", "idle_breath", "idle_deepbreath",
-                "idle_inhale", "idle_deepbreath", "idle_breath", "idle_calm"],
-        "hold": 7, "loop": True,
+                "idle_inhale", "idle_deepbreath", "idle_breath", "idle_alert",
+                "idle_calm", "idle_neutral", "idle_recovery", "idle_calm"],
+        "hold": 6, "loop": True,
     },
     "alert": {
         "seq": ["idle_alert", "idle_tense", "idle_alert", "idle_neutral"],
@@ -98,15 +101,20 @@ OMEGA_STATES = {
         "hold": 12, "loop": True,
     },
     "walk": {
-        "seq": ["walk_left", "walk_right"],
-        "hold": 5, "loop": True,
+        # 4-frame alternating stride (L, R, L, R) with two distinct poses per
+        # side so the gait doesn't rock back and forth on just two frames.
+        "seq": ["walk_left", "walk_right", "walk_step_left", "walk_step_right"],
+        "hold": 3, "loop": True,
     },
 }
 
 ALPHA_STATES = {
     "idle": {
-        "seq": ["idle_neutral", "idle_calm", "idle_thinking", "idle_calm"],
-        "hold": 7, "loop": True,
+        # Doubled from 4 frames: breathing base with thinking/snarl micro-shifts
+        # so the mechanical guardian reads as scanning/processing, not frozen.
+        "seq": ["idle_neutral", "idle_calm", "idle_thinking", "idle_calm",
+                "idle_neutral", "idle_tense", "idle_snarl", "idle_calm"],
+        "hold": 6, "loop": True,
     },
     "alert": {
         "seq": ["idle_thinking", "idle_tense", "idle_thinking", "idle_neutral"],
@@ -131,8 +139,10 @@ ALPHA_STATES = {
         "hold": 12, "loop": True,
     },
     "walk": {
-        "seq": ["walk_left", "walk_right"],
-        "hold": 5, "loop": True,
+        # 4-frame alternating stride (L, R, L, R) with two distinct poses per
+        # side so the gait doesn't rock back and forth on just two frames.
+        "seq": ["walk_left", "walk_right", "walk_step_left", "walk_step_right"],
+        "hold": 3, "loop": True,
     },
 }
 

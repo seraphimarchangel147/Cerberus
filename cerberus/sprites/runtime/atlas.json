@@ -11,7 +11,7 @@
   "cell": 128,
   "forms": {
     "alpha": {
-      "cols": 4,
+      "cols": 5,
       "frames": {
         "attack_overdrive": 7,
         "attack_recover": 8,
@@ -27,10 +27,12 @@
         "victory_howl2": 10,
         "walk_left": 13,
         "walk_right": 14,
+        "walk_step_left": 15,
+        "walk_step_right": 16,
         "working_focus": 6
       },
       "rows": 4,
-      "sha": "0c1571cd7f03",
+      "sha": "abc90101cf22",
       "states": {
         "alert": {
           "hold": 6,
@@ -55,12 +57,16 @@
           ]
         },
         "idle": {
-          "hold": 7,
+          "hold": 6,
           "loop": true,
           "seq": [
             "idle_neutral",
             "idle_calm",
             "idle_thinking",
+            "idle_calm",
+            "idle_neutral",
+            "idle_tense",
+            "idle_snarl",
             "idle_calm"
           ]
         },
@@ -87,11 +93,13 @@
           ]
         },
         "walk": {
-          "hold": 5,
+          "hold": 3,
           "loop": true,
           "seq": [
             "walk_left",
-            "walk_right"
+            "walk_right",
+            "walk_step_left",
+            "walk_step_right"
           ]
         },
         "working": {
@@ -114,7 +122,7 @@
         "attack_recover": 17,
         "attack_roar2": 15,
         "attack_windup": 13,
-        "base_lock": 25,
+        "base_lock": 27,
         "idle_alert": 5,
         "idle_breath": 2,
         "idle_calm": 1,
@@ -133,11 +141,13 @@
         "victory_howl2": 20,
         "walk_left": 23,
         "walk_right": 24,
+        "walk_step_left": 25,
+        "walk_step_right": 26,
         "working_snarl": 12,
         "working_stare": 11
       },
       "rows": 5,
-      "sha": "2b73ee604276",
+      "sha": "741c123f8a65",
       "states": {
         "alert": {
           "hold": 6,
@@ -164,7 +174,7 @@
           ]
         },
         "idle": {
-          "hold": 7,
+          "hold": 6,
           "loop": true,
           "seq": [
             "idle_neutral",
@@ -174,6 +184,10 @@
             "idle_inhale",
             "idle_deepbreath",
             "idle_breath",
+            "idle_alert",
+            "idle_calm",
+            "idle_neutral",
+            "idle_recovery",
             "idle_calm"
           ]
         },
@@ -202,11 +216,13 @@
           ]
         },
         "walk": {
-          "hold": 5,
+          "hold": 3,
           "loop": true,
           "seq": [
             "walk_left",
-            "walk_right"
+            "walk_right",
+            "walk_step_left",
+            "walk_step_right"
           ]
         },
         "working": {
