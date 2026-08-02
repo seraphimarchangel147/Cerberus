@@ -52,13 +52,32 @@ def save(arr, path):
     Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGBA").save(path)
 
 
+def _beat(cycles, n):
+    """Second, incommensurate cycle count so sampled phases stay distinct.
+
+    A single wave sampled as phase_i = 2*pi*cycles*i/n only yields
+    n/gcd(cycles, n) DISTINCT phases -- with cycles=2,n=24 that is 12 unique
+    frames repeated twice; cycles=4,n=24 gives 6 repeated four times. Adding a
+    minor wave whose cycle count is coprime to both `cycles` and `n` makes the
+    combined period exactly n, so every frame is a unique image.
+    """
+    for c in range(cycles + 1, cycles + n):
+        if math.gcd(c, n) == 1 and math.gcd(c, max(cycles, 1)) == 1:
+            return c
+    return 1
+
+
 def shimmer(form, base, sel, amp, wl, cycles, n, prefix):
     """Vectorized photometric shimmer on the fixed subset `sel`."""
     xs = np.arange(CANVAS)[None, :]
-    wave = np.sin(2 * math.pi * xs / wl)          # shape (1, C) broadcast
+    c2 = _beat(cycles, n)
+    wl2 = wl * 0.61                               # incommensurate spatial period
     for i in range(n):
         phase = 2 * math.pi * cycles * i / n
-        m = np.clip(1.0 + amp * np.sin(2 * math.pi * xs / wl - phase), 0.6, 1.5)
+        phase2 = 2 * math.pi * c2 * i / n
+        m = np.clip(1.0 + amp * (0.82 * np.sin(2 * math.pi * xs / wl - phase)
+                                 + 0.18 * np.sin(2 * math.pi * xs / wl2 - phase2)),
+                    0.6, 1.5)
         frame = base.copy()
         for k in range(3):
             layer = frame[:, :, k].astype(np.float32)
@@ -98,9 +117,14 @@ def paw_shift(frame, cluster, dx):
 def walk(form, base, sel, amp, wl, cycles, n, prefix, lift):
     clusters = leg_clusters(base)
     xs = np.arange(CANVAS)[None, :].astype(np.float32)
+    c2 = _beat(cycles, n)
+    wl2 = wl * 0.61
     for i in range(n):
         phase = 2 * math.pi * cycles * i / n
-        m = np.clip(1.0 + amp * np.sin(2 * math.pi * xs / wl - phase), 0.6, 1.5)[0]  # (C,)
+        phase2 = 2 * math.pi * c2 * i / n
+        m = np.clip(1.0 + amp * (0.82 * np.sin(2 * math.pi * xs / wl - phase)
+                                 + 0.18 * np.sin(2 * math.pi * xs / wl2 - phase2)),
+                    0.6, 1.5)[0]  # (C,)
         frame = base.copy()
         for k in range(3):
             layer = frame[:, :, k].astype(np.float32)
