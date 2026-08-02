@@ -1,0 +1,229 @@
+{
+  "alias": {
+    "failed": "sleep",
+    "idle": "idle",
+    "jumping": "attack",
+    "review": "alert",
+    "running": "working",
+    "waiting": "alert",
+    "waving": "victory"
+  },
+  "cell": 128,
+  "forms": {
+    "alpha": {
+      "cols": 4,
+      "frames": {
+        "attack_overdrive": 7,
+        "attack_recover": 8,
+        "idle_calm": 1,
+        "idle_neutral": 0,
+        "idle_roar": 5,
+        "idle_snarl": 4,
+        "idle_tense": 3,
+        "idle_thinking": 2,
+        "sleep_rest": 11,
+        "sleep_stir": 12,
+        "victory_howl": 9,
+        "victory_howl2": 10,
+        "walk_left": 13,
+        "walk_right": 14,
+        "working_focus": 6
+      },
+      "rows": 4,
+      "sha": "0c1571cd7f03",
+      "states": {
+        "alert": {
+          "hold": 6,
+          "loop": true,
+          "seq": [
+            "idle_thinking",
+            "idle_tense",
+            "idle_thinking",
+            "idle_neutral"
+          ]
+        },
+        "attack": {
+          "hold": 3,
+          "loop": false,
+          "seq": [
+            "idle_tense",
+            "idle_snarl",
+            "attack_overdrive",
+            "idle_roar",
+            "attack_recover",
+            "idle_neutral"
+          ]
+        },
+        "idle": {
+          "hold": 7,
+          "loop": true,
+          "seq": [
+            "idle_neutral",
+            "idle_calm",
+            "idle_thinking",
+            "idle_calm"
+          ]
+        },
+        "sleep": {
+          "hold": 12,
+          "loop": true,
+          "seq": [
+            "sleep_rest",
+            "sleep_rest",
+            "sleep_stir",
+            "sleep_rest"
+          ]
+        },
+        "victory": {
+          "hold": 4,
+          "loop": true,
+          "seq": [
+            "idle_snarl",
+            "idle_roar",
+            "victory_howl",
+            "victory_howl2",
+            "victory_howl",
+            "idle_roar"
+          ]
+        },
+        "walk": {
+          "hold": 5,
+          "loop": true,
+          "seq": [
+            "walk_left",
+            "walk_right"
+          ]
+        },
+        "working": {
+          "hold": 4,
+          "loop": true,
+          "seq": [
+            "working_focus",
+            "idle_tense",
+            "idle_snarl",
+            "idle_tense"
+          ]
+        }
+      }
+    },
+    "omega": {
+      "cols": 6,
+      "frames": {
+        "attack_lunge": 14,
+        "attack_overdrive": 16,
+        "attack_recover": 17,
+        "attack_roar2": 15,
+        "attack_windup": 13,
+        "base_lock": 25,
+        "idle_alert": 5,
+        "idle_breath": 2,
+        "idle_calm": 1,
+        "idle_deepbreath": 3,
+        "idle_halfroar": 7,
+        "idle_inhale": 4,
+        "idle_neutral": 0,
+        "idle_recovery": 10,
+        "idle_roar": 9,
+        "idle_snarl": 8,
+        "idle_tense": 6,
+        "sleep_rest": 21,
+        "sleep_stir": 22,
+        "special_ability": 18,
+        "victory_howl": 19,
+        "victory_howl2": 20,
+        "walk_left": 23,
+        "walk_right": 24,
+        "working_snarl": 12,
+        "working_stare": 11
+      },
+      "rows": 5,
+      "sha": "2b73ee604276",
+      "states": {
+        "alert": {
+          "hold": 6,
+          "loop": true,
+          "seq": [
+            "idle_alert",
+            "idle_tense",
+            "idle_alert",
+            "idle_neutral"
+          ]
+        },
+        "attack": {
+          "hold": 3,
+          "loop": false,
+          "seq": [
+            "idle_tense",
+            "attack_windup",
+            "attack_lunge",
+            "attack_overdrive",
+            "attack_roar2",
+            "special_ability",
+            "attack_recover",
+            "idle_recovery"
+          ]
+        },
+        "idle": {
+          "hold": 7,
+          "loop": true,
+          "seq": [
+            "idle_neutral",
+            "idle_calm",
+            "idle_breath",
+            "idle_deepbreath",
+            "idle_inhale",
+            "idle_deepbreath",
+            "idle_breath",
+            "idle_calm"
+          ]
+        },
+        "sleep": {
+          "hold": 12,
+          "loop": true,
+          "seq": [
+            "sleep_rest",
+            "sleep_rest",
+            "sleep_stir",
+            "sleep_rest"
+          ]
+        },
+        "victory": {
+          "hold": 4,
+          "loop": true,
+          "seq": [
+            "idle_alert",
+            "idle_snarl",
+            "idle_roar",
+            "victory_howl",
+            "victory_howl2",
+            "victory_howl",
+            "idle_roar",
+            "idle_snarl"
+          ]
+        },
+        "walk": {
+          "hold": 5,
+          "loop": true,
+          "seq": [
+            "walk_left",
+            "walk_right"
+          ]
+        },
+        "working": {
+          "hold": 4,
+          "loop": true,
+          "seq": [
+            "working_stare",
+            "idle_alert",
+            "idle_tense",
+            "working_snarl",
+            "idle_halfroar",
+            "working_stare",
+            "idle_snarl",
+            "idle_tense"
+          ]
+        }
+      }
+    }
+  }
+}

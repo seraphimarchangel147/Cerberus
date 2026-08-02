@@ -27,13 +27,42 @@ Tool: `terminal`, `browser`, `search`, `code` (colored screen-glow reflecting up
 
 ## Build
 
+Two separate outputs, for two different consumers:
+
+### 1. Runtime atlas (what the dashboard actually renders)
+
+```bash
+python3 cerberus/sprites/build_runtime_atlas.py
+```
+
+Writes `runtime/omega_atlas.png`, `runtime/alpha_atlas.png` and `runtime/atlas.json`.
+**These are committed** — the daemon serves them at `/assets/cerberus/` and the pet
+renderer in `src/hosted-interface.js` blits from them. Re-run this and commit the
+result whenever the source frames change, or the dashboard keeps showing the old art.
+
+`atlas.json` is the single source of truth for playback: which frames exist, the
+sequence each state plays, how long each frame is held, and the engine-state →
+art-row alias map. Frames are addressed **by name**, so repacking the sheet cannot
+silently repoint a state at the wrong pose. The build validates every reference and
+fails loudly rather than emitting a broken manifest.
+
+Verify a change with the end-to-end browser check (drives every form × state,
+asserts rows match the manifest alias and that looping rows actually advance):
+
+```bash
+node scripts/qa/verify-cerberus-sprites.mjs http://127.0.0.1:<port>/
+```
+
+### 2. Preview GIFs (docs / eyeballing only)
+
 ```bash
 python3 cerberus/sprites/omega_state_compositor.py
 python3 cerberus/sprites/alpha_state_compositor.py
 ```
 
 Both scripts resolve paths relative to their own location, so they run from
-anywhere. Output lands in `sprites/out/`. Requires `Pillow`, `numpy`, `scipy`.
+anywhere. Output lands in `sprites/out/` (gitignored). Requires `Pillow`, `numpy`, `scipy`.
+Nothing at runtime reads these.
 
 ## Procedural layers (compositor-level, on top of baked frames)
 
