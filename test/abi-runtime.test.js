@@ -266,7 +266,16 @@ test("scheduled prompt fires through agent host and produces a reply", async () 
   assert.ok(fired.result.reply, "scheduled prompt should have a reply");
 });
 
-test("skills loader exposes bundled skills via fixed-cost tools", () => {
+test("skills loader exposes bundled skills via fixed-cost tools", (t) => {
+  // This test asserts DEFAULT behavior, so pin the flag off regardless of the
+  // host environment — the daemon may legitimately run with
+  // OPENAGI_SKILLS_AS_TOOLS=1 exported, which would flip the default on.
+  const savedSkillsAsTools = process.env.OPENAGI_SKILLS_AS_TOOLS;
+  delete process.env.OPENAGI_SKILLS_AS_TOOLS;
+  t.after(() => {
+    if (savedSkillsAsTools === undefined) delete process.env.OPENAGI_SKILLS_AS_TOOLS;
+    else process.env.OPENAGI_SKILLS_AS_TOOLS = savedSkillsAsTools;
+  });
   const runtime = createDefaultRuntime();
   assert.ok(runtime.skills, "runtime.skills should exist");
   const names = runtime.skills.list().map((s) => s.name);

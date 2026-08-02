@@ -13,6 +13,13 @@ import { registerImessageSearchTool } from "../src/integrations/imessage-search-
 import { McpStdioClient } from "../src/mcp-client.js";
 import { McpHttpClient } from "../src/mcp-http-client.js";
 import { McpOAuthClient } from "../src/mcp-oauth.js";
+
+// Hermetic env: DiscordChannel's constructor falls back to ambient DISCORD_*
+// env vars; scrub at load so harnesses never inherit the host daemon's config.
+// (In-test process.env sets are unaffected — this runs once at module load.)
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("DISCORD_")) delete process.env[key];
+}
 import { McpRegistry } from "../src/mcp-registry.js";
 import {
   isCredentialHeaderName,

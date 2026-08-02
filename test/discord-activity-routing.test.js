@@ -7,6 +7,14 @@ import test from "node:test";
 import { DiscordChannel } from "../src/discord-channel.js";
 import { SkillRegistry } from "../src/skills.js";
 
+// Hermetic env: DiscordChannel's constructor falls back to ambient DISCORD_*
+// env vars. In particular `activityChannel: null` harness options are defeated
+// by an exported DISCORD_ACTIVITY_CHANNEL (`null ?? env` yields env), which
+// makes unroutable-feed tests post instead of drop. Scrub for determinism.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("DISCORD_")) delete process.env[key];
+}
+
 function createHarness(t, {
   activityChannel = "222222",
   guilds = []

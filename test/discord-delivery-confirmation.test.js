@@ -10,6 +10,12 @@ import { CHAT_CORE_TOOLS } from "../src/agent-host.js";
 import { DiscordChannel } from "../src/discord-channel.js";
 import { ToolRegistry, registerCoreTools } from "../src/tool-registry.js";
 
+// Hermetic env: DiscordChannel's constructor falls back to ambient DISCORD_*
+// env vars; scrub so delivery tests never depend on the host daemon's config.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("DISCORD_")) delete process.env[key];
+}
+
 function registryWith(channels) {
   const tools = new ToolRegistry();
   const runtime = { channels, dataDir: null, tools };

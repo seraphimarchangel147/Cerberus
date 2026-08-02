@@ -11,6 +11,15 @@ import { DiscordChannel } from "../src/discord-channel.js";
 import { PendingActionStore } from "../src/pending-actions.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
+// Hermetic env: DiscordChannel's constructor falls back to ambient DISCORD_*
+// env vars (e.g. DISCORD_GUILDS, DISCORD_ACTIVITY_CHANNEL). When the host
+// shell exports the daemon's real config, harness sessions whose guild is the
+// literal string "guild" fail the guild allowlist and approval cards are
+// silently dropped. Scrub so tests never depend on the host environment.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("DISCORD_")) delete process.env[key];
+}
+
 function createHarness(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "discord-catastrophic-"));
   const events = new EventEmitter();
