@@ -40,25 +40,20 @@ OUT_DIR = os.path.join(BASE_DIR, "runtime")
 CELL = 128
 
 # ── Frame inventory ────────────────────────────────────────────────────────
-# Order is the pack order. Keep it append-only: the JSON map keys by name, but
-# a stable order keeps diffs on the generated PNG readable.
-OMEGA_FRAMES = [
-    "idle_neutral", "idle_calm", "idle_breath", "idle_deepbreath", "idle_inhale",
-    "idle_alert", "idle_tense", "idle_halfroar", "idle_snarl", "idle_roar",
-    "idle_recovery", "working_stare", "working_snarl",
-    "attack_windup", "attack_lunge", "attack_roar2", "attack_overdrive",
-    "attack_recover", "special_ability",
-    "victory_howl", "victory_howl2", "sleep_rest", "sleep_stir",
-    "walk_left", "walk_right", "walk_step_left", "walk_step_right", "base_lock",
-]
+# Every frame is derived from ONE identity-locked base per state via bounded
+# procedural transforms (photometric shimmer on a fixed glow subset + a
+# horizontal weight-shift for walk), so inter-frame change is gated:
+#   idle/active/sleep <= 10% changed px, walk <= 25%, width spread 0px,
+#   baseline top=20 bottom=123 exact on every frame.
+# Naming: dl=derived-idle, act=derived-active, wk=derived-walk, sl=derived-sleep.
+def derived_names(prefix, n):
+    return [f"{prefix}{i:02d}" for i in range(n)]
 
-ALPHA_FRAMES = [
-    "idle_neutral", "idle_calm", "idle_thinking", "idle_tense", "idle_snarl",
-    "idle_roar", "working_focus",
-    "attack_overdrive", "attack_recover",
-    "victory_howl", "victory_howl2", "sleep_rest", "sleep_stir",
-    "walk_left", "walk_right", "walk_step_left", "walk_step_right",
-]
+OMEGA_FRAMES = derived_names("dl", 24) + derived_names("act", 24) \
+    + derived_names("wk", 16) + derived_names("sl", 16)
+
+ALPHA_FRAMES = derived_names("dl", 24) + derived_names("act", 24) \
+    + derived_names("wk", 16) + derived_names("sl", 16)
 
 # ── Animation map ──────────────────────────────────────────────────────────
 # `seq`  : frame names, played in order
@@ -69,81 +64,28 @@ ALPHA_FRAMES = [
 # waving / jumping / waiting. `alias` maps that vocabulary onto these rows so
 # the art rows stay named after what they DEPICT, not after engine internals.
 OMEGA_STATES = {
-    "idle": {
-        # Breathing cycle with occasional alert/recovery glances woven in so
-        # the idle reads as "alive and watchful", not a static chest pump.
-        "seq": ["idle_neutral", "idle_calm", "idle_breath", "idle_deepbreath",
-                "idle_inhale", "idle_deepbreath", "idle_breath", "idle_alert",
-                "idle_calm", "idle_neutral", "idle_recovery", "idle_calm"],
-        "hold": 6, "loop": True,
-    },
-    "alert": {
-        "seq": ["idle_alert", "idle_tense", "idle_alert", "idle_neutral"],
-        "hold": 6, "loop": True,
-    },
-    "working": {
-        "seq": ["working_stare", "idle_alert", "idle_tense", "working_snarl",
-                "idle_halfroar", "working_stare", "idle_snarl", "idle_tense"],
-        "hold": 4, "loop": True,
-    },
-    "attack": {
-        "seq": ["idle_tense", "attack_windup", "attack_lunge", "attack_overdrive",
-                "attack_roar2", "special_ability", "attack_recover", "idle_recovery"],
-        "hold": 3, "loop": False,
-    },
-    "victory": {
-        "seq": ["idle_alert", "idle_snarl", "idle_roar", "victory_howl",
-                "victory_howl2", "victory_howl", "idle_roar", "idle_snarl"],
-        "hold": 4, "loop": True,
-    },
-    "sleep": {
-        "seq": ["sleep_rest", "sleep_rest", "sleep_stir", "sleep_rest"],
-        "hold": 12, "loop": True,
-    },
-    "walk": {
-        # 4-frame alternating stride (L, R, L, R) with two distinct poses per
-        # side so the gait doesn't rock back and forth on just two frames.
-        "seq": ["walk_left", "walk_right", "walk_step_left", "walk_step_right"],
-        "hold": 3, "loop": True,
-    },
+    # Calm breathing shimmer (dl cycle, 24 frames). hold 3 @30fps = 100ms/frame, 2.4s loop.
+    "idle": {"seq": derived_names("dl", 24), "hold": 3, "loop": True},
+    # Agitated shimmer (act cycle, 24 frames) — same identity-locked base, faster wave.
+    "alert": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
+    "working": {"seq": derived_names("act", 24), "hold": 2, "loop": True},
+    # One-shot agitated burst, holds its final frame until state changes.
+    "attack": {"seq": derived_names("act", 24), "hold": 2, "loop": False},
+    "victory": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
+    # Slow shallow flicker (sl cycle, 16 frames). hold 5 = 167ms/frame, 2.67s loop.
+    "sleep": {"seq": derived_names("sl", 16), "hold": 5, "loop": True},
+    # Stride shimmer + horizontal weight-shift (wk cycle, 16 frames). hold 2 = 67ms/frame.
+    "walk": {"seq": derived_names("wk", 16), "hold": 2, "loop": True},
 }
 
 ALPHA_STATES = {
-    "idle": {
-        # Doubled from 4 frames: breathing base with thinking/snarl micro-shifts
-        # so the mechanical guardian reads as scanning/processing, not frozen.
-        "seq": ["idle_neutral", "idle_calm", "idle_thinking", "idle_calm",
-                "idle_neutral", "idle_tense", "idle_snarl", "idle_calm"],
-        "hold": 6, "loop": True,
-    },
-    "alert": {
-        "seq": ["idle_thinking", "idle_tense", "idle_thinking", "idle_neutral"],
-        "hold": 6, "loop": True,
-    },
-    "working": {
-        "seq": ["working_focus", "idle_tense", "idle_snarl", "idle_tense"],
-        "hold": 4, "loop": True,
-    },
-    "attack": {
-        "seq": ["idle_tense", "idle_snarl", "attack_overdrive", "idle_roar",
-                "attack_recover", "idle_neutral"],
-        "hold": 3, "loop": False,
-    },
-    "victory": {
-        "seq": ["idle_snarl", "idle_roar", "victory_howl", "victory_howl2",
-                "victory_howl", "idle_roar"],
-        "hold": 4, "loop": True,
-    },
-    "sleep": {
-        "seq": ["sleep_rest", "sleep_rest", "sleep_stir", "sleep_rest"],
-        "hold": 12, "loop": True,
-    },
-    "walk": {
-        # 4-frame alternating stride (L, R, L, R) with two distinct poses per
-        # side so the gait doesn't rock back and forth on just two frames.
-        "seq": ["walk_left", "walk_right", "walk_step_left", "walk_step_right"],
-        "hold": 3, "loop": True,
-    },
+    "idle": {"seq": derived_names("dl", 24), "hold": 3, "loop": True},
+    "alert": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
+    "working": {"seq": derived_names("act", 24), "hold": 2, "loop": True},
+    "attack": {"seq": derived_names("act", 24), "hold": 2, "loop": False},
+    "victory": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
+    "sleep": {"seq": derived_names("sl", 16), "hold": 5, "loop": True},
+    "walk": {"seq": derived_names("wk", 16), "hold": 2, "loop": True},
 }
 
 # Engine state -> art row. Every key of the engine's STATES table must appear.

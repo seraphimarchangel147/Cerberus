@@ -80,10 +80,31 @@ Nothing at runtime reads these.
 (clamps G to avg(R,B) on green-dominant pixels). Zero green spill verified across
 all frames.
 
-## Known limitation: the walk cycle
+## Animation architecture (identity-locked derivation)
 
-The AI-generated walk frames keep all four feet planted on the ground line, and
-the model cannot reliably differentiate leg lifts. The brain decodes walking from
-leg position, so compositor-level body tilt/shear does not sell locomotion (it was
-tried and regressed the read). The walk state ships a clean vertical bob only; a
-true walk cycle needs new source frames with real leg articulation.
+Every animated frame is derived from ONE identity-locked base per state via
+bounded procedural transforms — NOT independently generated illustrations.
+Independently generated frames re-decide pose/proportions/silhouette each time
+and strobe when sequenced (inter-frame change 30-58%); derivation locks identity
+structurally.
+
+- `derive_frames.py` — derives all cycles from the bases:
+  - idle (`dl*`, 24f): photometric shimmer on a 9% glow subset of `idle_neutral`
+  - active (`act*`, 24f): agitated shimmer (higher amp, faster wave), same base
+  - walk (`wk*`, 16f): 18% subset shimmer + horizontal weight-shift on leg
+    clusters from `walk_step_right`
+  - sleep (`sl*`, 16f): slow shallow flicker on a 7% subset of `sleep_rest`
+- `gate_runtime.py` — gate QA measured from the packed runtime atlas (what the
+  engine consumes): inter-frame changed px, width spread, meanRGB swing,
+  baseline top=20/bottom=123. Gates: idle/sleep ≤10%, walk ≤25%, width ≤8px,
+  meanRGB ±8. Frames that fail a gate do not get packed.
+
+Run order: `derive_frames.py` → `build_runtime_atlas.py` → `gate_runtime.py`.
+
+## Known limitation: true locomotion
+
+The AI image model cannot produce frames with differentiated leg articulation
+(confirmed across multiple prompt strategies — feet stay planted, side views
+drop heads to two). The walk cycle is therefore shimmer + weight-shift on a
+single stride pose; a true multi-pose walk cycle needs hand-drawn frames or a
+model with reliable pose control.
