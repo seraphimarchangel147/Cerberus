@@ -15,6 +15,7 @@ import { nowIso } from "./utils.js";
 // fail closed instead of starting another continuation.
 
 export const DEFAULT_GOAL_MAX_TURNS = 20;
+export const DEFAULT_GOAL_STAGNATION_LIMIT = 3;
 
 export const GOAL_STATUSES = Object.freeze({
   ACTIVE: "active",
@@ -43,6 +44,12 @@ export class GoalStore {
     this.eventsPath = path.join(this.dir, "events.jsonl");
     this.snapshotPath = path.join(this.dir, "snapshot.json");
     this.maxTurns = resolveGoalMaxTurns(options.maxTurns ?? process.env.OPENAGI_GOAL_MAX_TURNS);
+    this.stagnationLimit = resolveGoalStagnationLimit(
+      options.stagnationLimit ?? process.env.OPENAGI_GOAL_STAGNATION_LIMIT
+    );
+    this.stateMdPath = options.stateMdPath === undefined
+      ? path.join(this.dir, "GOAL_STATE.md")
+      : options.stateMdPath;
     this.now = typeof options.now === "function" ? options.now : nowIso;
     this.sessions = new Map();
     ensureDir(this.dir);
@@ -68,6 +75,7 @@ export class GoalStore {
       status: GOAL_STATUSES.ACTIVE,
       revision,
       turns: 0,
+      stagnationTurns: 0,
       maxTurns: limit,
       activatedAt: at,
       updatedAt: at,
@@ -165,7 +173,7 @@ export class GoalStore {
     return this._commit("turn", current, next, { turns: next.turns });
   }
 
-  recordJudge(sessionId, { satisfied, why } = {}, expectedRevision = undefined) {
+  recordJudge(sessionId, { satisfied, why, progress, critique, nextAdjustment } = {}, expectedRevision = undefined) {
     if (typeof satisfied !== "boolean") {
       throw new TypeError("goal judge result requires a boolean satisfied value");
     }
@@ -173,14 +181,28 @@ export class GoalStore {
     if (!current) return null;
     if (current.status !== GOAL_STATUSES.ACTIVE) return this._view(current);
     const at = this._now();
+    // Loop-engineering doctrine: the judge reports per-turn progress, not just
+    // satisfaction. Consecutive no-progress turns are stagnation; a satisfied
+    // verdict or any forward motion resets the counter. progress=null (older
+    // judges without the field) is treated as unknown and never accumulates.
+    const stagnationTurns = satisfied
+      ? 0
+      : progress === false
+        ? (current.stagnationTurns ?? 0) + 1
+        : 0;
     const judge = {
       satisfied,
       why: normalizeOptionalText(why, 4000),
+      progress: progress === true ? true : progress === false ? false : null,
+      critique: normalizeOptionalText(critique, 1000),
+      nextAdjustment: normalizeOptionalText(nextAdjustment, 1000),
+      stagnationTurns,
       at,
       turn: current.turns
     };
-    const next = this._next(current, "judge", at, { lastJudge: judge }, {
+    const next = this._next(current, "judge", at, { lastJudge: judge, stagnationTurns }, {
       satisfied,
+      progress: judge.progress,
       why: judge.why
     });
     return this._commit("judge", current, next, { judge });
@@ -235,6 +257,7 @@ export class GoalStore {
     appendJsonLine(this.eventsPath, event);
     this.sessions.set(state.sessionId, state);
     this._writeSnapshot();
+    this._writeStateMd();
     return this._view(state);
   }
 
@@ -244,6 +267,50 @@ export class GoalStore {
       updatedAt: this._now(),
       sessions: [...this.sessions.values()]
     });
+  }
+
+  // Loop-engineering STATE spine: a human-readable, always-current markdown
+  // mirror of goal-loop state. Inspectable without chat logs or tool calls.
+  // Render failures are advisory and must never break a goal commit.
+  _writeStateMd() {
+    if (!this.stateMdPath) return;
+    try {
+      const tmp = `${this.stateMdPath}.tmp`;
+      fs.writeFileSync(tmp, this.renderStateMarkdown(), "utf8");
+      fs.renameSync(tmp, this.stateMdPath);
+    } catch { /* advisory */ }
+  }
+
+  renderStateMarkdown() {
+    const sessions = [...this.sessions.values()]
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    const active = sessions.filter((s) => s.status === GOAL_STATUSES.ACTIVE);
+    const history = sessions.filter((s) => s.status !== GOAL_STATUSES.ACTIVE).slice(0, 8);
+    const lines = [
+      "# Goal Loop State",
+      `Updated: ${this._now()}`,
+      "",
+      "## Active"
+    ];
+    if (active.length === 0) lines.push("- (none)");
+    for (const s of active) {
+      lines.push(`- **${s.objective}** (goal \`${s.goalId}\`, session \`${s.sessionId}\`)`);
+      lines.push(`  - Turns: ${s.turns}/${s.maxTurns} · Stagnation: ${s.stagnationTurns ?? 0}/${this.stagnationLimit} · Status: ${s.status}`);
+      if (s.lastJudge) {
+        const j = s.lastJudge;
+        lines.push(`  - Last judge: ${j.satisfied ? "satisfied" : "not satisfied"}${j.progress === false ? " · NO PROGRESS" : ""} — ${j.why ?? "(no reason)"}`);
+        if (j.critique) lines.push(`  - Critique: ${j.critique}`);
+        if (j.nextAdjustment) lines.push(`  - Next adjustment: ${j.nextAdjustment}`);
+      }
+    }
+    lines.push("", "## Recent history");
+    if (history.length === 0) lines.push("- (none)");
+    for (const s of history) {
+      const icon = s.status === GOAL_STATUSES.COMPLETED ? "✅" : s.status === GOAL_STATUSES.PAUSED ? "⏸️" : "🗑️";
+      lines.push(`- ${icon} ${s.objective} — ${s.status} at ${s.updatedAt}${s.reason ? ` (${s.reason})` : ""}`);
+    }
+    lines.push("");
+    return lines.join("\n");
   }
 
   _loadSnapshot() {
@@ -293,6 +360,7 @@ export class GoalStore {
     const view = clone(state);
     view.remainingTurns = Math.max(0, view.maxTurns - view.turns);
     view.canContinue = view.status === GOAL_STATUSES.ACTIVE && view.turns < view.maxTurns;
+    view.stagnationLimit = this.stagnationLimit;
     return view;
   }
 
@@ -312,6 +380,19 @@ export function resolveGoalMaxTurns(value, { fallback = DEFAULT_GOAL_MAX_TURNS }
   const numeric = typeof value === "number" ? value : Number(String(value).trim());
   if (!Number.isSafeInteger(numeric) || numeric < 1) {
     if (fallback === null) throw new TypeError("maxTurns must be a positive integer");
+    return fallback;
+  }
+  return numeric;
+}
+
+export function resolveGoalStagnationLimit(value, { fallback = DEFAULT_GOAL_STAGNATION_LIMIT } = {}) {
+  if (value === undefined || value === null || value === "") {
+    if (fallback === null) throw new TypeError("stagnationLimit must be a positive integer");
+    return fallback;
+  }
+  const numeric = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isSafeInteger(numeric) || numeric < 1) {
+    if (fallback === null) throw new TypeError("stagnationLimit must be a positive integer");
     return fallback;
   }
   return numeric;
@@ -383,6 +464,8 @@ function isStoredState(state) {
     && state.turns >= 0
     && Number.isSafeInteger(state.maxTurns)
     && state.maxTurns >= 1
+    && (state.stagnationTurns === undefined
+      || (Number.isSafeInteger(state.stagnationTurns) && state.stagnationTurns >= 0))
     && Array.isArray(state.audit)
   );
 }

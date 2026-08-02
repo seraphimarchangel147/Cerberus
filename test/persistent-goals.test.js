@@ -43,10 +43,28 @@ function goalContext(runtime, events = []) {
 }
 
 test("goal judge verdict parser accepts strict JSON and rejects ambiguous output", () => {
-  assert.deepEqual(parseGoalJudgeVerdict('{"satisfied":true,"why":"done"}'), { satisfied: true, why: "done" });
+  // Legacy two-field verdicts parse with the enriched fields defaulted.
+  assert.deepEqual(parseGoalJudgeVerdict('{"satisfied":true,"why":"done"}'), {
+    satisfied: true,
+    why: "done",
+    progress: null,
+    critique: null,
+    nextAdjustment: null
+  });
   assert.deepEqual(parseGoalJudgeVerdict('```json\n{"satisfied":"no","why":"one step remains"}\n```'), {
     satisfied: false,
-    why: "one step remains"
+    why: "one step remains",
+    progress: null,
+    critique: null,
+    nextAdjustment: null
+  });
+  // Enriched verdicts carry progress/critique/nextAdjustment.
+  assert.deepEqual(parseGoalJudgeVerdict('{"satisfied":false,"progress":"no","why":"spinning","critique":"same failing command","nextAdjustment":"switch adapters"}'), {
+    satisfied: false,
+    why: "spinning",
+    progress: false,
+    critique: "same failing command",
+    nextAdjustment: "switch adapters"
   });
   assert.equal(parseGoalJudgeVerdict("probably"), null);
   assert.equal(parseGoalJudgeVerdict('{"satisfied":"maybe"}'), null);
@@ -110,7 +128,7 @@ test("OpenAI goal loop auto-continues once, uses the cheap model, then completes
   const judgeBodies = sent.filter((body) => String(body.instructions).includes("goal-completion judge"));
   assert.ok(judgeBodies.every((body) => (
     body.model === "cheap-model"
-    && body.max_output_tokens === 256
+    && body.max_output_tokens === 320
     && body.store === false
     && !("tools" in body)
   )));

@@ -2390,3 +2390,17 @@ CONTEXT VALUE WAVE 3 COMPLETE
 - 2026-07-31T12:29:51.017Z · **azazel** · create `drafts/provider-auth-dashboard-technical-outline.md` — Draft one-page technical outline for provider-auth dashboard (components, data flow, integration points)
 - 2026-07-31T12:30:21.028Z · **azazel** · create `drafts/eod-status-update-template.md` — Draft EOD status update template (shipped / loop verification / blockers)
 - 2026-07-31T12:30:44.842Z · **azazel** · create `drafts/4pm-full-loop-reminder-2026-07-31.md` — Draft 4 PM full-loop verification reminder proposal
+- 2026-08-01T11:44:04.000Z · **azazel** · create `usage-watcher-5h-state.json` — Persist usage-watcher tripped state + pending proactive-observer pause (memory lane blocked by scanner false positive)
+- 2026-08-01T19:15:51.517Z · **azazel** · create `drafts/provider-auth-dashboard-mini-spec.md` — One-page provider-auth dashboard mini-spec (draft only)
+- 2026-08-01T19:16:18.754Z · **azazel** · create `drafts/3pm-verification-reminder-2026-08-01.md` — Draft 3 PM verification reminder proposal (draft only)
+- 2026-08-01T21:45:25.170Z · **azazel** · create `drafts/monday-goal-mode-loop-review-2026-08-03.md` — Draft Monday goal-mode loop review reminder proposal (draft-only task)
+- 2026-08-02T21:09:53.318Z · **azazel** · edit `src/goal-store.js`
+- 2026-08-02T21:10:16.506Z · **azazel** · edit `src/goal-store.js`
+- 2026-08-02T21:10:48.682Z · **azazel** · edit `src/goal-store.js`
+- 2026-08-02T21:11:16.676Z · **azazel** · edit `src/goal-store.js`
+- 2026-08-02T21:11:53.778Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-02T21:12:21.362Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-02T21:13:10.207Z · **azazel** · edit `test/goal-store.test.js`
+- 2026-08-02T21:14:43.817Z · **azazel** · edit `test/goal-store.test.js`
+- 2026-08-02T21:15:10.070Z · **azazel** · edit `test/goal-store.test.js`
+- 2026-08-02T21:16:07.627Z · **azazel** · edit `test/persistent-goals.test.js`

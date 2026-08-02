@@ -139,9 +139,10 @@ const SYNTHETIC_CONTINUE = [
 const GOAL_JUDGE_INSTRUCTIONS = [
   "You are a cheap goal-completion judge.",
   "Decide whether the stated goal is fully satisfied by the latest assistant progress.",
-  "Return only JSON: {\"satisfied\":true|false,\"why\":\"short reason\"}."
+  "Also judge whether the latest turn made real progress toward the goal (new verified work, not repetition of earlier turns).",
+  "Return only JSON: {\"satisfied\":true|false,\"progress\":true|false,\"why\":\"short reason\",\"critique\":\"one-line post-run critique\",\"nextAdjustment\":\"one concrete adjustment for the next turn\"}."
 ].join(" ");
-const GOAL_JUDGE_MAX_TOKENS = 256;
+const GOAL_JUDGE_MAX_TOKENS = 320;
 
 class TurnDeadlineError extends Error {
   constructor() {
@@ -2462,16 +2463,35 @@ export function parseGoalJudgeVerdict(value) {
         : null;
   if (satisfied === null) return null;
   const why = String(parsed.why ?? "No reason supplied.").trim().slice(0, 1000);
-  return { satisfied, why: why || "No reason supplied." };
+  const rawProgress = parsed.progress;
+  const progress = typeof rawProgress === "boolean"
+    ? rawProgress
+    : typeof rawProgress === "string" && /^(?:yes|true)$/i.test(rawProgress.trim())
+      ? true
+      : typeof rawProgress === "string" && /^(?:no|false)$/i.test(rawProgress.trim())
+        ? false
+        : null;
+  const critique = String(parsed.critique ?? "").trim().slice(0, 1000) || null;
+  const nextAdjustment = String(parsed.nextAdjustment ?? "").trim().slice(0, 1000) || null;
+  return { satisfied, why: why || "No reason supplied.", progress, critique, nextAdjustment };
 }
 
 function goalJudgePrompt(goal, assistantText) {
+  const prior = goal?.lastJudge && !goal.lastJudge.satisfied
+    ? [
+        `Prior judge verdict (turn ${goal.lastJudge.turn}): ${goal.lastJudge.why ?? "(none)"}`,
+        goal.lastJudge.critique ? `Prior critique: ${goal.lastJudge.critique}` : null,
+        goal.lastJudge.nextAdjustment ? `Prior next adjustment: ${goal.lastJudge.nextAdjustment}` : null
+      ].filter(Boolean).join("\n")
+    : null;
   return [
     `Goal: ${goal.objective}`,
     `Goal turn: ${goal.turns}/${goal.maxTurns}`,
+    `Consecutive no-progress turns so far: ${goal.stagnationTurns ?? 0}`,
+    prior,
     "Latest assistant progress:",
     String(assistantText ?? "").trim().slice(-12000) || "(no visible assistant text)"
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 function emitGoalEvent(context, event) {
@@ -2528,6 +2548,21 @@ async function evaluateGoalTurn({ provider, context, assistantText, deadline, tu
   if (!latest || latest.status !== "active" || latest.revision !== judged.revision) {
     emitGoalEvent(context, { action: "stopped", reason: "preempted" });
     return { handled: true, continue: false, stopReason: "goal-preempted" };
+  }
+  // Loop-engineering escalation: consecutive no-progress turns mean the loop is
+  // spinning. Pause for human review (fail-safe handoff) instead of burning the
+  // remaining turn budget — the pause is resumable once a human redirects.
+  const stagnationLimit = store.stagnationLimit ?? 3;
+  if ((latest.stagnationTurns ?? 0) >= stagnationLimit) {
+    try {
+      store.pause(
+        sessionId,
+        `goal stagnated: ${latest.stagnationTurns} consecutive turns without judged progress — human review required`,
+        latest.revision
+      );
+    } catch { /* stale state wins */ }
+    emitGoalEvent(context, { action: "stagnated", turns: latest.turns, stagnationTurns: latest.stagnationTurns });
+    return { handled: true, continue: false, stopReason: "goal-stagnated" };
   }
   if (latest.turns >= latest.maxTurns) {
     try { store.pause(sessionId, "goal turn budget reached", latest.revision); } catch { /* stale state wins */ }
