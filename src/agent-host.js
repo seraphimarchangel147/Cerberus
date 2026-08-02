@@ -1175,7 +1175,16 @@ export class AgentHost {
           // checkpoint state instead of only bare tool start/end.
           state: event?.state ?? null,
           total: event?.total ?? null,
-          extensionsLeft: event?.extensionsLeft ?? null
+          extensionsLeft: event?.extensionsLeft ?? null,
+          // Goal-loop lifecycle fields (continue/completed/stagnated/stopped)
+          // so bus consumers (Discord feed, dashboard) can render goal
+          // progress and escalations instead of dropping them silently.
+          action: event?.action ?? null,
+          turns: event?.turns ?? null,
+          maxTurns: event?.maxTurns ?? null,
+          stagnationTurns: event?.stagnationTurns ?? null,
+          why: typeof event?.why === "string" ? event.why.slice(0, 280) : null,
+          reason: event?.reason ?? null
         });
       } catch { /* advisory */ }
       if (lifecycle && event?.phase === "iteration") {

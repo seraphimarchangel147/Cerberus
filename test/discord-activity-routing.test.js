@@ -295,3 +295,66 @@ test("approval cards without a session are dropped instead of using home", async
     )
   );
 });
+
+test("goal lifecycle events post to the session channel", (t) => {
+  const harness = createHarness(t, {
+    activityChannel: "222222",
+    guilds: ["shared-guild"]
+  });
+  harness.channel.bindActivityFeed(harness.events);
+  const sessionId = "discord:shared-guild:333333:user-1";
+
+  harness.events.emit("agent-activity", {
+    phase: "goal", action: "completed", why: "all steps done", sessionId
+  });
+  harness.events.emit("agent-activity", {
+    phase: "goal", action: "stagnated", stagnationTurns: 3, sessionId
+  });
+
+  assert.equal(harness.messages.length, 2);
+  assert.ok(harness.messages[0].content.includes("Goal completed"));
+  assert.ok(harness.messages[0].content.includes("all steps done"));
+  assert.ok(harness.messages[1].content.includes("Goal stagnated"));
+  assert.ok(harness.messages[1].content.includes("human review"));
+  assert.ok(harness.messages.every((m) => m.channelId === "333333"));
+});
+
+test("goal continue events are hard-throttled", (t) => {
+  const harness = createHarness(t, {
+    activityChannel: "222222",
+    guilds: ["shared-guild"]
+  });
+  harness.channel.bindActivityFeed(harness.events);
+  const sessionId = "discord:shared-guild:333333:user-1";
+
+  harness.events.emit("agent-activity", {
+    phase: "goal", action: "continue", turns: 2, maxTurns: 20, sessionId
+  });
+  harness.events.emit("agent-activity", {
+    phase: "goal", action: "continue", turns: 3, maxTurns: 20, sessionId
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.ok(harness.messages[0].content.includes("Goal turn 2/20"));
+});
+
+test("goal events are dropped when DISCORD_ACTIVITY_GOALS=0", (t) => {
+  const prev = process.env.DISCORD_ACTIVITY_GOALS;
+  process.env.DISCORD_ACTIVITY_GOALS = "0";
+  try {
+    const harness = createHarness(t, {
+      activityChannel: "222222",
+      guilds: ["shared-guild"]
+    });
+    harness.channel.bindActivityFeed(harness.events);
+    harness.events.emit("agent-activity", {
+      phase: "goal",
+      action: "completed",
+      sessionId: "discord:shared-guild:333333:user-1"
+    });
+    assert.equal(harness.messages.length, 0);
+  } finally {
+    if (prev === undefined) delete process.env.DISCORD_ACTIVITY_GOALS;
+    else process.env.DISCORD_ACTIVITY_GOALS = prev;
+  }
+});

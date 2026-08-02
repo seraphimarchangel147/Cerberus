@@ -1296,6 +1296,34 @@ export class DiscordChannel {
         post("🗜️ **Context compression** — long session compacted to preserve continuity", d);
         return;
       }
+      if (d?.phase === "goal") {
+        if ((process.env.DISCORD_ACTIVITY_GOALS ?? "1") === "0") return;
+        const action = String(d?.action ?? "");
+        const why = d?.why ? ` — ${String(d.why).slice(0, 200)}` : "";
+        if (action === "continue") {
+          // Fires every goal turn — throttle hard so the feed shows progress
+          // without one message per loop iteration.
+          if (!throttled("agent-activity:goal:continue", 600000)) return;
+          post(`🎯 **Goal turn ${d.turns ?? "?"}/${d.maxTurns ?? "?"}**${why}`, d);
+          return;
+        }
+        if (action === "completed") {
+          post(`✅ **Goal completed**${why}`, d);
+          return;
+        }
+        if (action === "stagnated") {
+          // Escalation, never throttled: this is the human-review signal.
+          post(`⚠️ **Goal stagnated — human review needed** — ${d.stagnationTurns ?? "?"} consecutive turns without judged progress. Resume with \`/goal resume\` or clear with \`/goal clear\`.`, d);
+          return;
+        }
+        if (action === "stopped") {
+          const reason = String(d?.reason ?? "unknown");
+          if (!throttled(`agent-activity:goal:stopped:${reason}`, 120000)) return;
+          post(`⏸️ **Goal stopped** — ${reason}`, d);
+          return;
+        }
+        return;
+      }
       const name = String(d?.name ?? "");
       if (!NOTABLE_FEED_TOOLS.has(name)) return;
       if (d?.phase === "start") {
