@@ -10563,9 +10563,11 @@ const OPS_CATEGORY_META = {
   tools: { icon: "⚙️", label: "tools" },
   "computer-use": { icon: "🖥️", label: "computer use" },
   vision: { icon: "👁️", label: "vision" },
+  goals: { icon: "🎯", label: "goals" },
   debug: { icon: "🧪", label: "debug" },
   system: { icon: "📡", label: "system" }
 };
+const OPS_FILTERS = ["all", "skills", "learning", "tools", "computer-use", "vision", "goals", "debug", "system"];
 const OPS_FILTERS = ["all", "skills", "learning", "tools", "computer-use", "vision", "debug", "system"];
 
 function opsMeta(category) {
@@ -10800,6 +10802,17 @@ function opsSse(type, rawEvent) {
       opsPush("debug", "Delegation active", [data.n != null && data.total != null ? data.n + "/" + data.total : null, data.name ?? null].filter(Boolean).join(" · "), "think");
     } else if (data.phase === "awaiting-approval") {
       opsPush("debug", "Approval requested", data.name ?? data.toolName ?? "", "think");
+    } else if (data.phase === "goal") {
+      const action = String(data.action ?? "");
+      if (action === "continue") {
+        opsPush("goals", "Goal turn " + (data.turns ?? "?") + "/" + (data.maxTurns ?? "?"), String(data.why ?? "").slice(0, 160), "info");
+      } else if (action === "completed") {
+        opsPush("goals", "Goal completed", String(data.why ?? "").slice(0, 160), "ok");
+      } else if (action === "stagnated") {
+        opsPush("goals", "Goal stagnated — human review needed", (data.stagnationTurns ?? "?") + " consecutive turns without judged progress", "err");
+      } else if (action === "stopped") {
+        opsPush("goals", "Goal stopped", String(data.reason ?? "unknown"), "think");
+      }
     }
   } else if (type === "run-inspector") {
     opsPush("debug", "Run inspector: " + String(data.kind ?? data.phase ?? "event"), [data.status ?? null, data.name ?? null, data.runId ?? null].filter(Boolean).join(" · "), data.status === "failed" || data.ok === false ? "err" : "info");
@@ -11528,6 +11541,8 @@ evt.addEventListener("agent-activity", (e) => {
     else if (phase === "end") petActivityPoke(data.ok === false ? "error" : "working");
     else if (phase === "turn-end") petActivityPoke("done");
     else if (phase === "awaiting-approval") petActivityPoke("thinking");
+    else if (phase === "goal") petActivityPoke(data.action === "completed" ? "done" : data.action === "stagnated" ? "error" : "thinking");
+  } catch (err) {}
   } catch (err) {}
 });
 
