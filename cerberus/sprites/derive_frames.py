@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coherent frame derivation v3 — identity-locked, vectorized.
+"""Coherent frame derivation v4 — identity-locked, distinct choreography.
 
 Invariant: every derived frame keeps the base's alpha mask and bbox EXACTLY
 (top=20, bottom=123). Motion sources:
@@ -7,10 +7,18 @@ Invariant: every derived frame keeps the base's alpha mask and bbox EXACTLY
   PHOTOMETRIC SHIMMER — brightness wave over a fixed SUBSET of glow pixels.
                         Only that subset's RGB changes; alpha + geometry never
                         move, so baseline/width are exact by construction and
-                        inter-frame change == subset fraction.
-  PAW LIFT (walk only) — the bottom paw block of one leg cluster shifts up 2px;
-                        opposite feet stay planted so bottom=123 holds; body
-                        and top rows untouched so top=20 holds.
+                        inter-frame change ~= subset fraction.
+  WEIGHT-SHIFT (walk/attack) — a leg block slides horizontally <=2px; vertical
+                        extents untouched so bottom=123 holds by construction.
+
+Distinct choreography: each state gets its own subset region (seeded), wave
+amplitude, spatial wavelength, and cycle count — so idle/alert/working/attack/
+victory read as different energies on the same identity-locked body instead of
+one shared shimmer at different speeds.
+
+Beat wave: every cycle pairs the main wave with an incommensurate minor wave
+(coprime cycle count) so the combined period is exactly n — every frame is a
+unique image, no phase-aliasing duplicates.
 
 Deterministic. No global ramps, no whole-frame bobs, no bbox-moving scales.
 """
@@ -36,14 +44,18 @@ def glow_mask(base, form):
     return op & (b > 150) & (g > 120) & (r < 110)
 
 
-def subset_mask(glow, target):
+def subset_mask(glow, target, seed=0):
+    """Deterministic subset of `target` glow pixels. `seed` rotates the
+    sampling order so different states shimmer on different physical glow
+    regions (visibly distinct shimmer zones, still identity-locked)."""
     ys, xs = np.where(glow)
     n = len(xs)
     sel = np.zeros(glow.shape, dtype=bool)
     if n <= target:
         sel[glow] = True
     else:
-        idx = np.linspace(0, n - 1, target).astype(int)
+        order = np.roll(np.arange(n), seed * 7919)
+        idx = order[np.linspace(0, n - 1, target).astype(int)]
         sel[ys[idx], xs[idx]] = True
     return sel
 
@@ -69,7 +81,7 @@ def _beat(cycles, n):
 
 def shimmer(form, base, sel, amp, wl, cycles, n, prefix):
     """Vectorized photometric shimmer on the fixed subset `sel`."""
-    xs = np.arange(CANVAS)[None, :]
+    xs = np.arange(CANVAS)[None, :].astype(np.float32)
     c2 = _beat(cycles, n)
     wl2 = wl * 0.61                               # incommensurate spatial period
     for i in range(n):
@@ -77,12 +89,11 @@ def shimmer(form, base, sel, amp, wl, cycles, n, prefix):
         phase2 = 2 * math.pi * c2 * i / n
         m = np.clip(1.0 + amp * (0.82 * np.sin(2 * math.pi * xs / wl - phase)
                                  + 0.18 * np.sin(2 * math.pi * xs / wl2 - phase2)),
-                    0.6, 1.5)
+                    0.6, 1.5)[0]  # (C,)
         frame = base.copy()
         for k in range(3):
-            layer = frame[:, :, k].astype(np.float32)
-            layer[sel] = (layer * m[0] if False else frame[:, :, k] * m)[sel]
-            frame[:, :, k] = layer.astype(np.int32)
+            layer = frame[:, :, k].astype(np.float32) * m[None, :]
+            frame[:, :, k] = np.where(sel, layer, base[:, :, k]).astype(np.int32)
         save(frame, os.path.join(REPO, form, f"{prefix}{i:02d}.png"))
 
 
@@ -114,7 +125,11 @@ def paw_shift(frame, cluster, dx):
     frame[110:BASELINE + 1, x0:x1 + 1, :] = reg
 
 
-def walk(form, base, sel, amp, wl, cycles, n, prefix, lift):
+def gait(form, base, sel, amp, wl, cycles, n, prefix, dx, mode):
+    """Shimmer + horizontal leg weight-shift.
+    mode 'walk'  : clusters shift one at a time, alternating direction.
+    mode 'attack': all clusters surge together, alternating direction per
+                   frame — reads as coiled aggression, not locomotion."""
     clusters = leg_clusters(base)
     xs = np.arange(CANVAS)[None, :].astype(np.float32)
     c2 = _beat(cycles, n)
@@ -127,42 +142,72 @@ def walk(form, base, sel, amp, wl, cycles, n, prefix, lift):
                     0.6, 1.5)[0]  # (C,)
         frame = base.copy()
         for k in range(3):
-            layer = frame[:, :, k].astype(np.float32)
-            layer = layer * m[None, :]
+            layer = frame[:, :, k].astype(np.float32) * m[None, :]
             frame[:, :, k] = np.where(sel, layer, base[:, :, k]).astype(np.int32)
-        if len(clusters) >= 2:
-            # alternate the weight-shift direction across clusters/frames
-            dx = lift if (i % 2 == 0) else -lift
-            paw_shift(frame, clusters[i % len(clusters)], dx)
+        if clusters:
+            if mode == "walk":
+                paw_shift(frame, clusters[i % len(clusters)],
+                          dx if (i % 2 == 0) else -dx)
+            else:  # attack surge: whole stance snaps side to side
+                d = dx if (i % 2 == 0) else -dx
+                for c in clusters:
+                    paw_shift(frame, c, d)
         save(frame, os.path.join(REPO, form, f"{prefix}{i:02d}.png"))
     return clusters
 
 
-N_IDLE = 24
-N_ACTIVE = 24
+# ── Cycle sizes ──────────────────────────────────────────────────────────
+N_IDLE = 32      # calm breathing — the state seen most, gets the most frames
+N_ALERT = 24
+N_WORKING = 24
+N_ATTACK = 24
+N_VICTORY = 24
 N_WALK = 16
 N_SLEEP = 16
 
 
 def main():
     for form in ["omega", "alpha"]:
-        # idle: 9% subset shimmer, calm breathing energy
         b = load_base(form, "idle_neutral")
-        sel = subset_mask(glow_mask(b, form), int(0.09 * (b[:, :, 3] > 0).sum()))
+        glow = glow_mask(b, form)
+
+        # idle: calm breathing shimmer, 9% subset, slow long wave
+        sel = subset_mask(glow, int(0.09 * (b[:, :, 3] > 0).sum()), seed=0)
         shimmer(form, b, sel, amp=0.28, wl=56, cycles=2, n=N_IDLE, prefix="dl")
-        # active: same base, agitated shimmer (higher amp, faster, shorter wave)
-        # for alert/working/attack/victory rows
-        shimmer(form, b, sel, amp=0.45, wl=40, cycles=4, n=N_ACTIVE, prefix="act")
-        # walk: 18% subset shimmer + horizontal weight-shift on leg clusters
+
+        # alert: watchful scan — tighter wave, faster, different glow zone
+        sel = subset_mask(glow, int(0.12 * (b[:, :, 3] > 0).sum()), seed=1)
+        shimmer(form, b, sel, amp=0.40, wl=34, cycles=5, n=N_ALERT, prefix="al")
+
+        # working: rhythmic processing pulse — mid wave, high frequency
+        sel = subset_mask(glow, int(0.10 * (b[:, :, 3] > 0).sum()), seed=2)
+        shimmer(form, b, sel, amp=0.34, wl=46, cycles=7, n=N_WORKING, prefix="wo")
+
+        # attack: aggressive surge — big amp, tight wave, whole-stance snaps
+        sel = subset_mask(glow, int(0.12 * (b[:, :, 3] > 0).sum()), seed=3)
+        cl = gait(form, b, sel, amp=0.50, wl=30, cycles=6, n=N_ATTACK,
+                  prefix="at", dx=2, mode="attack")
+
+        # victory: celebratory bloom — broad slow swell over a wide glow zone
+        sel = subset_mask(glow, int(0.20 * (b[:, :, 3] > 0).sum()), seed=4)
+        shimmer(form, b, sel, amp=0.38, wl=64, cycles=3, n=N_VICTORY, prefix="vc")
+
+        # walk: stride shimmer + alternating weight-shift on leg clusters
         b = load_base(form, "walk_step_right")
-        sel = subset_mask(glow_mask(b, form), int(0.18 * (b[:, :, 3] > 0).sum()))
-        cl = walk(form, b, sel, amp=0.26, wl=48, cycles=2, n=N_WALK, prefix="wk", lift=2)
-        # sleep: 7% subset, slow shallow flicker
+        sel = subset_mask(glow_mask(b, form), int(0.18 * (b[:, :, 3] > 0).sum()), seed=5)
+        clw = gait(form, b, sel, amp=0.26, wl=48, cycles=2, n=N_WALK,
+                   prefix="wk", dx=2, mode="walk")
+
+        # sleep: slow shallow flicker on a small subset
         b = load_base(form, "sleep_rest")
-        sel = subset_mask(glow_mask(b, form), int(0.07 * (b[:, :, 3] > 0).sum()))
+        sel = subset_mask(glow_mask(b, form), int(0.07 * (b[:, :, 3] > 0).sum()), seed=6)
         shimmer(form, b, sel, amp=0.16, wl=72, cycles=1, n=N_SLEEP, prefix="sl")
-        print(f"{form}: derived {N_IDLE} idle + {N_ACTIVE} active + {N_WALK} walk (clusters={cl}) + {N_SLEEP} sleep")
-    print("done v3")
+
+        total = N_IDLE + N_ALERT + N_WORKING + N_ATTACK + N_VICTORY + N_WALK + N_SLEEP
+        print(f"{form}: derived {total} frames "
+              f"(idle={N_IDLE} alert={N_ALERT} working={N_WORKING} attack={N_ATTACK} "
+              f"victory={N_VICTORY} walk={N_WALK} sleep={N_SLEEP}; clusters walk={clw} attack={cl})")
+    print("done v4")
 
 
 if __name__ == "__main__":

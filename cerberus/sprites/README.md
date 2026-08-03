@@ -88,16 +88,26 @@ Independently generated frames re-decide pose/proportions/silhouette each time
 and strobe when sequenced (inter-frame change 30-58%); derivation locks identity
 structurally.
 
-- `derive_frames.py` — derives all cycles from the bases:
-  - idle (`dl*`, 24f): photometric shimmer on a 9% glow subset of `idle_neutral`
-  - active (`act*`, 24f): agitated shimmer (higher amp, faster wave), same base
-  - walk (`wk*`, 16f): 18% subset shimmer + horizontal weight-shift on leg
+- `derive_frames.py` — derives all cycles from the bases, with DISTINCT
+  choreography per state (different seeded glow zone, amplitude, wavelength,
+  and cycle count, so states read as different energies, not one shimmer at
+  different speeds):
+  - idle (`dl*`, 32f): calm breathing, 9% glow subset, slow long wave
+  - alert (`al*`, 24f): watchful scan, 12% subset, tighter faster wave
+  - working (`wo*`, 24f): rhythmic processing pulse, 10% subset, mid wave
+  - attack (`at*`, 24f): aggressive surge, 12% subset, big amp + whole-stance
+    horizontal snaps on leg clusters (one-shot row)
+  - victory (`vc*`, 24f): celebratory bloom, 20% subset, broad slow swell
+  - walk (`wk*`, 16f): stride shimmer + alternating weight-shift on leg
     clusters from `walk_step_right`
   - sleep (`sl*`, 16f): slow shallow flicker on a 7% subset of `sleep_rest`
+- Beat wave: every cycle pairs the main wave with an incommensurate minor wave
+  (coprime cycle count) so the combined period is exactly n — every frame is
+  unique, no phase-aliasing duplicates.
 - `gate_runtime.py` — gate QA measured from the packed runtime atlas (what the
   engine consumes): inter-frame changed px, width spread, meanRGB swing,
-  baseline top=20/bottom=123. Gates: idle/sleep ≤10%, walk ≤25%, width ≤8px,
-  meanRGB ±8. Frames that fail a gate do not get packed.
+  baseline top=20/bottom=123, PLUS lower bounds: every frame unique, true
+  period == seq length, min motion 0.5%. Frames that fail a gate do not ship.
 
 Run order: `derive_frames.py` → `build_runtime_atlas.py` → `gate_runtime.py`.
 

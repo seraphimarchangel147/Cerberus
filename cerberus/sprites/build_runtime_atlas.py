@@ -41,19 +41,30 @@ CELL = 128
 
 # ── Frame inventory ────────────────────────────────────────────────────────
 # Every frame is derived from ONE identity-locked base per state via bounded
-# procedural transforms (photometric shimmer on a fixed glow subset + a
-# horizontal weight-shift for walk), so inter-frame change is gated:
-#   idle/active/sleep <= 10% changed px, walk <= 25%, width spread 0px,
-#   baseline top=20 bottom=123 exact on every frame.
-# Naming: dl=derived-idle, act=derived-active, wk=derived-walk, sl=derived-sleep.
+# procedural transforms (photometric shimmer on a seeded glow subset + a
+# horizontal weight-shift for walk/attack), so inter-frame change is gated:
+#   idle/sleep <= 10%, alert/working/attack/victory/walk <= 25%, width spread
+#   0px, baseline top=20 bottom=123 exact on every frame, every frame unique,
+#   true period == seq length, min motion 0.5% (see gate_runtime.py).
+# Each state has DISTINCT choreography — different glow zone (seeded subset),
+# amplitude, wavelength, cycle count — so the states read as different
+# energies, not one shimmer at different speeds.
+# Naming: dl=idle, al=alert, wo=working, at=attack, vc=victory,
+#         wk=walk, sl=sleep.
 def derived_names(prefix, n):
     return [f"{prefix}{i:02d}" for i in range(n)]
 
-OMEGA_FRAMES = derived_names("dl", 24) + derived_names("act", 24) \
-    + derived_names("wk", 16) + derived_names("sl", 16)
+N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 32, 24, 24, 24, 24, 16, 16
 
-ALPHA_FRAMES = derived_names("dl", 24) + derived_names("act", 24) \
-    + derived_names("wk", 16) + derived_names("sl", 16)
+OMEGA_FRAMES = derived_names("dl", N_IDLE) + derived_names("al", N_ALERT) \
+    + derived_names("wo", N_WORKING) + derived_names("at", N_ATTACK) \
+    + derived_names("vc", N_VICTORY) + derived_names("wk", N_WALK) \
+    + derived_names("sl", N_SLEEP)
+
+ALPHA_FRAMES = derived_names("dl", N_IDLE) + derived_names("al", N_ALERT) \
+    + derived_names("wo", N_WORKING) + derived_names("at", N_ATTACK) \
+    + derived_names("vc", N_VICTORY) + derived_names("wk", N_WALK) \
+    + derived_names("sl", N_SLEEP)
 
 # ── Animation map ──────────────────────────────────────────────────────────
 # `seq`  : frame names, played in order
@@ -64,28 +75,31 @@ ALPHA_FRAMES = derived_names("dl", 24) + derived_names("act", 24) \
 # waving / jumping / waiting. `alias` maps that vocabulary onto these rows so
 # the art rows stay named after what they DEPICT, not after engine internals.
 OMEGA_STATES = {
-    # Calm breathing shimmer (dl cycle, 24 frames). hold 3 @30fps = 100ms/frame, 2.4s loop.
-    "idle": {"seq": derived_names("dl", 24), "hold": 3, "loop": True},
-    # Agitated shimmer (act cycle, 24 frames) — same identity-locked base, faster wave.
-    "alert": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
-    "working": {"seq": derived_names("act", 24), "hold": 2, "loop": True},
-    # One-shot agitated burst, holds its final frame until state changes.
-    "attack": {"seq": derived_names("act", 24), "hold": 2, "loop": False},
-    "victory": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
-    # Slow shallow flicker (sl cycle, 16 frames). hold 5 = 167ms/frame, 2.67s loop.
-    "sleep": {"seq": derived_names("sl", 16), "hold": 5, "loop": True},
-    # Stride shimmer + horizontal weight-shift (wk cycle, 16 frames). hold 2 = 67ms/frame.
-    "walk": {"seq": derived_names("wk", 16), "hold": 2, "loop": True},
+    # Calm breathing shimmer (dl, 32f). hold 2 @30fps = 67ms/frame, 2.13s loop.
+    "idle": {"seq": derived_names("dl", N_IDLE), "hold": 2, "loop": True},
+    # Watchful scan (al, 24f) — tighter wave, faster, different glow zone.
+    "alert": {"seq": derived_names("al", N_ALERT), "hold": 2, "loop": True},
+    # Rhythmic processing pulse (wo, 24f). hold 2 = 67ms/frame, 1.6s loop.
+    "working": {"seq": derived_names("wo", N_WORKING), "hold": 2, "loop": True},
+    # Aggressive surge (at, 24f): big amp + whole-stance side snaps. One-shot,
+    # holds final frame until the state changes.
+    "attack": {"seq": derived_names("at", N_ATTACK), "hold": 2, "loop": False},
+    # Celebratory bloom (vc, 24f): broad slow swell over a wide glow zone.
+    "victory": {"seq": derived_names("vc", N_VICTORY), "hold": 3, "loop": True},
+    # Slow shallow flicker (sl, 16f). hold 5 = 167ms/frame, 2.67s loop.
+    "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 5, "loop": True},
+    # Stride shimmer + alternating weight-shift (wk, 16f). hold 2 = 67ms/frame.
+    "walk": {"seq": derived_names("wk", N_WALK), "hold": 2, "loop": True},
 }
 
 ALPHA_STATES = {
-    "idle": {"seq": derived_names("dl", 24), "hold": 3, "loop": True},
-    "alert": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
-    "working": {"seq": derived_names("act", 24), "hold": 2, "loop": True},
-    "attack": {"seq": derived_names("act", 24), "hold": 2, "loop": False},
-    "victory": {"seq": derived_names("act", 24), "hold": 3, "loop": True},
-    "sleep": {"seq": derived_names("sl", 16), "hold": 5, "loop": True},
-    "walk": {"seq": derived_names("wk", 16), "hold": 2, "loop": True},
+    "idle": {"seq": derived_names("dl", N_IDLE), "hold": 2, "loop": True},
+    "alert": {"seq": derived_names("al", N_ALERT), "hold": 2, "loop": True},
+    "working": {"seq": derived_names("wo", N_WORKING), "hold": 2, "loop": True},
+    "attack": {"seq": derived_names("at", N_ATTACK), "hold": 2, "loop": False},
+    "victory": {"seq": derived_names("vc", N_VICTORY), "hold": 3, "loop": True},
+    "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 5, "loop": True},
+    "walk": {"seq": derived_names("wk", N_WALK), "hold": 2, "loop": True},
 }
 
 # Engine state -> art row. Every key of the engine's STATES table must appear.
