@@ -64,4 +64,23 @@ for form in ["omega", "alpha"]:
               f"chg {min(chgs):5.2f}-{max(chgs):5.2f}% (gate {lim}) "
               f"w_spread={max(widths)-min(widths)} meanRGB={mswing[0]:.1f}/{mswing[1]:.1f}/{mswing[2]:.1f} "
               f"top={sorted(tops)} bot={sorted(bottoms)} -> {'PASS' if ok else 'FAIL'}")
+    # Extent claim, not just rate: rates can vary while every state animates the
+    # SAME pixel set (glow-pool clamp -- alpha 191px pool, IoU 1.00 across four
+    # states, all rates pinned at 3.5%). Compute each state's motion mask (pixels
+    # that vary anywhere in the cycle) and fail on SAME-PIXEL-SET overlap.
+    masks = {}
+    for st, spec in fd["states"].items():
+        stack = np.stack([cell_img(atlas, fd, nm).astype(np.int16) for nm in spec["seq"]])
+        masks[st] = (stack.max(axis=0) != stack.min(axis=0)).any(axis=2)
+    st_names = sorted(masks)
+    worst = 0.0
+    for i in range(len(st_names)):
+        for j in range(i + 1, len(st_names)):
+            a, b = masks[st_names[i]], masks[st_names[j]]
+            iou = (a & b).sum() / max(1, (a | b).sum())
+            worst = max(worst, iou)
+    distinct = worst < 0.85
+    allok &= distinct
+    print(f"  distinctness: worst state-pair motion-mask IoU={worst:.2f} "
+          f"(cap 0.85) -> {'PASS' if distinct else 'FAIL -- states share one pixel set'}")
 print("RUNTIME ARTIFACT:", "ALL PASS" if allok else "FAIL")
