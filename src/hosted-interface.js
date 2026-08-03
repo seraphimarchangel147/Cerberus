@@ -11539,7 +11539,7 @@ evt.addEventListener("agent-activity", (e) => {
     else if (phase === "iteration" || phase === "verdict" || phase === "subagent") petActivityPoke("thinking");
     else if (phase === "end") petActivityPoke(data.ok === false ? "error" : "working");
     else if (phase === "turn-end") petActivityPoke("done");
-    else if (phase === "awaiting-approval") petActivityPoke("thinking");
+    else if (phase === "awaiting-approval") petActivityPoke("waiting");
     else if (phase === "goal") petActivityPoke(data.action === "completed" ? "done" : data.action === "stagnated" ? "error" : "thinking");
   } catch (err) {}
 });
@@ -14747,6 +14747,7 @@ switchTab(initialTab);
   var petX = window.innerWidth - 170, petY = window.innerHeight - 140;
   var mouseX = petX, mouseY = petY - 100;
   var facing = -1;
+  var lastMoving = false;
   var jumpT = -1;
   var paused = false;
 
@@ -14828,6 +14829,11 @@ switchTab(initialTab);
     else if (mode === "offline") { setState("failed"); }
     else if (mode === "online") { setState("idle"); }
     else if (mode === "idle") { setState("idle"); }
+    /* "waiting" has art (aliased to the alert row) and a HUD badge, but until
+       now nothing could ever produce it — the state was defined and orphaned.
+       Blocked-on-you is a genuinely different condition from thinking, so it
+       gets its own door: see the awaiting-approval phase in agent-activity. */
+    else if (mode === "waiting") { setState("waiting"); }
   };
   window.cerbPetSetState = setState;
   window.cerbPetEvolve = doEvolve;
@@ -14864,7 +14870,10 @@ switchTab(initialTab);
          legitimately repeat a pose (sleep holds sleep_rest twice), so the
          name alone cannot prove playback advanced. */
       indices: JSON.parse(JSON.stringify(cerbSprLastIdx)),
-      state: state, stage: settings.stage
+      state: state, stage: settings.stage,
+      /* Locomotion inputs, so a failing walk-row assertion can be diagnosed
+         from the harness instead of by re-deriving the chase math by hand. */
+      petX: petX, petY: petY, mouseX: mouseX, mouseY: mouseY, moving: lastMoving
     };
   };
 
@@ -15120,6 +15129,7 @@ switchTab(initialTab);
 
     /* movement */
     var walkPhase = 0, moving = false;
+    var prevX = petX, prevY = petY;
     if (state === "running") {
       var dx = mouseX - petX;
       if (Math.abs(dx) > 6) {
@@ -15139,6 +15149,16 @@ switchTab(initialTab);
       petY = Math.max(window.innerHeight*0.4, Math.min(window.innerHeight-140, petY));
       petX = Math.max(40, Math.min(window.innerWidth-40, petX));
     }
+    /* The chase target can sit OUTSIDE the pet's clamped travel box (mouse in a
+       screen corner, or parked over the header). The distance test then stays
+       true forever while the clamp pins the body in place, so the pet walks on
+       the spot indefinitely and every state renders the side/walk row instead
+       of its own art. Gate movement on displacement that actually happened, not
+       on intent: if the clamp ate the step, we are not moving. */
+    if (moving && Math.abs(petX-prevX) < 0.01 && Math.abs(petY-prevY) < 0.01) {
+      moving = false; walkPhase = 0;
+    }
+    lastMoving = moving;
     var viewFront = !moving;
 
     /* gaze */

@@ -7,10 +7,23 @@
  * wall) repaint the whole canvas every frame, so a naive pixel probe measures
  * the compositor, not the atlas. Screenshots are captured for eyeballing.
  */
-import { chromium } from "playwright";
 import fs from "node:fs";
 
-const URL = process.argv[2] ?? "http://127.0.0.1:43879/";
+/* playwright is an OPTIONAL dependency (see package.json), so a plain top-level
+   import makes this whole gate unrunnable — with a module-resolution stack
+   trace, not a diagnosis — on any checkout that installed without optionals.
+   Skip loudly with a fix instruction instead, and reserve exit 1 for real
+   verification failures so CI can tell "not run" from "regressed". */
+let chromium;
+try {
+  ({ chromium } = await import("playwright"));
+} catch {
+  console.log("SKIP  cerberus sprite verification — optional dependency 'playwright' is not installed.");
+  console.log("      Install it with:  npm install --include=optional playwright && npx playwright install chromium");
+  process.exit(0);
+}
+
+const URL = process.argv[2] ?? "http://127.0.0.1:43210/";
 const OUT = "/tmp/cerb-shots";
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -67,6 +80,20 @@ for (const { stage, form } of FORMS) {
   await page.evaluate((s) => window.cerbPetSetForm(s), stage);
   await page.waitForTimeout(400);
 
+  /* Park the cursor ON the pet before asserting rows. The side/walk row is
+     selected by LOCOMOTION, not by engine state — if the pet is mid-chase the
+     walk row legitimately wins over the state's own art, and every alias
+     assertion below fails for a reason that has nothing to do with the atlas.
+     Without this the alias check is untestable: it was measuring the mouse. */
+  await page.evaluate(() => {
+    const p = window.__cerbProbe();
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: p.petX, clientY: p.petY - 60 }));
+  });
+  await page.waitForTimeout(400);
+  const settled = await page.evaluate(() => window.__cerbProbe());
+  check(`${form}: pet settles out of locomotion before row assertions`,
+    settled.moving === false, `moving=${settled.moving} row=${settled.rows[form]}`);
+
   for (const st of STATES) {
     await page.evaluate((s) => window.cerbPetSetState(s), st);
     await page.waitForTimeout(120);
@@ -105,6 +132,39 @@ for (const { stage, form } of FORMS) {
   await page.evaluate(() => window.cerbPetSetState("running"));
   await page.waitForTimeout(600);
   await page.screenshot({ path: `${OUT}/${form}.png` });
+
+  /* Clamped-chase regression: park the cursor in a screen corner the pet can
+     never reach (its travel box is inset from the viewport). The chase target
+     stays > the trigger distance forever while the position clamp eats every
+     step, so a locomotion flag driven by INTENT rather than by actual
+     displacement latches on and the pet walks in place indefinitely — pinning
+     every state to the side/walk row. Assert the pet stops walking once it has
+     stopped moving. This is the check the alias assertions above cannot make,
+     because they deliberately park the mouse ON the pet. */
+  await page.evaluate(() => window.cerbPetSetState("idle"));
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => window.dispatchEvent(new MouseEvent("mousemove", { clientX: 0, clientY: 0 })));
+  /* Collect positions across the window and judge pinning from the LAST several
+     samples with a small tolerance. Subpixel step aliasing makes per-second
+     petX jitter by ~1px at the corner clamp, so an exact-equality break can
+     never fire and the assertion would read one noisy sample. A parked pet's
+     last samples sit within a few px; a walking-in-place pet's spread stays
+     large, so 3px tolerance still catches the original defect. */
+  const samples = [];
+  for (let i = 0; i < 65; i++) {           // omega's corner walk measured ~43s; budget 65s
+    await page.waitForTimeout(1000);
+    samples.push(await page.evaluate(() => window.__cerbProbe()));
+    if (samples.length >= 5) {
+      const tail = samples.slice(-5);
+      const spread = Math.max(...tail.map(s => s.petX)) - Math.min(...tail.map(s => s.petX))
+                   + Math.max(...tail.map(s => s.petY)) - Math.min(...tail.map(s => s.petY));
+      if (spread < 6) break;               // pinned: x+y spread < 3px each
+    }
+  }
+  const pinned = samples[samples.length - 1];
+  check(`${form}: unreachable chase target does not latch the walk row`,
+    pinned && pinned.moving === false && pinned.rows[form] !== "walk",
+    `pos=(${Math.round(pinned.petX)},${Math.round(pinned.petY)}) moving=${pinned.moving} row=${pinned.rows[form]}`);
 }
 
 check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
