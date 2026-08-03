@@ -84,3 +84,5 @@ for form in ["omega", "alpha"]:
     print(f"  distinctness: worst state-pair motion-mask IoU={worst:.2f} "
           f"(cap 0.85) -> {'PASS' if distinct else 'FAIL -- states share one pixel set'}")
 print("RUNTIME ARTIFACT:", "ALL PASS" if allok else "FAIL")
+# Exit non-zero on failure so CI/automation can actually enforce this gate.
+sys.exit(0 if allok else 1)
