@@ -10568,7 +10568,6 @@ const OPS_CATEGORY_META = {
   system: { icon: "📡", label: "system" }
 };
 const OPS_FILTERS = ["all", "skills", "learning", "tools", "computer-use", "vision", "goals", "debug", "system"];
-const OPS_FILTERS = ["all", "skills", "learning", "tools", "computer-use", "vision", "debug", "system"];
 
 function opsMeta(category) {
   return OPS_CATEGORY_META[category] ?? OPS_CATEGORY_META.system;
@@ -11542,7 +11541,6 @@ evt.addEventListener("agent-activity", (e) => {
     else if (phase === "turn-end") petActivityPoke("done");
     else if (phase === "awaiting-approval") petActivityPoke("thinking");
     else if (phase === "goal") petActivityPoke(data.action === "completed" ? "done" : data.action === "stagnated" ? "error" : "thinking");
-  } catch (err) {}
   } catch (err) {}
 });
 
