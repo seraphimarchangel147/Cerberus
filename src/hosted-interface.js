@@ -14873,7 +14873,13 @@ switchTab(initialTab);
       state: state, stage: settings.stage,
       /* Locomotion inputs, so a failing walk-row assertion can be diagnosed
          from the harness instead of by re-deriving the chase math by hand. */
-      petX: petX, petY: petY, mouseX: mouseX, mouseY: mouseY, moving: lastMoving
+      petX: petX, petY: petY, mouseX: mouseX, mouseY: mouseY, moving: lastMoving,
+      /* Frame-clock inputs. A frozen index has exactly two producers and they
+         are one datum apart: reduced pins idx to 0 unconditionally, while a
+         starved rAF stops flick advancing so elapsed never grows. Exposing
+         both makes a freeze self-diagnosing from the harness -- flick rising
+         while indices stick means reduced; flick frozen means clock stall. */
+      flick: frame, reduced: reduced
     };
   };
 
