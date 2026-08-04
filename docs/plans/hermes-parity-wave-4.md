@@ -554,3 +554,5 @@ Do not silently skip a deliverable. If something in this spec is wrong or imposs
 against the real tree, implement what you can, and write the discrepancy into `CHANGES.md`
 under a `## Wave 4 — spec deviations` heading with the file:line evidence. An honest,
 documented gap is worth far more than a stub that makes the checklist look complete.
+
+PARITY WAVE 4 COMPLETE
