@@ -276,3 +276,47 @@ test("cron, autopilot, subagent, ephemeral and goal-continuation inputs never st
     assert.equal(steering.hasPending("s1"), false);
   }
 });
+
+test("endTurn REPORTS an undelivered steer instead of silently swallowing it", () => {
+  // Brief section 3. A steer is a real user message. If a turn ends before any
+  // tool boundary, dropping it from the turn is correct -- a late delivery
+  // would be a surprising injection -- but losing it without a trace is not:
+  // the user typed a correction, saw it accepted, and nothing ever happened.
+  const steering = new TurnSteering();
+  steering.beginTurn("s1", { turnId: "t1" });
+  steering.steer("s1", "actually, use the other API");
+
+  const stranded = steering.endTurn("s1");
+  assert.equal(stranded, "actually, use the other API", "the lost text must be returned to the caller");
+  assert.equal(steering.hasPending("s1"), false, "it must still not leak into the next turn");
+  assert.equal(steering.stats().stranded, 1, "the loss must be counted");
+});
+
+test("a steer put back by an empty batch is still reported when the turn ends", () => {
+  const steering = new TurnSteering();
+  steering.beginTurn("s2", { turnId: "t2" });
+  steering.steer("s2", "second correction");
+  // A batch with no tool_result: the steer is retained rather than dropped...
+  assert.equal(steering.applyToToolResults("s2", [{ type: "text", text: "notice" }]), false);
+  assert.equal(steering.hasPending("s2"), true);
+  // ...but if the turn then ends, the caller is told.
+  assert.equal(steering.endTurn("s2"), "second correction");
+  assert.equal(steering.stats().stranded, 1);
+});
+
+test("a delivered steer is NOT counted as stranded", () => {
+  const steering = new TurnSteering();
+  steering.beginTurn("s3", { turnId: "t3" });
+  steering.steer("s3", "delivered fine");
+  const results = [{ type: "tool_result", tool_use_id: "a", content: "out", is_error: false }];
+  assert.equal(steering.applyToToolResults("s3", results), true);
+  assert.equal(steering.endTurn("s3"), null, "nothing was lost");
+  assert.equal(steering.stats().stranded, 0);
+});
+
+test("endTurn on a session with no steer returns null and counts nothing", () => {
+  const steering = new TurnSteering();
+  steering.beginTurn("s4", { turnId: "t4" });
+  assert.equal(steering.endTurn("s4"), null);
+  assert.equal(steering.stats().stranded, 0);
+});

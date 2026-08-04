@@ -50,6 +50,11 @@ export class TurnSteering {
   #pending = new Map();
   #inFlight = new Map();
 
+  // Count of steers accepted from the user but never delivered to the model.
+  // Non-zero means users are typing corrections that go nowhere; surfaced in
+  // stats() so the condition is observable instead of silent.
+  stranded = 0;
+
   /**
    * Stash user text for delivery at the next tool-batch boundary.
    * Multiple steers before a drain concatenate with a newline.
@@ -99,11 +104,26 @@ export class TurnSteering {
     this.#inFlight.set(key, { turnId, abortController, startedAt: Date.now() });
   }
 
+  /**
+   * End a turn. Returns any steer that was accepted from the user but never
+   * delivered to the model, so the caller can fall back to delivering it as a
+   * normal next-turn user message.
+   *
+   * WHY THIS RETURNS SOMETHING: a steer is a real user message. If the turn
+   * ends without ever reaching a tool boundary (a chat turn with no tools, or a
+   * batch that carried no tool_result), silently deleting it means the user
+   * typed a correction, saw it accepted, and it was never shown to the model
+   * or acknowledged anywhere. Dropping it is still correct -- delivering it
+   * late on a later turn would be a surprising injection -- but the caller MUST
+   * be told so it can re-route it rather than lose it.
+   */
   endTurn(sessionId) {
     const key = String(sessionId ?? "");
     this.#inFlight.delete(key);
-    // A steer that never found a tool boundary must not leak into the next turn.
+    const stranded = this.#pending.get(key) ?? null;
     this.#pending.delete(key);
+    if (stranded) this.stranded += 1;
+    return stranded;
   }
 
   isTurnInFlight(sessionId) {
@@ -179,6 +199,10 @@ export class TurnSteering {
   }
 
   stats() {
-    return { pending: this.#pending.size, inFlight: this.#inFlight.size };
+    return {
+      pending: this.#pending.size,
+      inFlight: this.#inFlight.size,
+      stranded: this.stranded
+    };
   }
 }

@@ -1384,10 +1384,23 @@ export class AgentHost {
     } finally {
       toolRegistry?.clearFailureScope?.(modelContext);
       inputAbortSignal?.removeEventListener?.("abort", onInputAbort);
-      // Terminal path for BOTH the success return and the catch above. Also
-      // drops any steer that never found a tool boundary, so it cannot leak
-      // into the next turn as a late, surprising injection.
-      if (!ephemeral) this.runtime.steering?.endTurn?.(sessionId);
+      // Terminal path for BOTH the success return and the catch above.
+      // endTurn returns any steer that was accepted from the user but never
+      // reached a tool boundary. Dropping it from the turn is correct (a late
+      // delivery would be a surprising injection), but losing it silently is
+      // not: the user typed a correction and it went nowhere. Log it so the
+      // condition is observable, and count it in steering.stats().
+      if (!ephemeral) {
+        const stranded = this.runtime.steering?.endTurn?.(sessionId);
+        if (stranded) {
+          this.log?.({
+            op: "steer-undelivered",
+            sessionId,
+            channel,
+            chars: String(stranded).length
+          });
+        }
+      }
     }
 
     let selfOptimizationReward = null;

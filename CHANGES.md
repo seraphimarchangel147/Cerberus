@@ -137,7 +137,7 @@ Azazel ran an adversarial pass against the finished wave. Findings, with verdict
   deliveries (one each) on `session:end`.
 
 **Known limitation of this pass:** his turn stalled on the harness idle-watchdog after 27 iterations,
-so brief sections 2, 3, 4, 7 and 8 (steer cross-session leakage, stranded-steer delivery, breaker
+so brief sections 2, 4, 7 and 8 (steer cross-session leakage, breaker
 behaviour under parallel batches, SSE error handling, and webhook redaction under real conditions)
 were **not** reached. Those remain unaudited and are honest gaps, not silent passes.
 
@@ -170,6 +170,22 @@ a generic `handler_error` (indistinguishable from a broken tool), and the messag
 but never the remedy. Lease conflicts now carry `outcome.code=mutation_lease_conflict` and state
 plainly that side-effecting calls must be issued one at a time and retried. Verified by probe;
 his suite stayed at 2178 pass / 0 fail, and his next run showed zero lease conflicts.
+
+### Section 3 audited — undelivered steers were silently swallowed (FIXED)
+
+Also audited directly. `endTurn()` deleted any pending steer so it could not leak into the next turn
+as a late injection — correct — but it did so **silently**. A user could type a mid-turn correction,
+have it accepted, and have it never reach the model and never be acknowledged anywhere: the turn ends
+with no tool boundary (a chat turn with no tools, or a batch carrying no `tool_result`) and the text
+is gone. Probe confirmed there was no callback, no drain API, and no counter — nothing observed the
+loss.
+
+Dropping it from the turn remains right. Losing it without a trace does not. `endTurn()` now
+**returns** the undelivered text, `agent-host` logs `steer-undelivered` with the session and channel,
+and `steering.stats()` carries a `stranded` counter so a persistent problem is visible rather than
+invisible. Four regression tests, including one asserting a delivered steer is *not* counted.
+
+**VERDICT: CONFIRMED (silent user-message loss), fixed.**
 
 ### Bugs this work surfaced in existing code
 
