@@ -18,26 +18,26 @@
 6. One commit per fix, prefix `fix(wave4-qa):`. Push to a branch
    `azazel/wave4-qa` — do NOT force-push over my branch.
 
-## Known defect — already confirmed, start here
+## Known defect — CONFIRMED AND ALREADY FIXED in `93038e2`
 
-I found this myself and deliberately left it for you to fix so we can check the QA loop
-actually catches things:
+I found this myself by probe while writing this brief, and fixed it rather than
+leave you busywork. Recorded here so you can **audit the fix rather than rediscover
+the bug**:
 
 **Duplicate delivery on overlapping event patterns.** `OutboundWebhookDispatcher.hookSpecs()`
 registers one hook PER PATTERN per subscription. A single subscription with
-`events: ["session:*", "session:end"]` therefore receives `session:end` **twice**, and worse,
-each delivery gets a **different `eventId`**, so the receiver cannot dedupe them. Reproduce:
+`events: ["session:*", "session:end"]` therefore received `session:end` **twice**, and worse,
+each delivery minted a **different `eventId`**, so the receiver could not dedupe.
+`stats().enqueued` was inflated to match.
 
-```js
-registerOutboundWebhooks(hooks, { subscriptions: [{ name:"dash", url, secret:"s",
-  events:["session:*","session:end"], allowPrivate:true }] });
-hooks.notify("session:end", { sessionId:"s1" });
-// -> 2 POSTs, 2 distinct eventIds
-```
+Fix: only the first pattern in the subscription's list that matches the event delivers
+(`firstMatchingPattern`). Stateless, deterministic, per-subscription not global.
 
-Decide the right semantic (I believe: one delivery per subscription per event, with a stable
-`eventId`), fix it, and add a regression test. My `stats().enqueued` counter is also inflated
-by this, so check whether anything reads it.
+**Your job here is to try to break my fix**, not to re-find the bug. Specifically:
+does the "first matching pattern wins" rule behave correctly when patterns are reordered?
+When a subscription is disabled mid-flight? Is `matching()` (used by the direct
+`enqueue()` path, which does NOT go through `hookSpecs`) still consistent with it?
+I believe `matching()` returns each subscription at most once already — verify that.
 
 ## Where I think the bodies are buried
 
