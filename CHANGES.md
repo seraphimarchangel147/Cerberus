@@ -137,8 +137,7 @@ Azazel ran an adversarial pass against the finished wave. Findings, with verdict
   deliveries (one each) on `session:end`.
 
 **Known limitation of this pass:** his turn stalled on the harness idle-watchdog after 27 iterations,
-so brief sections 4, 7 and 8 (breaker
-behaviour under parallel batches, SSE error handling, and webhook redaction under real conditions)
+so brief sections 7 and 8 (SSE error handling and webhook redaction under real conditions)
 were **not** reached. Those remain unaudited and are honest gaps, not silent passes.
 
 ### Section 6 audited twice, independently — read-only ceiling is ENFORCED
@@ -224,6 +223,31 @@ turn runs, and a pending steer is surrendered only when the **last** turn ends. 
 optional `turnId`; the no-id legacy path still drains and still reports, so existing call sites are
 unaffected. Three regression tests plus `qa-probes/probe-2-steer-cross-session.mjs`, which carries a
 negative control proving correct single-turn use still delivers.
+
+### Section 4 audited — breaker behaviour under parallel batches (characterized, no change)
+
+Three findings by probe:
+
+* **Reset-on-success works.** A successful dispatch between denials clears the tally; the next
+  denial starts from one. **NO ISSUE FOUND.**
+* **No nondeterminism.** A mixed parallel batch (2 blocked + 1 success) produced an identical
+  outcome across 6 runs — the reset does not clobber the tally based on completion order, which was
+  the specific worry. **NO ISSUE FOUND.**
+* **A parallel batch of 3 denials does trip the breaker.** Technically a false fire: the model made
+  ONE decision and had not read any block yet, so those are not *retries*.
+
+**Deliberately not fixed.** The addendum is only text appended to a block message — it aborts
+nothing, and telling a model that just had three calls blocked to stop and explain the blockage is
+defensible advice rather than damage. The fix would require threading a per-batch id through both
+hot provider tool loops and mutating the invocation context mid-iteration: real regression risk in
+the highest-traffic path for a cosmetic gain. Operators who disagree have
+`OPENAGI_DENIAL_BREAKER_THRESHOLD` (0 disables).
+
+Worth recording: I implemented that fix, then **my own probe proved it broke the breaker outright**.
+Keying the batch on `__turnId` looked right but is turn-wide, and retry loops happen *within* a turn,
+so five sequential retries stopped tripping entirely. Reverted. Both behaviours are now pinned by
+test — the parallel-batch trip as an intentional decision, and a sequential retry loop as the case
+the breaker exists for, so a future batch-aware change fails loudly instead of silently disabling it.
 
 ### Bugs this work surfaced in existing code
 

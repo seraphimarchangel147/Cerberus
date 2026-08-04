@@ -187,3 +187,51 @@ test("integration: a disabled breaker leaves the block message byte-identical", 
     assert.equal(result.error, "blocked by policy");
   }
 });
+
+test("a parallel batch of denials trips the breaker -- characterized, intentional", async () => {
+  // Brief section 4. A model that issues N blocked tools in ONE parallel batch
+  // has made one decision and has not read any of the blocks yet, so counting
+  // that as N consecutive *retries* is arguably a false fire.
+  //
+  // ACCEPTED AS-IS, deliberately. The addendum is only TEXT appended to a block
+  // message: it aborts nothing, and telling a model that just had three calls
+  // blocked to stop and explain the blockage is defensible advice, not damage.
+  // The alternative -- threading a per-batch id through both hot provider tool
+  // loops and mutating the invocation context mid-iteration -- carries real
+  // regression risk in the highest-traffic code path for a cosmetic gain.
+  // Operators who disagree can raise OPENAGI_DENIAL_BREAKER_THRESHOLD or set 0.
+  //
+  // This test PINS the behaviour so it stays a decision rather than becoming an
+  // accident, and so a future batch-aware change fails loudly here.
+  const tools = blockingRegistry({ threshold: 3 });
+  const context = { sessionId: "parallel-batch", __turnId: "t1" };
+  const results = await Promise.all([
+    tools.invoke("probe", { i: 1 }, context),
+    tools.invoke("probe", { i: 2 }, context),
+    tools.invoke("probe", { i: 3 }, context)
+  ]);
+  const tripped = results.filter((r) => /CIRCUIT BREAKER/.test(String(r.error ?? "")));
+  assert.equal(tripped.length, 1, "the third denial in the batch carries the escalation");
+  for (const result of results) {
+    assert.equal(result.ok, false);
+    assert.ok(String(result.error).startsWith("blocked by policy"), "the block message is intact");
+  }
+});
+
+test("a SEQUENTIAL retry loop still trips -- the case the breaker exists for", async () => {
+  // Guard against a batch-collapsing change keying on something turn-wide:
+  // __turnId is constant for a whole turn and retry loops happen WITHIN a turn,
+  // so keying a batch on it would silently disable the breaker entirely.
+  const tools = blockingRegistry({ threshold: 3 });
+  const context = { sessionId: "retry-loop", __turnId: "one-and-only-turn" };
+  const seen = [];
+  for (let i = 0; i < 5; i += 1) {
+    const result = await tools.invoke("probe", { i }, context);
+    seen.push(/CIRCUIT BREAKER/.test(String(result.error ?? "")));
+  }
+  assert.deepEqual(
+    seen,
+    [false, false, true, true, true],
+    "sequential retries inside ONE turn must still trip the breaker at the threshold"
+  );
+});
