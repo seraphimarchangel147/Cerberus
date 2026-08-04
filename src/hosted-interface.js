@@ -381,6 +381,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         || pathname.startsWith("/runs/")
         || pathname.startsWith("/channels/telegram/pairing-code")
       );
+      // The A2A JSON-RPC endpoint drives real agent turns on behalf of EXTERNAL
+      // peers, so loopback trust must NOT extend to it: any process on this box
+      // (or a browser coerced into a local request) would otherwise drive the
+      // agent with no credential at all. The agent card stays public by
+      // protocol contract; the RPC route never is. Mirrors the secrets carve-out.
+      // Found by Azazel's QA probe -- my own A2A tests used a stub server and
+      // therefore never exercised this gate.
+      //
+      // Scoped to the ENABLED case on purpose: when A2A is off the route must
+      // still 404 (below) rather than 401, or a disabled deployment leaks the
+      // fact that the endpoint exists. Fingerprinting resistance and the auth
+      // carve-out are both required, and the order matters.
+      const a2aRpcRoute = pathname === A2A_RPC_PATH && Boolean(a2aServer?.enabled);
 
       if (setupActive && method === "GET" && pathname === "/") {
         res.writeHead(302, { Location: "/setup" });
@@ -417,18 +430,23 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const trustBypassAllowed = loopbackTrusted
         && !secretsRoute
         && !capabilityAdminRoute
-        && !projectDataRoute;
+        && !projectDataRoute
+        && !a2aRpcRoute;
       if (!isPublicRoute(pathname) && !setupBypass && !trustBypassAllowed) {
         const authToken = getAuthToken();
         // The rest of the local-only API retains its backwards-compatible
         // auth-disabled mode. The secrets surface is different: it must never
         // become anonymously reachable because OPENAGI_AUTH_TOKEN is absent.
-        const auth = (secretsRoute || capabilityAdminRoute) && !authToken
+        // The A2A RPC route shares that rule: a public protocol surface must
+        // fail CLOSED, never open, when no bearer token is configured.
+        const auth = (secretsRoute || capabilityAdminRoute || a2aRpcRoute) && !authToken
           ? {
               ok: false,
               reason: secretsRoute
                 ? "OPENAGI_AUTH_TOKEN is required for the secrets API"
-                : "OPENAGI_AUTH_TOKEN is required for capability administration"
+                : a2aRpcRoute
+                  ? "OPENAGI_AUTH_TOKEN is required for the A2A API"
+                  : "OPENAGI_AUTH_TOKEN is required for capability administration"
             }
           : checkAuth(req, url, authToken);
         if (!auth.ok) {

@@ -284,3 +284,109 @@ test("HTTP: a full send -> get -> cancel cycle behaves per spec", async () => {
     await listening.close();
   }
 });
+
+// --- REAL hosted-interface route (regression guard) -----------------------
+//
+// The tests above drive A2AServer directly. That is NOT enough: it was exactly
+// this gap that let a real auth hole ship -- loopback trust bypassed the auth
+// gate on /a2a, so any local process could drive the agent with no credential.
+// Azazel's QA probe caught it. These tests stand up the REAL
+// createHostedInterface so the route wiring itself is under test.
+
+import { createDurableRuntime, createHostedInterface } from "../src/index.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const REAL_TOKEN = "a2a-regression-token-9f2c";
+const AUTH_HEADER = (token) => ({ authorization: ["Bearer", token].join(" ") });
+
+async function startRealGateway({ enableA2A = true, token = REAL_TOKEN } = {}) {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "a2a-route-"));
+  const prevEnabled = process.env.OPENAGI_A2A_ENABLED;
+  const prevToken = process.env.OPENAGI_AUTH_TOKEN;
+  if (enableA2A) process.env.OPENAGI_A2A_ENABLED = "1";
+  else delete process.env.OPENAGI_A2A_ENABLED;
+  process.env.OPENAGI_AUTH_TOKEN = token;
+
+  const runtime = createDurableRuntime({
+    dataDir,
+    autoConnectMcp: false,
+    observations: {},
+    sessionIndexOptions: { fallback: true }
+  });
+  runtime.agentHost = { handleMessage: async () => ({ reply: "regression-ok" }) };
+  const app = createHostedInterface(runtime, {
+    host: "127.0.0.1", port: 0, tickerMs: 0, dataDir, authToken: token
+  });
+  const listened = await app.listen();
+  return {
+    base: `http://127.0.0.1:${listened.port}`,
+    async close() {
+      try { await app.close(); } catch { /* best effort */ }
+      if (prevEnabled === undefined) delete process.env.OPENAGI_A2A_ENABLED;
+      else process.env.OPENAGI_A2A_ENABLED = prevEnabled;
+      if (prevToken === undefined) delete process.env.OPENAGI_AUTH_TOKEN;
+      else process.env.OPENAGI_AUTH_TOKEN = prevToken;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  };
+}
+
+const RPC_BODY = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tasks/get", params: {} });
+
+test("REAL route: loopback trust must NOT bypass auth on /a2a", async () => {
+  const gw = await startRealGateway();
+  try {
+    // The request originates from 127.0.0.1, which is precisely the loopback
+    // trust path that used to hand out a free pass.
+    const noToken = await fetch(`${gw.base}${A2A_RPC_PATH}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: RPC_BODY
+    });
+    assert.notEqual(noToken.status, 200, "a credential-free local caller must NOT drive the agent");
+    assert.equal(noToken.status, 401);
+
+    const wrongToken = await fetch(`${gw.base}${A2A_RPC_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...AUTH_HEADER("not-the-token") },
+      body: RPC_BODY
+    });
+    assert.equal(wrongToken.status, 401, "a wrong bearer token must be rejected");
+
+    const rightToken = await fetch(`${gw.base}${A2A_RPC_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...AUTH_HEADER(REAL_TOKEN) },
+      body: RPC_BODY
+    });
+    assert.equal(rightToken.status, 200, "the correct bearer token must be accepted");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("REAL route: the agent card is public and carries no token", async () => {
+  const gw = await startRealGateway();
+  try {
+    const card = await fetch(`${gw.base}${A2A_CARD_PATH}`);
+    assert.equal(card.status, 200, "discovery must work without a credential");
+    const text = await card.text();
+    assert.ok(!text.includes(REAL_TOKEN), "the card must never carry the auth token");
+    assert.equal(JSON.parse(text).protocolVersion, "1.0");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("REAL route: both A2A routes 404 when the feature is disabled", async () => {
+  const gw = await startRealGateway({ enableA2A: false });
+  try {
+    const card = await fetch(`${gw.base}${A2A_CARD_PATH}`);
+    assert.equal(card.status, 404, "a disabled deployment must not expose the card");
+    const rpc = await fetch(`${gw.base}${A2A_RPC_PATH}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: RPC_BODY
+    });
+    assert.equal(rpc.status, 404);
+  } finally {
+    await gw.close();
+  }
+});
