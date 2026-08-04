@@ -949,6 +949,7 @@ export class AgentHost {
       : { ...output, scrutiny: effectiveScrutiny };
     // Tell the live-progress observer (Discord status line) what the
     // scrutiny gate decided before any model/tool work starts.
+    const turnStartedAt = Date.now();
     recordRunInspector(this.runtime, {
       runId: turnId,
       projectId: project.id,
@@ -1581,6 +1582,25 @@ export class AgentHost {
         )
       }
     });
+
+    // A webhook consumer that only sees post_tool_call cannot tell when the
+    // agent actually finished. Routed through _notifyHook so the payload is
+    // sanitized for audit like every other emission.
+    //
+    // Ephemeral turns are connectivity probes, not real work: they are excluded
+    // from every other lifecycle hook (agent:start/step/end) and must be
+    // excluded here too, or a webhook receiver sees phantom turns.
+    if (!ephemeral) {
+      this._notifyHook("turn:complete", {
+        sessionId,
+        projectId: project.id,
+        turnId,
+        stopReason: modelResult.stopReason ?? null,
+        iterations: modelResult.iterations ?? null,
+        durationMs: Math.max(0, Date.now() - turnStartedAt),
+        channel
+      });
+    }
 
     return {
       id: turnId,

@@ -1185,6 +1185,19 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     const receiptState = context?.[EXECUTION_RECEIPT_STATE];
     markExecutionDecision(receiptState, "approval", "pending");
+    // Tell subscribers a human decision is now blocking a tool. This is what
+    // lets a dashboard stop polling for pending approvals. Deliberately WITHOUT
+    // `args`: a catastrophic command's arguments can carry credentials, and
+    // this payload leaves the machine over an operator-configured webhook.
+    try {
+      this.hooks?.notify?.("approval:required", {
+        actionId: action?.id,
+        toolName: name,
+        summary: action?.summary ?? null,
+        severity: action?.severity ?? null,
+        sessionId: context?.sessionId ?? null
+      });
+    } catch { /* approval notification is advisory */ }
     // Lightweight store doubles used by embedders may only implement the old
     // queue API. Preserve that contract while the real store provides the
     // Hermes-style suspend/resume rail.

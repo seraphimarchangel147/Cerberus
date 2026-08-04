@@ -4577,6 +4577,18 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       catch (error) { console.warn(`[hooks] gateway:shutdown failed open: ${error?.message ?? String(error)}`); }
       try { await runtime.hooks?.flush?.(); }
       catch (error) { console.warn(`[hooks] shutdown flush failed open: ${error?.message ?? String(error)}`); }
+      // Drain outbound webhooks after the hook queue, so gateway:shutdown itself
+      // gets delivered. Bounded: a dead receiver may delay exit, never hang it.
+      if (runtime.webhooks?.flush) {
+        try {
+          await Promise.race([
+            runtime.webhooks.flush(),
+            new Promise((resolve) => setTimeout(resolve, 5000).unref?.())
+          ]);
+        } catch (error) {
+          console.warn(`[webhooks] shutdown flush failed open: ${error?.message ?? String(error)}`);
+        }
+      }
       await new Promise((resolve, reject) => {
         if (tickerHandle) clearInterval(tickerHandle);
         if (heartbeatHandle) clearInterval(heartbeatHandle);
