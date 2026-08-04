@@ -2044,14 +2044,28 @@ function mutationLeaseConflictError(manager, {
     `${action} conflicts with ${category} '${status.ownerId}' `
       + `(lease ${leaseId}, held ${status.humanAge}, locks: ${locks}).`
   );
-  const suffix = " Call mutation_lease_status for detail.";
+  // A lease conflict is a TRANSIENT serialization conflict, not a broken tool.
+  // Without an explicit instruction the model reads the bare conflict text as a
+  // failure and immediately reissues the same parallel batch, which collides
+  // again -- observed in the wild: 16 consecutive side-effecting calls lost to
+  // this loop, burning a whole turn until the idle watchdog stopped it. Tell it
+  // what to DO (serialize and retry), not just what went wrong.
+  const suffix = " This is a transient lock conflict, not a tool failure:"
+    + " run side-effecting calls ONE AT A TIME (wait for each to return before"
+    + " issuing the next) and retry this call. Call mutation_lease_status for detail.";
   const boundedBody = String(body)
     .replace(/[\r\n]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_MUTATION_CONFLICT_ERROR_CHARS - suffix.length)
     .trimEnd();
-  return new Error(`${boundedBody}${suffix}`);
+  const error = new Error(`${boundedBody}${suffix}`);
+  // Surfaced by tool-registry's catch as `retryable` on the semantic envelope,
+  // so a lease conflict is distinguishable from a genuinely broken handler.
+  // Both are `handler_error` otherwise, which is what made this look fatal.
+  error.retryable = true;
+  error.code = "MUTATION_LEASE_CONFLICT";
+  return error;
 }
 
 function redactMutationLeaseText(runtime, value, { requireComplete = false } = {}) {

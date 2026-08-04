@@ -1892,7 +1892,14 @@ export class ToolRegistry {
         : semanticToolError(tool, errorDetails.message, {
             code: errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
               ? "checkpoint_target_ambiguous"
-              : "handler_error",
+              // A mutation-lease conflict is a transient serialization
+              // conflict, not a broken handler. Collapsing it into
+              // `handler_error` made it indistinguishable from a real failure,
+              // so the model retried the same parallel batch instead of
+              // serializing -- 16 calls lost to that loop in one observed turn.
+              : errorDetails.code === "MUTATION_LEASE_CONFLICT"
+                ? "mutation_lease_conflict"
+                : "handler_error",
             retryable: errorDetails.retryable,
             changed: dispatched && tool?.sideEffects !== false ? null : false,
             evidence: checkpointEvidence(checkpointCapture)
