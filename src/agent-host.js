@@ -1391,7 +1391,7 @@ export class AgentHost {
       // not: the user typed a correction and it went nowhere. Log it so the
       // condition is observable, and count it in steering.stats().
       if (!ephemeral) {
-        const stranded = this.runtime.steering?.endTurn?.(sessionId);
+        const stranded = this.runtime.steering?.endTurn?.(sessionId, { turnId });
         if (stranded) {
           this.log?.({
             op: "steer-undelivered",

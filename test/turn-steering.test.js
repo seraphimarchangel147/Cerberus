@@ -320,3 +320,51 @@ test("endTurn on a session with no steer returns null and counts nothing", () =>
   assert.equal(steering.endTurn("s4"), null);
   assert.equal(steering.stats().stranded, 0);
 });
+
+test("a steer never crosses session boundaries", () => {
+  // Brief section 2. TurnSteering is keyed only by sessionId, so the isolation
+  // guarantee is worth pinning explicitly rather than assuming.
+  const steering = new TurnSteering();
+  steering.beginTurn("A", { turnId: "tA" });
+  steering.beginTurn("B", { turnId: "tB" });
+  steering.steer("A", "for-A-only");
+
+  const bResults = [{ type: "tool_result", tool_use_id: "b1", content: "B output", is_error: false }];
+  assert.equal(steering.applyToToolResults("B", bResults), false, "B must not receive A's steer");
+  assert.equal(bResults[0].content, "B output", "B's tool result must be byte-identical");
+  assert.equal(steering.peek("A"), "for-A-only", "A's steer is still waiting for A");
+});
+
+test("overlapping turns in ONE session do not destroy each other's steer", () => {
+  // Brief section 2, case 3 -- a real defect found by probe. #inFlight was a
+  // single slot per session, so a second beginTurn silently evicted the first.
+  // Turn 1 finishing then (a) cleared turn 2's pending steer and (b) marked the
+  // session idle while turn 2 was still executing -- after which a new user
+  // message saw no in-flight turn and PREEMPTED the goal, silently reverting
+  // Phase 3 to the behavior it exists to replace.
+  const steering = new TurnSteering();
+  steering.beginTurn("S", { turnId: "turn-1" });
+  steering.beginTurn("S", { turnId: "turn-2" });
+  assert.equal(steering.inFlightCount("S"), 2, "both live turns must be tracked");
+
+  steering.steer("S", "guidance-for-turn-2");
+
+  assert.equal(steering.endTurn("S", { turnId: "turn-1" }), null, "an early finisher takes nothing");
+  assert.equal(steering.isTurnInFlight("S"), true, "the session is still busy");
+  assert.equal(steering.peek("S"), "guidance-for-turn-2", "the steer survived");
+
+  const batch = [{ type: "tool_result", tool_use_id: "x", content: "out", is_error: false }];
+  assert.equal(steering.applyToToolResults("S", batch), true);
+  assert.match(batch[0].content, /guidance-for-turn-2/);
+
+  steering.endTurn("S", { turnId: "turn-2" });
+  assert.equal(steering.isTurnInFlight("S"), false, "the last turn drains the session");
+});
+
+test("endTurn without a turnId still drains and still reports (legacy call sites)", () => {
+  const steering = new TurnSteering();
+  steering.beginTurn("Z", { turnId: "t" });
+  steering.steer("Z", "lost text");
+  assert.equal(steering.endTurn("Z"), "lost text");
+  assert.equal(steering.isTurnInFlight("Z"), false);
+});

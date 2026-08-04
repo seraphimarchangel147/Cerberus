@@ -137,7 +137,7 @@ Azazel ran an adversarial pass against the finished wave. Findings, with verdict
   deliveries (one each) on `session:end`.
 
 **Known limitation of this pass:** his turn stalled on the harness idle-watchdog after 27 iterations,
-so brief sections 2, 4, 7 and 8 (steer cross-session leakage, breaker
+so brief sections 4, 7 and 8 (breaker
 behaviour under parallel batches, SSE error handling, and webhook redaction under real conditions)
 were **not** reached. Those remain unaudited and are honest gaps, not silent passes.
 
@@ -206,6 +206,24 @@ and `steering.stats()` carries a `stranded` counter so a persistent problem is v
 invisible. Four regression tests, including one asserting a delivered steer is *not* counted.
 
 **VERDICT: CONFIRMED (silent user-message loss), fixed.**
+
+### Section 2 audited — cross-session isolation clean, cross-TURN was broken (FIXED)
+
+Cross-**session** isolation holds: a steer queued for session A is never delivered into session B's
+tool batch, and B's tool results stay byte-identical. **NO ISSUE FOUND** there.
+
+Cross-**turn** was a real defect. `#inFlight` was a single slot per session, so when two turns
+legitimately overlap in one session (a goal continuation still running when a real user turn starts)
+the second `beginTurn` silently evicted the first. Turn 1 finishing then (a) consumed turn 2's
+pending steer and (b) marked the session idle **while turn 2 was still executing** — after which a
+new user message saw no in-flight turn and **preempted the goal**, silently reverting Phase 3 to the
+exact behaviour it exists to replace. The failure was invisible: every test still passed.
+
+Fixed: turns are tracked per session as a set of live turn ids. The session stays in flight while any
+turn runs, and a pending steer is surrendered only when the **last** turn ends. `endTurn` takes an
+optional `turnId`; the no-id legacy path still drains and still reports, so existing call sites are
+unaffected. Three regression tests plus `qa-probes/probe-2-steer-cross-session.mjs`, which carries a
+negative control proving correct single-turn use still delivers.
 
 ### Bugs this work surfaced in existing code
 

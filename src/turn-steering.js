@@ -101,15 +101,37 @@ export class TurnSteering {
   beginTurn(sessionId, { turnId = null, abortController = null } = {}) {
     const key = String(sessionId ?? "");
     if (!key) return;
-    this.#inFlight.set(key, { turnId, abortController, startedAt: Date.now() });
+    // Turns are tracked per session as a SET of live turn ids, not a single
+    // slot. Two turns can legitimately overlap in one session (a goal
+    // continuation still running while a real user turn starts), and a
+    // single-slot Map let the second beginTurn silently evict the first --
+    // after which turn 1's endTurn cleared turn 2's pending steer and marked
+    // the session idle while turn 2 was still executing. A later user message
+    // then saw no in-flight turn and PREEMPTED the goal, silently reverting
+    // this phase to the behavior it exists to replace.
+    const existing = this.#inFlight.get(key);
+    if (existing) {
+      existing.turns.set(turnId ?? `anon-${existing.nextAnon++}`, {
+        turnId, abortController, startedAt: Date.now()
+      });
+      return;
+    }
+    const turns = new Map();
+    const id = turnId ?? "anon-0";
+    turns.set(id, { turnId, abortController, startedAt: Date.now() });
+    this.#inFlight.set(key, { turns, nextAnon: 1 });
   }
 
   /**
-   * End a turn. Returns any steer that was accepted from the user but never
-   * delivered to the model, so the caller can fall back to delivering it as a
-   * normal next-turn user message.
+   * End one turn. The session stays in flight while ANY other turn is still
+   * running, and a pending steer is only surrendered when the LAST turn ends --
+   * otherwise an early-finishing turn destroys a steer intended for a sibling
+   * turn that is still executing.
    *
-   * WHY THIS RETURNS SOMETHING: a steer is a real user message. If the turn
+   * Returns the undelivered steer text when the session fully drains, else null.
+   * See the note on the return value below.
+   *
+   * WHY THIS RETURNS SOMETHING: a steer is a real user message. If the session
    * ends without ever reaching a tool boundary (a chat turn with no tools, or a
    * batch that carried no tool_result), silently deleting it means the user
    * typed a correction, saw it accepted, and it was never shown to the model
@@ -117,9 +139,19 @@ export class TurnSteering {
    * late on a later turn would be a surprising injection -- but the caller MUST
    * be told so it can re-route it rather than lose it.
    */
-  endTurn(sessionId) {
+  endTurn(sessionId, { turnId = null } = {}) {
     const key = String(sessionId ?? "");
-    this.#inFlight.delete(key);
+    const entry = this.#inFlight.get(key);
+    if (entry) {
+      if (turnId != null && entry.turns.has(turnId)) entry.turns.delete(turnId);
+      else if (entry.turns.size > 0) {
+        // Caller did not identify the turn (legacy call site): drop the oldest
+        // so repeated calls still drain rather than wedging the session.
+        entry.turns.delete(entry.turns.keys().next().value);
+      }
+      if (entry.turns.size > 0) return null; // other turns still running
+      this.#inFlight.delete(key);
+    }
     const stranded = this.#pending.get(key) ?? null;
     this.#pending.delete(key);
     if (stranded) this.stranded += 1;
@@ -130,8 +162,20 @@ export class TurnSteering {
     return this.#inFlight.has(String(sessionId ?? ""));
   }
 
+  /** The most recently started live turn for a session, or null. */
   inFlight(sessionId) {
-    return this.#inFlight.get(String(sessionId ?? "")) ?? null;
+    const entry = this.#inFlight.get(String(sessionId ?? ""));
+    if (!entry || entry.turns.size === 0) return null;
+    let latest = null;
+    for (const turn of entry.turns.values()) {
+      if (!latest || turn.startedAt >= latest.startedAt) latest = turn;
+    }
+    return latest;
+  }
+
+  /** How many turns are currently live for a session. */
+  inFlightCount(sessionId) {
+    return this.#inFlight.get(String(sessionId ?? ""))?.turns.size ?? 0;
   }
 
   /**
