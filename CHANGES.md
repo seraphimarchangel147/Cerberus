@@ -173,7 +173,23 @@ mutation lease. Two defects made a recoverable condition look fatal: the conflic
 a generic `handler_error` (indistinguishable from a broken tool), and the message named the problem
 but never the remedy. Lease conflicts now carry `outcome.code=mutation_lease_conflict` and state
 plainly that side-effecting calls must be issued one at a time and retried. Verified by probe;
-his suite stayed at 2178 pass / 0 fail, and his next run showed zero lease conflicts.
+his suite stayed at 2178 pass / 0 fail, and his next run showed zero lease conflicts (68 tool calls,
+65 successful — up from 22 calls with 18 failures).
+
+A second harness bug surfaced from the same runs and was fixed in openAGI `c00a179`: the idle
+watchdog stopped a turn as STALLED after **68 successful tool calls, mid-`git commit`**.
+`evaluateRepeatedOutcome` reported `progressed: false` for every FIRST-TIME call (no prior
+signature), and `recordTurnProgress` only fires when `progressed` is true — so the watchdog's
+"output-aware progress" counter moved only when a *repeated* call produced *different* output. The
+normal good-agent pattern, a long run of distinct non-repeating successful calls, scored **zero**
+progress and was indistinguishable from an agent doing nothing.
+
+Measured before: 20 distinct successful calls → counter 0. After: → counter 20. Stall detection is
+intact and that was the part worth proving: 20 *identical* calls still register only their first
+(counter 1), so a genuine loop still exhausts its allowances and is still stopped. Two existing tests
+asserted the old value; both encoded the bug rather than a requirement (one a direct unit assertion,
+one an off-by-one in a poll loop where every call genuinely progresses). A new regression test pins
+both directions.
 
 ### Section 3 audited — undelivered steers were silently swallowed (FIXED)
 
