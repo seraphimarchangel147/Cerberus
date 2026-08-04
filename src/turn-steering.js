@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 // Mid-turn steering — redirect an in-flight turn instead of killing it.
 //
 // Today a user typing "actually, use the other API" while a goal loop is six
@@ -97,11 +99,26 @@ export class TurnSteering {
   // --- in-flight turn registry -------------------------------------------
   // Minimal on purpose: `activeHookSessions` tracks review lifecycle, not
   // execution, so it cannot answer "is a turn running right now".
+  //
+  // The registry is PER-TURN, not per-session: the goal loop and a real user
+  // turn can overlap under one session key (Discord's steer-then-enqueue path
+  // is exactly that overlap). A flat Map<session, entry> let the second
+  // beginTurn silently overwrite the first, and the first turn's endTurn then
+  // deleted the SECOND turn's registration and stranded its pending steer —
+  // found by Azazel's wave-4 QA (brief section 2, case 3).
 
   beginTurn(sessionId, { turnId = null, abortController = null } = {}) {
     const key = String(sessionId ?? "");
     if (!key) return;
-    this.#inFlight.set(key, { turnId, abortController, startedAt: Date.now() });
+    let turns = this.#inFlight.get(key);
+    if (!turns) {
+      turns = new Map();
+      this.#inFlight.set(key, turns);
+    }
+    // A caller that does not track turn identity still gets a distinct slot,
+    // so two anonymous begins cannot alias each other.
+    const id = turnId ?? `anon:${randomUUID()}`;
+    turns.set(id, { turnId: id, abortController, startedAt: Date.now() });
   }
 
   /**
@@ -116,10 +133,27 @@ export class TurnSteering {
    * or acknowledged anywhere. Dropping it is still correct -- delivering it
    * late on a later turn would be a surprising injection -- but the caller MUST
    * be told so it can re-route it rather than lose it.
+   *
+   * Turn identity: with { turnId }, only THAT turn's registration is removed.
+   * The pending steer belongs to the SESSION, not to whichever turn ends
+   * first, so it is only reported stranded once NO turn remains that could
+   * still deliver it. Without a turnId (legacy callers) every turn for the
+   * session ends — the pre-fix behavior.
    */
-  endTurn(sessionId) {
+  endTurn(sessionId, { turnId = null } = {}) {
     const key = String(sessionId ?? "");
-    this.#inFlight.delete(key);
+    const turns = this.#inFlight.get(key);
+    if (turns) {
+      if (turnId == null) {
+        this.#inFlight.delete(key);
+      } else {
+        turns.delete(turnId);
+        if (turns.size === 0) this.#inFlight.delete(key);
+      }
+    }
+    // Another turn is still in flight for this session: it can still deliver
+    // the pending steer at its next boundary, so nothing is stranded yet.
+    if (this.#inFlight.has(key)) return null;
     const stranded = this.#pending.get(key) ?? null;
     this.#pending.delete(key);
     if (stranded) this.stranded += 1;
@@ -131,8 +165,11 @@ export class TurnSteering {
   }
 
   inFlight(sessionId) {
-    return this.#inFlight.get(String(sessionId ?? "")) ?? null;
+    const turns = this.#inFlight.get(String(sessionId ?? ""));
+    if (!turns || turns.size === 0) return null;
+    return turns.values().next().value;
   }
+
 
   /**
    * Append the pending steer to the LAST tool result in an Anthropic-style
