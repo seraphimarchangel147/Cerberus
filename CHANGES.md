@@ -137,8 +137,8 @@ Azazel ran an adversarial pass against the finished wave. Findings, with verdict
   deliveries (one each) on `session:end`.
 
 **Known limitation of this pass:** his turn stalled on the harness idle-watchdog after 27 iterations,
-so brief sections 7 and 8 (SSE error handling and webhook redaction under real conditions)
-were **not** reached. Those remain unaudited and are honest gaps, not silent passes.
+so brief section 8 (webhook redaction under real conditions) was
+**not** reached in his run; sections 2, 3, 4, 6 and 7 were audited afterwards (below). Section 8 remains an honest gap, not a silent pass.
 
 ### Section 6 audited twice, independently — read-only ceiling is ENFORCED
 
@@ -248,6 +248,26 @@ Keying the batch on `__turnId` looked right but is turn-wide, and retry loops ha
 so five sequential retries stopped tripping entirely. Reverted. Both behaviours are now pinned by
 test — the parallel-batch trip as an intentional decision, and a sequential retry loop as the case
 the breaker exists for, so a future batch-aware change fails loudly instead of silently disabling it.
+
+### Section 7 audited — SSE error handling (2 bugs FIXED)
+
+The `message/stream` branch writes SSE headers **before** calling `handleRpc`, so a throw afterwards
+cannot be answered with a JSON error response. There was no catch: the client saw a silent half-open
+stream and hung until its own timeout. There was also no heartbeat, unlike the dashboard SSE path, so
+a long turn behind a proxy could be killed for inactivity.
+
+Fixed: the stream is wrapped so a failure is emitted as a JSON-RPC **error event** (spec code
+`-32603`, with the request id echoed so the client can correlate) and the response always terminates;
+a 15s comment-frame heartbeat keeps long turns alive; and `req.on("close")` stops the heartbeat when
+the peer disconnects.
+
+Writing the test for this surfaced a **third, unrelated bug in the gateway itself**:
+`hosted-interface.js` read `result.session.id` unguarded inside its own `handleMessage` observer
+wrapper, while every sibling field on the same object was optional-chained. Any turn result without a
+`session` block — legitimate for an embedder or a lightweight agent host — threw *"Cannot read
+properties of undefined (reading 'id')"* **inside the wrapper**, converting a successful turn into a
+failed one for the sake of a cosmetic dashboard event. That is why the A2A stream reported
+`TASK_STATE_FAILED` on a turn that had actually succeeded. Now optional-chained like its neighbours.
 
 ### Bugs this work surfaced in existing code
 

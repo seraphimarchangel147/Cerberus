@@ -316,12 +316,17 @@ async function startRealGateway({ enableA2A = true, token = REAL_TOKEN } = {}) {
     sessionIndexOptions: { fallback: true }
   });
   runtime.agentHost = { handleMessage: async () => ({ reply: "regression-ok" }) };
+  const a2aServer = new A2AServer({
+    agentHost: runtime.agentHost,
+    env: enableA2A ? { OPENAGI_A2A_ENABLED: "1" } : {}
+  });
   const app = createHostedInterface(runtime, {
-    host: "127.0.0.1", port: 0, tickerMs: 0, dataDir, authToken: token
+    host: "127.0.0.1", port: 0, tickerMs: 0, dataDir, authToken: token, a2aServer
   });
   const listened = await app.listen();
   return {
     base: `http://127.0.0.1:${listened.port}`,
+    a2aServer,
     async close() {
       try { await app.close(); } catch { /* best effort */ }
       if (prevEnabled === undefined) delete process.env.OPENAGI_A2A_ENABLED;
@@ -386,6 +391,60 @@ test("REAL route: both A2A routes 404 when the feature is disabled", async () =>
       method: "POST", headers: { "content-type": "application/json" }, body: RPC_BODY
     });
     assert.equal(rpc.status, 404);
+  } finally {
+    await gw.close();
+  }
+});
+
+test("REAL route: a throwing stream emits a JSON-RPC error event, not a hang", async () => {
+  // Brief section 7. SSE headers are written BEFORE handleRpc runs, so a throw
+  // afterwards cannot be answered with a JSON error response. Without an
+  // explicit catch the client sees a silent half-open stream and hangs until
+  // its own timeout. Prove it now terminates with a readable error event.
+  const gw = await startRealGateway();
+  try {
+    // Force handleRpc to throw after headers are already committed.
+    gw.a2aServer.handleRpc = async () => { throw new Error("provider exploded mid-stream"); };
+
+    const response = await fetch(`${gw.base}${A2A_RPC_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...AUTH_HEADER(REAL_TOKEN) },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 9, method: "message/stream",
+        params: { message: { parts: [{ text: "go" }] } }
+      })
+    });
+
+    assert.equal(response.status, 200, "headers were already sent, so the status stays 200");
+    // The key assertion: the body TERMINATES. A hang would never resolve here.
+    const text = await response.text();
+    assert.match(text, /A2A stream failed/, "the failure is reported as an SSE event");
+    assert.match(text, /provider exploded mid-stream/);
+    const payload = JSON.parse(text.split("data: ").at(-1).trim());
+    assert.equal(payload.jsonrpc, "2.0");
+    assert.equal(payload.id, 9, "the JSON-RPC id is echoed so the client can correlate");
+    assert.equal(payload.error.code, -32603, "internal error uses the spec code");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("REAL route: a successful stream still terminates cleanly", async () => {
+  const gw = await startRealGateway();
+  try {
+    const response = await fetch(`${gw.base}${A2A_RPC_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...AUTH_HEADER(REAL_TOKEN) },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 10, method: "message/stream",
+        params: { message: { parts: [{ text: "go" }] } }
+      })
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /TASK_STATE_WORKING/, "status updates stream as they happen");
+    assert.match(text, /TASK_STATE_COMPLETED/, "the terminal state is delivered");
+    assert.ok(!/A2A stream failed/.test(text), "no error event on the happy path");
   } finally {
     await gw.close();
   }

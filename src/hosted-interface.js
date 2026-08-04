@@ -18,7 +18,7 @@ import {
   verifyBuildBetterWebhook
 } from "./auth.js";
 import { A2AServer, A2A_CARD_PATH, A2A_RPC_PATH, a2aBindAllowed } from "./a2a-server.js";
-import { ERR_PARSE, jsonRpcError } from "./a2a-protocol.js";
+import { ERR_PARSE, ERR_INTERNAL, jsonRpcError } from "./a2a-protocol.js";
 import { ChannelManager } from "./channels.js";
 import { inferToneScore } from "./outcome-store.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
@@ -310,10 +310,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       try {
         const result = await original(input);
         events.emit("message", {
-          sessionId: result.session.id,
-          projectId: result.project?.id ?? result.session?.projectId ?? "default",
-          agent: result.agent,
-          reply: result.reply,
+          // Optional-chained like every sibling field below. An embedder or a
+          // lightweight agent host can legitimately return a turn result
+          // without a `session` block, and an unguarded read here threw
+          // "Cannot read properties of undefined (reading 'id')" INSIDE the
+          // gateway's own observer wrapper -- turning a successful turn into a
+          // failed one for a purely cosmetic dashboard event.
+          sessionId: result?.session?.id ?? null,
+          projectId: result?.project?.id ?? result?.session?.projectId ?? "default",
+          agent: result?.agent,
+          reply: result?.reply,
           toolCalls: result.output?.scrutiny?.action ? [] : []
         });
         // Terminal beat for the live-activity lane: lets the pet settle into
@@ -694,10 +700,30 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             const emit = (event) => {
               try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
             };
-            const response = await a2aServer.handleRpc(body, { onEvent: emit });
-            emit(response);
+            // A long turn behind a proxy dies without traffic. The dashboard SSE
+            // path heartbeats for the same reason; comment frames are ignored by
+            // every SSE client but keep the connection alive.
+            const heartbeat = setInterval(() => {
+              try { res.write(": ping\n\n"); } catch { /* client gone */ }
+            }, 15000);
+            heartbeat.unref?.();
+            let closed = false;
+            req.on("close", () => { closed = true; clearInterval(heartbeat); });
+            try {
+              const response = await a2aServer.handleRpc(body, { onEvent: emit });
+              emit(response);
+            } catch (error) {
+              // Headers are already sent, so a JSON error response is no longer
+              // possible. Emit the failure as a JSON-RPC error EVENT instead --
+              // otherwise the client sees a silent half-open stream and hangs
+              // until its own timeout.
+              emit(jsonRpcError(body?.id ?? null, ERR_INTERNAL, `A2A stream failed: ${error?.message ?? String(error)}`));
+            } finally {
+              clearInterval(heartbeat);
+            }
             // Stream closure signals the terminal state -- there is no final flag.
-            return res.end();
+            if (!closed) res.end();
+            return;
           }
           const response = await a2aServer.handleRpc(body);
           return sendJson(res, 200, response);
