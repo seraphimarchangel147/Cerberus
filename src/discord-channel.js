@@ -371,9 +371,19 @@ export class DiscordChannel {
     // turn for the same session is still running.
     if (!message.author?.bot) {
       const goals = this.agentHost?.runtime?.goals;
+      const steering = this.agentHost?.runtime?.steering;
       try {
         if (goals?.get?.(key)?.status === "active") {
-          goals.preempt?.(key, "discord-user-message");
+          // Same redirect-vs-preempt rule as agent-host: when a turn is already
+          // running, a user message is a course correction delivered at the
+          // next tool boundary, not a cancellation. Without this check Discord
+          // would keep preempting at enqueue time and make the whole steering
+          // phase a no-op on the channel that actually matters.
+          if (steering?.isTurnInFlight?.(key) && steering.steer(key, cleaned)) {
+            this.log({ op: "goal-steered", key });
+          } else {
+            goals.preempt?.(key, "discord-user-message");
+          }
         }
       } catch (error) {
         this.log({ op: "goal-preempt-error", key, error: error?.message ?? String(error) });

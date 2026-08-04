@@ -65,6 +65,7 @@ import {
 } from "./terminal-session-manager.js";
 import { HookRegistry } from "./hook-registry.js";
 import { registerOutboundWebhooks } from "./outbound-webhooks.js";
+import { TurnSteering } from "./turn-steering.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
 import { SpillStore } from "./spill-store.js";
@@ -517,6 +518,9 @@ export class AbiRuntime {
       dataDir: options.dataDir,
       ...(options.webhookOptions ?? {})
     });
+    // Mid-turn steering: lets a real user message redirect an in-flight turn
+    // at the next tool boundary instead of preempting the goal loop outright.
+    this.steering = options.steering ?? new TurnSteering();
     this.tools.bindHooks?.(this.hooks);
     this.tools.bindProjects?.(this.projects);
     this.tools.bindProfiles?.(this.profiles);

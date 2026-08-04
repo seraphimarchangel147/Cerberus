@@ -5117,6 +5117,9 @@ export class OpenAIResponsesProvider {
         prepared: preparedToolBatch
       });
 
+      // Where this batch's outputs start, so a steer lands on a tool result
+      // from THIS batch and never on an earlier one.
+      const toolBatchStartIndex = conversationInput.length;
       for (let callIndex = 0; callIndex < calls.length; callIndex += 1) {
         const call = calls[callIndex];
         if (!goalContinuationIsCurrent(context, goalContinuationRevision)) {
@@ -5225,6 +5228,19 @@ export class OpenAIResponsesProvider {
             output: modelToolOutput(this, context, result)
           });
         }
+      }
+
+      // Deliver a mid-turn steer at the tool-batch boundary: append to the
+      // LAST function_call_output of this batch. Appends to an existing entry
+      // only -- conversationInput keeps its exact length and shape.
+      if (calls.length > 0) {
+        try {
+          context?.runtime?.steering?.applyToFunctionCallOutputs?.(
+            context?.sessionId,
+            conversationInput,
+            toolBatchStartIndex
+          );
+        } catch { /* steering is advisory and must never break a turn */ }
       }
 
       if (iterations >= maxIterations) {
@@ -6170,6 +6186,16 @@ export class AnthropicProvider {
         };
         if (toolUses.length > 0) toolResults.push(duplicateNotice);
         else convo.push({ role: "user", content: [duplicateNotice] });
+      }
+      // Deliver a mid-turn steer at the tool-batch boundary, before the next
+      // model request. This APPENDS to the last existing tool_result -- the
+      // toolResults array was already pushed into `convo` by reference above,
+      // so `convo` keeps its exact length and role alternation. Nothing is
+      // inserted and no history is rewritten.
+      if (toolUses.length > 0) {
+        try {
+          context?.runtime?.steering?.applyToToolResults?.(context?.sessionId, toolResults);
+        } catch { /* steering is advisory and must never break a turn */ }
       }
       if (iterations >= maxIterations) {
         stopReason = "iteration-cap";
