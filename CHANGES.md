@@ -141,24 +141,28 @@ so brief sections 2, 4, 7 and 8 (steer cross-session leakage, breaker
 behaviour under parallel batches, SSE error handling, and webhook redaction under real conditions)
 were **not** reached. Those remain unaudited and are honest gaps, not silent passes.
 
-### Section 6 audited separately — read-only ceiling is ENFORCED
+### Section 6 audited twice, independently — read-only ceiling is ENFORCED
 
-Because it is the most security-relevant unverified claim in the wave, section 6 was audited
-directly rather than left as a gap. Earlier tests only asserted that `scrutinyPolicyCeiling:
-"read-only"` was *passed* to `handleMessage`; they never proved the runtime *honors* it.
+Because it is the most security-relevant unverified claim in the wave, section 6 was audited by both
+agents independently, and both reached **NO ISSUE FOUND**. Earlier tests only asserted that
+`scrutinyPolicyCeiling: "read-only"` was *passed* to `handleMessage`; neither proved the runtime
+*honors* it.
 
-Probe: a real `A2AServer` -> real `AgentHost` -> real `ToolRegistry` with `OPENAGI_AUTO_APPROVE=1`,
-and a fixture provider that ignores the advertised tool list and invokes a side-effecting tool
-**directly through the registry** -- exactly what a hostile or jailbroken peer would do. Result:
+Azazel's probe is the stronger of the two and is the one retained: a real `message/send` over a real
+socket (`OPENAGI_A2A_ENABLED=1`, auth token set, `OPENAGI_AUTO_APPROVE=1`) with a scripted attacker
+model that attempts `code_write`, `code_shell`, `remember`, and `send_message` through the real
+dispatch path, plus filesystem canaries. All four are hard-blocked by the invoke-time watch gate, no
+canary lands, and auto-approve cannot rescue them — the gate fires *before* the confirmation lane.
 
-* the ceiling reaches the tool context (`__scrutinyPolicy === "read-only"`),
-* the side-effecting tool is not advertised,
-* the direct invocation is refused: *"scrutiny verdict 'watch' permits read-only tools only"*,
-* the handler **never runs** (`dispatched === []`), auto-approve notwithstanding.
+What makes it credible is that it carries **negative controls**: the identical subagent turn WITHOUT
+the ceiling dispatches the same mutations successfully, and a bare registry invoke with no policy
+context succeeds while the same call under `__scrutinyPolicy: "read-only"` is blocked. So the probe
+demonstrably detects failure, and the ceiling is the differentiator rather than some unrelated
+guard. A probe that cannot fail proves nothing; this one can.
 
 The guarantee is defence in depth: the filtered tool list is advisory to the model, and
-`tool-registry.js:1510` is a hard gate that does not depend on the model cooperating. Now covered
-permanently by `test/a2a-server.test.js` rather than by a one-off probe. **VERDICT: NO ISSUE FOUND.**
+`tool-registry.js:1510` is a hard gate that does not depend on the model cooperating. Retained as
+`test/a2a-readonly-ceiling.test.js` (my weaker single-tool version was deleted in favour of his).
 
 ### Harness bugs fixed in the QA agent's own runtime
 
