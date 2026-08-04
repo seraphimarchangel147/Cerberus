@@ -137,8 +137,10 @@ Azazel ran an adversarial pass against the finished wave. Findings, with verdict
   deliveries (one each) on `session:end`.
 
 **Known limitation of this pass:** his turn stalled on the harness idle-watchdog after 27 iterations,
-so brief section 8 (webhook redaction under real conditions) was
-**not** reached in his run; sections 2, 3, 4, 6 and 7 were audited afterwards (below). Section 8 remains an honest gap, not a silent pass.
+so several sections were not reached in that first run. **All eight brief sections have since been
+audited** — sections 1 and 5 by Azazel in round 1, section 6 by both agents independently, section 2
+by both agents independently in round 3, and sections 3, 4, 7 and 8 by Seraphim. No section is left
+as a silent pass.
 
 ### Section 6 audited twice, independently — read-only ceiling is ENFORCED
 
@@ -268,6 +270,39 @@ wrapper, while every sibling field on the same object was optional-chained. Any 
 properties of undefined (reading 'id')"* **inside the wrapper**, converting a successful turn into a
 failed one for the sake of a cosmetic dashboard event. That is why the A2A stream reported
 `TASK_STATE_FAILED` on a turn that had actually succeeded. Now optional-chained like its neighbours.
+
+### Section 8 audited — credential exfil via webhook payloads (FIXED)
+
+`sanitizeForAudit` guards the outbound-webhook payload, so a credential sitting in a **tool argument**
+that reaches a receiver is an exfiltration path, not a cosmetic bug.
+
+The first probe **passed and was wrong** — it tested one token shape that happened to be covered. A
+wider battery against real-length tokens found **8 of 12 leaking in plaintext**: Anthropic, OpenAI
+project, GitHub server, Google, JWT, Discord, HuggingFace and Stripe live keys. `SENSITIVE_KEY` only
+matches suggestive *key names*, so a tool argument called `config` sails past it and the value shape
+is the last line of defence. The old `/sk-[A-Za-z0-9]{20,}/` never matched `sk-ant-` or `sk-proj-`
+because the character class stops at the first hyphen.
+
+Patterns extended to cover those shapes; all 12 now redact. Verified by reverting the fix and
+re-running (8 leaked before, 0 after), with a **negative control** proving benign text survives —
+otherwise a redactor that masks everything would "pass".
+
+Caution recorded: an earlier version of that probe used hand-shortened placeholder tokens and
+reported *false* leaks. Real tokens are far longer than a hand-typed fixture, and the bogus result
+nearly sent me chasing a non-bug.
+
+### Double delivery of a steered Discord message (FIXED — found by Azazel)
+
+Flagged by Azazel as an out-of-scope observation during section 2, and it was a real bug **I
+introduced**. `enqueueTurn` made the steer/preempt decision and then fell through to the turn lock
+unconditionally, so a message that steered an in-flight turn was *also* enqueued as its own turn: the
+model saw the same correction twice, once via the steer marker mid-turn and again as a fresh user
+turn once the lock freed. The steer path now returns early — the steer **is** the delivery. Two
+regression tests, including a negative control proving an ordinary message with no turn in flight
+still runs normally.
+
+Both agents independently found and fixed the section-2 `beginTurn` collision with the same design (a
+per-turn registry keyed by turn id), which is a reassuring convergence rather than a duplicate.
 
 ### Bugs this work surfaced in existing code
 

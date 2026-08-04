@@ -211,3 +211,73 @@ test("enqueueTurn does not treat a bot message as real user preemption", async (
 
   assert.equal(preempted, false);
 });
+
+test("a steered message is delivered ONCE, not also re-run as a full turn", async () => {
+  // Found by Azazel's section-2 QA pass. enqueueTurn made the steer/preempt
+  // decision and then fell through to the turn lock unconditionally, so a
+  // message that steered an in-flight turn was ALSO queued as its own turn.
+  // The model saw the same correction twice: once via the steer marker
+  // mid-turn, then again as a fresh user turn once the lock freed.
+  const started = [];
+  const steers = [];
+  const preemptions = [];
+  const channel = Object.create(DiscordChannel.prototype);
+  channel.turnLocks = new Map();
+  channel.agentHost = {
+    runtime: {
+      goals: {
+        get: () => ({ status: "active" }),
+        preempt: (sessionId, reason) => preemptions.push([sessionId, reason])
+      },
+      steering: {
+        isTurnInFlight: () => true,
+        steer: (key, text) => { steers.push([key, text]); return true; }
+      }
+    }
+  };
+  channel.runTurn = async (message) => { started.push(message.id); };
+  channel.log = () => {};
+  channel.sendMessage = async () => null;
+
+  await channel.enqueueTurn(
+    { guild_id: "guild-1", channel_id: "channel-1", author: { id: "user-1" }, id: "steering-msg" },
+    "actually, use the other API"
+  );
+
+  assert.deepEqual(
+    steers,
+    [["discord:guild-1:channel-1:user-1", "actually, use the other API"]],
+    "the message is accepted as a steer"
+  );
+  assert.deepEqual(started, [], "and is NOT also run as a separate full turn");
+  assert.deepEqual(preemptions, [], "an in-flight turn is steered, never preempted");
+});
+
+test("with no turn in flight the message still runs as a full turn", async () => {
+  // Negative control for the test above: the early return must apply ONLY to
+  // the steer path, or ordinary messages would stop being processed entirely.
+  const started = [];
+  const preemptions = [];
+  const channel = Object.create(DiscordChannel.prototype);
+  channel.turnLocks = new Map();
+  channel.agentHost = {
+    runtime: {
+      goals: {
+        get: () => ({ status: "active" }),
+        preempt: (sessionId, reason) => preemptions.push([sessionId, reason])
+      },
+      steering: { isTurnInFlight: () => false, steer: () => false }
+    }
+  };
+  channel.runTurn = async (message) => { started.push(message.id); };
+  channel.log = () => {};
+  channel.sendMessage = async () => null;
+
+  await channel.enqueueTurn(
+    { guild_id: "guild-1", channel_id: "channel-1", author: { id: "user-1" }, id: "normal-msg" },
+    "new instruction"
+  );
+
+  assert.deepEqual(started, ["normal-msg"], "the turn still runs");
+  assert.equal(preemptions.length, 1, "and the goal is preempted exactly as before");
+});

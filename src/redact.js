@@ -1,10 +1,27 @@
 const MASK = "[REDACTED]";
 const SENSITIVE_KEY = /token|secret|password|api[_-]?key|authorization|bearer/i;
+// Value-shape patterns. These are the last line of defence: a credential
+// carried under an INNOCUOUS key name (a tool argument called `anthropic`,
+// `endpoint`, or `config`) is not caught by SENSITIVE_KEY, so the value itself
+// must be recognisable. Verified by probe: before these additions, real
+// Anthropic (`sk-ant-`), OpenAI project (`sk-proj-`) and Discord bot tokens
+// passed straight through sanitizeForAudit and reached an outbound webhook
+// receiver in plaintext via the post_tool_call payload.
+//
+// `sk-[A-Za-z0-9]{20,}` did NOT cover sk-ant-/sk-proj- because those carry
+// hyphens inside the body, so the class stopped at the first `-`.
 const STRING_PATTERNS = [
-  /sk-[A-Za-z0-9]{20,}/g,
-  /xox[bp]-[A-Za-z0-9-]+/g,
-  /ghp_[A-Za-z0-9]{20,}/g,
-  /AKIA[0-9A-Z]{16}/g
+  /sk-[A-Za-z0-9-]*[A-Za-z0-9]{16,}/g,   // OpenAI/Anthropic incl. sk-ant-, sk-proj-
+  /xox[bpsoa]-[A-Za-z0-9-]+/g,           // Slack
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,         // GitHub PAT / OAuth / refresh / server
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  /AKIA[0-9A-Z]{16}/g,                   // AWS access key id
+  /AIza[0-9A-Za-z_-]{30,}/g,             // Google API key
+  /\bey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JWT
+  // Discord bot token: base64 id "." 6-char stamp "." 27+ hmac
+  /\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{25,}/g,
+  /\bhf_[A-Za-z0-9]{20,}/g,              // HuggingFace
+  /\bsk_live_[A-Za-z0-9]{16,}/g          // Stripe live
 ];
 const CREDENTIAL_ENV_NAME = /(?:^|_)(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSCODE|PRIVATE_KEY|ACCESS_KEY(?:_ID)?|CLIENT_SECRET|CLIENT_ID|AUTH|AUTHORIZATION|CREDENTIALS?|ACCOUNT_SID)(?:_|$)/;
 const CREDENTIAL_HEADER_NAME = /authorization|proxy-authorization|(?:^|[-_])(?:api[-_]?(?:key|token)|access[-_]?(?:key|token)|refresh[-_]?token|auth(?:[-_]?token)?|bearer[-_]?token|client[-_]?(?:id|secret)|service[-_]?key|webhook[-_]?secret|account[-_]?sid|private[-_]?key|signature|credentials?|token|secret|password|passcode)(?:$|[-_])/i;

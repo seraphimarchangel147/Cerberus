@@ -381,9 +381,15 @@ export class DiscordChannel {
           // phase a no-op on the channel that actually matters.
           if (steering?.isTurnInFlight?.(key) && steering.steer(key, cleaned)) {
             this.log({ op: "goal-steered", key });
-          } else {
-            goals.preempt?.(key, "discord-user-message");
+            // RETURN, do not fall through to the turn lock. The steer IS the
+            // delivery: the running turn will read this text at its next tool
+            // boundary. Falling through queued the identical message a second
+            // time, so the model saw the same correction twice -- once via the
+            // steer marker mid-turn, then again as a fresh user turn once the
+            // lock freed. Found by Azazel's section-2 QA pass.
+            return this.turnLocks.get(key) ?? Promise.resolve();
           }
+          goals.preempt?.(key, "discord-user-message");
         }
       } catch (error) {
         this.log({ op: "goal-preempt-error", key, error: error?.message ?? String(error) });

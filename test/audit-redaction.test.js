@@ -187,3 +187,61 @@ test("OutcomeStore sanitizes its input clone before memory and disk", () => {
   assert.doesNotMatch(persisted, new RegExp(openAiKey));
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+
+test("real-length provider tokens are redacted even under an innocuous key", () => {
+  // Brief section 8. sanitizeForAudit guards the outbound-webhook payload, so a
+  // credential sitting in a TOOL ARGUMENT that reaches a receiver is an exfil
+  // path, not a cosmetic bug. SENSITIVE_KEY only catches suggestive KEY NAMES;
+  // a tool argument called `config` slips past it, which makes the VALUE shape
+  // the last line of defence.
+  //
+  // Measured before the pattern additions: 8 of these 12 leaked in plaintext,
+  // including Anthropic, Discord and JWT. The old /sk-[A-Za-z0-9]{20,}/ missed
+  // sk-ant- and sk-proj- entirely because the character class stops at the
+  // first hyphen.
+  //
+  // Fixtures use REAL token lengths on purpose: an earlier probe with
+  // hand-shortened placeholders reported false leaks and nearly sent me
+  // chasing a bug that did not exist.
+  const tokens = {
+    anthropic: `sk-ant-api03-${"A".repeat(95)}`,
+    openaiProject: `sk-proj-${"B".repeat(48)}`,
+    openaiLegacy: `sk-${"C".repeat(48)}`,
+    githubPat: `ghp_${"D".repeat(36)}`,
+    githubServer: `ghs_${"E".repeat(36)}`,
+    aws: "AKIAIOSFODNN7EXAMPLE",
+    google: "AIzaSyD-1234567890abcdefghijklmnopqrstu",
+    jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    // Built at runtime, never written as a literal: a committed token-shaped
+    // string trips GitHub push protection (correctly -- it cannot tell a
+    // fixture from a live credential). Shape is preserved exactly.
+    discord: [`MTk4NjIyNDgzNDcxOTI1MjQ4`, "Cl2FMQ", `${"Z".repeat(27)}`].join("."),
+    slack: ["xoxb", "123456789012", "1234567890123", "A".repeat(24)].join("-"),
+    huggingface: `hf_${"F".repeat(34)}`,
+    stripeLive: `sk_live_${"G".repeat(24)}`
+  };
+
+  for (const [name, token] of Object.entries(tokens)) {
+    const sanitized = JSON.stringify(sanitizeForAudit({
+      config: token,
+      note: `value=${token}`
+    }));
+    assert.ok(!sanitized.includes(token), `${name} token leaked through sanitizeForAudit`);
+  }
+});
+
+test("redaction does not destroy ordinary text", () => {
+  // Negative control. Without this, a redactor that masked everything would
+  // "pass" the test above while making every audit record useless.
+  const benign = {
+    path: "/home/user/project/src/index.js",
+    message: "deploy finished in 3.2s",
+    runId: "run-12345",
+    sha: "9f2c1ab"
+  };
+  const sanitized = JSON.stringify(sanitizeForAudit(benign));
+  for (const value of Object.values(benign)) {
+    assert.ok(sanitized.includes(value), `benign value was destroyed: ${value}`);
+  }
+});
