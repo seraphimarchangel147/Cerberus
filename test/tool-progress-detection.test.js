@@ -5,6 +5,10 @@ import {
   evaluateRepeatedOutcome
 } from "../src/tool-registry.js";
 import { SETUP_FIELDS } from "../src/setup-wizard.js";
+import {
+  bindTurnProgressCounter,
+  readTurnProgressCount
+} from "../src/turn-progress.js";
 
 function registerPollTool(registry, handler) {
   registry.register({
@@ -25,6 +29,11 @@ function registerPollTool(registry, handler) {
 }
 
 test("repeated-outcome comparison reports progress and exact threshold", () => {
+  // A first-time successful call IS forward progress: the agent did something
+  // it had not done before this turn. Reporting false here made the wall-clock
+  // watchdog blind to the normal good-agent pattern (a long run of distinct,
+  // successful, non-repeating calls scored zero progress and was stopped as
+  // "stalled"). Only a REPEAT with identical output is stagnation.
   assert.deepEqual(evaluateRepeatedOutcome({
     priorSignature: null,
     nextSignature: "sig-a",
@@ -32,7 +41,7 @@ test("repeated-outcome comparison reports progress and exact threshold", () => {
     limit: 3
   }), {
     comparable: true,
-    progressed: false,
+    progressed: true,
     repeatedSuccessCount: 1,
     thresholdReached: false
   });
@@ -88,7 +97,10 @@ test("same polling call with changing output never blocks", async () => {
   assert.ok(results.every((result) => result.ok === true));
   const endEvents = events.filter((event) => event.phase === "end");
   assert.equal(endEvents.length, 20);
-  assert.equal(endEvents.filter((event) => event.progress === true).length, 19);
+  // 20, not 19: the first call now counts as progress too (see
+  // evaluateRepeatedOutcome). Every one of these 20 polls returns a changing
+  // revision, so every one is genuine forward progress.
+  assert.equal(endEvents.filter((event) => event.progress === true).length, 20);
 });
 
 test("identical call and output returns one advisory at the threshold", async () => {
@@ -237,5 +249,50 @@ test("repeated-success threshold is setup-wizard persistable", () => {
   assert.equal(
     SETUP_FIELDS.includes("OPENAGI_REPEATED_SUCCESS_LIMIT"),
     true
+  );
+});
+
+test("a run of DISTINCT successful calls registers progress; an identical loop does not", async () => {
+  // Regression guard for the idle-watchdog blindness that stopped a QA turn
+  // after 68 successful tool calls, mid-commit. The watchdog's progress signal
+  // must distinguish "working" from "looping" -- before this, a long run of
+  // varied productive work scored ZERO and looked identical to a stall.
+  const registry = new ToolRegistry({ env: { OPENAGI_REPEATED_SUCCESS_LIMIT: "50" } });
+  registry.register({
+    name: "varied_read",
+    description: "distinct args, distinct output",
+    sideEffects: false,
+    parameters: { type: "object", additionalProperties: true },
+    handler: async (args) => ({ value: `unique-${args.i}` })
+  });
+  registry.register({
+    name: "stuck_read",
+    description: "identical output every time",
+    sideEffects: false,
+    parameters: { type: "object", additionalProperties: true },
+    handler: async () => ({ same: "identical" })
+  });
+
+  const working = { sessionId: "s", __turnId: "turn-working" };
+  const workingCounter = bindTurnProgressCounter(working);
+  for (let i = 0; i < 20; i += 1) {
+    const result = await registry.invoke("varied_read", { i }, working);
+    assert.equal(result.ok, true);
+  }
+  assert.equal(
+    readTurnProgressCount(workingCounter),
+    20,
+    "20 distinct successful calls must register as 20 units of progress"
+  );
+
+  const looping = { sessionId: "s", __turnId: "turn-looping" };
+  const loopingCounter = bindTurnProgressCounter(looping);
+  for (let i = 0; i < 20; i += 1) {
+    await registry.invoke("stuck_read", { a: 1 }, looping);
+  }
+  assert.equal(
+    readTurnProgressCount(loopingCounter),
+    1,
+    "an identical loop must register only its first call -- the watchdog must still fire"
   );
 });

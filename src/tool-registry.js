@@ -150,9 +150,16 @@ export function evaluateRepeatedOutcome(input = {}) {
     const hasPrior = typeof priorSignature === "string"
       && priorSignature.length > 0;
     if (!hasPrior) {
+      // A FIRST-TIME successful call is unambiguous forward progress: the agent
+      // did something it had not done before in this turn. Reporting false here
+      // made the wall-clock watchdog blind to the normal good-agent pattern --
+      // a long run of distinct, successful, non-repeating tool calls scored
+      // ZERO progress and was stopped as "stalled" despite obviously working.
+      // Observed: a QA turn stopped after 68 successful calls, mid-commit.
+      // Only a REPEAT that yields identical output is genuine stagnation.
       return {
         comparable: true,
-        progressed: false,
+        progressed: true,
         repeatedSuccessCount: 1,
         thresholdReached: false
       };
