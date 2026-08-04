@@ -137,10 +137,39 @@ Azazel ran an adversarial pass against the finished wave. Findings, with verdict
   deliveries (one each) on `session:end`.
 
 **Known limitation of this pass:** his turn stalled on the harness idle-watchdog after 27 iterations,
-so brief sections 2, 3, 4, 6, 7 and 8 (steer cross-session leakage, stranded-steer delivery, breaker
-behaviour under parallel batches, the read-only ceiling exercised end to end, SSE error handling, and
-webhook redaction under real conditions) were **not** reached. Those remain unaudited and are honest
-gaps, not silent passes.
+so brief sections 2, 3, 4, 7 and 8 (steer cross-session leakage, stranded-steer delivery, breaker
+behaviour under parallel batches, SSE error handling, and webhook redaction under real conditions)
+were **not** reached. Those remain unaudited and are honest gaps, not silent passes.
+
+### Section 6 audited separately — read-only ceiling is ENFORCED
+
+Because it is the most security-relevant unverified claim in the wave, section 6 was audited
+directly rather than left as a gap. Earlier tests only asserted that `scrutinyPolicyCeiling:
+"read-only"` was *passed* to `handleMessage`; they never proved the runtime *honors* it.
+
+Probe: a real `A2AServer` -> real `AgentHost` -> real `ToolRegistry` with `OPENAGI_AUTO_APPROVE=1`,
+and a fixture provider that ignores the advertised tool list and invokes a side-effecting tool
+**directly through the registry** -- exactly what a hostile or jailbroken peer would do. Result:
+
+* the ceiling reaches the tool context (`__scrutinyPolicy === "read-only"`),
+* the side-effecting tool is not advertised,
+* the direct invocation is refused: *"scrutiny verdict 'watch' permits read-only tools only"*,
+* the handler **never runs** (`dispatched === []`), auto-approve notwithstanding.
+
+The guarantee is defence in depth: the filtered tool list is advisory to the model, and
+`tool-registry.js:1510` is a hard gate that does not depend on the model cooperating. Now covered
+permanently by `test/a2a-server.test.js` rather than by a one-off probe. **VERDICT: NO ISSUE FOUND.**
+
+### Harness bugs fixed in the QA agent's own runtime
+
+The QA agent's first run died on the idle watchdog. The cause was in *his* harness, not his work,
+and was fixed there (openAGI `a921f17`): 16 of his 18 `code_shell` failures blocked at the
+`resource_lease` gate *after* passing approval -- parallel side-effecting calls colliding on the
+mutation lease. Two defects made a recoverable condition look fatal: the conflict was collapsed into
+a generic `handler_error` (indistinguishable from a broken tool), and the message named the problem
+but never the remedy. Lease conflicts now carry `outcome.code=mutation_lease_conflict` and state
+plainly that side-effecting calls must be issued one at a time and retried. Verified by probe;
+his suite stayed at 2178 pass / 0 fail, and his next run showed zero lease conflicts.
 
 ### Bugs this work surfaced in existing code
 
