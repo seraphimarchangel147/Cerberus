@@ -1,4 +1,4 @@
-import { redactKnownValues, sanitizeForAudit } from "./redact.js";
+import { isCredentialEnvName, redactKnownValues, sanitizeForAudit } from "./redact.js";
 import { secretsStoreRedactionSnapshot } from "./secrets-store.js";
 import { stableHash } from "./utils.js";
 
@@ -7,6 +7,15 @@ const MAX_MEMORY_TAGS = 8;
 const MAX_MEMORY_TAG_CHARS = 64;
 const ALLOWED_BACKGROUND_KINDS = new Set(["preference", "correction", "environment"]);
 const ALLOWED_CONFIDENCE = new Set(["high", "medium", "low"]);
+
+// Only credential-shaped names become configured-secret needles. The store also
+// owns ordinary configuration (OPENAGI_AUTO_APPROVE=1, OPENAGI_CHECKPOINTS=3,
+// OPENAGI_MAX_TURN_SECONDS=1200), and treating a value such as "1" or "3" as a
+// secret makes every digit in a memory a false MEMORY_SECRET_CONTENT rejection.
+// code-tools.js applies the same filter for stdout redaction (F2, 58814e3).
+// Values under a non-credential name are still checked when they are long
+// enough to be secret-shaped, so a misnamed credential cannot slip through.
+const MIN_UNNAMED_SECRET_CHECK_LENGTH = 12;
 
 // Memory is a durable instruction-adjacent surface. These deliberately narrow
 // rules catch content that tries to change agent authority or extract secrets,
@@ -206,7 +215,14 @@ function assertNoConfiguredSecret(content, runtime) {
       "The configured-secret safety check exceeded its safe bound."
     );
   }
-  const values = snapshot.records?.map((record) => record.value).filter(Boolean) ?? [];
+  const values = snapshot.records
+    ?.filter((record) => (
+      record
+      && typeof record.value === "string"
+      && record.value
+      && (isCredentialEnvName(record.name) || record.value.length >= MIN_UNNAMED_SECRET_CHECK_LENGTH)
+    ))
+    .map((record) => record.value) ?? [];
   if (values.length === 0) return;
   let redacted;
   try {
