@@ -119,6 +119,17 @@ export function parseSubscription(raw, index = 0) {
   };
 }
 
+/**
+ * The first pattern in a subscription's `events` list that matches `event`,
+ * or null. Used to collapse overlapping patterns to a single delivery.
+ */
+export function firstMatchingPattern(subscription, event) {
+  for (const pattern of subscription?.events ?? []) {
+    if (eventMatches(pattern, event)) return pattern;
+  }
+  return null;
+}
+
 export function loadWebhookConfig(dataDir = resolveDataDir(), { log } = {}) {
   const filePath = path.join(dataDir, "webhooks.json");
   // readJsonFile returns the fallback for a missing file but rethrows a parse
@@ -206,8 +217,15 @@ export class OutboundWebhookDispatcher {
   }
 
   /**
-   * Hook specs to hand to `HookRegistry.register`. One per subscription per
-   * pattern; the handler enqueues and returns synchronously.
+   * Hook specs to hand to `HookRegistry.register`.
+   *
+   * One hook per subscription per pattern, because the registry matches a
+   * single pattern per hook. That means a subscription whose patterns OVERLAP
+   * (e.g. `["session:*", "session:end"]`) fires MORE THAN ONCE for the same
+   * event. Delivering twice is wrong on its own, but the real damage is that
+   * each delivery would carry a different `eventId`, leaving the receiver no
+   * way to dedupe. So the handler carries the pattern that registered it and
+   * `enqueue` collapses the fan-out to one delivery per subscription.
    */
   hookSpecs() {
     const specs = [];
@@ -221,7 +239,12 @@ export class OutboundWebhookDispatcher {
           // HookRegistry passes (payload, {event, signal, timeoutMs}); the
           // second argument is a context object, not the event string.
           handler: (payload, context) => {
-            this.enqueue(context?.event ?? pattern, payload, [subscription]);
+            const event = context?.event ?? pattern;
+            // Collapse overlapping patterns: only the FIRST pattern in this
+            // subscription's list that matches the event delivers. Stateless
+            // and deterministic -- no dedupe cache, no timing window.
+            if (firstMatchingPattern(subscription, event) !== pattern) return undefined;
+            this.enqueue(event, payload, [subscription]);
             return undefined;
           }
         });

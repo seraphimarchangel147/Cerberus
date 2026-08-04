@@ -353,3 +353,73 @@ test("event names used by the new emissions are registrable patterns", () => {
     name: "wave4.turn", event: "turn:*", tier: "plugin", handler: () => {}
   }));
 });
+
+test("overlapping patterns in one subscription deliver exactly once, with a stable eventId", async () => {
+  const receiver = await startReceiver((req, res) => { res.writeHead(200); res.end("ok"); });
+  try {
+    const hooks = new HookRegistry({ loadConfig: false, log: () => {} });
+    const dispatcher = registerOutboundWebhooks(hooks, {
+      // "session:*" and "session:end" BOTH match session:end. Before the fix
+      // this fired twice with two different eventIds, so a receiver could not
+      // dedupe. Regression guard.
+      subscriptions: [subscription(receiver.url, { events: ["session:*", "session:end"] })],
+      log: () => {},
+      sleep: () => Promise.resolve()
+    });
+
+    hooks.notify("session:end", { sessionId: "s1" });
+    await hooks.flush();
+    await dispatcher.flush();
+
+    assert.equal(receiver.received.length, 1, "overlapping patterns must not double-deliver");
+    assert.equal(dispatcher.stats().enqueued, 1, "the enqueued counter must not be inflated either");
+
+    // A non-overlapping event on the same subscription still arrives.
+    hooks.notify("session:branch", { sessionId: "s1" });
+    await hooks.flush();
+    await dispatcher.flush();
+    assert.equal(receiver.received.length, 2);
+    assert.equal(receiver.received[1].headers["x-cerberus-event"], "session:branch");
+  } finally {
+    await receiver.close();
+  }
+});
+
+test("three overlapping patterns still collapse to one delivery", async () => {
+  const receiver = await startReceiver((req, res) => { res.writeHead(200); res.end("ok"); });
+  try {
+    const hooks = new HookRegistry({ loadConfig: false, log: () => {} });
+    const dispatcher = registerOutboundWebhooks(hooks, {
+      subscriptions: [subscription(receiver.url, { events: ["*", "session:*", "session:end"] })],
+      log: () => {},
+      sleep: () => Promise.resolve()
+    });
+    hooks.notify("session:end", {});
+    await hooks.flush();
+    await dispatcher.flush();
+    assert.equal(receiver.received.length, 1);
+  } finally {
+    await receiver.close();
+  }
+});
+
+test("two distinct subscriptions on the same event each still get their own delivery", async () => {
+  const receiver = await startReceiver((req, res) => { res.writeHead(200); res.end("ok"); });
+  try {
+    const hooks = new HookRegistry({ loadConfig: false, log: () => {} });
+    const dispatcher = registerOutboundWebhooks(hooks, {
+      subscriptions: [
+        subscription(receiver.url, { name: "dash", events: ["session:*"] }),
+        subscription(receiver.url, { name: "ci", events: ["session:end"] })
+      ],
+      log: () => {},
+      sleep: () => Promise.resolve()
+    });
+    hooks.notify("session:end", {});
+    await hooks.flush();
+    await dispatcher.flush();
+    assert.equal(receiver.received.length, 2, "dedupe is per-subscription, not global");
+  } finally {
+    await receiver.close();
+  }
+});
