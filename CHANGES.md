@@ -97,6 +97,51 @@ further, never loosen.
 6. **Phase 4 omits push notifications** (`tasks/pushNotificationConfig/*`). The card advertises
    `pushNotifications: false` honestly, and `-32003` is reserved and unused rather than misapplied.
 
+### Post-wave QA pass (Azazel, adversarial review)
+
+Azazel ran an adversarial pass against the finished wave. Findings, with verdicts:
+
+* **CONFIRMED, HIGH SEVERITY — loopback trust bypassed auth on `/a2a`.** `createHostedInterface`
+  grants a loopback caller a trust bypass around the auth gate, and `/a2a` was never carved out of
+  it. Any local process — or a browser coerced into a local request — could POST JSON-RPC and drive
+  real agent turns with **no credential at all**. Verified exploitable by reverting the fix and
+  re-running the probe: `no-token=200`. Fixed in `d66e5ab`.
+
+  **Why my own tests could never have caught it:** `test/a2a-server.test.js` drove `A2AServer`
+  through a stub `http.createServer` I wrote myself. That proves my mental model of the auth rule,
+  not the actual route wiring. Three regression tests now stand up the REAL `createHostedInterface`.
+  This is the lesson of the whole QA pass: a test that mocks the thing it is verifying proves only
+  that the author is self-consistent.
+
+  Two corrections applied while porting his patch: it duplicated the telegram pairing-code line
+  (copy-paste artifact), and its carve-out was unconditional — which made a **disabled** deployment
+  answer `401` instead of `404` on `/a2a`, leaking that the endpoint exists. Now scoped to the
+  enabled case; the new disabled-state test caught that regression.
+
+* **NO ISSUE FOUND — Discord steering session-key identity.** This was my own highest-risk worry:
+  if `discord-channel.js`'s `sessionKeyFor(message)` diverged from the key `agent-host.js` registers
+  via `store.sessionKey(...)`, Phase 3 would be silently dead on Discord while every test passed.
+  His probe drives both sides end to end with a turn genuinely held in flight, and the keys are
+  identical across **guild, DM, thread, and the legacy-migration path**. Probe vendored at
+  `qa-probes/probe-1-steering-key-identity.mjs`. Disproven with evidence, not by argument.
+
+* **Duplicate webhook delivery on overlapping patterns** — found by me while writing the QA brief
+  and fixed in `93038e2` before he started. A subscription with `events: ["session:*","session:end"]`
+  delivered `session:end` twice with two different `eventId`s, so a receiver could not dedupe.
+  He independently reached the same diagnosis and the same semantic (one delivery per subscription
+  per event, stable `eventId`), implemented differently: he registered one hook on `*` and filtered
+  inside the handler; I keep per-pattern registration and let only the first matching pattern
+  deliver. Both are correct. Mine is retained because it leaves pattern matching in the registry, so
+  subscriptions that do not care about the hot `post_tool_call` path are never woken — measured: 10
+  uninterested subscriptions produce 0 handler wakeups on `post_tool_call`, and exactly 10
+  deliveries (one each) on `session:end`.
+
+**Known limitation of this pass:** his turn stalled on the harness idle-watchdog after 27 iterations,
+so brief sections 2, 3, 4, 6, 7 and 8 (steer cross-session leakage, stranded-steer delivery, breaker
+behaviour under parallel batches, the read-only ceiling exercised end to end, SSE error handling, and
+webhook redaction under real conditions) were **not** reached. Those remain unaudited and are honest
+gaps, not silent passes.
+
 ### Bugs this work surfaced in existing code
 
 * **`readJsonFile` throws on malformed JSON** rather than returning its fallback. The fail-open
