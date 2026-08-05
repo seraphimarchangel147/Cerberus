@@ -2404,3 +2404,19 @@ CONTEXT VALUE WAVE 3 COMPLETE
 - 2026-08-02T21:14:43.817Z · **azazel** · edit `test/goal-store.test.js`
 - 2026-08-02T21:15:10.070Z · **azazel** · edit `test/goal-store.test.js`
 - 2026-08-02T21:16:07.627Z · **azazel** · edit `test/persistent-goals.test.js`
+- 2026-08-02T21:39:42.400Z · **azazel** · edit `src/agent-host.js`
+- 2026-08-02T21:39:59.505Z · **azazel** · edit `src/discord-channel.js`
+- 2026-08-02T21:40:20.551Z · **azazel** · edit `test/discord-activity-routing.test.js`
+- 2026-08-02T23:39:13.808Z · **azazel** · edit `test/discord-catastrophic-approval.test.js` — Scrub ambient DISCORD_* env so the harness is hermetic
+- 2026-08-02T23:39:13.848Z · **azazel** · edit `test/secrets-injection.test.js` — Scrub ambient DISCORD_* env (latent fragility hardening)
+- 2026-08-02T23:39:13.884Z · **azazel** · edit `test/discord-delivery-confirmation.test.js` — Scrub ambient DISCORD_* env (latent fragility hardening)
+- 2026-08-02T23:39:13.921Z · **azazel** · edit `test/discord-activity-routing.test.js` — Scrub ambient DISCORD_* env so routing tests are hermetic
+- 2026-08-02T23:40:29.000Z · **azazel** · edit `test/abi-runtime.test.js` — Pin OPENAGI_SKILLS_AS_TOOLS off inside the default-behavior assertion, restore after
+- 2026-08-03T00:41:14.225Z · **azazel** · edit `src/hosted-interface.js`
+- 2026-08-03T12:17:13.575Z · **azazel** · create `drafts/goal-loop-verification-evidence-template.md` — Draft evidence-collection template for goal-loop verification run
+- 2026-08-03T12:17:53.139Z · **azazel** · create `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Draft report skeleton for goal-loop dashboard integration verification
+- 2026-08-04T12:47:23.959Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend checklist header to cover 2026-08-04 re-issue
+- 2026-08-04T12:48:01.860Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend skeleton header to cover 2026-08-04 re-issue
+- 2026-08-05T12:26:14.062Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend draft header to cover 2026-08-05 re-issue (task_9c86ed66f7984dc6)
+- 2026-08-05T12:26:49.414Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend header to cover 2026-08-05 re-issue (task_c55f71cca65042b4)
+- 2026-08-05T18:27:32.160Z · **azazel** · create `drafts/thursday-dashboard-checkin-2026-08-06.md` — Draft Thursday check-in proposal for dashboard progress review (draft-only, not scheduled)
