@@ -17,6 +17,8 @@ import {
   verifyTelegramSecret,
   verifyBuildBetterWebhook
 } from "./auth.js";
+import { A2AServer, A2A_CARD_PATH, A2A_RPC_PATH, a2aBindAllowed } from "./a2a-server.js";
+import { ERR_PARSE, ERR_INTERNAL, jsonRpcError } from "./a2a-protocol.js";
 import { ChannelManager } from "./channels.js";
 import { inferToneScore } from "./outcome-store.js";
 import { isFirstRun, renderWizard, saveEnv } from "./setup-wizard.js";
@@ -94,6 +96,13 @@ function configuredMoaPresetNames(dataDir) {
 export function createHostedInterface(runtime = createDefaultRuntime(), options = {}) {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 43210;
+  // A2A server. Constructed unconditionally (it is cheap and stateless until
+  // used) but every route checks `enabled` first, so a disabled deployment
+  // never exposes the protocol.
+  const a2aServer = options.a2aServer ?? new A2AServer({
+    agentHost: runtime.agentHost,
+    env: options.env ?? process.env
+  });
   // Read these dynamically so the setup wizard can update them mid-flight.
   const getAuthToken = () => options.authToken ?? process.env.OPENAGI_AUTH_TOKEN ?? null;
   const getPublicUrl = () => options.publicUrl ?? process.env.OPENAGI_PUBLIC_URL ?? null;
@@ -301,10 +310,16 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       try {
         const result = await original(input);
         events.emit("message", {
-          sessionId: result.session.id,
-          projectId: result.project?.id ?? result.session?.projectId ?? "default",
-          agent: result.agent,
-          reply: result.reply,
+          // Optional-chained like every sibling field below. An embedder or a
+          // lightweight agent host can legitimately return a turn result
+          // without a `session` block, and an unguarded read here threw
+          // "Cannot read properties of undefined (reading 'id')" INSIDE the
+          // gateway's own observer wrapper -- turning a successful turn into a
+          // failed one for a purely cosmetic dashboard event.
+          sessionId: result?.session?.id ?? null,
+          projectId: result?.project?.id ?? result?.session?.projectId ?? "default",
+          agent: result?.agent,
+          reply: result?.reply,
           toolCalls: result.output?.scrutiny?.action ? [] : []
         });
         // Terminal beat for the live-activity lane: lets the pet settle into
@@ -372,6 +387,19 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         || pathname.startsWith("/runs/")
         || pathname.startsWith("/channels/telegram/pairing-code")
       );
+      // The A2A JSON-RPC endpoint drives real agent turns on behalf of EXTERNAL
+      // peers, so loopback trust must NOT extend to it: any process on this box
+      // (or a browser coerced into a local request) would otherwise drive the
+      // agent with no credential at all. The agent card stays public by
+      // protocol contract; the RPC route never is. Mirrors the secrets carve-out.
+      // Found by Azazel's QA probe -- my own A2A tests used a stub server and
+      // therefore never exercised this gate.
+      //
+      // Scoped to the ENABLED case on purpose: when A2A is off the route must
+      // still 404 (below) rather than 401, or a disabled deployment leaks the
+      // fact that the endpoint exists. Fingerprinting resistance and the auth
+      // carve-out are both required, and the order matters.
+      const a2aRpcRoute = pathname === A2A_RPC_PATH && Boolean(a2aServer?.enabled);
 
       if (setupActive && method === "GET" && pathname === "/") {
         res.writeHead(302, { Location: "/setup" });
@@ -408,18 +436,23 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       const trustBypassAllowed = loopbackTrusted
         && !secretsRoute
         && !capabilityAdminRoute
-        && !projectDataRoute;
+        && !projectDataRoute
+        && !a2aRpcRoute;
       if (!isPublicRoute(pathname) && !setupBypass && !trustBypassAllowed) {
         const authToken = getAuthToken();
         // The rest of the local-only API retains its backwards-compatible
         // auth-disabled mode. The secrets surface is different: it must never
         // become anonymously reachable because OPENAGI_AUTH_TOKEN is absent.
-        const auth = (secretsRoute || capabilityAdminRoute) && !authToken
+        // The A2A RPC route shares that rule: a public protocol surface must
+        // fail CLOSED, never open, when no bearer token is configured.
+        const auth = (secretsRoute || capabilityAdminRoute || a2aRpcRoute) && !authToken
           ? {
               ok: false,
               reason: secretsRoute
                 ? "OPENAGI_AUTH_TOKEN is required for the secrets API"
-                : "OPENAGI_AUTH_TOKEN is required for capability administration"
+                : a2aRpcRoute
+                  ? "OPENAGI_AUTH_TOKEN is required for the A2A API"
+                  : "OPENAGI_AUTH_TOKEN is required for capability administration"
             }
           : checkAuth(req, url, authToken);
         if (!auth.ok) {
@@ -635,6 +668,69 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       // than base64 inlined into the dashboard HTML. Placed after the auth
       // gate so the art inherits the dashboard's protection.
       if (isCerberusAsset(pathname) && serveCerberusAsset(req, res, pathname)) return;
+      // --- A2A v1.0 (disabled by default; OPENAGI_A2A_ENABLED=1) -----------
+      // Both routes 404 when disabled so a scan cannot even fingerprint the
+      // protocol, and 404 off-loopback unless OPENAGI_A2A_ALLOW_REMOTE=1 --
+      // enabling A2A and exposing it to the network are separate decisions.
+      if (pathname === A2A_CARD_PATH || pathname === A2A_RPC_PATH) {
+        if (!a2aServer?.enabled) return sendJson(res, 404, { error: "not found" });
+        if (!a2aBindAllowed(req.socket?.remoteAddress)) {
+          return sendJson(res, 404, { error: "not found" });
+        }
+        if (method === "GET" && pathname === A2A_CARD_PATH) {
+          // PUBLIC by protocol contract. Curated, secret-free payload.
+          const requestHost = req.headers.host ?? `${host}:${port}`;
+          return sendJson(res, 200, a2aServer.agentCard({ url: `http://${requestHost}${A2A_RPC_PATH}` }));
+        }
+        if (method === "POST" && pathname === A2A_RPC_PATH) {
+          let body;
+          try {
+            body = await readJson(req);
+          } catch (error) {
+            return sendJson(res, 400, jsonRpcError(null, ERR_PARSE, `Invalid JSON: ${error?.message ?? "parse error"}`));
+          }
+          // message/stream streams StreamResponse events over SSE; every other
+          // method answers as a single JSON-RPC response.
+          if (body?.method === "message/stream") {
+            res.writeHead(200, {
+              "content-type": "text/event-stream",
+              "cache-control": "no-cache, no-transform",
+              connection: "keep-alive"
+            });
+            const emit = (event) => {
+              try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
+            };
+            // A long turn behind a proxy dies without traffic. The dashboard SSE
+            // path heartbeats for the same reason; comment frames are ignored by
+            // every SSE client but keep the connection alive.
+            const heartbeat = setInterval(() => {
+              try { res.write(": ping\n\n"); } catch { /* client gone */ }
+            }, 15000);
+            heartbeat.unref?.();
+            let closed = false;
+            req.on("close", () => { closed = true; clearInterval(heartbeat); });
+            try {
+              const response = await a2aServer.handleRpc(body, { onEvent: emit });
+              emit(response);
+            } catch (error) {
+              // Headers are already sent, so a JSON error response is no longer
+              // possible. Emit the failure as a JSON-RPC error EVENT instead --
+              // otherwise the client sees a silent half-open stream and hangs
+              // until its own timeout.
+              emit(jsonRpcError(body?.id ?? null, ERR_INTERNAL, `A2A stream failed: ${error?.message ?? String(error)}`));
+            } finally {
+              clearInterval(heartbeat);
+            }
+            // Stream closure signals the terminal state -- there is no final flag.
+            if (!closed) res.end();
+            return;
+          }
+          const response = await a2aServer.handleRpc(body);
+          return sendJson(res, 200, response);
+        }
+        return sendJson(res, 405, { error: "method not allowed" });
+      }
+
       // firstRun lets clients (Mac app) know setup has never completed, so
       // they can take the user to the wizard instead of sitting silent.
       if (method === "GET" && pathname === "/health") {
@@ -4577,6 +4673,18 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
       catch (error) { console.warn(`[hooks] gateway:shutdown failed open: ${error?.message ?? String(error)}`); }
       try { await runtime.hooks?.flush?.(); }
       catch (error) { console.warn(`[hooks] shutdown flush failed open: ${error?.message ?? String(error)}`); }
+      // Drain outbound webhooks after the hook queue, so gateway:shutdown itself
+      // gets delivered. Bounded: a dead receiver may delay exit, never hang it.
+      if (runtime.webhooks?.flush) {
+        try {
+          await Promise.race([
+            runtime.webhooks.flush(),
+            new Promise((resolve) => setTimeout(resolve, 5000).unref?.())
+          ]);
+        } catch (error) {
+          console.warn(`[webhooks] shutdown flush failed open: ${error?.message ?? String(error)}`);
+        }
+      }
       await new Promise((resolve, reject) => {
         if (tickerHandle) clearInterval(tickerHandle);
         if (heartbeatHandle) clearInterval(heartbeatHandle);

@@ -60,6 +60,7 @@ import {
   sameBackgroundMemoryProposal
 } from "./memory-intake-policy.js";
 import { isProfileMemoryScope } from "./memory-system.js";
+import { DenialBreaker, denialSessionKey } from "./denial-breaker.js";
 import { readableMemoryScopes } from "../lib/memtree.js";
 import { incrementMemoryRequestMetric } from "./memory-request-metrics.js";
 import {
@@ -198,6 +199,11 @@ export class ToolRegistry {
     // Keeping it in memory guarantees a daemon restart clears every allowance.
     this.sessionAllows = new Set();
     this.hooks = options.hooks ?? new HookRegistry({ loadConfig: false });
+    // Consecutive-denial valve. Escalates the BLOCK MESSAGE TEXT after N
+    // denials in a session; never aborts a turn or touches message history.
+    this.denialBreaker = options.denialBreaker ?? new DenialBreaker({
+      env: options.env ?? process.env
+    });
     this.toolSearchController = options.toolSearchController ?? null;
     this.projects = options.projects ?? null;
     this.profiles = options.profiles ?? null;
@@ -1192,6 +1198,19 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     const receiptState = context?.[EXECUTION_RECEIPT_STATE];
     markExecutionDecision(receiptState, "approval", "pending");
+    // Tell subscribers a human decision is now blocking a tool. This is what
+    // lets a dashboard stop polling for pending approvals. Deliberately WITHOUT
+    // `args`: a catastrophic command's arguments can carry credentials, and
+    // this payload leaves the machine over an operator-configured webhook.
+    try {
+      this.hooks?.notify?.("approval:required", {
+        actionId: action?.id,
+        toolName: name,
+        summary: action?.summary ?? null,
+        severity: action?.severity ?? null,
+        sessionId: context?.sessionId ?? null
+      });
+    } catch { /* approval notification is advisory */ }
     // Lightweight store doubles used by embedders may only implement the old
     // queue API. Preserve that contract while the real store provides the
     // Hermes-style suspend/resume rail.
@@ -1228,6 +1247,8 @@ export class ToolRegistry {
     });
     if (decision.decision === "approve") {
       markExecutionDecision(receiptState, "approval", "approved");
+      // A human said yes: the model is not in a blocked loop. Clear the tally.
+      this.denialBreaker.reset(denialSessionKey(context));
       // A legacy approval surface may already have executed before deciding.
       // Honor its recorded completion rather than replaying the side effect.
       if (decision.completed) {
@@ -1348,9 +1369,13 @@ export class ToolRegistry {
       return { ok: false, error: `Action ${action.id} cancelled because the turn ended while awaiting approval.` };
     }
     markExecutionDecision(receiptState, "approval", "blocked");
+    // An explicit human denial. Unlike the catastrophic BLOCK (which merely
+    // enqueues for a decision), this is a real dead end for the model, so it
+    // counts toward the breaker and carries the escalation text on trip.
+    const denialAddendum = this.denialBreaker.recordAndAddendum(denialSessionKey(context));
     return {
       ok: false,
-      error: `Action ${action.id} denied by ${decision.decidedBy ?? "human"}${decision.error ? `: ${decision.error}` : "."}`
+      error: `Action ${action.id} denied by ${decision.decidedBy ?? "human"}${decision.error ? `: ${decision.error}` : "."}${denialAddendum}`
     };
   }
 
@@ -1562,7 +1587,13 @@ export class ToolRegistry {
         }
         const unavailable = hookDecision.failure === "registry_error";
         const code = unavailable ? "security_hook_unavailable" : "hook_blocked";
-        const error = hookDecision.message ?? `Tool ${name} was blocked by a pre_tool_call hook.`;
+        // Non-catastrophic block is a dead end for the model: there is no
+        // approval queue to wait on, so a retry loop here is unbounded. Count
+        // it, and once the breaker trips append the hard-stop instruction to
+        // the message text the model reads next. Nothing else changes.
+        const breakerKey = denialSessionKey(context);
+        const error = (hookDecision.message ?? `Tool ${name} was blocked by a pre_tool_call hook.`)
+          + this.denialBreaker.recordAndAddendum(breakerKey);
         const blocked = await ensureSemanticToolEnvelope(tool, {
           ok: false,
           error,
@@ -1872,6 +1903,10 @@ export class ToolRegistry {
       if (semantic.ok && context?.__approval) {
         semantic.result = appendApprovalNote(semantic.result, context.__approval);
       }
+      // One successful tool call means the model is no longer stuck. Clearing
+      // the tally here is what keeps the breaker from false-firing across a
+      // long session that hits scattered, unrelated blocks.
+      if (semantic.ok) this.denialBreaker.reset(denialSessionKey(context));
       this._scheduleTimelineCapture({
         name,
         context,

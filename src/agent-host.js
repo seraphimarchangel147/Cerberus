@@ -1,3 +1,4 @@
+import { STEER_CHANNEL_NOTE } from "./turn-steering.js";
 import path from "node:path";
 import { types as utilTypes } from "node:util";
 import { InMemoryAgentStore, legacyDiscordKey } from "./agent-store.js";
@@ -657,7 +658,12 @@ export class AgentHost {
       }
     }
 
-    // A real inbound user message always wins over an automated goal loop.
+    // A real inbound user message used to always kill an automated goal loop.
+    // Now it does so ONLY when no turn is running: if a turn is in flight, the
+    // message is a course correction, not a cancellation, so it is queued as a
+    // steer and delivered at the next tool-batch boundary. The goal survives
+    // and the in-flight tool work is not thrown away.
+    //
     // Discord also performs this at enqueue time so a queued message can stop
     // an in-flight judge before same-session serialization reaches this point.
     if (
@@ -668,7 +674,17 @@ export class AgentHost {
     ) {
       try {
         if (this.runtime.goals?.get?.(sessionId)?.status === "active") {
-          this.runtime.goals.preempt(sessionId, "real user message");
+          const steering = this.runtime.steering;
+          if (steering?.isTurnInFlight?.(sessionId) && steering.steer(sessionId, text)) {
+            // Redirect: never kill a tool merely to deliver conversational
+            // guidance. Deliberate scope cut -- when a model request (rather
+            // than a tool) is outstanding we still steer rather than
+            // abort-and-retry the request; the steer lands at the next tool
+            // boundary, and a tool-free chat turn ends in seconds anyway.
+            this.log?.({ op: "turn-steered", sessionId, channel });
+          } else {
+            this.runtime.goals.preempt(sessionId, "real user message");
+          }
         }
       } catch {
         // Goal control is advisory to accepting a real user message.
@@ -949,6 +965,7 @@ export class AgentHost {
       : { ...output, scrutiny: effectiveScrutiny };
     // Tell the live-progress observer (Discord status line) what the
     // scrutiny gate decided before any model/tool work starts.
+    const turnStartedAt = Date.now();
     recordRunInspector(this.runtime, {
       runId: turnId,
       projectId: project.id,
@@ -1135,6 +1152,13 @@ export class AgentHost {
     }));
 
     const turnAbortController = new AbortController();
+    // Mark the turn in flight so a concurrent user message can steer it rather
+    // than preempt the goal. Cleared in the finally below, on BOTH the success
+    // and failure paths, so a crashed turn cannot leave a session permanently
+    // "in flight" and silently swallow every later preempt.
+    if (!ephemeral) {
+      this.runtime.steering?.beginTurn?.(sessionId, { turnId, abortController: turnAbortController });
+    }
     const inputAbortSignal = input.abortSignal;
     const onInputAbort = () => turnAbortController.abort(inputAbortSignal.reason);
     if (inputAbortSignal?.aborted) onInputAbort();
@@ -1360,6 +1384,23 @@ export class AgentHost {
     } finally {
       toolRegistry?.clearFailureScope?.(modelContext);
       inputAbortSignal?.removeEventListener?.("abort", onInputAbort);
+      // Terminal path for BOTH the success return and the catch above.
+      // endTurn returns any steer that was accepted from the user but never
+      // reached a tool boundary. Dropping it from the turn is correct (a late
+      // delivery would be a surprising injection), but losing it silently is
+      // not: the user typed a correction and it went nowhere. Log it so the
+      // condition is observable, and count it in steering.stats().
+      if (!ephemeral) {
+        const stranded = this.runtime.steering?.endTurn?.(sessionId, { turnId });
+        if (stranded) {
+          this.log?.({
+            op: "steer-undelivered",
+            sessionId,
+            channel,
+            chars: String(stranded).length
+          });
+        }
+      }
     }
 
     let selfOptimizationReward = null;
@@ -1581,6 +1622,25 @@ export class AgentHost {
         )
       }
     });
+
+    // A webhook consumer that only sees post_tool_call cannot tell when the
+    // agent actually finished. Routed through _notifyHook so the payload is
+    // sanitized for audit like every other emission.
+    //
+    // Ephemeral turns are connectivity probes, not real work: they are excluded
+    // from every other lifecycle hook (agent:start/step/end) and must be
+    // excluded here too, or a webhook receiver sees phantom turns.
+    if (!ephemeral) {
+      this._notifyHook("turn:complete", {
+        sessionId,
+        projectId: project.id,
+        turnId,
+        stopReason: modelResult.stopReason ?? null,
+        iterations: modelResult.iterations ?? null,
+        durationMs: Math.max(0, Date.now() - turnStartedAt),
+        channel
+      });
+    }
 
     return {
       id: turnId,
@@ -2153,6 +2213,11 @@ export class AgentHost {
     const budgetedMemoryBlock = this.runtime?.memtree
       ? "\n\nBudgeted memory tools: use memory_wake to refresh the age-decayed cover, memory_zoom and memory_merge to satisfy in-band summary requests, memory_tree_recall for exact regex lookup, and read_spill for exact line ranges from oversized tool results."
       : "";
+    // The steer marker only works if the model is taught to trust it. Without
+    // this block a mid-turn steer reads as an injection attempt inside tool
+    // output and gets refused -- which is exactly what happened upstream before
+    // the note was added. The two ship together or not at all.
+    const steeringBlock = `\n\n${STEER_CHANNEL_NOTE}`;
     return `${agent.systemPrompt ? `${agent.systemPrompt}\n\n` : ""}You are ${agent.name}, an always-on OpenAGI agent.
 
 Your job is to help through the ABI loop:
@@ -2160,7 +2225,7 @@ Your job is to help through the ABI loop:
 2. Use memory deliberately. When the user CORRECTS something you previously stored or said (a time, a name, a decision, a preference), call correct_memory with the corrected fact — never just remember a second conflicting version.
 3. Propagate bounded specialists only when repeated or novel high-risk work justifies it.
 
-Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}${skillBlock}${budgetedMemoryBlock}`;
+Answer the user plainly. If a specialist was created, mention its name and scope.${projectBlock}${profileBlock}${skillBlock}${budgetedMemoryBlock}${steeringBlock}`;
   }
 
   // Per-turn [context] block prepended to the latest user message (see

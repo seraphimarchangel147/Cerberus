@@ -64,6 +64,8 @@ import {
   TerminalSessionManager
 } from "./terminal-session-manager.js";
 import { HookRegistry } from "./hook-registry.js";
+import { registerOutboundWebhooks } from "./outbound-webhooks.js";
+import { TurnSteering } from "./turn-steering.js";
 import { PendingActionStore } from "./pending-actions.js";
 import { ToolOutputStore } from "./tool-output-store.js";
 import { SpillStore } from "./spill-store.js";
@@ -509,6 +511,16 @@ export class AbiRuntime {
       ?? options.tools?.hooks
       ?? new HookRegistry({ dataDir: options.dataDir, ...(options.hookOptions ?? {}) });
     this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks });
+    // Outbound webhooks subscribe to the hook registry like any other observer,
+    // so every existing notify() emission becomes deliverable with no call-site
+    // change. Null when nothing is configured in <dataDir>/webhooks.json.
+    this.webhooks = options.webhooks ?? registerOutboundWebhooks(this.hooks, {
+      dataDir: options.dataDir,
+      ...(options.webhookOptions ?? {})
+    });
+    // Mid-turn steering: lets a real user message redirect an in-flight turn
+    // at the next tool boundary instead of preempting the goal loop outright.
+    this.steering = options.steering ?? new TurnSteering();
     this.tools.bindHooks?.(this.hooks);
     this.tools.bindProjects?.(this.projects);
     this.tools.bindProfiles?.(this.profiles);

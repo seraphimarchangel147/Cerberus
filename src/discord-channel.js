@@ -371,8 +371,24 @@ export class DiscordChannel {
     // turn for the same session is still running.
     if (!message.author?.bot) {
       const goals = this.agentHost?.runtime?.goals;
+      const steering = this.agentHost?.runtime?.steering;
       try {
         if (goals?.get?.(key)?.status === "active") {
+          // Same redirect-vs-preempt rule as agent-host: when a turn is already
+          // running, a user message is a course correction delivered at the
+          // next tool boundary, not a cancellation. Without this check Discord
+          // would keep preempting at enqueue time and make the whole steering
+          // phase a no-op on the channel that actually matters.
+          if (steering?.isTurnInFlight?.(key) && steering.steer(key, cleaned)) {
+            this.log({ op: "goal-steered", key });
+            // RETURN, do not fall through to the turn lock. The steer IS the
+            // delivery: the running turn will read this text at its next tool
+            // boundary. Falling through queued the identical message a second
+            // time, so the model saw the same correction twice -- once via the
+            // steer marker mid-turn, then again as a fresh user turn once the
+            // lock freed. Found by Azazel's section-2 QA pass.
+            return this.turnLocks.get(key) ?? Promise.resolve();
+          }
           goals.preempt?.(key, "discord-user-message");
         }
       } catch (error) {

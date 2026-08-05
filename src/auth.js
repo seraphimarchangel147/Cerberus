@@ -38,9 +38,16 @@ export function clearCookie() {
 export function isPublicRoute(pathname) {
   // Webhooks self-authenticate; /health stays open as a liveness check.
   // /sign-in is the path you use to GET auth — must be reachable unauthenticated.
+  //
+  // The A2A agent card is public BY PROTOCOL CONTRACT: it is the discovery
+  // document a peer fetches before it has any credential. It is therefore a
+  // curated, secret-free payload (see src/a2a-protocol.js buildAgentCard).
+  // Every other A2A route stays behind bearer auth. The route only exists at
+  // all when OPENAGI_A2A_ENABLED=1; when disabled it 404s before reaching here.
   return (
     pathname === "/health" ||
     pathname === "/sign-in" ||
+    pathname === "/.well-known/agent-card.json" ||
     pathname === "/channels/telegram/webhook" ||
     pathname === "/webhooks/buildbetter"
   );
