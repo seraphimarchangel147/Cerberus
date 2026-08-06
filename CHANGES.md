@@ -2730,4 +2730,35 @@ CONTEXT VALUE WAVE 3 COMPLETE
 - 2026-08-04T12:48:01.860Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend skeleton header to cover 2026-08-04 re-issue
 - 2026-08-05T12:26:14.062Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend draft header to cover 2026-08-05 re-issue (task_9c86ed66f7984dc6)
 - 2026-08-05T12:26:49.414Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend header to cover 2026-08-05 re-issue (task_c55f71cca65042b4)
-- 2026-08-05T18:27:32.160Z · **azazel** · create `drafts/thursday-dashboard-checkin-2026-08-06.md` — Draft Thursday check-in proposal for dashboard progress review (draft-only, not scheduled)
+- 2026-08-05T18:27:32.160Z - **azazel** - create `drafts/thursday-dashboard-checkin-2026-08-06.md` - Draft Thursday check-in proposal for dashboard progress review (draft-only, not scheduled)
+
+## 2026-08-06 - Cerberus sprite toggle and animation dev menu
+
+- Added a persisted Sprite art setting, defaulting on. Turning it off makes
+  drawCerbSprite return false immediately, preserving the existing procedural
+  fallback for Omega and Alpha without changing any render call site. Pup,
+  Prime, and Ultra remain procedural in either setting.
+- Added a Dev / animations overlay and the cerbPetDevMenu console hook. The
+  overlay derives its five form controls from FORMS and every animation row,
+  frame count, loop flag, hold, duration, and engine-state alias from the live
+  atlas manifest. It reports the explicit procedural-only state for forms with
+  no atlas rows.
+- Play uses the normal engine state for aliased rows. Unaliased rows such as
+  walk use a menu-scoped forceRow override that cannot be set while the menu is
+  closed. Stop or closing the menu clears the override, and closing also clears
+  the live frame/index refresh timer.
+- Added a rendered-dashboard integration test. It parses the actual inline
+  client bundle, loads the real atlas manifest, proves sprite-off fallback for
+  Omega and Alpha, counts seven rows for both atlas forms, checks the exact
+  procedural-only message for stages 0 through 2, and draws walk frame zero
+  through the unaliased override.
+- The untouched branch initially contained one contradictory watchdog test
+  demanding an eight-hour wall-clock ceiling that the established changelog,
+  implementation, and unlimited-progress regression test explicitly prohibit.
+  Commit 3322d11 corrected that assertion without changing runtime behavior.
+- Verification: node scripts/run-tests.mjs 0 on the Linux lane reports 2296
+  passed and 0 failed. Both server-module and freshly rendered inline-client
+  syntax checks pass. No dependencies, sprite assets, default stage, or
+  walk-latch displacement logic changed.
+
+SPRITE TOGGLE AND DEV MENU COMPLETE

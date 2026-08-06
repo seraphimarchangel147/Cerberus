@@ -14418,6 +14418,8 @@ switchTab(initialTab);
      old look instead of an empty canvas. */
   var CERB_ATLAS_BASE = "/assets/cerberus/";
   var cerbAtlas = { manifest: null, images: {}, ready: false, failed: false };
+  var devMenuOpen = false;
+  var devForceRow = null;
 
   (function loadCerbAtlas() {
     fetch(CERB_ATLAS_BASE + "atlas.json", { credentials: "same-origin" })
@@ -14469,13 +14471,14 @@ switchTab(initialTab);
     var m = cerbAtlas.manifest;
     if (!m || !m.forms[form]) return null;
     var states = m.forms[form].states;
-    var row = forceRow || (m.alias && m.alias[engineState]) || "idle";
+    var row = (devMenuOpen && devForceRow) || forceRow || (m.alias && m.alias[engineState]) || "idle";
     return states[row] ? row : (states.idle ? "idle" : null);
   }
 
   /* Blit the current frame of a form's atlas. Returns false when the atlas
      isn't available yet, which tells the caller to draw its procedural body. */
   function drawCerbSprite(ctx, P, form, forceRow) {
+    if (!settings.sprites) return false;
     if (!cerbAtlas.ready || !cerbAtlas.images[form]) return false;
     var m = cerbAtlas.manifest;
     var F = m.forms[form];
@@ -14770,7 +14773,7 @@ switchTab(initialTab);
      stage meant a fresh profile saw zero of the sprite work for the first
      EVOLVE_MS (20 min) of uptime. Default to the first form that renders the
      atlas; persisted settings still win, so existing profiles are untouched. */
-  var settings = { enabled:true, scale:3, glow:true, autoEvolve:true, stage:3, xp:0 };
+  var settings = { enabled:true, scale:3, glow:true, sprites:true, autoEvolve:true, stage:3, xp:0 };
   try {
     var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
     if (saved) for (var k in settings) if (saved[k] !== undefined) settings[k] = saved[k];
@@ -14889,8 +14892,10 @@ switchTab(initialTab);
   }
   function setForm(stage) {
     stage = Math.max(0, Math.min(FORMS.length - 1, stage|0));
+    devForceRow = null;
     settings.stage = stage; settings.xp = 0; evolving = false; evolveT = 0;
     saveSettings(); applyCanvasStyle(); updatePanel(); updateHud();
+    if (devMenuOpen) renderCerbDevMenu();
   }
   function resetToBase() { setForm(0); }
 
@@ -14954,7 +14959,8 @@ switchTab(initialTab);
   window.cerbPetGetInfo = function () {
     return { stage:settings.stage, form:FORMS[settings.stage].key, name:FORMS[settings.stage].name,
              xp:settings.xp, xpMax:FORMS[settings.stage].xpMax, enabled:settings.enabled,
-             scale:settings.scale, glow:settings.glow, autoEvolve:settings.autoEvolve, state:state,
+             scale:settings.scale, glow:settings.glow, sprites:settings.sprites,
+             autoEvolve:settings.autoEvolve, state:state,
              /* animation timing, for automated verification */
              fps:FPS, ticksPerFrame:TICKS_PER_FRAME };
   };
@@ -14983,7 +14989,8 @@ switchTab(initialTab);
          legitimately repeat a pose (sleep holds sleep_rest twice), so the
          name alone cannot prove playback advanced. */
       indices: JSON.parse(JSON.stringify(cerbSprLastIdx)),
-      state: state, stage: settings.stage,
+      state: state, stage: settings.stage, sprites: settings.sprites,
+      devMenuOpen: devMenuOpen, devForceRow: devForceRow,
       /* Locomotion inputs, so a failing walk-row assertion can be diagnosed
          from the harness instead of by re-deriving the chase math by hand. */
       petX: petX, petY: petY, mouseX: mouseX, mouseY: mouseY, moving: lastMoving,
@@ -15012,6 +15019,14 @@ switchTab(initialTab);
   panel.id = "cerbPetPanel";
   panel.style.cssText = "position:fixed;z-index:10001;right:14px;top:96px;width:240px;background:rgba(16,9,9,0.96);border:1px solid rgba(224,69,26,0.45);border-radius:10px;padding:14px;font-family:inherit;color:#e8e0d8;font-size:12px;display:none;pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,0.6);";
   document.body.appendChild(panel);
+
+  var devPanel = document.createElement("div");
+  devPanel.id = "cerbPetDevMenuPanel";
+  devPanel.style.cssText = "position:fixed;z-index:10002;right:270px;top:96px;width:310px;max-width:calc(100vw - 28px);box-sizing:border-box;max-height:calc(100vh - 120px);overflow-y:auto;background:rgba(16,9,9,0.98);border:1px solid rgba(224,69,26,0.55);border-radius:10px;padding:12px;font-family:inherit;color:#e8b84a;font-size:11px;display:none;pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,0.7);";
+  document.body.appendChild(devPanel);
+
+  var devMenuTimer = null;
+  var devMenuManifest = null;
 
   var panelOpen = false;
   gear.addEventListener("click", function () {
@@ -15042,6 +15057,203 @@ switchTab(initialTab);
     b.style.cssText = "width:100%;margin:6px 0 0;padding:7px 0;border-radius:6px;border:1px solid " + (accent?"rgba(255,138,30,0.6)":"rgba(224,69,26,0.4)") + ";background:" + (accent?"rgba(255,138,30,0.15)":"rgba(224,69,26,0.1)") + ";color:" + (accent?"#ffd97a":"#e8b84a") + ";font-size:12px;font-family:inherit;cursor:pointer;";
     b.addEventListener("click", fn); return b;
   }
+
+  function cerbDevButton(label, fn) {
+    var b = document.createElement("button");
+    b.textContent = label;
+    b.style.cssText = "padding:5px 7px;border-radius:5px;border:1px solid rgba(224,69,26,0.5);background:rgba(224,69,26,0.12);color:#ffd97a;font-size:10px;font-family:inherit;cursor:pointer;";
+    b.addEventListener("click", fn);
+    return b;
+  }
+
+  function cerbDevAliases(rowName) {
+    var alias = (cerbAtlas.manifest && cerbAtlas.manifest.alias) || {};
+    return Object.keys(alias).filter(function (engineState) {
+      return alias[engineState] === rowName;
+    }).sort();
+  }
+
+  function playCerbDevRow(rowName, aliases) {
+    if (!devMenuOpen) return;
+    var form = FORMS[settings.stage].key;
+    var m = cerbAtlas.manifest;
+    var states = m && m.forms && m.forms[form] && m.forms[form].states;
+    if (!states || !states[rowName]) return;
+    devForceRow = null;
+    delete cerbSprCursor[form];
+    if (aliases.length) {
+      setState(aliases[0]);
+    } else if (devMenuOpen) {
+      devForceRow = rowName;
+    }
+    refreshCerbDevLive();
+  }
+
+  function stopCerbDevRow() {
+    var form = FORMS[settings.stage].key;
+    devForceRow = null;
+    delete cerbSprCursor[form];
+    refreshCerbDevLive();
+  }
+
+  function refreshCerbDevLive() {
+    if (!devMenuOpen) return;
+    if (devMenuManifest !== cerbAtlas.manifest) {
+      renderCerbDevMenu();
+      return;
+    }
+    var live = document.getElementById("cerbPetDevLive");
+    if (!live) return;
+    var form = FORMS[settings.stage].key;
+    var m = cerbAtlas.manifest;
+    if (!settings.sprites) {
+      live.textContent = "Live: procedural rig (sprite art off)";
+      return;
+    }
+    if (!m) {
+      live.textContent = settings.stage < 3
+        ? "Live: procedural only"
+        : "Live: atlas manifest loading";
+      return;
+    }
+    if (!m.forms || !m.forms[form]) {
+      live.textContent = "Live: procedural only";
+      return;
+    }
+    var cur = cerbSprCursor[form];
+    var rowName = cur ? cur.row : cerbAtlasRow(form, state, null);
+    var frameName = cerbSprLastFrame[form];
+    var frameIdx = cerbSprLastIdx[form];
+    live.textContent = "Live: row " + (rowName || "none")
+      + " | frame " + (frameName || "not drawn yet")
+      + " | index " + (frameIdx == null ? "-" : frameIdx)
+      + (devForceRow ? " | forced" : "");
+  }
+
+  function renderCerbDevMenu() {
+    if (!devMenuOpen) return;
+    devPanel.innerHTML = "";
+    devMenuManifest = cerbAtlas.manifest;
+
+    var heading = document.createElement("div");
+    heading.style.cssText = "display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(224,69,26,0.35);padding-bottom:7px;margin-bottom:8px;";
+    var title = document.createElement("b");
+    title.textContent = "ANIMATION DEV MENU";
+    title.style.cssText = "color:#ffd97a;letter-spacing:0.6px;";
+    heading.appendChild(title);
+    heading.appendChild(cerbDevButton("Close", function () { setCerbDevMenuOpen(false); }));
+    devPanel.appendChild(heading);
+
+    var formRow = document.createElement("div");
+    formRow.style.cssText = "display:grid;grid-template-columns:repeat(5,1fr);gap:3px;margin-bottom:8px;";
+    for (var fi=0; fi<FORMS.length; fi++) {
+      (function (idx) {
+        var formButton = cerbDevButton(
+          FORMS[idx].key.charAt(0).toUpperCase() + FORMS[idx].key.slice(1),
+          function () { setForm(idx); }
+        );
+        formButton.setAttribute("data-cerb-dev-form", idx);
+        formButton.style.color = FORM_COLOR[idx];
+        if (idx === settings.stage) {
+          formButton.style.background = "rgba(255,138,30,0.35)";
+          formButton.style.borderColor = "rgba(255,138,30,0.85)";
+        }
+        formRow.appendChild(formButton);
+      })(fi);
+    }
+    devPanel.appendChild(formRow);
+
+    var controls = document.createElement("div");
+    controls.style.cssText = "display:grid;grid-template-columns:1fr;gap:4px;margin-bottom:8px;";
+    var stop = cerbDevButton("Stop / resume live state", stopCerbDevRow);
+    stop.style.width = "100%";
+    controls.appendChild(stop);
+    devPanel.appendChild(controls);
+
+    var live = document.createElement("div");
+    live.id = "cerbPetDevLive";
+    live.style.cssText = "margin:6px 0 9px;padding:6px;border-radius:5px;background:rgba(224,69,26,0.08);color:#ffd97a;";
+    devPanel.appendChild(live);
+
+    var form = FORMS[settings.stage].key;
+    var m = cerbAtlas.manifest;
+    var formSpec = m && m.forms && m.forms[form];
+    if (!m && settings.stage >= 3) {
+      var loading = document.createElement("div");
+      loading.textContent = "Atlas manifest is loading.";
+      loading.style.cssText = "padding:10px 4px;color:#c9beb0;";
+      devPanel.appendChild(loading);
+      refreshCerbDevLive();
+      return;
+    }
+    if (!formSpec) {
+      var procedural = document.createElement("div");
+      procedural.setAttribute("data-cerb-procedural-only", "true");
+      procedural.textContent = "procedural only - no atlas rows for this form";
+      procedural.style.cssText = "padding:10px 4px;color:#c9beb0;";
+      devPanel.appendChild(procedural);
+      refreshCerbDevLive();
+      return;
+    }
+
+    var states = formSpec.states || {};
+    Object.keys(states).sort().forEach(function (rowName) {
+      var spec = states[rowName] || {};
+      var seq = Array.isArray(spec.seq) ? spec.seq : [];
+      var hold = Number(spec.hold) || 0;
+      var seconds = seq.length * hold * TICKS_PER_FRAME / 60;
+      var aliases = cerbDevAliases(rowName);
+      var section = document.createElement("div");
+      section.setAttribute("data-cerb-row", rowName);
+      section.style.cssText = "margin:6px 0;padding:7px;border:1px solid rgba(224,69,26,0.3);border-radius:6px;background:rgba(224,69,26,0.05);";
+
+      var rowHead = document.createElement("div");
+      rowHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:6px;";
+      var rowTitle = document.createElement("b");
+      rowTitle.textContent = rowName;
+      rowTitle.style.color = "#ffd97a";
+      rowHead.appendChild(rowTitle);
+      var play = cerbDevButton("Play", function () { playCerbDevRow(rowName, aliases); });
+      play.setAttribute("data-cerb-play-row", rowName);
+      rowHead.appendChild(play);
+      section.appendChild(rowHead);
+
+      var details = document.createElement("div");
+      details.style.cssText = "margin-top:4px;color:#c9beb0;line-height:1.45;";
+      details.textContent = seq.length + " frames | loop " + (!!spec.loop)
+        + " | hold " + hold + " | " + seconds.toFixed(2) + "s";
+      section.appendChild(details);
+
+      var aliasLine = document.createElement("div");
+      aliasLine.style.cssText = "margin-top:2px;color:#e8b84a;";
+      aliasLine.textContent = aliases.length
+        ? "aliases: " + aliases.join(", ")
+        : "no alias - forceRow only";
+      section.appendChild(aliasLine);
+      devPanel.appendChild(section);
+    });
+    refreshCerbDevLive();
+  }
+
+  function setCerbDevMenuOpen(open) {
+    devMenuOpen = !!open;
+    devPanel.style.display = devMenuOpen ? "block" : "none";
+    if (!devMenuOpen) {
+      devForceRow = null;
+      if (devMenuTimer !== null) window.clearInterval(devMenuTimer);
+      devMenuTimer = null;
+      return;
+    }
+    renderCerbDevMenu();
+    if (devMenuTimer === null) {
+      devMenuTimer = window.setInterval(refreshCerbDevLive, 150);
+    }
+  }
+
+  window.cerbPetDevMenu = function (open) {
+    setCerbDevMenuOpen(open === undefined ? true : !!open);
+    return devMenuOpen;
+  };
 
   function buildPanel() {
     panel.innerHTML = "";
@@ -15083,6 +15295,7 @@ switchTab(initialTab);
 
     var r1 = row("Show pet"); r1.appendChild(toggle(function(){return settings.enabled;}, function(v){settings.enabled=v;})); panel.appendChild(r1);
     var r2 = row("Ember glow"); r2.appendChild(toggle(function(){return settings.glow;}, function(v){settings.glow=v;})); panel.appendChild(r2);
+    var rS = row("Sprite art"); rS.appendChild(toggle(function(){return settings.sprites;}, function(v){settings.sprites=v;})); panel.appendChild(rS);
     var r3 = row("Auto-evolve"); r3.appendChild(toggle(function(){return settings.autoEvolve;}, function(v){settings.autoEvolve=v;})); panel.appendChild(r3);
 
     var r4 = row("Size");
@@ -15099,6 +15312,7 @@ switchTab(initialTab);
 
     panel.appendChild(btn("Evolve now", function(){ doEvolve(); }, true));
     panel.appendChild(btn("Reset to pup", function(){ resetToBase(); }, false));
+    panel.appendChild(btn("Dev / animations", function(){ setCerbDevMenuOpen(!devMenuOpen); }, false));
   }
   buildPanel();
 
