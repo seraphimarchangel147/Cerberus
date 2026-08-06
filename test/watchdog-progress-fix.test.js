@@ -122,13 +122,13 @@ test("ANTI-SPIN PRESERVED: hammering the SAME failing call credits once", () => 
   );
 });
 
-test("hard ceiling default is 8 hours", async () => {
+test("progress-aware watchdog does not reintroduce a hard wall-clock ceiling", async () => {
   const src = await import("node:fs").then((fs) =>
     fs.promises.readFile(new URL("../src/model-provider.js", import.meta.url), "utf8")
   );
-  assert.match(
+  assert.doesNotMatch(
     src,
-    /DEFAULT_MAX_TURN_HARD_SECONDS\s*=\s*28800/,
-    "the runaway backstop must remain 8h (28800s)"
+    /DEFAULT_MAX_TURN_HARD_SECONDS/,
+    "productive turns are work-bounded and must not regain an elapsed-time ceiling"
   );
 });
