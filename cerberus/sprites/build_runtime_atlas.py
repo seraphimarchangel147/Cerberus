@@ -40,15 +40,19 @@ OUT_DIR = os.path.join(BASE_DIR, "runtime")
 CELL = 128
 
 # ── Frame inventory ────────────────────────────────────────────────────────
-# Every frame is derived from ONE identity-locked base per state via bounded
-# procedural transforms (photometric shimmer on a seeded glow subset + a
-# horizontal weight-shift for walk/attack), so inter-frame change is gated:
-#   idle/sleep <= 10%, alert/working/attack/victory/walk <= 25%, width spread
-#   0px, baseline top=20 bottom=123 exact on every frame, every frame unique,
-#   true period == seq length, min motion 0.5% (see gate_runtime.py).
-# Each state has DISTINCT choreography — different glow zone (seeded subset),
-# amplitude, wavelength, cycle count — so the states read as different
-# energies, not one shimmer at different speeds.
+# Every frame is derived from ONE base per state via bounded procedural
+# motion (breath / bob / sway / lunge / leg weight-shift) plus a photometric
+# shimmer wave on a seeded glow subset, so motion is real silhouette change
+# and inter-frame behavior is gated (see gate_runtime.py):
+#   silhouette presence-XOR per-state FLOOR (frozen bodies fail) and CAP
+#   (thrash fails), bounded top/bottom ranges, planted feet for idle/sleep,
+#   every frame unique, true period == seq length, shimmer on alpha-constant
+#   pixels >= 0.5%, geometry-signature collision check, shimmer-zone IoU cap.
+# v4 required a frozen silhouette and produced a statue (recolor-only rows);
+# v5 moves the body — Creator's eye caught what the old gate certified.
+# Each state has DISTINCT choreography — different motion (breath vs bob vs
+# sway vs lunge) and different shimmer zone — so states read as different
+# energies, not one effect at different speeds.
 # Naming: dl=idle, al=alert, wo=working, at=attack, vc=victory,
 #         wk=walk, sl=sleep.
 def derived_names(prefix, n):

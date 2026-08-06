@@ -80,34 +80,41 @@ Nothing at runtime reads these.
 (clamps G to avg(R,B) on green-dominant pixels). Zero green spill verified across
 all frames.
 
-## Animation architecture (identity-locked derivation)
+## Animation architecture (v5 — bodies move, identity holds)
 
-Every animated frame is derived from ONE identity-locked base per state via
-bounded procedural transforms — NOT independently generated illustrations.
-Independently generated frames re-decide pose/proportions/silhouette each time
-and strobe when sequenced (inter-frame change 30-58%); derivation locks identity
-structurally.
+Every animated frame is derived from ONE base per state via bounded
+procedural motion plus a photometric shimmer wave — NOT independently
+generated illustrations. Independently generated frames re-decide
+pose/proportions/silhouette each time and strobe when sequenced
+(inter-frame change 30-58%); derivation locks identity structurally.
 
-- `derive_frames.py` — derives all cycles from the bases, with DISTINCT
-  choreography per state (different seeded glow zone, amplitude, wavelength,
-  and cycle count, so states read as different energies, not one shimmer at
-  different speeds):
-  - idle (`dl*`, 32f): calm breathing, 9% glow subset, slow long wave
-  - alert (`al*`, 24f): watchful scan, 12% subset, tighter faster wave
-  - working (`wo*`, 24f): rhythmic processing pulse, 10% subset, mid wave
-  - attack (`at*`, 24f): aggressive surge, 12% subset, big amp + whole-stance
-    horizontal snaps on leg clusters (one-shot row)
-  - victory (`vc*`, 24f): celebratory bloom, 20% subset, broad slow swell
-  - walk (`wk*`, 16f): stride shimmer + alternating weight-shift on leg
-    clusters from `walk_step_right`
-  - sleep (`sl*`, 16f): slow shallow flicker on a 7% subset of `sleep_rest`
-- Beat wave: every cycle pairs the main wave with an incommensurate minor wave
-  (coprime cycle count) so the combined period is exactly n — every frame is
-  unique, no phase-aliasing duplicates.
-- `gate_runtime.py` — gate QA measured from the packed runtime atlas (what the
-  engine consumes): inter-frame changed px, width spread, meanRGB swing,
-  baseline top=20/bottom=123, PLUS lower bounds: every frame unique, true
-  period == seq length, min motion 0.5%. Frames that fail a gate do not ship.
+v5 history: v4 locked every frame to an exact bbox (top=20, bottom=123) to
+prevent drift and phase aliasing. That invariant overshot into forbidding
+ALL silhouette motion — 12 of 14 rows recolored glow interiors on a frozen
+body, and the eye reads that as static. v5 keeps v4's uniqueness/period
+machinery and adds real geometry motion per state:
+
+- `derive_frames.py` — derives all cycles from the bases. Motion vocabulary:
+  - idle (`dl*`, 32f): BREATH — baseline-anchored vertical chest scale,
+    feet planted (bottom=123 exact), 2 rows of rise/fall over 2 cycles
+  - alert (`al*`, 24f): SWAY — whole-body horizontal weight-shift ±2px
+  - working (`wo*`, 24f): BOB — vertical lift 0..2px off the baseline
+  - attack (`at*`, 24f): stance surge + LUNGE — leg-cluster snaps, bob,
+    and a ±3px horizontal lunge on the beat (one-shot row)
+  - victory (`vc*`, 24f): BOB — the biggest vertical lift (3px) + broad swell
+  - walk (`wk*`, 16f): stride — alternating leg-cluster weight-shift + bob,
+    from `walk_step_right`
+  - sleep (`sl*`, 16f): BREATH — one slow shallow breath per loop, feet planted
+  All motion is driven by the same coprime beat-wave pair as the shimmer
+  phases, so uniqueness/period survive; shimmer rides the moving body.
+- `gate_runtime.py` — gate QA measured from the packed runtime atlas (what
+  the engine consumes), rebuilt around ALPHA-channel metrics (RGB diffs are
+  contaminated by any geometry transform on textured art): silhouette
+  presence-XOR per-state FLOOR (frozen bodies fail) + CAP, bounded top/bottom
+  ranges, planted feet for idle/sleep, every frame unique, true period ==
+  seq length, shimmer on alpha-constant pixels >= 0.5%, geometry-signature
+  collision check (no two states perform identical motion), and
+  shimmer-zone IoU cap. Frames that fail a gate do not ship.
 
 Run order: `derive_frames.py` → `build_runtime_atlas.py` → `gate_runtime.py`.
 
