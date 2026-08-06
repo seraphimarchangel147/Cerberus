@@ -14765,7 +14765,12 @@ switchTab(initialTab);
 
   /* ── settings (persisted) ── */
   var SETTINGS_KEY = "cerbPetSettings";
-  var settings = { enabled:true, scale:3, glow:true, autoEvolve:true, stage:0, xp:0 };
+  /* stage 0-2 are procedural forms that never touch the sprite atlas — the
+     first atlas-backed form is OMEGA at stage 3. Defaulting to a pre-atlas
+     stage meant a fresh profile saw zero of the sprite work for the first
+     EVOLVE_MS (20 min) of uptime. Default to the first form that renders the
+     atlas; persisted settings still win, so existing profiles are untouched. */
+  var settings = { enabled:true, scale:3, glow:true, autoEvolve:true, stage:3, xp:0 };
   try {
     var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
     if (saved) for (var k in settings) if (saved[k] !== undefined) settings[k] = saved[k];
