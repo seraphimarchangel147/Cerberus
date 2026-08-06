@@ -1049,6 +1049,19 @@ export class ToolRegistry {
 
   _recordOutcome(tracking, envelope) {
     const { scope, fingerprint } = tracking;
+    // A PENDING outcome means a long-running call is still executing (a build,
+    // a full test suite, a deploy). That is liveness, not stagnation -- but the
+    // success branch below explicitly excludes pending, and the failure branch
+    // never ran for it either, so a single multi-checkpoint command scored ZERO
+    // progress and burned every idle allowance while the process was provably
+    // alive. This is the exact shape of the observed stop: a turn killed at 39
+    // tool calls while re-running a suite to a file. Credit liveness here and
+    // return without touching the repeat-detection bookkeeping, which only
+    // becomes meaningful once the call actually completes.
+    if (envelope?.outcome?.status === "pending") {
+      recordTurnProgress(tracking.progressContext);
+      return null;
+    }
     if (envelope?.ok === true && envelope?.outcome?.status !== "pending") {
       try {
         // ensureSemanticToolEnvelope has already applied the existing bounded
@@ -1101,12 +1114,28 @@ export class ToolRegistry {
       }
     }
     const previous = scope.entries.get(fingerprint);
+    const attempts = (previous?.attempts ?? 0) + 1;
     scope.entries.set(fingerprint, {
-      attempts: (previous?.attempts ?? 0) + 1,
+      attempts,
       envelope: failureTrackerEnvelope(envelope),
       inFlight: false
     });
     tracking.outputProgress = false;
+    // A FAILING call is not "no progress" -- it is work. A turn spending ten
+    // minutes correctly diagnosing a broken suite is the single most valuable
+    // thing an agent does, and the watchdog used to score it ZERO because this
+    // branch (envelope.ok !== true) never touched the progress counter. That
+    // made "failing usefully" indistinguishable from "doing nothing" and
+    // burned every idle allowance on a healthy turn.
+    //
+    // The anti-spin property is preserved by counting only DISTINCT failures:
+    // a genuine loop retries the SAME call and re-enters this branch with the
+    // same fingerprint, so attempts > 1 and no progress is credited. A turn
+    // failing its way through different commands advances; a turn hammering
+    // one failing command does not.
+    if (attempts === 1) {
+      recordTurnProgress(tracking.progressContext);
+    }
     return null;
   }
 
