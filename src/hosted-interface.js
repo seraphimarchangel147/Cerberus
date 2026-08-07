@@ -11632,7 +11632,13 @@ function petActivityPoke(mode) {
   // Fall back to idle if the harness goes quiet (turn ended without a
   // terminal event, e.g. an aborted or errored turn upstream).
   if (petActivityIdle) clearTimeout(petActivityIdle);
-  if (mode !== "done") {
+  /* "blocked" must NOT time out. Every other mode describes something the
+     agent is doing, so decaying to idle is correct when the harness goes
+     quiet. Blocked describes something the HUMAN has not done yet -- the
+     condition is still true after 45s of silence, and silently clearing it
+     would re-hide the approval prompt this state exists to surface. It is
+     cleared by the next real state change (an answer resumes the turn). */
+  if (mode !== "done" && mode !== "blocked") {
     petActivityIdle = setTimeout(function () {
       if (window.cerbPetReact) { try { window.cerbPetReact("idle"); } catch (e) {} }
       if (window.cerbHoloReact) { try { window.cerbHoloReact("idle"); } catch (e) {} }
@@ -11647,7 +11653,14 @@ evt.addEventListener("agent-activity", (e) => {
     else if (phase === "iteration" || phase === "verdict" || phase === "subagent") petActivityPoke("thinking");
     else if (phase === "end") petActivityPoke(data.ok === false ? "error" : "working");
     else if (phase === "turn-end") petActivityPoke("done");
-    else if (phase === "awaiting-approval") petActivityPoke("waiting");
+    else if (phase === "awaiting-approval") petActivityPoke("blocked");
+    /* The provider is backing off (rate limit / 5xx). Without this the pet
+       keeps its working pose through the whole retry ladder, so a stalled
+       turn is indistinguishable from a productive one. */
+    else if (phase === "provider-retry") petActivityPoke("straining");
+    /* A turn was killed by the runaway backstop. That is NOT the same as a
+       tool error, and conflating them hides which failure actually happened. */
+    else if (phase === "wall-clock-stopped") petActivityPoke("error");
     else if (phase === "goal") petActivityPoke(data.action === "completed" ? "done" : data.action === "stagnated" ? "error" : "thinking");
   } catch (err) {}
 });
@@ -11785,6 +11798,10 @@ evt.addEventListener("clarification-created", (e) => {
   try {
     const data = JSON.parse(e.data);
     showToast("❓ " + (data.question || "Need your call on a task"), true);
+    /* The single truest "blocked on YOU" signal in the system: a question is
+       queued and nothing proceeds until it is answered. The pet should say so
+       rather than sitting in an ambient thinking pose. */
+    if (window.cerbPetReact) { try { window.cerbPetReact("blocked"); } catch (err) {} }
     if ("Notification" in window && Notification.permission === "granted") {
       new Notification("Needs your call", { body: data.question || "" });
     }
@@ -14467,11 +14484,27 @@ switchTab(initialTab);
   var cerbSprLastFrame = {};
   var cerbSprLastIdx = {};
 
+  /* Interim art routing for states whose OWN atlas rows do not exist yet.
+     The manifest alias always wins; this is only consulted when the manifest
+     has nothing for the state, so the day Levi ships a real "blocked"/
+     "straining"/"hurt"/"doze" row the manifest takes over with NO code change
+     here. Without this the shared "return idle" fallback would silently make
+     every new state look identical to idle -- reintroducing exactly the
+     collision class these states were added to remove. */
+  var ROW_FALLBACK = {
+    blocked: "alert",     /* closest existing posture: heads up, attentive */
+    straining: "working", /* effortful, so borrow the work loop, not idle   */
+    hurt: "sleep",        /* the existing downed//droop art                 */
+    dozing: "sleep"       /* sleep art, finally reached WITHOUT a failure   */
+  };
+
   function cerbAtlasRow(form, engineState, forceRow) {
     var m = cerbAtlas.manifest;
     if (!m || !m.forms[form]) return null;
     var states = m.forms[form].states;
-    var row = (devMenuOpen && devForceRow) || forceRow || (m.alias && m.alias[engineState]) || "idle";
+    var row = (devMenuOpen && devForceRow) || forceRow || (m.alias && m.alias[engineState]);
+    /* Manifest first, interim map second, idle only as the last resort. */
+    if (!row || !states[row]) row = ROW_FALLBACK[engineState] || row || "idle";
     return states[row] ? row : (states.idle ? "idle" : null);
   }
 
@@ -14820,7 +14853,12 @@ switchTab(initialTab);
 
   var HUD_TONE = {
     idle:["#6b5a52","idle"], running:["#ff8a1e","working"], review:["#ffd24a","thinking"],
-    waving:["#7ddc7d","done"], jumping:["#7ddc7d","done"], failed:["#e0451a","error"], waiting:["#8d7e72","waiting"]
+    waving:["#7ddc7d","done"], jumping:["#7ddc7d","done"], failed:["#e0451a","error"], waiting:["#8d7e72","waiting"],
+    /* Distinct tones for the new states. blocked is deliberately the loudest
+       non-error colour on the list -- it is the only condition where the pet
+       is waiting on the HUMAN, so it must not read as ambient activity. */
+    blocked:["#4ea8ff","blocked on you"], straining:["#ff5a00","retrying"],
+    hurt:["#e0451a","failed"], dozing:["#5a4f66","dozing"]
   };
   var FORM_COLOR = ["#ffd97a", "#fff4d0", "#ff9a2a", "#ffd878", "#fffbe8"];
 
@@ -14855,7 +14893,25 @@ switchTab(initialTab);
     failed:{flameI:0.4,walk:0,bobAmp:0.4,roarCenter:false,roarSide:false,tailSpeed:0.03,sad:1},
     waving:{flameI:1.2,walk:0,bobAmp:1.2,roarCenter:true,roarSide:false,tailSpeed:0.35,sad:0},
     jumping:{flameI:1.6,walk:0,bobAmp:0,roarCenter:true,roarSide:true,tailSpeed:0.25,sad:0},
-    waiting:{flameI:0.7,walk:0,bobAmp:0.8,roarCenter:false,roarSide:false,tailSpeed:0.05,sad:0.3}
+    waiting:{flameI:0.7,walk:0,bobAmp:0.8,roarCenter:false,roarSide:false,tailSpeed:0.05,sad:0.3},
+    /* --- states added for conditions the harness already knew but the pet
+       could not express. Each was a COLLISION before: blocked rendered as
+       thinking (opposite meanings -- one says wait, the other says YOU are
+       the bottleneck), hurt rendered as the offline droop (a crashed turn
+       looked like a disconnected daemon), and a provider backoff looked like
+       happy work while nothing was happening. --- */
+    /* Blocked on a human decision. Alert posture but turned outward and
+       expectant -- the only state where the pet wants something from you. */
+    blocked:{flameI:0.9,walk:0,bobAmp:0.9,roarCenter:true,roarSide:false,tailSpeed:0.04,sad:0},
+    /* Provider retry/backoff: rate limited or 5xx. Effortful, not restful --
+       high flame with almost no motion reads as straining against a wall. */
+    straining:{flameI:1.7,walk:0,bobAmp:0.3,roarCenter:false,roarSide:true,tailSpeed:0.02,sad:0.2},
+    /* A real failure, distinct from the offline droop: recoil, not a nap. */
+    hurt:{flameI:0.5,walk:0,bobAmp:0.5,roarCenter:false,roarSide:false,tailSpeed:0.08,sad:0.8},
+    /* Genuine rest after a long quiet spell. The sleep ART already existed but
+       was reachable ONLY through failure, so a dozing pet was indistinguishable
+       from a crashed one. This gives it an honest, non-error door. */
+    dozing:{flameI:0.3,walk:0,bobAmp:0.5,roarCenter:false,roarSide:false,tailSpeed:0.02,sad:0}
   };
 
   var state = "idle";
@@ -14916,13 +14972,37 @@ switchTab(initialTab);
 
   window.addEventListener("mousemove", function (e) { mouseX = e.clientX; mouseY = e.clientY; });
 
+  /* Doze-off timer. The sleep ART shipped long ago but was reachable ONLY
+     through a failure path, so a resting pet and a crashed one looked the
+     same. After a long genuine quiet spell the pet now drifts to sleep on its
+     own, and ANY state change wakes it. Uses existing art -- no new frames. */
+  var DOZE_AFTER_MS = 300000;   /* 5 min of no state change */
+  var dozeTimer = null;
+  function armDoze() {
+    /* Guarded: the pet is also instantiated in timer-less contexts (jsdom-style
+       test sandboxes, SSR-ish evaluation). Dozing is a nicety, so its absence
+       must never take the whole widget down -- without this the entire pet
+       fails to initialise with "setTimeout is not defined". */
+    if (typeof setTimeout !== "function") return;
+    if (dozeTimer) clearTimeout(dozeTimer);
+    dozeTimer = setTimeout(function () {
+      /* Only doze from a genuinely calm state -- never mask an error, a
+         block, or work in flight by falling asleep on top of it. */
+      if (state === "idle") setState("dozing");
+    }, DOZE_AFTER_MS);
+  }
+
   function setState(s) {
     if (!STATES[s]) return;
     state = s;
     if (s === "jumping") jumpT = 0;
     if (s !== "idle") { egg = null; eggT = 0; }
+    /* Any state change is a sign of life: restart the quiet clock. Dozing
+       itself must not re-arm or the pet would loop through the timer. */
+    if (s !== "dozing") armDoze();
     updateHud();
   }
+  armDoze();
 
   window.cerbPetEgg = function (name) {
     setState("idle"); egg = name; eggT = 0;
@@ -14943,7 +15023,10 @@ switchTab(initialTab);
     if (mode === "thinking" || mode === "processing") { setState("review"); gainXP(2); }
     else if (mode === "working") { setState("running"); gainXP(1); }
     else if (mode === "done") { setState("waving"); gainXP(3); }
-    else if (mode === "error") { setState("failed"); }
+    /* error and offline were BOTH "failed" -- a crashed turn and a dead daemon
+       looked identical. They are different conditions and now read differently:
+       a failure recoils, a disconnect droops. */
+    else if (mode === "error") { setState("hurt"); }
     else if (mode === "offline") { setState("failed"); }
     else if (mode === "online") { setState("idle"); }
     else if (mode === "idle") { setState("idle"); }
@@ -14952,6 +15035,14 @@ switchTab(initialTab);
        Blocked-on-you is a genuinely different condition from thinking, so it
        gets its own door: see the awaiting-approval phase in agent-activity. */
     else if (mode === "waiting") { setState("waiting"); }
+    /* Blocked on a HUMAN decision -- the one state that is a request, not a
+       status. Kept separate from "waiting"/thinking so an unanswered approval
+       prompt cannot hide behind ambient activity. */
+    else if (mode === "blocked") { setState("blocked"); }
+    /* Provider is retrying (rate limit / 5xx). Previously indistinguishable
+       from productive work, so a stalled turn looked like a busy one. */
+    else if (mode === "straining" || mode === "retry") { setState("straining"); }
+    else if (mode === "dozing") { setState("dozing"); }
   };
   window.cerbPetSetState = setState;
   window.cerbPetEvolve = doEvolve;
