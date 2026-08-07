@@ -15518,7 +15518,29 @@ switchTab(initialTab);
       jumpT += 0.06*TICKS_PER_FRAME*dtF;
       var arc = Math.sin(Math.min(1, jumpT)*Math.PI);
       yOff = -arc*26; squash = 1+arc*0.25-(jumpT<0.15?0.2:0);
-      if (jumpT >= 1.15) setState("idle");
+      /* Hold the state for the FULL attack row, not the legacy hop arc.
+         1.15 was tuned to the procedural hop (0.32s); the sprite attack row
+         is seq.length * hold rendered frames (24*2 = 1.6s), and the old
+         threshold cut it at frame 4 of 24 — the lunge started and reverted
+         before it ever landed. Derive the hold from the manifest so future
+         re-cuts stay in sync. The arc itself completes at jumpT=1.0
+         (sin(pi)=0), so the hop stays snappy and the pet is grounded for
+         the rest of the lunge. Procedural forms (stage<3) keep the old
+         feel — they have no atlas row to wait for. */
+      var jumpMax = 1.15;
+      if (settings.sprites && settings.stage >= 3 && cerbAtlas.ready) {
+        var jmForm = (settings.stage >= 4) ? "alpha" : "omega";
+        var jmRow = cerbAtlasRow(jmForm, state, null);
+        var jmSpec = cerbAtlas.manifest && cerbAtlas.manifest.forms[jmForm]
+          && cerbAtlas.manifest.forms[jmForm].states[jmRow];
+        if (jmSpec && !jmSpec.loop) {
+          /* row ticks -> jumpT units (0.06 per tick), +0.75 = ~0.2s hold
+             on the final connected pose before reverting */
+          jumpMax = jmSpec.seq.length * (jmSpec.hold || 1)
+            * TICKS_PER_FRAME * 0.06 + 0.75;
+        }
+      }
+      if (jumpT >= jumpMax) setState("idle");
     }
 
     /* progressive flame intensity per tier */
