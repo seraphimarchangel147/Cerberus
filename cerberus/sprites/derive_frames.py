@@ -35,7 +35,17 @@ import os, math
 
 REPO = os.path.expanduser("~/openagi/cerberus/sprites")
 CANVAS = 128
-BASELINE = 123
+
+# Per-form geometry. OMEGA keeps the classic registration; ALPHA v2 fills the
+# cell (bigger + more detailed per Creator's overhaul) so its baseline differs.
+FORM_GEOM = {
+    "omega": {"baseline": 123},
+    "alpha": {"baseline": 126},
+}
+
+
+def geom(form):
+    return FORM_GEOM[form]["baseline"]
 
 
 def load_base(form, name):
@@ -60,7 +70,12 @@ def glow_mask(base, form, min_frac=MAX_SUBSET * 1.15):
         core = op & (r > 150) & (g < r) & (b < 100)
         score = r - (g + b) // 2          # warm-cast ranking
     else:
-        core = op & (b > 150) & (g > 120) & (r < 110)
+        # ALPHA v2: blue flames + cyan glows + white-hot lightning are all
+        # energy — all of it shimmers. (Lightning bolts read as static
+        # decoration if excluded, and Creator asked for them overhauled.)
+        blue_flame = op & (b > 140) & (b >= r + 10)
+        white_hot = op & (r > 190) & (g > 190) & (b > 190)
+        core = blue_flame | white_hot
         score = (b + g) // 2 - r          # cool-cast ranking
 
     need = int(min_frac * op.sum())
@@ -134,20 +149,21 @@ def body_rows(frame):
     return int(ys.min()), int(ys.max())
 
 
-def breath(frame, dy):
+def breath(form, frame, dy):
     """Vertical rescale anchored at the paw baseline: chest rises (dy>0) and
-    falls (dy<0) while the feet stay planted at BASELINE."""
+    falls (dy<0) while the feet stay planted at the form's baseline."""
+    base_row = geom(form)
     top, bot = body_rows(frame)
     h = bot - top + 1
     new_h = h + dy
-    if new_h < h // 2 or BASELINE - new_h + 1 < 0:
+    if new_h < h // 2 or base_row - new_h + 1 < 0:
         return frame
     content = frame[top:bot + 1, :, :]
     img = Image.fromarray(np.clip(content, 0, 255).astype(np.uint8), "RGBA")
     scaled = np.array(img.resize((CANVAS, new_h), Image.NEAREST))
     out = np.zeros_like(frame)
-    new_top = BASELINE - new_h + 1
-    out[new_top:BASELINE + 1, :, :] = scaled
+    new_top = base_row - new_h + 1
+    out[new_top:base_row + 1, :, :] = scaled
     return out
 
 
@@ -211,7 +227,7 @@ def derive(form, base, sel, amp, wl, cycles, n, prefix, kind, gamp):
     for i in range(n):
         frame = shimmer_frame(base, sel, amp, wl, i, n, cycles)
         if kind == "breath":
-            frame = breath(frame, int(round(_wave(i, n, cycles, gamp))))
+            frame = breath(form, frame, int(round(_wave(i, n, cycles, gamp))))
         elif kind == "bob":
             frame = bob(frame, int(round(abs(_wave(i, n, cycles, gamp)))))
         elif kind == "sway":
@@ -219,9 +235,10 @@ def derive(form, base, sel, amp, wl, cycles, n, prefix, kind, gamp):
         save(frame, os.path.join(REPO, form, f"{prefix}{i:02d}.png"))
 
 
-def leg_clusters(base):
+def leg_clusters(form, base):
+    base_row = geom(form)
     op = base[:, :, 3] > 0
-    band = op[100:BASELINE + 1, :]
+    band = op[base_row - 23:base_row + 1, :]
     cols = band.sum(axis=0)
     clusters, in_c, x0 = [], False, 0
     for x in range(CANVAS):
@@ -234,16 +251,17 @@ def leg_clusters(base):
     return clusters
 
 
-def paw_shift(frame, cluster, dx):
+def paw_shift(form, frame, cluster, dx):
     """Horizontal weight-shift of one leg block."""
+    base_row = geom(form)
     x0, x1 = cluster
-    reg = frame[110:BASELINE + 1, x0:x1 + 1, :].copy()
+    reg = frame[base_row - 13:base_row + 1, x0:x1 + 1, :].copy()
     reg = np.roll(reg, dx, axis=1)
     if dx > 0:
         reg[:, :dx, :] = 0
     elif dx < 0:
         reg[:, dx:, :] = 0
-    frame[110:BASELINE + 1, x0:x1 + 1, :] = reg
+    frame[base_row - 13:base_row + 1, x0:x1 + 1, :] = reg
 
 
 def gait(form, base, sel, amp, wl, cycles, n, prefix, dx, mode, gamp, samp=0):
@@ -255,17 +273,17 @@ def gait(form, base, sel, amp, wl, cycles, n, prefix, dx, mode, gamp, samp=0):
                    beat — coiled aggression. The lunge also gives attack a
                    motion signature distinct from working's pure vertical bob.
     """
-    clusters = leg_clusters(base)
+    clusters = leg_clusters(form, base)
     for i in range(n):
         frame = shimmer_frame(base, sel, amp, wl, i, n, cycles)
         if clusters:
             if mode == "walk":
-                paw_shift(frame, clusters[i % len(clusters)],
+                paw_shift(form, frame, clusters[i % len(clusters)],
                           dx if (i % 2 == 0) else -dx)
             else:  # attack surge: whole stance snaps side to side
                 d = dx if (i % 2 == 0) else -dx
                 for c in clusters:
-                    paw_shift(frame, c, d)
+                    paw_shift(form, frame, c, d)
         if gamp:
             frame = bob(frame, int(round(abs(_wave(i, n, cycles, gamp)))))
         if samp:

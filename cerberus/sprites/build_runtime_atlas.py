@@ -135,6 +135,16 @@ def pack(form, names):
     return sheet, cols, rows, index
 
 
+# Per-form registration baseline. OMEGA keeps the classic geometry; ALPHA v2
+# fills the cell (bigger + more detailed per Creator's overhaul request) so its
+# top/bottom differ. Recorded in the manifest so gate QA validates each form
+# against its OWN baseline instead of a single hardcoded constant.
+BASELINE = {
+    "omega": {"top": 20, "bottom": 123},
+    "alpha": {"top": 5, "bottom": 126},
+}
+
+
 def sha_short(path):
     import hashlib
     with open(path, "rb") as fh:
@@ -170,6 +180,7 @@ def main():
               f"{size:,} bytes, sha {digest}")
         manifest["forms"][form] = {
             "cols": cols, "rows": rows, "sha": digest,
+            "baseline": BASELINE[form],
             "frames": index, "states": states,
         }
 

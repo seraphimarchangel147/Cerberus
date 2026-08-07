@@ -11,6 +11,10 @@
   "cell": 128,
   "forms": {
     "alpha": {
+      "baseline": {
+        "bottom": 126,
+        "top": 5
+      },
       "cols": 13,
       "frames": {
         "al00": 32,
@@ -175,7 +179,7 @@
         "wo23": 79
       },
       "rows": 13,
-      "sha": "447b0a34526e",
+      "sha": "5e5448f601f9",
       "states": {
         "alert": {
           "hold": 2,
@@ -382,6 +386,10 @@
       }
     },
     "omega": {
+      "baseline": {
+        "bottom": 123,
+        "top": 20
+      },
       "cols": 13,
       "frames": {
         "al00": 32,

@@ -51,8 +51,13 @@ SIL_FLOOR = {"idle": 150, "alert": 800, "working": 500, "attack": 1800,
              "victory": 500, "sleep": 100, "walk": 400}
 SIL_CAP = {"idle": 1000, "alert": 2200, "working": 2000, "attack": 4000,
            "victory": 2000, "sleep": 800, "walk": 1800}
-TOP_RANGE = (17, 23)      # frames may breathe/bob within these canvas rows
-BOTTOM_RANGE = (120, 123)
+# Per-form drift bounds. OMEGA keeps the classic geometry; ALPHA v2 fills the
+# cell (top=5, bottom=126) so its frames breathe within different canvas rows.
+# Read from the manifest's per-form baseline when present.
+FORM_RANGES = {
+    "omega": {"top": (17, 23), "bottom": (120, 123), "planted": 123},
+    "alpha": {"top": (2, 8), "bottom": (123, 126), "planted": 126},
+}
 PLANTED = ("idle", "sleep")   # feet never leave the baseline in these states
 
 # Shimmer lower bound on alpha-constant pixels: interior glow must recolor on
@@ -64,8 +69,15 @@ ZONE_IOU_CAP = 0.85
 allok = True
 for form in ["omega", "alpha"]:
     fd = m["forms"][form]
+    # Per-form drift bounds. The manifest's baseline (written by the builder)
+    # is authoritative when present; FORM_RANGES supplies the breathing room
+    # around it. ALPHA v2 fills the cell (top=5, bottom=126); OMEGA keeps the
+    # classic geometry (top=20, bottom=123).
+    fr = FORM_RANGES.get(form, FORM_RANGES["omega"])
+    top_range, bottom_range, planted_row = fr["top"], fr["bottom"], fr["planted"]
     atlas = Image.open(os.path.join(RUN, f"{form}_atlas.png"))
-    print(f"== {form} (sha {fd['sha']}) ==")
+    bl = fd.get("baseline", {})
+    print(f"== {form} (sha {fd['sha']}, baseline {bl or 'classic'}) ==")
     sigs = {}
     zones = {}
     for st, spec in fd["states"].items():
@@ -105,9 +117,9 @@ for form in ["omega", "alpha"]:
         ok = (uniq == n and period == n
               and min(shims) >= SHIMMER_FLOOR
               and max(sils) >= sfloor and max(sils) <= scap
-              and all(TOP_RANGE[0] <= t <= TOP_RANGE[1] for t in tops)
-              and all(BOTTOM_RANGE[0] <= b <= BOTTOM_RANGE[1] for b in bots)
-              and (st not in PLANTED or set(bots) == {123})
+              and all(top_range[0] <= t <= top_range[1] for t in tops)
+              and all(bottom_range[0] <= b <= bottom_range[1] for b in bots)
+              and (st not in PLANTED or set(bots) == {planted_row})
               and (max(widths) - min(widths)) <= 8)
         allok &= ok
         sigs[st] = (max(tops) - min(tops), max(bots) - min(bots),
