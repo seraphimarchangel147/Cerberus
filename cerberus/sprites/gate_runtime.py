@@ -111,8 +111,16 @@ for form in ["omega", "alpha"]:
             adiff = a[:, :, 3] != b[:, :, 3]
             rgbdiff = (a[:, :, :3] != b[:, :, :3]).any(axis=2)
             const = ~adiff
-            denom = int(np.logical_or(a[:, :, 3] > 0, b[:, :, 3] > 0)[const].sum())
-            shims.append(100.0 * int(np.logical_and(rgbdiff, const).sum()) / max(1, denom))
+            # A pixel only shimmers if it is VISIBLE. RGB churn in fully
+            # transparent pixels is invisible to the eye but was being counted,
+            # which pushed the reported rate above 100% (a fraction cannot
+            # exceed its own denominator) -- measured 230% on ALPHA v2 attack,
+            # 57% of that numerator being pixels transparent in both frames.
+            # The larger cell-filling art exposed a latent bug: the numerator
+            # spanned the whole cell while the denominator was visible-only.
+            visible = np.logical_or(a[:, :, 3] > 0, b[:, :, 3] > 0)
+            denom = int(visible[const].sum())
+            shims.append(100.0 * int(np.logical_and(np.logical_and(rgbdiff, const), visible).sum()) / max(1, denom))
         sfloor, scap = SIL_FLOOR.get(st, 500), SIL_CAP.get(st, 2500)
         ok = (uniq == n and period == n
               and min(shims) >= SHIMMER_FLOOR
@@ -128,7 +136,12 @@ for form in ["omega", "alpha"]:
         stack = np.stack(imgs)
         rgb_var = (stack[:, :, :, :3].max(0) != stack[:, :, :, :3].min(0)).any(2)
         alpha_const = (stack[:, :, :, 3].max(0) == stack[:, :, :, 3].min(0))
-        zones[st] = np.logical_and(rgb_var, alpha_const)
+        # Visible-only, same reason as the shimmer rate above: RGB variation in
+        # pixels that are transparent for the whole cycle is invisible, and
+        # including it inflates every zone toward the full cell -- which drives
+        # the pairwise IoU toward 1.0 and erodes this check's margin.
+        ever_visible = stack[:, :, :, 3].max(0) > 0
+        zones[st] = np.logical_and(np.logical_and(rgb_var, alpha_const), ever_visible)
         print(f"  {st:8} n={n:2} uniq={uniq:2} period={period:2} "
               f"sil {min(sils):4d}-{max(sils):4d}px (floor {sfloor} cap {scap}) "
               f"shim {min(shims):5.2f}-{max(shims):5.2f}% "
