@@ -126,7 +126,12 @@ you" reads as facing you rather than as ambient work:
   ranges, planted feet for the six baseline-anchored states, every frame
   unique, true period == seq length, shimmer on alpha-constant pixels >=
   0.5%, geometry-signature collision check (no two states perform identical
-  motion), and shimmer-zone IoU cap. Frames that fail a gate do not ship.
+  motion), shimmer-zone IoU cap, and the COLOR-SNAP check: a step whose
+  silhouette barely moves (XOR < 50px) must not churn more than 3,000
+  interior pixels or mean RGB delta > 100 — the signature of a palette
+  hard-cut (pre-fbcf723 dissolve: 6,488px churn, delta 215.9, silXOR 0;
+  the fixed artifact's worst geometry-quiet step is 1,377px/14.7).
+  Frames that fail a gate do not ship.
 
 Run order: `derive_frames.py` → `build_runtime_atlas.py` → `gate_runtime.py`.
 

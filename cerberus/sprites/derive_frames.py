@@ -33,7 +33,11 @@ from PIL import Image
 import numpy as np
 import os, math
 
-REPO = os.path.expanduser("~/openagi/cerberus/sprites")
+# Script-relative, NOT ~/openagi: the pipeline must read bases and write
+# derived frames wherever THIS checkout lives. The old expanduser() home
+# path silently wrote 176 files into the live repo when the pipeline ran
+# from a worktree (2026-08-08, caught + reverted by Seraphim).
+REPO = os.path.dirname(os.path.abspath(__file__))
 CANVAS = 128
 
 # Per-form geometry. OMEGA keeps the classic registration; ALPHA v2 fills the

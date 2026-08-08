@@ -27,7 +27,8 @@ recolor and precise about motion, so:
 from PIL import Image
 import numpy as np, json, os, sys, hashlib
 
-RUN = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/openagi/cerberus/sprites/runtime")
+RUN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "runtime")
 m = json.load(open(os.path.join(RUN, "atlas.json")))
 CELL = m["cell"]
 
@@ -72,6 +73,22 @@ PLANTED = ("idle", "sleep", "blocked", "straining", "hurt", "doze")
 SHIMMER_FLOOR = 0.5
 ZONE_IOU_CAP = 0.85
 
+# ── COLOR-SNAP check (fourth bite of "silhouette is not the whole frame") ──
+# The v6 dissolve bug: pixels were flipped on silhouette XOR only, so every
+# interior pixel that was opaque in both variants stayed untouched through
+# the dissolve and then HARD-CUT its palette at the dissolve->hold boundary.
+# Signature of that defect class: silhouette XOR == 0 (nothing moved) while
+# thousands of interior pixels change color in one step. Measured: the bug's
+# boundary step churned 6,488 interior px at mean RGB delta 215.9; the fixed
+# dissolve's boundary is 0px by construction, and its within-dissolve steps
+# churn ~1,300 px. Legitimate geometry-quiet steps (shimmer/breath on hold
+# frames) churn <= 1,377 px across all 22 rows of the current artifact.
+# Thresholds: 3,000px churn AND interior-wide mean delta > 100 (both
+# conditions — a broad bright churn, not the small-dim deltas of shimmer).
+SNAP_SIL_XOR = 50        # a step is "geometry-quiet" below this silhouette XOR
+SNAP_CHURN_CAP = 3000    # interior pixels that may recolor on a quiet step
+SNAP_MEAN_CAP = 100      # interior-wide mean RGB delta on a quiet step
+
 allok = True
 for form in ["omega", "alpha"]:
     fd = m["forms"][form]
@@ -106,9 +123,26 @@ for form in ["omega", "alpha"]:
             widths.append(int(xs.max() - xs.min() + 1))
         # Silhouette delta between consecutive frames — THE motion metric
         sils = []
+        # COLOR-SNAP measurement on the same adjacency pass. A step whose
+        # silhouette barely moves may still churn its interior palette (the
+        # dissolve hard-cut class). Track, per geometry-quiet step, how many
+        # interior (opaque-in-both) pixels recolor and how hard they shift.
+        snap_worst = (0, 0.0, 0)   # (churn px, mean delta, step index)
         for i in range(n):
             a, b = imgs[i], imgs[(i + 1) % n]
-            sils.append(int(((a[:, :, 3] > 0) ^ (b[:, :, 3] > 0)).sum()))
+            aA, bA = a[:, :, 3] > 0, b[:, :, 3] > 0
+            sil = int((aA ^ bA).sum())
+            sils.append(sil)
+            if sil < SNAP_SIL_XOR:
+                interior = aA & bA
+                d = np.abs(a[:, :, :3].astype(np.int32)
+                           - b[:, :, :3].astype(np.int32)).sum(axis=2)
+                churn = int((interior & (d > 0)).sum())
+                meand = float(d[interior].mean()) if interior.any() else 0.0
+                if churn > snap_worst[0]:
+                    snap_worst = (churn, meand, i)
+        snap_churn, snap_mean, snap_i = snap_worst
+        snap_ok = snap_churn <= SNAP_CHURN_CAP and snap_mean <= SNAP_MEAN_CAP
         # Shimmer on alpha-constant pixels (excludes pixels that flip in/out
         # of the silhouette — those are motion, not recolor)
         shims = []
@@ -134,7 +168,8 @@ for form in ["omega", "alpha"]:
               and all(top_range[0] <= t <= top_range[1] for t in tops)
               and all(bottom_range[0] <= b <= bottom_range[1] for b in bots)
               and (st not in PLANTED or set(bots) == {planted_row})
-              and (max(widths) - min(widths)) <= 8)
+              and (max(widths) - min(widths)) <= 8
+              and snap_ok)
         allok &= ok
         sigs[st] = (max(tops) - min(tops), max(bots) - min(bots),
                     round(max(cxs) - min(cxs)), round(max(cys) - min(cys)),
@@ -151,6 +186,7 @@ for form in ["omega", "alpha"]:
         print(f"  {st:8} n={n:2} uniq={uniq:2} period={period:2} "
               f"sil {min(sils):4d}-{max(sils):4d}px (floor {sfloor} cap {scap}) "
               f"shim {min(shims):5.2f}-{max(shims):5.2f}% "
+              f"snap {snap_churn:4d}px/{snap_mean:5.1f}d@{snap_i} "
               f"top={sorted(set(tops))} bot={sorted(set(bots))} -> {'PASS' if ok else 'FAIL'}")
     # Distinctness 1: no two states may perform the same geometry. Signature =
     # (topSwing, botSwing, cxSwing, cySwing, cyMean) — measured on alpha only,
