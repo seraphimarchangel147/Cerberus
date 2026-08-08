@@ -123,14 +123,26 @@ def save(arr, path):
 def dissolve_masks(b_from, b_to, k):
     """Cumulative pixel-flip masks for a k-step dissolve between two bases.
 
-    Only alpha-differing pixels flip. Flip order is a spatial hash
-    (7x+13y mod k), so each step reveals a scattered cluster of pixels —
-    the new sprite MATERIALIZES across the whole body instead of wiping in
-    from the top. Each transition frame changes the silhouette by ~XOR/k
-    pixels: bounded by construction, and gate_runtime.py's per-state cap can
-    verify it arithmetically (k-step dissolve <= chunk_size + motion delta).
+    Only pixels that DIFFER between the two bases flip -- both silhouette
+    pixels (alpha changes) and body pixels that merely change colour. The
+    latter matters more than it sounds: between two variant bases there are
+    typically ~3x more recoloured-but-still-opaque pixels than alpha-differing
+    ones, so dissolving on alpha alone left the entire body interior to snap
+    palette in a single frame. The silhouette metric could not see it (XOR
+    stayed ~260px) but the mean RGB step spiked 9 -> 124, which reads as a
+    hard cut with a scattering of pixels around it.
+
+    Flip order is a spatial hash (7x+13y mod k), so each step reveals a
+    scattered cluster of pixels -- the new sprite MATERIALIZES across the whole
+    body instead of wiping in from the top. Each transition frame changes the
+    silhouette by ~XOR/k pixels: bounded by construction, and
+    gate_runtime.py's per-state cap can verify it arithmetically (k-step
+    dissolve <= chunk_size + motion delta).
     """
-    xor = (b_from[:, :, 3] > 0) != (b_to[:, :, 3] > 0)
+    alpha_xor = (b_from[:, :, 3] > 0) != (b_to[:, :, 3] > 0)
+    botmcp_opaque = (b_from[:, :, 3] > 0) & (b_to[:, :, 3] > 0)
+    rgb_xor = botmcp_opaque & (b_from[:, :, :3] != b_to[:, :, :3]).any(axis=2)
+    xor = alpha_xor | rgb_xor
     ys, xs = np.where(xor)
     if len(ys) == 0:
         z = np.zeros(xor.shape, dtype=bool)
