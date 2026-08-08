@@ -80,7 +80,7 @@ Nothing at runtime reads these.
 (clamps G to avg(R,B) on green-dominant pixels). Zero green spill verified across
 all frames.
 
-## Animation architecture (v5 — bodies move, identity holds)
+## Animation architecture (v6 — bodies move, identity holds)
 
 Every animated frame is derived from ONE base per state via bounded
 procedural motion plus a photometric shimmer wave — NOT independently
@@ -92,7 +92,11 @@ v5 history: v4 locked every frame to an exact bbox (top=20, bottom=123) to
 prevent drift and phase aliasing. That invariant overshot into forbidding
 ALL silhouette motion — 12 of 14 rows recolored glow interiors on a frozen
 body, and the eye reads that as static. v5 keeps v4's uniqueness/period
-machinery and adds real geometry motion per state:
+machinery and adds real geometry motion per state. v6 (2026-08) adds rows
+for the four harness states the engine learned in `65b7bda` (blocked /
+straining / hurt / dozing) — all derived from the FRONTAL `idle_neutral`
+base, the only pose with the center head facing the viewer, so "waiting on
+you" reads as facing you rather than as ambient work:
 
 - `derive_frames.py` — derives all cycles from the bases. Motion vocabulary:
   - idle (`dl*`, 32f): BREATH — baseline-anchored vertical chest scale,
@@ -105,16 +109,24 @@ machinery and adds real geometry motion per state:
   - walk (`wk*`, 16f): stride — alternating leg-cluster weight-shift + bob,
     from `walk_step_right`
   - sleep (`sl*`, 16f): BREATH — one slow shallow breath per loop, feet planted
+  - blocked (`bl*`, 24f): EXPECTANT — one LONG breath per loop + lean-in
+    sway; patient, not distressed (hold 3, slower than alert on purpose)
+  - straining (`st*`, 24f): TREMOR — high-freq ±1px shudder + occasional
+    1px chest compression; energy without travel, hot shimmer, feet planted
+  - hurt (`hu*`, 16f): FLINCH — snap to full compression, ease back only
+    partway, throb + a one-way backward stagger (a wince has a direction)
+  - doze (`dz*`, 16f): CONTENT REST — slow breath + a gentle symmetric loll,
+    quietest shimmer of the set
   All motion is driven by the same coprime beat-wave pair as the shimmer
   phases, so uniqueness/period survive; shimmer rides the moving body.
 - `gate_runtime.py` — gate QA measured from the packed runtime atlas (what
   the engine consumes), rebuilt around ALPHA-channel metrics (RGB diffs are
   contaminated by any geometry transform on textured art): silhouette
   presence-XOR per-state FLOOR (frozen bodies fail) + CAP, bounded top/bottom
-  ranges, planted feet for idle/sleep, every frame unique, true period ==
-  seq length, shimmer on alpha-constant pixels >= 0.5%, geometry-signature
-  collision check (no two states perform identical motion), and
-  shimmer-zone IoU cap. Frames that fail a gate do not ship.
+  ranges, planted feet for the six baseline-anchored states, every frame
+  unique, true period == seq length, shimmer on alpha-constant pixels >=
+  0.5%, geometry-signature collision check (no two states perform identical
+  motion), and shimmer-zone IoU cap. Frames that fail a gate do not ship.
 
 Run order: `derive_frames.py` → `build_runtime_atlas.py` → `gate_runtime.py`.
 

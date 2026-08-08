@@ -235,6 +235,62 @@ def derive(form, base, sel, amp, wl, cycles, n, prefix, kind, gamp):
         save(frame, os.path.join(REPO, form, f"{prefix}{i:02d}.png"))
 
 
+def flinch_dy(i, n):
+    """Recoil that settles, for the hurt row: frame 0 is the upright starting
+    pose, frame 1 snaps to full compression (-2 rows), the rest of the cycle
+    eases back only to -1 — a throb that never fully recovers before the next
+    wince. Distinct from sleep's even breath: hurt motion is asymmetric by
+    construction (snap, partial settle, repeat)."""
+    if i == 0:
+        return 0
+    t = (i - 1) / max(1, n - 2)          # 0..1 across the recovery
+    return int(math.floor(-2 + t + 0.5))  # -2 early, settles at -1
+
+
+def expectant(form, base, sel, amp, wl, cycles, n, prefix, gamp, samp):
+    """Shimmer + slow breath + gentle whole-body sway. Used by the two
+    'being, not doing' rows: blocked (waiting on the human) and doze (content
+    rest). Same frontal pose as idle — the distinction is the RHYTHM: one
+    long deliberate breath per loop instead of idle's two quick ones, plus a
+    sway that reads as leaning in (blocked) or lolling (doze)."""
+    for i in range(n):
+        frame = shimmer_frame(base, sel, amp, wl, i, n, cycles)
+        frame = breath(form, frame, int(round(_wave(i, n, cycles, gamp))))
+        frame = sway(frame, int(round(_wave(i, n, cycles + 2, samp))))
+        save(frame, os.path.join(REPO, form, f"{prefix}{i:02d}.png"))
+
+
+def tremor(form, base, sel, amp, wl, cycles, n, prefix):
+    """Shimmer + high-frequency low-amplitude shudder: fast horizontal ±1px
+    jitter (incommensurate minor wave keeps the period exactly n) plus an
+    occasional 1px chest compression. Energy without travel — pushing against
+    a wall. Structurally unlike working's on-beat bob: the dominant frequency
+    here is ~n/2 cycles per loop, not the gait beat."""
+    for i in range(n):
+        frame = shimmer_frame(base, sel, amp, wl, i, n, cycles)
+        frame = sway(frame, int(round(_wave(i, n, cycles, 1.3))))
+        # Dip capped at -1: deeper compression would push this row's geometry
+        # signature toward blocked's (the gate only sees swings, not tempo).
+        if _wave(i, n, cycles + 3, 1.6) < -0.8:
+            frame = breath(form, frame, -1)
+        save(frame, os.path.join(REPO, form, f"{prefix}{i:02d}.png"))
+
+
+def hurt(form, base, sel, amp, wl, cycles, n, prefix):
+    """Shimmer + the flinch_dy recoil sequence + a one-way backward stagger.
+    Head-down-but-body-up: compression anchors at the paw baseline, so the
+    chest drops while the stance holds — recoil, not the sleep droop. The
+    stagger only pulls BACK (a wince has a direction), which also gives hurt
+    cxSwing=1 vs doze's symmetric ±1 loll (cxSwing=2) — the two rows stay
+    apart on a swing dimension, not just on a fragile 1px cyMean difference."""
+    for i in range(n):
+        frame = shimmer_frame(base, sel, amp, wl, i, n, cycles)
+        frame = breath(form, frame, flinch_dy(i, n))
+        stag = int(round(min(0.0, _wave(i, n, cycles + 2, 1.2))))
+        frame = sway(frame, stag)
+        save(frame, os.path.join(REPO, form, f"{prefix}{i:02d}.png"))
+
+
 def leg_clusters(form, base):
     base_row = geom(form)
     op = base[:, :, 3] > 0
@@ -300,6 +356,11 @@ N_ATTACK = 24
 N_VICTORY = 24
 N_WALK = 16
 N_SLEEP = 16
+# v6 — rows for the four harness states the engine already knows about.
+N_BLOCKED = 24     # waiting on the human: one long deliberate breath
+N_STRAINING = 24   # rate-limited / backing off: high-freq tremor, no travel
+N_HURT = 16        # a real failure: flinch that settles, not the sleep droop
+N_DOZE = 16        # genuine rest: slower, content breath on the same pose
 
 
 def main():
@@ -345,10 +406,45 @@ def main():
         derive(form, b, sel, amp=0.16, wl=72, cycles=1, n=N_SLEEP,
                prefix="sl", kind="breath", gamp=1)
 
-        total = N_IDLE + N_ALERT + N_WORKING + N_ATTACK + N_VICTORY + N_WALK + N_SLEEP
+        # ── v6: the four harness states (blocked / straining / hurt / doze) ──
+        # All four ride the idle_neutral base: the ONLY pose in the set with the
+        # center head facing the viewer — "at you" vs "at work" is first read
+        # from which way the heads point, so the request-facing states get it.
+        b = load_base(form, "idle_neutral")
+        glow_n = glow_mask(b, form)
+        body_n = int((b[:, :, 3] > 0).sum())
+
+        # blocked: one LONG deliberate breath per loop + gentle lean-in sway.
+        # Waiting on the human — patient, not distressed; may sit for minutes.
+        sel = subset_mask(glow_n, int(0.10 * body_n), seed=7)
+        expectant(form, b, sel, amp=0.22, wl=68, cycles=1, n=N_BLOCKED,
+                  prefix="bl", gamp=1, samp=2)
+
+        # straining: pushing against a wall — high-freq ±1px tremor + occasional
+        # 1px chest compression, hot shimmer (amp 0.45, highest), almost no travel.
+        sel = subset_mask(glow_n, int(0.12 * body_n), seed=8)
+        tremor(form, b, sel, amp=0.45, wl=30, cycles=9, n=N_STRAINING,
+               prefix="st")
+
+        # hurt: flinch that settles — snap to full compression, ease back only
+        # partway, throb. Dimmer shimmer than idle (failed, not resting).
+        sel = subset_mask(glow_n, int(0.08 * body_n), seed=9)
+        hurt(form, b, sel, amp=0.20, wl=52, cycles=1, n=N_HURT,
+             prefix="hu")
+
+        # doze: content rest — same slow-breath family as blocked but the sway
+        # lolls (amp 1) instead of leaning in, and the shimmer is the quietest.
+        sel = subset_mask(glow_n, int(0.07 * body_n), seed=10)
+        expectant(form, b, sel, amp=0.14, wl=76, cycles=1, n=N_DOZE,
+                  prefix="dz", gamp=2, samp=1)
+
+        total = (N_IDLE + N_ALERT + N_WORKING + N_ATTACK + N_VICTORY + N_WALK
+                 + N_SLEEP + N_BLOCKED + N_STRAINING + N_HURT + N_DOZE)
         print(f"{form}: derived {total} frames "
               f"(idle={N_IDLE} alert={N_ALERT} working={N_WORKING} attack={N_ATTACK} "
-              f"victory={N_VICTORY} walk={N_WALK} sleep={N_SLEEP}; clusters walk={clw} attack={cl})")
+              f"victory={N_VICTORY} walk={N_WALK} sleep={N_SLEEP} "
+              f"blocked={N_BLOCKED} straining={N_STRAINING} hurt={N_HURT} doze={N_DOZE}; "
+              f"clusters walk={clw} attack={cl})")
     print("done v5")
 
 

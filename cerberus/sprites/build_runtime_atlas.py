@@ -54,21 +54,28 @@ CELL = 128
 # sway vs lunge) and different shimmer zone — so states read as different
 # energies, not one effect at different speeds.
 # Naming: dl=idle, al=alert, wo=working, at=attack, vc=victory,
-#         wk=walk, sl=sleep.
+#         wk=walk, sl=sleep, bl=blocked, st=straining, hu=hurt, dz=doze.
 def derived_names(prefix, n):
     return [f"{prefix}{i:02d}" for i in range(n)]
 
 N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 32, 24, 24, 24, 24, 16, 16
+# v6 rows for the harness states the engine already knows about (blocked /
+# straining / hurt / dozing). All derived from the frontal idle_neutral pose.
+N_BLOCKED, N_STRAINING, N_HURT, N_DOZE = 24, 24, 16, 16
 
 OMEGA_FRAMES = derived_names("dl", N_IDLE) + derived_names("al", N_ALERT) \
     + derived_names("wo", N_WORKING) + derived_names("at", N_ATTACK) \
     + derived_names("vc", N_VICTORY) + derived_names("wk", N_WALK) \
-    + derived_names("sl", N_SLEEP)
+    + derived_names("sl", N_SLEEP) + derived_names("bl", N_BLOCKED) \
+    + derived_names("st", N_STRAINING) + derived_names("hu", N_HURT) \
+    + derived_names("dz", N_DOZE)
 
 ALPHA_FRAMES = derived_names("dl", N_IDLE) + derived_names("al", N_ALERT) \
     + derived_names("wo", N_WORKING) + derived_names("at", N_ATTACK) \
     + derived_names("vc", N_VICTORY) + derived_names("wk", N_WALK) \
-    + derived_names("sl", N_SLEEP)
+    + derived_names("sl", N_SLEEP) + derived_names("bl", N_BLOCKED) \
+    + derived_names("st", N_STRAINING) + derived_names("hu", N_HURT) \
+    + derived_names("dz", N_DOZE)
 
 # ── Animation map ──────────────────────────────────────────────────────────
 # `seq`  : frame names, played in order
@@ -94,6 +101,15 @@ OMEGA_STATES = {
     "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 5, "loop": True},
     # Stride shimmer + alternating weight-shift (wk, 16f). hold 2 = 67ms/frame.
     "walk": {"seq": derived_names("wk", N_WALK), "hold": 2, "loop": True},
+    # Waiting on the human (bl, 24f): one long breath per loop + lean-in sway.
+    # hold 3 = 100ms/frame, 2.4s loop — slower than alert on purpose.
+    "blocked": {"seq": derived_names("bl", N_BLOCKED), "hold": 3, "loop": True},
+    # Rate-limited tremor (st, 24f): high-freq shudder, hot shimmer, no travel.
+    "straining": {"seq": derived_names("st", N_STRAINING), "hold": 2, "loop": True},
+    # Flinch that settles (hu, 16f): snap + partial recovery, throb. hold 3.
+    "hurt": {"seq": derived_names("hu", N_HURT), "hold": 3, "loop": True},
+    # Content rest (dz, 16f): slow breath, quietest shimmer. hold 4.
+    "doze": {"seq": derived_names("dz", N_DOZE), "hold": 4, "loop": True},
 }
 
 ALPHA_STATES = {
@@ -104,9 +120,15 @@ ALPHA_STATES = {
     "victory": {"seq": derived_names("vc", N_VICTORY), "hold": 3, "loop": True},
     "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 5, "loop": True},
     "walk": {"seq": derived_names("wk", N_WALK), "hold": 2, "loop": True},
+    "blocked": {"seq": derived_names("bl", N_BLOCKED), "hold": 3, "loop": True},
+    "straining": {"seq": derived_names("st", N_STRAINING), "hold": 2, "loop": True},
+    "hurt": {"seq": derived_names("hu", N_HURT), "hold": 3, "loop": True},
+    "doze": {"seq": derived_names("dz", N_DOZE), "hold": 4, "loop": True},
 }
 
 # Engine state -> art row. Every key of the engine's STATES table must appear.
+# The harness states (65b7bda) use their OWN rows when present; the engine's
+# ROW_FALLBACK map is only consulted for states the manifest doesn't know.
 ALIAS = {
     "idle": "idle",
     "running": "working",
@@ -115,6 +137,10 @@ ALIAS = {
     "waving": "victory",
     "jumping": "attack",
     "waiting": "alert",
+    "blocked": "blocked",
+    "straining": "straining",
+    "hurt": "hurt",
+    "dozing": "doze",
 }
 
 

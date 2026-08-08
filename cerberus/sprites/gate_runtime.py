@@ -48,9 +48,15 @@ def cell_img(atlas, fd, name):
 # the pixels whose presence actually changed, and presence is what the eye
 # reads as shape motion.
 SIL_FLOOR = {"idle": 150, "alert": 800, "working": 500, "attack": 1800,
-             "victory": 500, "sleep": 100, "walk": 400}
+             "victory": 500, "sleep": 100, "walk": 400,
+             # v6 rows. Floors sit under each state's observed minimum-of-maxes
+             # (blocked/straining 1030, hurt 593, doze 597) and above 0.
+             "blocked": 900, "straining": 900, "hurt": 500, "doze": 500}
 SIL_CAP = {"idle": 1000, "alert": 2200, "working": 2000, "attack": 4000,
-           "victory": 2000, "sleep": 800, "walk": 1800}
+           "victory": 2000, "sleep": 800, "walk": 1800,
+           # Caps over the observed maximums with headroom: blocked/straining
+           # peak at 1828, hurt/doze at ~1108.
+           "blocked": 2500, "straining": 2500, "hurt": 1600, "doze": 1600}
 # Per-form drift bounds. OMEGA keeps the classic geometry; ALPHA v2 fills the
 # cell (top=5, bottom=126) so its frames breathe within different canvas rows.
 # Read from the manifest's per-form baseline when present.
@@ -58,7 +64,7 @@ FORM_RANGES = {
     "omega": {"top": (17, 23), "bottom": (120, 123), "planted": 123},
     "alpha": {"top": (2, 8), "bottom": (123, 126), "planted": 126},
 }
-PLANTED = ("idle", "sleep")   # feet never leave the baseline in these states
+PLANTED = ("idle", "sleep", "blocked", "straining", "hurt", "doze")
 
 # Shimmer lower bound on alpha-constant pixels: interior glow must recolor on
 # top of the geometry motion (no upper bound — with moving bodies, RGB diffs
