@@ -80,7 +80,7 @@ Nothing at runtime reads these.
 (clamps G to avg(R,B) on green-dominant pixels). Zero green spill verified across
 all frames.
 
-## Animation architecture (v6 — bodies move, identity holds)
+## Animation architecture (v8 — bodies move, identity holds, 15fps everywhere)
 
 Every animated frame is derived from ONE base per state via bounded
 procedural motion plus a photometric shimmer wave — NOT independently
@@ -96,7 +96,12 @@ machinery and adds real geometry motion per state. v6 (2026-08) adds rows
 for the four harness states the engine learned in `65b7bda` (blocked /
 straining / hurt / dozing) — all derived from the FRONTAL `idle_neutral`
 base, the only pose with the center head facing the viewer, so "waiting on
-you" reads as facing you rather than as ambient work:
+you" reads as facing you rather than as ambient work. v8 (2026-08, Creator:
+smoother animation) densifies the five rows that ran at 6-10fps to 15fps at
+CONSTANT duration (n*hold ticks preserved exactly, every loop length
+unchanged): victory 24->36f, blocked 24->36f, hurt 16->24f, doze 16->32f
+(dissolve fraction 62.5%->50%, k=8), sleep 16->40f. All 11 rows now hold 2
+rendered frames = 15fps:
 
 - `derive_frames.py` — derives all cycles from the bases. Motion vocabulary:
   - idle (`dl*`, 32f): BREATH — baseline-anchored vertical chest scale,
@@ -105,32 +110,37 @@ you" reads as facing you rather than as ambient work:
   - working (`wo*`, 24f): BOB — vertical lift 0..2px off the baseline
   - attack (`at*`, 24f): stance surge + LUNGE — leg-cluster snaps, bob,
     and a ±3px horizontal lunge on the beat (one-shot row)
-  - victory (`vc*`, 24f): BOB — the biggest vertical lift (3px) + broad swell
+  - victory (`vc*`, 36f): BOB — the biggest vertical lift (3px) + broad swell
   - walk (`wk*`, 16f): stride — alternating leg-cluster weight-shift + bob,
     from `walk_step_right`
-  - sleep (`sl*`, 16f): BREATH — one slow shallow breath per loop, feet planted
-  - blocked (`bl*`, 24f): EXPECTANT — one LONG breath per loop + lean-in
-    sway; patient, not distressed (hold 3, slower than alert on purpose)
+  - sleep (`sl*`, 40f): BREATH — one slow shallow breath per loop, feet planted
+  - blocked (`bl*`, 36f): EXPECTANT — one LONG breath per loop + lean-in
+    sway; patient, not distressed (same 2.4s loop as before, denser frames)
   - straining (`st*`, 24f): TREMOR — high-freq ±1px shudder + occasional
     1px chest compression; energy without travel, hot shimmer, feet planted
-  - hurt (`hu*`, 16f): FLINCH — snap to full compression, ease back only
+  - hurt (`hu*`, 24f): FLINCH — snap to full compression, ease back only
     partway, throb + a one-way backward stagger (a wince has a direction)
-  - doze (`dz*`, 16f): CONTENT REST — slow breath + a gentle symmetric loll,
-    quietest shimmer of the set
+  - doze (`dz*`, 32f): CONTENT REST — slow breath + a gentle symmetric loll,
+    quietest shimmer of the set; v8 drops the dissolve fraction to 50% so
+    the rest cycle spends more of its loop actually resting
   All motion is driven by the same coprime beat-wave pair as the shimmer
   phases, so uniqueness/period survive; shimmer rides the moving body.
 - `gate_runtime.py` — gate QA measured from the packed runtime atlas (what
   the engine consumes), rebuilt around ALPHA-channel metrics (RGB diffs are
   contaminated by any geometry transform on textured art): silhouette
-  presence-XOR per-state FLOOR (frozen bodies fail) + CAP, bounded top/bottom
+  travel-per-second FLOOR — sum of per-step presence-XOR over the loop
+  divided by loop duration, invariant under resampling so denser
+  in-betweens can never false-fail a moving row while a frozen body still
+  scores exactly 0 (the v7 per-step-max floor conflated "doesn't move"
+  with "moves smoothly" and would have failed 8 of 11 rows after v8's
+  resampling) — plus a per-step CAP for thrash/teleport, bounded top/bottom
   ranges, planted feet for the six baseline-anchored states, every frame
   unique, true period == seq length, shimmer on alpha-constant pixels >=
   0.5%, geometry-signature collision check (no two states perform identical
   motion), shimmer-zone IoU cap, and the COLOR-SNAP check: a step whose
   silhouette barely moves (XOR < 50px) must not churn more than 3,000
   interior pixels or mean RGB delta > 100 — the signature of a palette
-  hard-cut (pre-fbcf723 dissolve: 6,488px churn, delta 215.9, silXOR 0;
-  the fixed artifact's worst geometry-quiet step is 1,377px/14.7).
+  hard-cut (pre-fbcf723 dissolve: 6,488px churn, delta 215.9, silXOR 0).
   Frames that fail a gate do not ship.
 
 Run order: `derive_frames.py` → `build_runtime_atlas.py` → `gate_runtime.py`.

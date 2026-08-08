@@ -480,14 +480,20 @@ N_IDLE = 32      # calm breathing — the state seen most, gets the most frames
 N_ALERT = 24
 N_WORKING = 24
 N_ATTACK = 24
-N_VICTORY = 24
 N_WALK = 16
-N_SLEEP = 16
-# v6 — rows for the four harness states the engine already knows about.
-N_BLOCKED = 24     # waiting on the human: one long deliberate breath
+# v8 — in-between-frame pass (Creator: smoother animation). The five rows
+# that ran at 6–10fps are densified to 15fps at CONSTANT duration: n*hold
+# ticks are preserved exactly, so every loop length is unchanged.
+#   victory 24f h3 -> 36f h2 (2.4s)   blocked 24f h3 -> 36f h2 (2.4s)
+#   hurt    16f h3 -> 24f h2 (1.6s)   doze    16f h4 -> 32f h2 (2.13s)
+#   sleep   16f h5 -> 40f h2 (2.67s)  (Seraphim's table said 32f — that is
+#   64 ticks vs the current 80 and would shorten the loop; 40f preserves it.)
+N_VICTORY = 36
+N_BLOCKED = 36     # waiting on the human: one long deliberate breath
 N_STRAINING = 24   # rate-limited / backing off: high-freq tremor, no travel
-N_HURT = 16        # a real failure: flinch that settles, not the sleep droop
-N_DOZE = 16        # genuine rest: slower, content breath on the same pose
+N_HURT = 24        # a real failure: flinch that settles, not the sleep droop
+N_DOZE = 32        # genuine rest: slower, content breath on the same pose
+N_SLEEP = 40
 
 
 def main():
@@ -578,7 +584,10 @@ def main():
         # variant and the breath amplitude collapsed doze's geometry
         # signature into idle's). Variant B's dissolve + a shallower breath
         # (gamp=1 vs idle's 2) keep doze apart on cxSwing/topSwing/cyMean.
-        tr = build_track(b0, vb, N_DOZE, k=5)
+        # v8: n=32 with k=8 — dissolve fraction drops from 10/16 (62.5%) to
+        # 16/32 (50%), so the rest cycle spends more of its loop actually
+        # resting and each materialization step is finer.
+        tr = build_track(b0, vb, N_DOZE, k=8)
         sel = subset_mask(glow_u, int(0.07 * body), seed=10)
         expectant(form, tr, sel, amp=0.14, wl=76, cycles=1, n=N_DOZE,
                   prefix="dz", gamp=1, samp=1)

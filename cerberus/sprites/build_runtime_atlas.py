@@ -58,10 +58,12 @@ CELL = 128
 def derived_names(prefix, n):
     return [f"{prefix}{i:02d}" for i in range(n)]
 
-N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 32, 24, 24, 24, 24, 16, 16
-# v6 rows for the harness states the engine already knows about (blocked /
-# straining / hurt / dozing). All derived from the frontal idle_neutral pose.
-N_BLOCKED, N_STRAINING, N_HURT, N_DOZE = 24, 24, 16, 16
+N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 32, 24, 24, 24, 36, 16, 40
+# Harness-state rows (blocked / straining / hurt / dozing), all derived from
+# the frontal idle_neutral pose. v8 in-between pass densified victory/blocked/
+# hurt/doze/sleep to 15fps at constant duration (n*hold ticks preserved —
+# holds drop to 2 in the state tables below).
+N_BLOCKED, N_STRAINING, N_HURT, N_DOZE = 36, 24, 24, 32
 
 OMEGA_FRAMES = derived_names("dl", N_IDLE) + derived_names("al", N_ALERT) \
     + derived_names("wo", N_WORKING) + derived_names("at", N_ATTACK) \
@@ -95,21 +97,26 @@ OMEGA_STATES = {
     # Aggressive surge (at, 24f): big amp + whole-stance side snaps. One-shot,
     # holds final frame until the state changes.
     "attack": {"seq": derived_names("at", N_ATTACK), "hold": 2, "loop": False},
-    # Celebratory bloom (vc, 24f): broad slow swell over a wide glow zone.
-    "victory": {"seq": derived_names("vc", N_VICTORY), "hold": 3, "loop": True},
-    # Slow shallow flicker (sl, 16f). hold 5 = 167ms/frame, 2.67s loop.
-    "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 5, "loop": True},
+    # Celebratory bloom (vc, 36f): broad slow swell over a wide glow zone.
+    # v8: hold 2 @30fps, 2.4s loop — same duration as the old 24f/hold-3.
+    "victory": {"seq": derived_names("vc", N_VICTORY), "hold": 2, "loop": True},
+    # Slow shallow flicker (sl, 40f). v8: hold 2 = 67ms/frame, 2.67s loop —
+    # same duration as the old 16f/hold-5 (6fps -> 15fps).
+    "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 2, "loop": True},
     # Stride shimmer + alternating weight-shift (wk, 16f). hold 2 = 67ms/frame.
     "walk": {"seq": derived_names("wk", N_WALK), "hold": 2, "loop": True},
-    # Waiting on the human (bl, 24f): one long breath per loop + lean-in sway.
-    # hold 3 = 100ms/frame, 2.4s loop — slower than alert on purpose.
-    "blocked": {"seq": derived_names("bl", N_BLOCKED), "hold": 3, "loop": True},
+    # Waiting on the human (bl, 36f): one long breath per loop + lean-in sway.
+    # v8: hold 2, 2.4s loop — same duration as the old 24f/hold-3.
+    "blocked": {"seq": derived_names("bl", N_BLOCKED), "hold": 2, "loop": True},
     # Rate-limited tremor (st, 24f): high-freq shudder, hot shimmer, no travel.
     "straining": {"seq": derived_names("st", N_STRAINING), "hold": 2, "loop": True},
-    # Flinch that settles (hu, 16f): snap + partial recovery, throb. hold 3.
-    "hurt": {"seq": derived_names("hu", N_HURT), "hold": 3, "loop": True},
-    # Content rest (dz, 16f): slow breath, quietest shimmer. hold 4.
-    "doze": {"seq": derived_names("dz", N_DOZE), "hold": 4, "loop": True},
+    # Flinch that settles (hu, 24f): snap + partial recovery, throb.
+    # v8: hold 2, 1.6s loop — same duration as the old 16f/hold-3.
+    "hurt": {"seq": derived_names("hu", N_HURT), "hold": 2, "loop": True},
+    # Content rest (dz, 32f): slow breath, quietest shimmer. v8: hold 2,
+    # 2.13s loop — same duration as the old 16f/hold-4; dissolve fraction
+    # dropped 62.5% -> 50% so the rest actually reads as rest.
+    "doze": {"seq": derived_names("dz", N_DOZE), "hold": 2, "loop": True},
 }
 
 ALPHA_STATES = {
@@ -117,13 +124,13 @@ ALPHA_STATES = {
     "alert": {"seq": derived_names("al", N_ALERT), "hold": 2, "loop": True},
     "working": {"seq": derived_names("wo", N_WORKING), "hold": 2, "loop": True},
     "attack": {"seq": derived_names("at", N_ATTACK), "hold": 2, "loop": False},
-    "victory": {"seq": derived_names("vc", N_VICTORY), "hold": 3, "loop": True},
-    "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 5, "loop": True},
+    "victory": {"seq": derived_names("vc", N_VICTORY), "hold": 2, "loop": True},
+    "sleep": {"seq": derived_names("sl", N_SLEEP), "hold": 2, "loop": True},
     "walk": {"seq": derived_names("wk", N_WALK), "hold": 2, "loop": True},
-    "blocked": {"seq": derived_names("bl", N_BLOCKED), "hold": 3, "loop": True},
+    "blocked": {"seq": derived_names("bl", N_BLOCKED), "hold": 2, "loop": True},
     "straining": {"seq": derived_names("st", N_STRAINING), "hold": 2, "loop": True},
-    "hurt": {"seq": derived_names("hu", N_HURT), "hold": 3, "loop": True},
-    "doze": {"seq": derived_names("dz", N_DOZE), "hold": 4, "loop": True},
+    "hurt": {"seq": derived_names("hu", N_HURT), "hold": 2, "loop": True},
+    "doze": {"seq": derived_names("dz", N_DOZE), "hold": 2, "loop": True},
 }
 
 # Engine state -> art row. Every key of the engine's STATES table must appear.

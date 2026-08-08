@@ -12,9 +12,16 @@ contaminates per-frame RGB diffs on textured art — a 2px bob shifts texture
 through the column wave and reads as 99% "change". Alpha is invariant to
 recolor and precise about motion, so:
 
-  MOTION        silhouette delta between consecutive frames — per-state FLOOR
-                (a frozen body scores 0 and fails) and CAP (bodies must not
-                thrash). This is the check v4 never made.
+  MOTION        total silhouette travel per second — sum of per-step
+                presence-XOR over the loop, divided by loop duration. This
+                is invariant under resampling: adding in-betweens halves the
+                per-step deltas but doubles the step count, so a frozen body
+                still scores 0 (fails) and a smooth body no longer fails
+                just for being smooth. (v7 gated max-over-steps, which
+                conflated "doesn't move" with "moves smoothly" — doubling
+                frames would have failed 8 of 11 rows, Seraphim's catch.)
+                A per-step CAP is kept: that one is correctly per-step,
+                since it catches thrash/teleport between adjacent frames.
   DRIFT         top/bottom bounding ranges + planted feet for idle/sleep —
                 frames may breathe and bob within bounds, never wander.
   COMPLETENESS  every frame byte-unique, true period == seq length (v4
@@ -38,25 +45,28 @@ def cell_img(atlas, fd, name):
     sy = (slot // fd["cols"]) * CELL
     return np.array(atlas.crop((sx, sy, sx + CELL, sy + CELL)).convert("RGBA"))
 
-# ── Silhouette motion: floor (body MUST move) and cap (it must not thrash) ──
-# Presence-XOR symmetric difference of consecutive frames, measured on the v5
-# artifact (max over the cycle, both forms): idle ~200-240, sleep ~170-200,
-# victory/working ~690-950, walk ~660-770, alert ~1030-1170, attack
-# ~2200-2300. Floors sit under the observed minimums and above 0 — a
-# recolor-only row scores exactly 0 and fails every floor. Caps sit over the
-# observed maximums — a runaway thrash fails them. Presence-XOR, not raw
-# alpha-value diff: NEAREST rescales churn soft-edge alpha VALUES far beyond
-# the pixels whose presence actually changed, and presence is what the eye
-# reads as shape motion.
-SIL_FLOOR = {"idle": 150, "alert": 800, "working": 500, "attack": 1800,
-             "victory": 500, "sleep": 100, "walk": 400,
-             # v6 rows. Floors sit under each state's observed minimum-of-maxes
-             # (blocked/straining 1030, hurt 593, doze 597) and above 0.
-             "blocked": 900, "straining": 900, "hurt": 500, "doze": 500}
+# ── Silhouette motion: travel-per-second floor + per-step thrash cap ──
+# Presence-XOR symmetric difference of consecutive frames, measured on the
+# packed artifact, both forms. The FLOOR is on TOTAL travel per second
+# (sum of per-step XOR over the loop / loop duration): invariant under
+# resampling, so denser in-betweens can never false-fail a moving row, while
+# a frozen body still scores exactly 0. Calibrated at ~60% of the observed
+# minimum across forms on the v8 artifact (sleep is the quietest legitimate
+# mover at ~260px/s; anything below these floors is a statue or a corpse).
+# The CAP stays per-step: it catches thrash/teleport between ADJACENT frames,
+# which finer sampling legitimately shrinks — so the cap must not be
+# resampling-normalised.
+TRAVEL_FLOOR = {"idle": 1500, "alert": 4600, "working": 3900, "attack": 10000,
+                "victory": 3000, "sleep": 150, "walk": 4600,
+                # v8 densified rows: travel/sec is resampling-invariant, so
+                # floors carry over from the v7 measurements (omega minimums:
+                # blocked 4519, straining 8044, hurt 3970, doze 3014).
+                "blocked": 2700, "straining": 4800, "hurt": 2300, "doze": 1800}
 SIL_CAP = {"idle": 1000, "alert": 2200, "working": 2000, "attack": 4000,
            "victory": 2000, "sleep": 800, "walk": 1800,
-           # Caps over the observed maximums with headroom: blocked/straining
-           # peak at 1828, hurt/doze at ~1108.
+           # Caps over the observed per-step maximums with headroom: blocked/
+           # straining peak at 1828, hurt/doze at ~1108. Finer sampling only
+           # shrinks per-step deltas, so caps keep their v7 values.
            "blocked": 2500, "straining": 2500, "hurt": 1600, "doze": 1600}
 # Per-form drift bounds. OMEGA keeps the classic geometry; ALPHA v2 fills the
 # cell (top=5, bottom=126) so its frames breathe within different canvas rows.
@@ -143,6 +153,13 @@ for form in ["omega", "alpha"]:
                     snap_worst = (churn, meand, i)
         snap_churn, snap_mean, snap_i = snap_worst
         snap_ok = snap_churn <= SNAP_CHURN_CAP and snap_mean <= SNAP_MEAN_CAP
+        # Travel-per-second: total silhouette travel over the loop, divided by
+        # loop duration derived from the manifest itself (n * hold rendered
+        # frames at 30fps). Resampling-invariant by construction.
+        duration = n * spec["hold"] / 30.0
+        travel = sum(sils)
+        travel_rate = travel / duration
+        tfloor = TRAVEL_FLOOR.get(st, 3000)
         # Shimmer on alpha-constant pixels (excludes pixels that flip in/out
         # of the silhouette — those are motion, not recolor)
         shims = []
@@ -161,10 +178,9 @@ for form in ["omega", "alpha"]:
             visible = np.logical_or(a[:, :, 3] > 0, b[:, :, 3] > 0)
             denom = int(visible[const].sum())
             shims.append(100.0 * int(np.logical_and(np.logical_and(rgbdiff, const), visible).sum()) / max(1, denom))
-        sfloor, scap = SIL_FLOOR.get(st, 500), SIL_CAP.get(st, 2500)
         ok = (uniq == n and period == n
               and min(shims) >= SHIMMER_FLOOR
-              and max(sils) >= sfloor and max(sils) <= scap
+              and travel_rate >= tfloor and max(sils) <= SIL_CAP.get(st, 2500)
               and all(top_range[0] <= t <= top_range[1] for t in tops)
               and all(bottom_range[0] <= b <= bottom_range[1] for b in bots)
               and (st not in PLANTED or set(bots) == {planted_row})
@@ -184,7 +200,8 @@ for form in ["omega", "alpha"]:
         ever_visible = stack[:, :, :, 3].max(0) > 0
         zones[st] = np.logical_and(np.logical_and(rgb_var, alpha_const), ever_visible)
         print(f"  {st:8} n={n:2} uniq={uniq:2} period={period:2} "
-              f"sil {min(sils):4d}-{max(sils):4d}px (floor {sfloor} cap {scap}) "
+              f"travel {travel_rate:7.1f}px/s (floor {tfloor}) "
+              f"step {min(sils):4d}-{max(sils):4d}px (cap {SIL_CAP.get(st, 2500)}) "
               f"shim {min(shims):5.2f}-{max(shims):5.2f}% "
               f"snap {snap_churn:4d}px/{snap_mean:5.1f}d@{snap_i} "
               f"top={sorted(set(tops))} bot={sorted(set(bots))} -> {'PASS' if ok else 'FAIL'}")
