@@ -269,10 +269,17 @@ test("Cerberus sprite toggle and manifest-driven dev menu", async (t) => {
     assert.equal(browser.window.cerbPetDevMenu(), true, "console hook opens the menu");
     const panel = browser.document.getElementById("cerbPetDevMenuPanel");
     assert.ok(panel);
-    assert.equal(panel.querySelectorAll("[data-cerb-row]").length, 7);
+    /* Row count is read from the MANIFEST, not hardcoded: the whole point of
+       the dev menu is that it enumerates whatever the atlas ships. Pinning a
+       literal here made the suite fail the moment new state rows landed
+       (7 -> 11), which is a stale test, not a regression. */
+    const omegaRows = Object.keys(ATLAS.forms.omega.states).length;
+    const alphaRows = Object.keys(ATLAS.forms.alpha.states).length;
+    assert.ok(omegaRows >= 7, "omega should expose at least the original seven rows");
+    assert.equal(panel.querySelectorAll("[data-cerb-row]").length, omegaRows);
 
     browser.window.cerbPetSetForm(4);
-    assert.equal(panel.querySelectorAll("[data-cerb-row]").length, 7);
+    assert.equal(panel.querySelectorAll("[data-cerb-row]").length, alphaRows);
 
     for (const stage of [0, 1, 2]) {
       browser.window.cerbPetSetForm(stage);
