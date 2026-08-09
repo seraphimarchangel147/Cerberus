@@ -2731,6 +2731,19 @@ CONTEXT VALUE WAVE 3 COMPLETE
 - 2026-08-05T12:26:14.062Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend draft header to cover 2026-08-05 re-issue (task_9c86ed66f7984dc6)
 - 2026-08-05T12:26:49.414Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend header to cover 2026-08-05 re-issue (task_c55f71cca65042b4)
 - 2026-08-05T18:27:32.160Z - **azazel** - create `drafts/thursday-dashboard-checkin-2026-08-06.md` - Draft Thursday check-in proposal for dashboard progress review (draft-only, not scheduled)
+- 2026-08-05T18:27:32.160Z · **azazel** · create `drafts/thursday-dashboard-checkin-2026-08-06.md` — Draft Thursday check-in proposal for dashboard progress review (draft-only, not scheduled)
+- 2026-08-06T11:32:08.543Z · **azazel** · edit `docs/qa/wave-live-qa-2026-07-29.md` — Close A4 (verbatim charged card + stalled-turn stop records + free-variant caveat + "?" anomaly); strengthen A8 with executable probe and live env evidence; Pha
+- 2026-08-06T12:27:51.617Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend draft header to cover 2026-08-06 re-issue of integration report outline task
+- 2026-08-06T12:28:43.352Z · **azazel** · create `drafts/evidence-artifact-checklist.md` — Draft evidence artifact checklist for E2E verification runs (task_21b42dc5a4b247e3)
+- 2026-08-06T12:29:18.731Z · **azazel** · create `drafts/friday-dashboard-review-block-2026-08-07.md` — Draft Friday 30-min dashboard completion review block proposal (task_f3a1b58176344c10)
+- 2026-08-06T13:18:28.956Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-06T13:19:41.288Z · **azazel** · edit `.env.example`
+- 2026-08-06T13:19:41.346Z · **azazel** · edit `src/setup-wizard.js`
+- 2026-08-06T13:20:55.853Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-06T13:21:44.314Z · **azazel** · edit `test/wall-clock-progress.test.js`
+- 2026-08-06T13:23:42.308Z · **azazel** · edit `test/model-provider-iterations.test.js`
+- 2026-08-06T21:50:02.723Z · **azazel** · edit `src/tool-registry.js` — Credit turn progress for successful calls with uncomparable output — liveness, not stagnation
+- 2026-08-06T21:50:31.383Z · **azazel** · edit `test/wall-clock-progress.test.js` — Regression: generous idle budget lets quiet-but-alive turns finish at the iteration cap
 
 ## 2026-08-06 - Cerberus sprite toggle and animation dev menu
 
@@ -2762,3 +2775,10 @@ CONTEXT VALUE WAVE 3 COMPLETE
   walk-latch displacement logic changed.
 
 SPRITE TOGGLE AND DEV MENU COMPLETE
+
+- 2026-08-07T12:28:36.617Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend draft header to cover 2026-08-07 re-issue (task_db8a4b7ff428470b)
+- 2026-08-07T12:29:15.704Z · **azazel** · edit `drafts/evidence-artifact-checklist.md` — Add explicit Metrics section (§4) and extend header to cover 2026-08-07 re-issue
+- 2026-08-08T12:28:38.878Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend draft header to cover 2026-08-08 daily-plan re-issue
+- 2026-08-08T12:29:04.748Z · **azazel** · create `drafts/stakeholder-update-email-2026-08-08.md` — Draft stakeholder wrap-up email (dashboard status + goal-loop verification), not sent
+- 2026-08-09T04:03:04.541Z · **azazel** · edit `src/model-provider.js` — Goal loop: judge active goals on watchdog/timeout/evidence-incomplete turn endings (tail evaluation, both lanes) — kills zombie-goal gap
+- 2026-08-09T04:03:42.996Z · **azazel** · edit `test/persistent-goals.test.js` — Regression tests: tail goal evaluation judges watchdog-stopped turns (completes) and fails open on judge error (never pauses)
