@@ -82,6 +82,14 @@ const DEFAULT_MAX_TURN_SECONDS = 900;
 // IDLE checkpoints deplete this strike budget and eventually stop the turn as
 // stalled. 0 restores the original hard stop at the first checkpoint.
 const DEFAULT_WALL_CLOCK_IDLE_STRIKES = 3;
+// Absolute hard-time backstop for a single turn, in seconds. Progress
+// extensions are free and unlimited while output keeps landing, but NOTHING
+// runs past this total turn age -- not even a productive turn. This is the
+// runaway backstop for the one failure mode the idle detector cannot see: a
+// loop that produces slightly different output every cycle (novel-looking,
+// going nowhere). Default 8h; non-positive or invalid values fall back to the
+// default so the backstop cannot be silently disabled.
+const DEFAULT_MAX_TURN_HARD_SECONDS = 28800;
 // Max silence (no streamed tokens/events) before a single request is treated
 // as stalled. A model that keeps producing output — even slowly, like Kimi —
 // resets this on every event and is never aborted for being slow. 0 disables
@@ -500,6 +508,12 @@ function applyIterationSettings(provider, options) {
   provider.maxTurnSeconds = positiveNumber(
     options.maxTurnSeconds ?? process.env.OPENAGI_MAX_TURN_SECONDS,
     DEFAULT_MAX_TURN_SECONDS
+  );
+  provider.maxTurnHardSeconds = positiveNumber(
+    options.maxTurnHardSeconds
+      ?? provider.env?.OPENAGI_MAX_TURN_HARD_SECONDS
+      ?? process.env.OPENAGI_MAX_TURN_HARD_SECONDS,
+    DEFAULT_MAX_TURN_HARD_SECONDS
   );
   provider.wallClockIdleStrikes = resolveWallClockIdleStrikes(
     options.wallClockIdleStrikes,
@@ -1032,15 +1046,20 @@ function createWallClockCheckpointState(provider, context) {
   // output-aware progress keeps arriving, and the only budget that depletes is
   // the idle-strike budget, which is spent solely on checkpoints that observed
   // NO new progress (or could not read progress at all). The real bounds on a
-  // turn remain the iteration cap, the USD budget cap, and per-request stall
-  // detection -- all of which measure work, not wall time.
+  // turn remain the iteration cap, the USD budget cap, per-request stall
+  // detection -- all of which measure work, not wall time -- plus the absolute
+  // hard-time ceiling recorded here, which caps TOTAL turn age no matter how
+  // productive the turn looks (the novel-output-loop backstop).
   return {
     total: provider.wallClockIdleStrikes,
     left: provider.wallClockIdleStrikes,
     progressCounter,
     lastProgressCount: progressCount,
     progressExtensions: 0,
-    stoppedWhileMakingProgress: null
+    stoppedWhileMakingProgress: null,
+    startedAt: safeProviderNow(provider),
+    hardSeconds: positiveNumber(provider.maxTurnHardSeconds, 0),
+    hardCeilingReached: false
   };
 }
 
@@ -1101,6 +1120,66 @@ function evaluateWallClockCheckpoint(state) {
   }
 }
 
+function safeProviderNow(provider) {
+  try {
+    const value = Number(provider?.now?.());
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+// The absolute hard-time backstop, independent of the idle/progress signal.
+// Returns false when the clock or state is unreadable -- an unverifiable
+// signal must never stop a turn.
+function wallClockHardCeilingReached(provider, state) {
+  const hard = Number(state?.hardSeconds);
+  const started = Number(state?.startedAt);
+  if (!Number.isFinite(hard) || hard <= 0 || !Number.isFinite(started)) return false;
+  const now = safeProviderNow(provider);
+  if (now === null) return false;
+  return now >= started + hard * 1000;
+}
+
+// Audit receipt for a watchdog stop: which tracked outputs were judged
+// non-progressive, so a STALLED verdict is verifiable after the fact instead
+// of "progress unreadable". Bounded: last 64 tracked outputs, last 5
+// non-progressive call ids. Advisory -- must never throw.
+function wallClockStopReceipt(context) {
+  try {
+    const outputs = readTurnProgressOutputs(context);
+    const nonProgressive = outputs.filter((record) => record?.progressed !== true);
+    return {
+      trackedOutputs: outputs.length,
+      nonProgressiveOutputs: nonProgressive.length,
+      lastNonProgressiveCallIds: nonProgressive
+        .slice(-5)
+        .map((record) => record.callId)
+        .filter((id) => typeof id === "string")
+    };
+  } catch {
+    return {
+      trackedOutputs: null,
+      nonProgressiveOutputs: null,
+      lastNonProgressiveCallIds: []
+    };
+  }
+}
+
+function emitWallClockStopped(context, state, reason, receipt) {
+  try {
+    context?.__onToolEvent?.({
+      phase: "wall-clock-stopped",
+      reason,
+      idleStrikesLeft: Number.isSafeInteger(state?.left) ? state.left : null,
+      progressExtensions: Math.max(0, Number(state?.progressExtensions) || 0),
+      ...(receipt ?? {})
+    });
+  } catch {
+    // Stop receipts are advisory and must never break a turn.
+  }
+}
+
 function emitWallClockCheckpoint(context, state, decision) {
   try {
     context?.__onToolEvent?.({
@@ -1144,8 +1223,19 @@ function wallClockCheckpointPrompt(state, decision, maxTurnSeconds) {
 // "turn-timeout" exactly as before). Orphaned tool calls are reconciled first
 // so the next request never carries an unanswered call.
 function maybeWallClockCheckpoint(provider, context, conversation, format, state, maxTurnSeconds) {
+  // The absolute backstop is checked BEFORE the idle/progress signal: a turn
+  // past its hard age stops even while demonstrably productive. This is the
+  // only guard against a novel-output loop that never reads as "idle".
+  if (wallClockHardCeilingReached(provider, state)) {
+    if (state) state.hardCeilingReached = true;
+    emitWallClockStopped(context, state, "hard-ceiling", wallClockStopReceipt(context));
+    return null;
+  }
   const decision = evaluateWallClockCheckpoint(state);
-  if (!decision.extend) return null;
+  if (!decision.extend) {
+    emitWallClockStopped(context, state, "stalled", wallClockStopReceipt(context));
+    return null;
+  }
   const next = extendTurnDeadline(provider, context, maxTurnSeconds);
   emitWallClockCheckpoint(context, state, decision);
   const prompt = wallClockCheckpointPrompt(state, decision, maxTurnSeconds);
@@ -2573,6 +2663,73 @@ async function evaluateGoalTurn({ provider, context, assistantText, deadline, tu
   emitGoalEvent(context, { action: "continue", turns: latest.turns, maxTurns: latest.maxTurns, why: verdict.why });
   return { handled: true, continue: true, stopReason: "completed", revision: latest.revision };
 }
+const GOAL_TAIL_BYPASS_REASONS = new Set([
+  "turn-timeout",
+  "budget-cap",
+  "request-timeout",
+  "stalled",
+  "provider-error",
+  "context-too-large",
+  "evidence-incomplete"
+]);
+
+// Best-effort goal judge for turns that ended before the in-loop evaluation
+// could run (watchdog stops, timeouts, evidence-incomplete). Two deliberate
+// differences from evaluateGoalTurn: a judge failure never pauses the goal
+// (an interrupted turn must not punish it), and the judge runs on a fresh
+// bounded deadline because the turn's own deadline has already expired on
+// every path that reaches this helper. No continuation nudge is appended —
+// the goal stays active and the next normal turn end resumes the loop.
+async function evaluateGoalTail({ provider, context, assistantText, turnBudget, credentialRequest = null, usageAccumulator = null }) {
+  try {
+    const store = context?.runtime?.goals;
+    const sessionId = context?.sessionId;
+    if (!store || !sessionId) return;
+    const initial = store.get(sessionId);
+    if (!initial || initial.status !== "active") return;
+    const advanced = store.incrementTurn(sessionId, initial.revision);
+    const judgeDeadline = provider.now() + Math.min(positiveNumber(provider.forceAnswerMs, 30000), 60000);
+    const verdict = await provider.judgeGoal(
+      advanced,
+      assistantText,
+      context,
+      judgeDeadline,
+      turnBudget,
+      credentialRequest,
+      usageAccumulator
+    );
+    if (!verdict) return;
+    store.recordJudge(sessionId, verdict, advanced.revision);
+    const judged = store.get(sessionId);
+    if (!judged || judged.status !== "active") return;
+    if (verdict.satisfied) {
+      store.complete(sessionId, verdict.why, judged.revision);
+      if (initial.goalId) context.runtime?.tasks?.updateGoal?.(initial.goalId, { status: "completed" });
+      emitGoalEvent(context, { action: "completed", why: verdict.why });
+      return;
+    }
+    const stagnationLimit = store.stagnationLimit ?? 3;
+    if ((judged.stagnationTurns ?? 0) >= stagnationLimit) {
+      try {
+        store.pause(
+          sessionId,
+          `goal stagnated: ${judged.stagnationTurns} consecutive turns without judged progress — human review required`,
+          judged.revision
+        );
+      } catch { /* stale state wins */ }
+      emitGoalEvent(context, { action: "stagnated", turns: judged.turns, stagnationTurns: judged.stagnationTurns });
+      return;
+    }
+    if (judged.turns >= judged.maxTurns) {
+      try { store.pause(sessionId, "goal turn budget reached", judged.revision); } catch { /* stale state wins */ }
+      emitGoalEvent(context, { action: "stopped", reason: "turn-cap", turns: judged.turns });
+    }
+  } catch {
+    // Tail evaluation is advisory: stale revisions, judge errors, and budget
+    // exhaustion may not fail the turn or pause the goal.
+  }
+}
+
 
 function pauseGoalForProviderCap(context, expectedRevision) {
   try {
@@ -4373,11 +4530,15 @@ function wallClockStopSnapshot(state) {
       ? true
       : state?.stoppedWhileMakingProgress === false
         ? false
-        : null
+        : null,
+    hardCeiling: state?.hardCeilingReached === true
   };
 }
 
 function wallClockStopProgressText(wallClock) {
+  if (wallClock?.hardCeiling === true) {
+    return "The turn reached its absolute hard-time ceiling (OPENAGI_MAX_TURN_HARD_SECONDS) — the runaway backstop fired, not the stall detector.";
+  }
   if (wallClock?.stoppedWhileMakingProgress === true) {
     return "The turn was still producing output at the stop, so elapsed time did not end it.";
   }
@@ -4424,6 +4585,9 @@ function localPartialSummary({ reason, iterations, maxIterations, toolCalls, las
     : "No tool calls completed.";
   const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
   if (reason === "turn-timeout") {
+    if (wallClock?.hardCeiling === true) {
+      return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because it reached its absolute hard-time ceiling — even a productive turn stops there.${wallClockConsumptionText(wallClock)} ${detail} Long agentic turns are NOT stopped for elapsed time below the ceiling; raise OPENAGI_MAX_TURN_HARD_SECONDS (default 8h) only for genuinely longer missions.${prior}`;
+    }
     return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because it went idle — no new output-aware progress across every idle allowance.${wallClockConsumptionText(wallClock)} ${wallClockStopProgressText(wallClock)} ${detail} Long-running turns are NOT stopped for elapsed time; raise OPENAGI_WALL_CLOCK_IDLE_STRIKES to tolerate more quiet checks, or OPENAGI_MAX_TURN_SECONDS to check less often.${prior}`;
   }
   if (reason === "stalled") {
@@ -5358,6 +5522,21 @@ export class OpenAIResponsesProvider {
     } else if (text === undefined) {
       text = extractResponseText(response) || "(no text)";
     }
+    // Tail goal evaluation: turns ending via watchdog/timeout/evidence-incomplete
+    // never reach the in-loop evaluateGoalTurn call, leaving active goals
+    // unjudged (zombie goals). Judge the best available final text — fail-open,
+    // and on a fresh bounded deadline since the turn deadline has expired here.
+    if (GOAL_TAIL_BYPASS_REASONS.has(stopReason) && text) {
+      await evaluateGoalTail({
+        provider: this,
+        context,
+        assistantText: text,
+        turnBudget,
+        credentialRequest: credentialState?.request ?? null,
+        usageAccumulator
+      });
+    }
+
     completionEvidence = assessCompletionEvidence(
       completionContract,
       toolCalls,
@@ -6310,6 +6489,19 @@ export class AnthropicProvider {
     } else if (text === undefined) {
       text = extractAnthropicText(response);
     }
+    // Tail goal evaluation: mirrors the OpenAI lane — watchdog/timeout endings
+    // skip the in-loop judge, so evaluate the final text here (fail-open).
+    if (GOAL_TAIL_BYPASS_REASONS.has(stopReason) && text) {
+      await evaluateGoalTail({
+        provider: this,
+        context,
+        assistantText: text,
+        turnBudget,
+        credentialRequest: credentialState?.request ?? null,
+        usageAccumulator
+      });
+    }
+
 
     const thinkingOnly = !text && (response?.content ?? []).some(
       (block) => block?.type === "thinking" && typeof block.thinking === "string"

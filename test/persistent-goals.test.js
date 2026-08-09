@@ -451,3 +451,117 @@ test("AgentHost preempts real users but preserves explicit goal continuations an
   });
   assert.equal(goals.get("session-goal").status, "active");
 });
+
+test("OpenAI tail evaluation judges goals on watchdog-stopped turns", async (t) => {
+  const { runtime, goals, taskUpdates } = goalRuntime(t);
+  let fakeNow = 1_000_000;
+  const provider = new OpenAIResponsesProvider({
+    apiKey: "test",
+    model: "base-model",
+    maxIterations: 6,
+    maxTurnSeconds: 1,
+    wallClockCheckpoints: 0,
+    now: () => fakeNow
+  });
+  let mainRequests = 0;
+  let judgeRequests = 0;
+  provider.postResponses = async (body) => {
+    if (String(body.instructions).includes("goal-completion judge")) {
+      judgeRequests += 1;
+      return {
+        id: `judge-${judgeRequests}`,
+        usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4, input_tokens_details: { cached_tokens: 0 } },
+        output_text: JSON.stringify({ satisfied: true, why: "the interrupted turn still delivered the result" }),
+        output: []
+      };
+    }
+    mainRequests += 1;
+    if (mainRequests === 1) {
+      fakeNow += 5_000; // burn past the 1s turn deadline mid-hop
+      return {
+        id: "main-1",
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12, input_tokens_details: { cached_tokens: 0 } },
+        output: [{ type: "function_call", call_id: "call-1", name: "noop_step", arguments: "{}" }]
+      };
+    }
+    // Forced answer: runs on its own forceAnswerMs budget after the deadline.
+    return {
+      id: "main-forced",
+      usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11, input_tokens_details: { cached_tokens: 0 } },
+      output_text: "Forced final answer with the delivered result.",
+      output: []
+    };
+  };
+  const toolRegistry = {
+    toOpenAITools: () => [{ type: "function", name: "noop_step", parameters: {} }],
+    async invoke() { return { ok: true, result: "done" }; }
+  };
+
+  const events = [];
+  const result = await provider.generate({
+    input: "Finish the goal despite the watchdog",
+    agent,
+    toolRegistry,
+    context: goalContext(runtime, events)
+  });
+
+  assert.ok(
+    ["turn-timeout", "request-timeout"].includes(result.stopReason),
+    `expected a bypass stopReason, got ${result.stopReason}`
+  );
+  assert.equal(judgeRequests, 1, "tail evaluation runs the judge exactly once");
+  assert.equal(goals.get("session-goal").status, "completed");
+  assert.deepEqual(taskUpdates, [{ id: "goal-task", patch: { status: "completed" } }]);
+  assert.ok(events.some((event) => event.phase === "goal" && event.action === "completed"));
+});
+
+test("OpenAI tail evaluation fails open when the judge errors on a stopped turn", async (t) => {
+  const { runtime, goals } = goalRuntime(t);
+  let fakeNow = 1_000_000;
+  const provider = new OpenAIResponsesProvider({
+    apiKey: "test",
+    model: "base-model",
+    maxIterations: 6,
+    maxTurnSeconds: 1,
+    wallClockCheckpoints: 0,
+    now: () => fakeNow
+  });
+  let mainRequests = 0;
+  provider.postResponses = async (body) => {
+    if (String(body.instructions).includes("goal-completion judge")) {
+      throw new Error("judge unavailable");
+    }
+    mainRequests += 1;
+    if (mainRequests === 1) {
+      fakeNow += 5_000;
+      return {
+        id: "main-1",
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12, input_tokens_details: { cached_tokens: 0 } },
+        output: [{ type: "function_call", call_id: "call-1", name: "noop_step", arguments: "{}" }]
+      };
+    }
+    return {
+      id: "main-forced",
+      usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11, input_tokens_details: { cached_tokens: 0 } },
+      output_text: "Forced final answer.",
+      output: []
+    };
+  };
+  const toolRegistry = {
+    toOpenAITools: () => [{ type: "function", name: "noop_step", parameters: {} }],
+    async invoke() { return { ok: true, result: "done" }; }
+  };
+
+  const result = await provider.generate({
+    input: "Work the goal",
+    agent,
+    toolRegistry,
+    context: goalContext(runtime)
+  });
+
+  assert.ok(["turn-timeout", "request-timeout"].includes(result.stopReason));
+  assert.equal(result.text, "Forced final answer.");
+  const goal = goals.get("session-goal");
+  assert.equal(goal.status, "active", "a tail judge error must never pause the goal");
+  assert.equal(goal.turns, 1, "the interrupted turn is still counted honestly");
+});
