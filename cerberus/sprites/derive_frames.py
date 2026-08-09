@@ -476,24 +476,28 @@ def gait(form, base, track, sel, amp, wl, cycles, n, prefix, dx, mode, gamp, sam
 
 
 # ── Cycle sizes ──────────────────────────────────────────────────────────
-N_IDLE = 32      # calm breathing — the state seen most, gets the most frames
-N_ALERT = 24
-N_WORKING = 24
-N_ATTACK = 24
-N_WALK = 16
-# v8 — in-between-frame pass (Creator: smoother animation). The five rows
-# that ran at 6–10fps are densified to 15fps at CONSTANT duration: n*hold
-# ticks are preserved exactly, so every loop length is unchanged.
-#   victory 24f h3 -> 36f h2 (2.4s)   blocked 24f h3 -> 36f h2 (2.4s)
-#   hurt    16f h3 -> 24f h2 (1.6s)   doze    16f h4 -> 32f h2 (2.13s)
-#   sleep   16f h5 -> 40f h2 (2.67s)  (Seraphim's table said 32f — that is
-#   64 ticks vs the current 80 and would shorten the loop; 40f preserves it.)
-N_VICTORY = 36
-N_BLOCKED = 36     # waiting on the human: one long deliberate breath
-N_STRAINING = 24   # rate-limited / backing off: high-freq tremor, no travel
-N_HURT = 24        # a real failure: flinch that settles, not the sleep droop
-N_DOZE = 32        # genuine rest: slower, content breath on the same pose
-N_SLEEP = 40
+# v9 — smooth-in-between pass (Creator 2026-08-08: "generate more in between
+# sprites that transition into a smoother animation"). Every row doubles its
+# frame count AND its dissolve step count k in the same proportion, then hold
+# halves 2 -> 1: loop wall-clock duration is unchanged (n*hold ticks constant
+# modulo rounding), but the sampling doubles to 30fps and each materialization
+# step flips HALF the pixels — the transitions read as smooth assembly instead
+# of chunky pops. Gate needs no change: the travel/sec floor is resampling-
+# invariant by design and per-step caps only shrink under finer sampling.
+#   idle 32->64 alert 24->48 working 24->48 attack 24->48 victory 36->72
+#   walk 16->32 sleep 40->80 blocked 36->72 straining 24->48 hurt 24->48
+#   doze 32->64
+N_IDLE = 64      # calm breathing — the state seen most, gets the most frames
+N_ALERT = 48
+N_WORKING = 48
+N_ATTACK = 48
+N_WALK = 32
+N_VICTORY = 72
+N_BLOCKED = 72   # waiting on the human: one long deliberate breath
+N_STRAINING = 48 # rate-limited / backing off: high-freq tremor, no travel
+N_HURT = 48      # a real failure: flinch that settles, not the sleep droop
+N_DOZE = 64      # genuine rest: slower, content breath on the same pose
+N_SLEEP = 80
 
 
 def main():
@@ -509,34 +513,36 @@ def main():
         # ── Multi-base tracks (Creator 2026-08-08: several distinct sprites
         # per animation, not one). k = dissolve steps, sized so each step's
         # silhouette delta stays under 60% of the state's gate cap. Rows are
-        # split across the two variants so they stay visually distinct. ──
+        # split across the two variants so they stay visually distinct.
+        # v9: k doubled WITH n — same dissolve fraction, half the pixels per
+        # materialization step, so transitions read smooth, not chunky. ──
 
         # idle: two calm breaths per loop, dissolving to variant A mid-loop
-        tr = build_track(b0, va, N_IDLE, k=8)
+        tr = build_track(b0, va, N_IDLE, k=16)
         sel = subset_mask(glow_u, int(0.09 * body), seed=0)
         derive(form, tr, sel, amp=0.28, wl=56, cycles=2, n=N_IDLE,
                prefix="dl", kind="breath", gamp=2)
 
         # alert: watchful scan — variant B
-        tr = build_track(b0, vb, N_ALERT, k=4)
+        tr = build_track(b0, vb, N_ALERT, k=8)
         sel = subset_mask(glow_u, int(0.12 * body), seed=1)
         derive(form, tr, sel, amp=0.40, wl=34, cycles=5, n=N_ALERT,
                prefix="al", kind="sway", gamp=2)
 
         # working: rhythmic processing pulse — variant A
-        tr = build_track(b0, va, N_WORKING, k=4)
+        tr = build_track(b0, va, N_WORKING, k=8)
         sel = subset_mask(glow_u, int(0.10 * body), seed=2)
         derive(form, tr, sel, amp=0.34, wl=46, cycles=7, n=N_WORKING,
                prefix="wo", kind="bob", gamp=2)
 
         # attack: aggressive surge + lunge — variant B
-        tr = build_track(b0, vb, N_ATTACK, k=3)
+        tr = build_track(b0, vb, N_ATTACK, k=6)
         sel = subset_mask(glow_u, int(0.12 * body), seed=3)
         cl = gait(form, b0, tr, sel, amp=0.50, wl=30, cycles=6, n=N_ATTACK,
                   prefix="at", dx=2, mode="attack", gamp=2, samp=3)
 
         # victory: celebratory swell + biggest bob — variant A
-        tr = build_track(b0, va, N_VICTORY, k=4)
+        tr = build_track(b0, va, N_VICTORY, k=8)
         sel = subset_mask(glow_u, int(0.20 * body), seed=4)
         derive(form, tr, sel, amp=0.38, wl=64, cycles=3, n=N_VICTORY,
                prefix="vc", kind="bob", gamp=3)
@@ -544,7 +550,7 @@ def main():
         # walk: stride with the opposite-step variant dissolving in
         bw = load_base(form, "walk_step_right")
         wv = load_base(form, "walk_variant")
-        tr = build_track(bw, wv, N_WALK, k=4)
+        tr = build_track(bw, wv, N_WALK, k=8)
         sel = subset_mask(union_glow(form, [bw, wv]),
                           int(0.18 * (bw[:, :, 3] > 0).sum()), seed=5)
         clw = gait(form, bw, tr, sel, amp=0.26, wl=48, cycles=2, n=N_WALK,
@@ -553,7 +559,7 @@ def main():
         # sleep: one slow shallow breath — single base (no sleep variant yet)
         b = load_base(form, "sleep_rest")
         sel = subset_mask(glow_mask(b, form), int(0.07 * (b[:, :, 3] > 0).sum()), seed=6)
-        tr = build_track(b, b, N_SLEEP, k=4)
+        tr = build_track(b, b, N_SLEEP, k=8)
         derive(form, tr, sel, amp=0.16, wl=72, cycles=1, n=N_SLEEP,
                prefix="sl", kind="breath", gamp=1)
 
@@ -562,19 +568,19 @@ def main():
         # different rhythms on one silhouette.
 
         # blocked: long deliberate breath + lean-in — variant B
-        tr = build_track(b0, vb, N_BLOCKED, k=3)
+        tr = build_track(b0, vb, N_BLOCKED, k=6)
         sel = subset_mask(glow_u, int(0.10 * body), seed=7)
         expectant(form, tr, sel, amp=0.22, wl=68, cycles=1, n=N_BLOCKED,
                   prefix="bl", gamp=1, samp=2)
 
         # straining: high-freq tremor against a wall — variant A
-        tr = build_track(b0, va, N_STRAINING, k=4)
+        tr = build_track(b0, va, N_STRAINING, k=8)
         sel = subset_mask(glow_u, int(0.12 * body), seed=8)
         tremor(form, tr, sel, amp=0.45, wl=30, cycles=9, n=N_STRAINING,
                prefix="st")
 
         # hurt: flinch that settles — variant B
-        tr = build_track(b0, vb, N_HURT, k=5)
+        tr = build_track(b0, vb, N_HURT, k=10)
         sel = subset_mask(glow_u, int(0.08 * body), seed=9)
         hurt(form, tr, sel, amp=0.20, wl=52, cycles=1, n=N_HURT,
              prefix="hu")
@@ -584,10 +590,10 @@ def main():
         # variant and the breath amplitude collapsed doze's geometry
         # signature into idle's). Variant B's dissolve + a shallower breath
         # (gamp=1 vs idle's 2) keep doze apart on cxSwing/topSwing/cyMean.
-        # v8: n=32 with k=8 — dissolve fraction drops from 10/16 (62.5%) to
-        # 16/32 (50%), so the rest cycle spends more of its loop actually
-        # resting and each materialization step is finer.
-        tr = build_track(b0, vb, N_DOZE, k=8)
+        # v9: n=64 with k=16 — same 50% dissolve fraction as v8 (more rest
+        # time than motion), but each materialization step flips half the
+        # pixels, so the transition assembles smoothly at 30fps.
+        tr = build_track(b0, vb, N_DOZE, k=16)
         sel = subset_mask(glow_u, int(0.07 * body), seed=10)
         expectant(form, tr, sel, amp=0.14, wl=76, cycles=1, n=N_DOZE,
                   prefix="dz", gamp=1, samp=1)
