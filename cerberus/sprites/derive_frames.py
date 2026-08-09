@@ -505,9 +505,16 @@ def main():
         b0 = load_base(form, "idle_neutral")
         va = load_base(form, "idle_variant_a")
         vb = load_base(form, "idle_variant_b")
+        # v10 — two MORE generated bases (crown-spiked / icicle-crowned proud
+        # stances), spread across the remaining rows so every loop visibly
+        # cycles different sprite art. Generated via OpenRouter
+        # (gemini-3.1-flash-image) when QwenCloud quota was exhausted;
+        # magenta-keyed + drift-clean registered (top/bottom == primary).
+        vc = load_base(form, "idle_variant_c")
+        vd = load_base(form, "idle_variant_d")
         # Glow pool = union over every base any row will play, so variant
         # energy pixels (flames/bolts/magma) shimmer during their holds too.
-        glow_u = union_glow(form, [b0, va, vb])
+        glow_u = union_glow(form, [b0, va, vb, vc, vd])
         body = int((b0[:, :, 3] > 0).sum())
 
         # ── Multi-base tracks (Creator 2026-08-08: several distinct sprites
@@ -517,14 +524,15 @@ def main():
         # v9: k doubled WITH n — same dissolve fraction, half the pixels per
         # materialization step, so transitions read smooth, not chunky. ──
 
-        # idle: two calm breaths per loop, dissolving to variant A mid-loop
-        tr = build_track(b0, va, N_IDLE, k=16)
+        # idle: two calm breaths per loop, dissolving to variant C mid-loop
+        # (v10: the most-seen state gets the NEW art first)
+        tr = build_track(b0, vc, N_IDLE, k=16)
         sel = subset_mask(glow_u, int(0.09 * body), seed=0)
         derive(form, tr, sel, amp=0.28, wl=56, cycles=2, n=N_IDLE,
                prefix="dl", kind="breath", gamp=2)
 
-        # alert: watchful scan — variant B
-        tr = build_track(b0, vb, N_ALERT, k=8)
+        # alert: watchful scan — variant D (v10)
+        tr = build_track(b0, vd, N_ALERT, k=8)
         sel = subset_mask(glow_u, int(0.12 * body), seed=1)
         derive(form, tr, sel, amp=0.40, wl=34, cycles=5, n=N_ALERT,
                prefix="al", kind="sway", gamp=2)
@@ -541,8 +549,8 @@ def main():
         cl = gait(form, b0, tr, sel, amp=0.50, wl=30, cycles=6, n=N_ATTACK,
                   prefix="at", dx=2, mode="attack", gamp=2, samp=3)
 
-        # victory: celebratory swell + biggest bob — variant A
-        tr = build_track(b0, va, N_VICTORY, k=8)
+        # victory: celebratory swell + biggest bob — variant C (v10)
+        tr = build_track(b0, vc, N_VICTORY, k=8)
         sel = subset_mask(glow_u, int(0.20 * body), seed=4)
         derive(form, tr, sel, amp=0.38, wl=64, cycles=3, n=N_VICTORY,
                prefix="vc", kind="bob", gamp=3)
@@ -567,8 +575,8 @@ def main():
         # so blocked/straining/hurt/doze read as different SPRITES, not just
         # different rhythms on one silhouette.
 
-        # blocked: long deliberate breath + lean-in — variant B
-        tr = build_track(b0, vb, N_BLOCKED, k=6)
+        # blocked: long deliberate breath + lean-in — variant D (v10)
+        tr = build_track(b0, vd, N_BLOCKED, k=6)
         sel = subset_mask(glow_u, int(0.10 * body), seed=7)
         expectant(form, tr, sel, amp=0.22, wl=68, cycles=1, n=N_BLOCKED,
                   prefix="bl", gamp=1, samp=2)
@@ -585,14 +593,12 @@ def main():
         hurt(form, tr, sel, amp=0.20, wl=52, cycles=1, n=N_HURT,
              prefix="hu")
 
-        # doze: content rest, quietest shimmer — variant B (NOT variant A,
-        # which idle/working/victory/straining all use: sharing both the
-        # variant and the breath amplitude collapsed doze's geometry
-        # signature into idle's). Variant B's dissolve + a shallower breath
-        # (gamp=1 vs idle's 2) keep doze apart on cxSwing/topSwing/cyMean.
-        # v9: n=64 with k=16 — same 50% dissolve fraction as v8 (more rest
-        # time than motion), but each materialization step flips half the
-        # pixels, so the transition assembles smoothly at 30fps.
+        # doze: content rest, quietest shimmer — variant B (v10: blocked took
+        # variant D, and putting both 'expectant' rows on the same variant
+        # collapsed their geometry signatures into an identical collision —
+        # the signature sees only integer swings, and 1px sway is 1px sway.
+        # Splitting the variant pair is the cleanest structural fix.)
+        # Shallower breath (gamp=1 vs idle's 2) keeps doze apart from idle.
         tr = build_track(b0, vb, N_DOZE, k=16)
         sel = subset_mask(glow_u, int(0.07 * body), seed=10)
         expectant(form, tr, sel, amp=0.14, wl=76, cycles=1, n=N_DOZE,
