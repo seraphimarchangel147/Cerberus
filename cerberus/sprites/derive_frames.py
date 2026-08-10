@@ -161,12 +161,64 @@ def dissolve_masks(b_from, b_to, k):
     return masks
 
 
-def dissolve_frame(b_from, b_to, masks, j):
-    """Transition frame j (1..k): cumulative flip set j applied."""
-    return np.where(masks[j - 1][:, :, None], b_to, b_from)
+# v11.1 transition smoothing: each pixel cohort passes through a true
+# IN-BETWEEN on the step it flips, then settles to its final state on the
+# next step. Three cases per fresh pixel:
+#   appearing  (from transparent -> to opaque) : to-color fades in at partial
+#                                                alpha with a faint energy tint
+#   vanishing  (from opaque -> to transparent) : from-color fades out at
+#                                                partial alpha
+#   recolored  (both opaque, different color)  : 50/50 midpoint blend of the
+#                                                two colors + slight tint
+# Each per-step color/alpha delta is therefore ~HALVED vs the hard flip,
+# which is what makes the materialization read smooth instead of popping.
+# The first ghost-ramp attempt used a fixed bright tint as the intermediate —
+# that sat FARTHER from both endpoints and raised per-step delta 118->173
+# (measured). Midpoint blend is the correct in-between; tint stays subtle.
+GHOST_TINT = {"omega": (255, 214, 110), "alpha": (170, 240, 255)}
+GHOST_ALPHA_FADE = 150      # partial-alpha in/out phase
+GHOST_TINT_MIX = 0.18       # subtle energy tint over the midpoint
 
 
-def build_track(b0, b1, n, k):
+def dissolve_frame(b_from, b_to, masks, j, form):
+    """Transition frame j (1..k): cumulative flip set j applied; the FRESH
+    cohort (flipped on THIS step) renders as its in-between state instead of
+    jumping straight to the final. The previous step's cohort has already
+    settled, so every pixel passes through exactly one in-between frame."""
+    frame = np.where(masks[j - 1][:, :, None], b_to, b_from)
+    prev = masks[j - 2] if j >= 2 else np.zeros(masks[0].shape, dtype=bool)
+    fresh = masks[j - 1] & ~prev
+    if not fresh.any():
+        return frame
+    tint = np.array(GHOST_TINT[form], dtype=np.int32)
+    g = frame[fresh].copy()
+    fa = b_from[fresh][:, 3] > 0          # opaque on the FROM side
+    ta = b_to[fresh][:, 3] > 0            # opaque on the TO side
+    appearing = ta & ~fa
+    vanishing = fa & ~ta
+    recolored = fa & ta
+    # appearing: fade the to-color in at partial alpha + faint tint
+    if appearing.any():
+        c = b_to[fresh][appearing, :3].astype(np.int32)
+        c = (c * (1 - GHOST_TINT_MIX) + tint * GHOST_TINT_MIX)
+        g[appearing, :3] = c
+        g[appearing, 3] = GHOST_ALPHA_FADE
+    # vanishing: fade the from-color out at partial alpha
+    if vanishing.any():
+        g[vanishing, :3] = b_from[fresh][vanishing, :3]
+        g[vanishing, 3] = GHOST_ALPHA_FADE
+    # recolored: true midpoint blend + slight tint
+    if recolored.any():
+        c = 0.5 * b_from[fresh][recolored, :3].astype(np.int32) \
+            + 0.5 * b_to[fresh][recolored, :3].astype(np.int32)
+        c = c * (1 - GHOST_TINT_MIX) + tint * GHOST_TINT_MIX
+        g[recolored, :3] = c
+        g[recolored, 3] = 255
+    frame[fresh] = g
+    return frame
+
+
+def build_track(b0, b1, n, k, form):
     """Per-frame base track + motion envelope for one row.
 
     Layout: hold b0, dissolve to b1 over k frames, hold b1, dissolve back.
@@ -195,11 +247,11 @@ def build_track(b0, b1, n, k):
         if i < h:
             frames.append(b0)
         elif i < h + k:
-            frames.append(dissolve_frame(b0, b1, masks_fwd, i - h + 1))
+            frames.append(dissolve_frame(b0, b1, masks_fwd, i - h + 1, form))
         elif i < 2 * h + k + r:
             frames.append(b1)
         else:
-            frames.append(dissolve_frame(b1, b0, masks_rev, i - (2 * h + k + r) + 1))
+            frames.append(dissolve_frame(b1, b0, masks_rev, i - (2 * h + k + r) + 1, form))
     assert len(frames) == n
     if not identical:
         seg1 = (h + k, 2 * h + k + r - 1)   # hold1 index range
@@ -638,31 +690,31 @@ def main():
 
         # idle: two calm breaths per loop, dissolving to variant C mid-loop
         # (v10: the most-seen state gets the NEW art first)
-        tr = build_track(b0, vc, N_IDLE, k=16)
+        tr = build_track(b0, vc, N_IDLE, k=16, form=form)
         sel = subset_mask(glow_u, int(0.09 * body), seed=0)
         derive(form, tr, sel, amp=0.28, wl=56, cycles=2, n=N_IDLE,
                prefix="dl", kind="breath", gamp=2)
 
         # alert: watchful scan — variant D (v10)
-        tr = build_track(b0, vd, N_ALERT, k=8)
+        tr = build_track(b0, vd, N_ALERT, k=8, form=form)
         sel = subset_mask(glow_u, int(0.12 * body), seed=1)
         derive(form, tr, sel, amp=0.40, wl=34, cycles=5, n=N_ALERT,
                prefix="al", kind="sway", gamp=2)
 
         # working: rhythmic processing pulse — variant A
-        tr = build_track(b0, va, N_WORKING, k=8)
+        tr = build_track(b0, va, N_WORKING, k=8, form=form)
         sel = subset_mask(glow_u, int(0.10 * body), seed=2)
         derive(form, tr, sel, amp=0.34, wl=46, cycles=7, n=N_WORKING,
                prefix="wo", kind="bob", gamp=2)
 
         # attack: aggressive surge + lunge — variant B
-        tr = build_track(b0, vb, N_ATTACK, k=6)
+        tr = build_track(b0, vb, N_ATTACK, k=6, form=form)
         sel = subset_mask(glow_u, int(0.12 * body), seed=3)
         cl = gait(form, b0, tr, sel, amp=0.50, wl=30, cycles=6, n=N_ATTACK,
                   prefix="at", dx=2, mode="attack", gamp=2, samp=3)
 
         # victory: celebratory swell + biggest bob — variant C (v10)
-        tr = build_track(b0, vc, N_VICTORY, k=8)
+        tr = build_track(b0, vc, N_VICTORY, k=8, form=form)
         sel = subset_mask(glow_u, int(0.20 * body), seed=4)
         derive(form, tr, sel, amp=0.38, wl=64, cycles=3, n=N_VICTORY,
                prefix="vc", kind="bob", gamp=3)
@@ -670,7 +722,7 @@ def main():
         # walk: stride with the opposite-step variant dissolving in
         bw = load_base(form, "walk_step_right")
         wv = load_base(form, "walk_variant")
-        tr = build_track(bw, wv, N_WALK, k=8)
+        tr = build_track(bw, wv, N_WALK, k=8, form=form)
         sel = subset_mask(union_glow(form, [bw, wv]),
                           int(0.18 * (bw[:, :, 3] > 0).sum()), seed=5)
         clw = gait(form, bw, tr, sel, amp=0.26, wl=48, cycles=2, n=N_WALK,
@@ -679,7 +731,7 @@ def main():
         # sleep: one slow shallow breath — single base (no sleep variant yet)
         b = load_base(form, "sleep_rest")
         sel = subset_mask(glow_mask(b, form), int(0.07 * (b[:, :, 3] > 0).sum()), seed=6)
-        tr = build_track(b, b, N_SLEEP, k=8)
+        tr = build_track(b, b, N_SLEEP, k=8, form=form)
         derive(form, tr, sel, amp=0.16, wl=72, cycles=1, n=N_SLEEP,
                prefix="sl", kind="breath", gamp=1)
 
@@ -688,19 +740,19 @@ def main():
         # different rhythms on one silhouette.
 
         # blocked: long deliberate breath + lean-in — variant D (v10)
-        tr = build_track(b0, vd, N_BLOCKED, k=6)
+        tr = build_track(b0, vd, N_BLOCKED, k=6, form=form)
         sel = subset_mask(glow_u, int(0.10 * body), seed=7)
         expectant(form, tr, sel, amp=0.22, wl=68, cycles=1, n=N_BLOCKED,
                   prefix="bl", gamp=1, samp=2)
 
         # straining: high-freq tremor against a wall — variant A
-        tr = build_track(b0, va, N_STRAINING, k=8)
+        tr = build_track(b0, va, N_STRAINING, k=8, form=form)
         sel = subset_mask(glow_u, int(0.12 * body), seed=8)
         tremor(form, tr, sel, amp=0.45, wl=30, cycles=9, n=N_STRAINING,
                prefix="st")
 
         # hurt: flinch that settles — variant B
-        tr = build_track(b0, vb, N_HURT, k=10)
+        tr = build_track(b0, vb, N_HURT, k=10, form=form)
         sel = subset_mask(glow_u, int(0.08 * body), seed=9)
         hurt(form, tr, sel, amp=0.20, wl=52, cycles=1, n=N_HURT,
              prefix="hu")
@@ -711,7 +763,7 @@ def main():
         # the signature sees only integer swings, and 1px sway is 1px sway.
         # Splitting the variant pair is the cleanest structural fix.)
         # Shallower breath (gamp=1 vs idle's 2) keeps doze apart from idle.
-        tr = build_track(b0, vb, N_DOZE, k=16)
+        tr = build_track(b0, vb, N_DOZE, k=16, form=form)
         sel = subset_mask(glow_u, int(0.07 * body), seed=10)
         expectant(form, tr, sel, amp=0.14, wl=76, cycles=1, n=N_DOZE,
                   prefix="dz", gamp=1, samp=1)
@@ -735,7 +787,7 @@ def main():
               f"victory={N_VICTORY} walk={N_WALK} sleep={N_SLEEP} "
               f"blocked={N_BLOCKED} straining={N_STRAINING} hurt={N_HURT} doze={N_DOZE}; "
               f"clusters walk={clw} attack={cl})")
-    print("done v7 multi-base")
+    print("done v11.1 ghost-ramp transitions")
 
 
 if __name__ == "__main__":
