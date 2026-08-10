@@ -500,6 +500,118 @@ N_DOZE = 64      # genuine rest: slower, content breath on the same pose
 N_SLEEP = 80
 
 
+# ── v11 eye blinks — the cheapest 'alive' cue (Creator standing mission) ──
+# Eye positions located empirically and vision-confirmed (2026-08-09):
+# OMEGA = four bright red-orange glow dots (side heads + center-head pair);
+# ALPHA = bright cyan/white pixels in the skull-mask sockets. Coordinates are
+# RELATIVE TO THE SILHOUETTE TOP (eyes are fixed to the head; the whole
+# frame moves ±2px on breath/bob, but top is recomputed per frame).
+# Pure color-band detection failed on ALPHA: the head flames bleed into the
+# same hue band and merge eye clusters into oversize blobs that the size
+# filter rejects (measured: E2/E4 eyes missed on most frames). Template
+# windows + brightness threshold are immune to flame contamination.
+# Blink is RGB-only: silhouette never changes, so every geometry gate
+# (top/bottom ranges, travel, signatures, baselines) is unaffected.
+EYE_WINDOWS = {
+    # (cx, cy) relative to silhouette top; window = ±3px square
+    "omega": [(24, 23), (57, 24), (72, 24), (105, 23)],
+    "alpha": [(14, 28), (42, 27), (53, 27), (79, 27)],
+}
+EYE_WIN_R = 3  # half-window radius
+
+
+def eye_mask(frame, form):
+    """Eye pixels of this frame: bright pixels inside the template eye
+    windows (anchored to per-frame silhouette top). ALPHA additionally gets
+    an eyelid patch — ALL opaque pixels within ±1px of each eye center —
+    because its eyes are only 1-3px each and pure bright-pixel dimming was
+    invisible at display size (vision judge 1/10 despite 95% measured
+    darkening; the surrounding cyan flame washes small changes out)."""
+    r, g, b, al = (frame[:, :, i] for i in range(4))
+    op = al > 0
+    ys_all = np.where(op)[0]
+    if len(ys_all) == 0:
+        return op & False
+    top = int(ys_all.min())
+    out = np.zeros(op.shape, dtype=bool)
+    if form == "omega":
+        bright = (np.maximum(r, g) > 180) & (r > b + 40)
+    else:
+        bright = (b > 140) & (g > 100) & (np.maximum(b, g) > r + 20)
+    H, W = op.shape
+    for cx, cy in EYE_WINDOWS[form]:
+        y0 = max(0, top + cy - EYE_WIN_R)
+        y1 = min(H, top + cy + EYE_WIN_R + 1)
+        x0 = max(0, cx - EYE_WIN_R)
+        x1 = min(W, cx + EYE_WIN_R + 1)
+        win = op[y0:y1, x0:x1] & bright[y0:y1, x0:x1]
+        out[y0:y1, x0:x1] |= win
+        if form == "alpha":
+            # eyelid patch: solid dark core over the socket itself
+            ly0 = max(0, top + cy - 1)
+            ly1 = min(H, top + cy + 2)
+            lx0 = max(0, cx - 1)
+            lx1 = min(W, cx + 2)
+            out[ly0:ly1, lx0:lx1] |= op[ly0:ly1, lx0:lx1]
+    return out
+
+
+def dim_eyes(frame, mask, strength):
+    """Darken eye pixels toward closed-lid shadow, keeping a faint hue."""
+    if not mask.any():
+        return
+    frame[mask, :3] = np.clip(
+        frame[mask, :3] * (1.0 - strength), 0, 255).astype(np.int32)
+
+
+def _blink_windows(n, seed):
+    """Two blink windows per loop, deterministic per row seed, placed away
+    from the wrap seam (frames 0-3 and n-4..n-1 stay clean)."""
+    h = (seed * 2654435761) % (2 ** 31)
+    usable = n - 12
+    if usable < 8:
+        return []
+    s1 = 4 + (h % usable)
+    s2 = s1 + n // 2 + ((h >> 3) % 7)
+    wins = []
+    for s in (s1, s2):
+        if s + 3 <= n - 4:
+            wins.append(s)
+    return wins
+
+
+def blink_pass(form, prefix, n, seed, mode="blink"):
+    """Post-process a derived row's saved frames with eye animation.
+    mode 'blink' : two quick close-open windows per loop (awake rows).
+    mode 'drowsy': half-lidded all loop (doze).
+    mode 'closed' : eyes shut all loop (sleep).
+    """
+    d = os.path.join(REPO, form)
+    if mode == "closed":
+        for i in range(n):
+            p = os.path.join(d, f"{prefix}{i:02d}.png")
+            f = np.array(Image.open(p).convert("RGBA")).astype(np.int32)
+            dim_eyes(f, eye_mask(f, form), 0.90)
+            save(f, p)
+        return
+    if mode == "drowsy":
+        for i in range(n):
+            p = os.path.join(d, f"{prefix}{i:02d}.png")
+            f = np.array(Image.open(p).convert("RGBA")).astype(np.int32)
+            dim_eyes(f, eye_mask(f, form), 0.50)
+            save(f, p)
+        return
+    # awake blink: open -> half -> shut -> half -> open over 4 frames
+    strengths = {0: 0.55, 1: 0.95, 2: 0.95, 3: 0.55}
+    for s in _blink_windows(n, seed):
+        for j, st in strengths.items():
+            i = s + j
+            p = os.path.join(d, f"{prefix}{i:02d}.png")
+            f = np.array(Image.open(p).convert("RGBA")).astype(np.int32)
+            dim_eyes(f, eye_mask(f, form), st)
+            save(f, p)
+
+
 def main():
     for form in ["omega", "alpha"]:
         b0 = load_base(form, "idle_neutral")
@@ -603,6 +715,18 @@ def main():
         sel = subset_mask(glow_u, int(0.07 * body), seed=10)
         expectant(form, tr, sel, amp=0.14, wl=76, cycles=1, n=N_DOZE,
                   prefix="dz", gamp=1, samp=1)
+
+        # ── v11 blinks: eyes animate in every row (RGB-only post-pass).
+        # Awake rows blink twice per loop on row-unique seeds (no synced
+        # blinking across states); doze rides half-lidded; sleep stays shut.
+        for prefix, nrows, seed in [("dl", N_IDLE, 11), ("al", N_ALERT, 12),
+                                    ("wo", N_WORKING, 13), ("at", N_ATTACK, 14),
+                                    ("vc", N_VICTORY, 15), ("wk", N_WALK, 16),
+                                    ("bl", N_BLOCKED, 17), ("st", N_STRAINING, 18),
+                                    ("hu", N_HURT, 19)]:
+            blink_pass(form, prefix, nrows, seed, mode="blink")
+        blink_pass(form, "dz", N_DOZE, 20, mode="drowsy")
+        blink_pass(form, "sl", N_SLEEP, 21, mode="closed")
 
         total = (N_IDLE + N_ALERT + N_WORKING + N_ATTACK + N_VICTORY + N_WALK
                  + N_SLEEP + N_BLOCKED + N_STRAINING + N_HURT + N_DOZE)
