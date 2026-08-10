@@ -136,12 +136,14 @@ def dissolve_masks(b_from, b_to, k):
     stayed ~260px) but the mean RGB step spiked 9 -> 124, which reads as a
     hard cut with a scattering of pixels around it.
 
-    Flip order is a spatial hash (7x+13y mod k), so each step reveals a
-    scattered cluster of pixels -- the new sprite MATERIALIZES across the whole
-    body instead of wiping in from the top. Each transition frame changes the
-    silhouette by ~XOR/k pixels: bounded by construction, and
-    gate_runtime.py's per-state cap can verify it arithmetically (k-step
-    dissolve <= chunk_size + motion delta).
+    Flip order groups pixels into COHERENT SHARDS, not single-pixel scatter:
+    a spatial hash over 6px superpixel cells ((7cx+13cy) mod k) reveals a whole
+    cell's worth of xor pixels on one step. Single-pixel scatter read as TV
+    static once upscaled nearest-neighbor 128->160 (Creator 2026-08-10:
+    "pixelated, looks kinda cheap"); 6px plates materializing as units read
+    as energy shards condensing instead. Each step still reveals ~XOR/k
+    pixels: bounded by construction, and gate_runtime.py's per-state cap can
+    verify it arithmetically (k-step dissolve <= chunk_size + motion delta).
     """
     alpha_xor = (b_from[:, :, 3] > 0) != (b_to[:, :, 3] > 0)
     botmcp_opaque = (b_from[:, :, 3] > 0) & (b_to[:, :, 3] > 0)
@@ -151,7 +153,8 @@ def dissolve_masks(b_from, b_to, k):
     if len(ys) == 0:
         z = np.zeros(xor.shape, dtype=bool)
         return [z] * k
-    ranks = (7 * xs + 13 * ys) % k           # deterministic scatter
+    SHARD = 6                                # superpixel cell size
+    ranks = (7 * (xs // SHARD) + 13 * (ys // SHARD)) % k   # coherent shards
     masks, acc = [], np.zeros(xor.shape, dtype=bool)
     for j in range(1, k + 1):
         acc = acc.copy()
