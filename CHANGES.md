@@ -2,6 +2,26 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-08-10 — PageIndex doc-tree lane: vectorless retrieval over long docs (Azazel)
+
+Self-hosted VectifyAI PageIndex integrated as a workspace lane at `~/.openagi/workspace/doc-index/`.
+
+- **Zero-LLM structural trees.** `build_tree.py` runs the source-cloned library with all LLM
+  features off (`if_add_node_summary="no"` etc.) — no external keys, no per-doc token cost.
+  The summary layer, when added, routes through in-harness delegation tiers instead.
+- **First corpus verified end-to-end.** `CHANGES.md` → 184-node tree preserving the
+  wave/phase/section hierarchy; nav outline (`out/CHANGES.nav.md`) carries an exact
+  source-line anchor per node (`line_num`). Retrieval round-trip proven: nav node `[0021]`
+  → `code_read` at its line → exact section content.
+- **Isolation.** Homebrew Python is PEP-668 externally-managed, so the lane lives in its own
+  venv; repo cloned depth-1 into `src/`; `litellm` unpinned (the pinned 1.84.0 was yanked).
+- **Runbook saved** as skill `doc-tree-index` (build/refresh commands, retrieval discipline,
+  and the five build pitfalls — pypi package is API-client-only, async `md_to_tree`,
+  markdown node fields, PEP-668, read-before-edit).
+- **Roadmap (not in this commit):** corpus expansion (`docs/`, QA reports), delegation-tier
+  summary layer, nightly refresh cron (pair with memory-consolidation reactivation on the
+  same restart), PixelRAG visual retrieval as stage 2.
+
 ## 2026-08-04 — Hermes Parity Wave 4: event push, safety valve, steering, A2A (Seraphim)
 
 Four capabilities ported from Hermes v0.20.0, one commit per phase. Measured test baseline on this
