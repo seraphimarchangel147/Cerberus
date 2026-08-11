@@ -229,6 +229,20 @@ function malformedToolInputError(cause) {
   });
 }
 
+// Same truncation class, one level up: an entire SSE event line that will not
+// parse (stream cut mid-line, proxy byte damage). Unclassified, this escapes
+// as a raw SyntaxError that no retry path recognizes.
+const MALFORMED_STREAM_EVENT_FAILURE = "malformed-stream-event";
+
+function malformedStreamEventError(message, providerCode, cause) {
+  return new ProviderError(message, {
+    providerCode,
+    providerType: "stream_truncation",
+    failureKind: MALFORMED_STREAM_EVENT_FAILURE,
+    cause: cause ?? null
+  });
+}
+
 function nonNegativeInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
@@ -336,6 +350,7 @@ export async function requestWithRetry(doRequest, options = {}) {
         ? RETRYABLE_PROVIDER_STATUSES.has(error.status)
           || error.failureKind === "silent-failure"
           || error.failureKind === MALFORMED_TOOL_INPUT_FAILURE
+          || error.failureKind === MALFORMED_STREAM_EVENT_FAILURE
         : isRetryableNetworkError(error);
       let retryApproved = retryable;
       if (retryable && typeof options.shouldRetry === "function") {
@@ -744,6 +759,7 @@ async function requestWithSilentResponseRetry(provider, context, signal, request
     ...providerRetryOptions(provider, context, signal),
     shouldRetry: ({ error }) => error?.failureKind === "silent-failure"
       || error?.failureKind === MALFORMED_TOOL_INPUT_FAILURE
+      || error?.failureKind === MALFORMED_STREAM_EVENT_FAILURE
   });
 }
 
@@ -1689,7 +1705,17 @@ export async function readAnthropicEventStream(response, { onDelta, onActivity }
     if (!line.startsWith("data:")) return;
     const data = line.slice(5).trim();
     if (!data || data === "[DONE]") return;
-    handleEvent(JSON.parse(data));
+    let sseEvent;
+    try {
+      sseEvent = JSON.parse(data);
+    } catch (error) {
+      throw malformedStreamEventError(
+        "Anthropic stream returned malformed event JSON.",
+        "malformed_stream_event",
+        error
+      );
+    }
+    handleEvent(sseEvent);
   };
 
   while (true) {
@@ -1737,7 +1763,16 @@ const OPENAI_SSE_DEFAULT_LIMITS = Object.freeze({
   maxUsageKeys: PROVIDER_USAGE_MAX_KEYS
 });
 
+// Transport-damage codes: a corrupt event body or undecodable bytes mean the
+// stream was damaged in flight, so they classify as retryable truncation.
+// Structural protocol violations stay non-retryable — retrying those just
+// replays a deterministic server bug.
+const RETRYABLE_STREAM_PROTOCOL_CODES = new Set(["invalid_stream_json", "invalid_stream_encoding"]);
+
 function openAIStreamProtocolError(message, providerCode = "invalid_stream_protocol", cause = null) {
+  if (RETRYABLE_STREAM_PROTOCOL_CODES.has(providerCode)) {
+    return malformedStreamEventError(message, providerCode, cause);
+  }
   return new ProviderError(message, { providerCode, cause });
 }
 
