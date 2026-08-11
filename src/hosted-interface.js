@@ -14560,15 +14560,19 @@ switchTab(initialTab);
        finished playing, so it is keyed to elapsed < n as well as the window. */
     var tr = spec.transition;
     if (tr && !reduced) {
-      var w = tr.windows;
-      var inFwd = idx >= w.fwd[0] && idx <= w.fwd[1];
-      var inRev = idx >= w.rev[0] && idx <= w.rev[1];
-      if ((inFwd || inRev) && (spec.loop || elapsed < n)) {
+      /* v13 generalized contract: tr.windows is a list of M {hold, dissolve}
+         phase pairs in play order. Locate the dissolve window containing idx
+         (if any) and measure progress through it for the charge/burst phase. */
+      var inWin = null, jj = 0;
+      for (var wi = 0; wi < tr.windows.length; wi++) {
+        var dw = tr.windows[wi].dissolve;
+        if (idx >= dw[0] && idx <= dw[1]) { inWin = dw; jj = idx - dw[0]; break; }
+      }
+      if (inWin && (spec.loop || elapsed < n)) {
         var pal = form === "alpha"
           ? { hot: "#e8fbff", bloom: "#f2feff", a: "#aeeaff", b: "#66d4ff", c: "#4fc3ff" }
           : { hot: "#fff8e0", bloom: "#fffef0", a: "#ffd878", b: "#ff9a2a", c: "#ff5a00" };
         var kk = tr.k;
-        var jj = inFwd ? idx - w.fwd[0] : idx - w.rev[0];
         var p = (jj + 0.5) / kk;               /* progress through the window */
         var env = Math.sin(Math.PI * p);       /* fade in/out — no edge pop */
         var cx = 80, cy = 88;                  /* sprite center (evolve: DH*0.55) */

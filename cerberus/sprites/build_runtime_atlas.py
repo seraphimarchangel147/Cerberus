@@ -62,7 +62,10 @@ def derived_names(prefix, n):
 # dissolve step count in the same proportion; holds drop 2 -> 1 so every
 # loop's wall-clock duration (n*hold ticks) is unchanged. 30fps sampling,
 # half the pixels flipped per materialization step = smooth transitions.
-N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 64, 48, 48, 48, 72, 32, 80
+# PITFALL (v13): these constants DUPLICATE derive_frames.py's — when a row's
+# frame count changes (e.g. idle 64->128 super-loop) BOTH files must be
+# updated, or the builder packs the stale count and the gate reads a stale n.
+N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 128, 48, 48, 48, 72, 32, 80
 # Harness-state rows (blocked / straining / hurt / dozing), all derived from
 # the frontal idle_neutral pose.
 N_BLOCKED, N_STRAINING, N_HURT, N_DOZE = 72, 48, 48, 64
@@ -152,36 +155,51 @@ ALIAS = {
     "dozing": "doze",
 }
 
-# ── Transition windows (v12) ────────────────────────────────────────────────
-# Dissolve step count k per row. MUST mirror the build_track(b0, b1, N_*, k=...)
-# calls in derive_frames.py — that file is the source of truth for k; this
-# table is validated below against len(seq) so drift fails the build loudly.
+# ── Transition windows (v12 contract, generalized v13) ─────────────────────
+# Base-cycle spec per row: (bases, k). bases = number of distinct sprites the
+# row cycles through (idle super-loop = 3; every other multi-base row = 2;
+# sleep = 1 => no transition). k = dissolve steps per transition and MUST
+# mirror the build_track([...], N_*, k=...) calls in derive_frames.py — that
+# file is the source of truth; attach_transitions() validates the windows
+# tile the seq so drift fails the build loudly.
 # v12 purpose: the renderer overlays an evolve-style canvas composite (glow
-# bloom + energy streaks + shockwave ring) during these windows so the pixel
-# materialization reads as energy FX instead of cheap pixel flips. Sleep is
-# single-base (build_track(b, b, ...)) => no visual transition => null.
-ROW_K = {
-    "idle": 16, "alert": 8, "working": 8, "attack": 6, "victory": 8,
-    "walk": 8, "sleep": None, "blocked": 6, "straining": 8, "hurt": 10,
-    "doze": 16,
+# bloom + energy streaks + shockwave ring) during dissolve windows so the
+# pixel materialization reads as energy FX instead of cheap pixel flips.
+ROW_SPEC = {
+    "idle": {"bases": 3, "k": 16},     # v13 super-loop: b0 -> C -> D -> b0
+    "alert": {"bases": 2, "k": 8},
+    "working": {"bases": 2, "k": 8},
+    "attack": {"bases": 2, "k": 6},
+    "victory": {"bases": 2, "k": 8},
+    "walk": {"bases": 2, "k": 8},
+    "sleep": {"bases": 1, "k": None},  # single-base: no visual transition
+    "blocked": {"bases": 2, "k": 6},
+    "straining": {"bases": 2, "k": 8},
+    "hurt": {"bases": 2, "k": 10},
+    "doze": {"bases": 2, "k": 16},
 }
 
 
-def transition_windows(n, k):
-    """Inclusive seq-index ranges for one row's dissolve phases.
+def transition_windows(n, m, k):
+    """Inclusive seq-index ranges for one row's base cycle.
 
     Mirrors build_track()'s layout in derive_frames.py EXACTLY:
-      hold b0 [0, h) | dissolve fwd [h, h+k) | hold b1 [h+k, 2h+k+r)
-      | dissolve rev [2h+k+r, n). Returned as inclusive [start, end] pairs.
+      for each base j: hold_j [lo, hi] then dissolve_j [lo, hi]; the last
+      hold absorbs the remainder r. Returned as a list of M
+      {"hold": [lo,hi], "dissolve": [lo,hi]} phase dicts in play order.
     """
-    h = (n - 2 * k) // 2
-    r = n - 2 * k - 2 * h
-    return {
-        "hold_a": [0, h - 1],
-        "fwd": [h, h + k - 1],
-        "hold_b": [h + k, 2 * h + k + r - 1],
-        "rev": [2 * h + k + r, n - 1],
-    }
+    h = (n - m * k) // m
+    r = n - m * k - m * h
+    windows, cursor = [], 0
+    for j in range(m):
+        hold_len = h + (r if j == m - 1 else 0)
+        hold = [cursor, cursor + hold_len - 1]
+        cursor += hold_len
+        dis = [cursor, cursor + k - 1]
+        cursor += k
+        windows.append({"hold": hold, "dissolve": dis})
+    assert cursor == n
+    return windows
 
 
 def pack(form, names):
@@ -230,36 +248,40 @@ def validate(states, index, alias):
 
 
 def attach_transitions(states):
-    """Add per-row dissolve windows to the manifest (v12). Validates ROW_K
-    arithmetic against seq lengths so a k drift in derive_frames.py fails
-    the build instead of mis-timing the renderer's FX overlay."""
+    """Add per-row base-cycle windows to the manifest (v12 contract, v13
+    generalized to M bases). Validates ROW_SPEC arithmetic against seq
+    lengths so a k/bases drift in derive_frames.py fails the build instead
+    of mis-timing the renderer's FX overlay."""
     for row, spec in states.items():
         n = len(spec["seq"])
-        k = ROW_K.get(row)
-        if k is None:                      # single-base row: no transition
+        row_spec = ROW_SPEC.get(row)
+        if row_spec is None:
+            raise SystemExit(f"row {row!r} missing from ROW_SPEC")
+        m, k = row_spec["bases"], row_spec["k"]
+        if m == 1:                         # single-base row: no transition
             spec["transition"] = None
             continue
-        if k < 1 or 2 * k > n:
-            raise SystemExit(f"row {row!r}: k={k} invalid for n={n}")
-        h = (n - 2 * k) // 2
-        r = n - 2 * k - 2 * h
-        wins = transition_windows(n, k)
+        if k < 1 or m * k > n:
+            raise SystemExit(f"row {row!r}: m={m} k={k} invalid for n={n}")
+        wins = transition_windows(n, m, k)
         # windows must tile [0, n-1] contiguously — catches formula drift
         covered = []
-        for key in ("hold_a", "fwd", "hold_b", "rev"):
-            lo, hi = wins[key]
-            covered.extend(range(lo, hi + 1))
+        for w in wins:
+            for key in ("hold", "dissolve"):
+                lo, hi = w[key]
+                covered.extend(range(lo, hi + 1))
         if covered != list(range(n)):
             raise SystemExit(f"row {row!r}: windows do not tile the seq: {wins}")
+        dissolve_idx = []
+        for w in wins:
+            dissolve_idx.extend(range(w["dissolve"][0], w["dissolve"][1] + 1))
         spec["transition"] = {
+            "bases": m,
             "k": k,
-            "windows": wins,
-            # engine convenience: dissolve frames in seq order (fwd then rev),
-            # so an FX overlay can fire on membership instead of index math.
-            "dissolve_idx": list(range(wins["fwd"][0], wins["fwd"][1] + 1))
-            + list(range(wins["rev"][0], wins["rev"][1] + 1)),
-            "hold_b_last": wins["hold_b"][1],
-            "rem": r,
+            "windows": wins,              # [{"hold": [lo,hi], "dissolve": [lo,hi]}, ...]
+            # engine convenience: dissolve frames in seq order, so the FX
+            # overlay can fire on membership instead of index math.
+            "dissolve_idx": dissolve_idx,
         }
     return states
 
