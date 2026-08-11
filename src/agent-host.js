@@ -1,4 +1,27 @@
 import { STEER_CHANNEL_NOTE } from "./turn-steering.js";
+import { createInspectorLogger } from "./host-logger.js";
+
+/**
+ * Map a thrown turn error to a steering abort cause.
+ *
+ * Uses the typed reason already produced by model-provider.js:
+ * TurnDeadlineError / wall-clock stops carry recognizable names and codes, and
+ * abortReason() propagates `signal.reason` when the aborter supplied one. A
+ * user-initiated cancel surfaces as a plain AbortError with no harness code,
+ * which is exactly the case we must NOT carry.
+ */
+export function classifyAbortCause(error) {
+  const code = String(error?.code ?? "").toLowerCase();
+  const name = String(error?.name ?? "").toLowerCase();
+  const message = String(error?.message ?? "").toLowerCase();
+
+  if (code.includes("stall") || message.includes("stalled")) return "stalled";
+  if (name === "turndeadlineerror" || message.includes("hard ceiling")) return "hard-ceiling";
+  if (message.includes("wall clock") || message.includes("wall-clock")) return "wall-clock";
+  // A bare cancel with no harness marker is the user pressing stop.
+  if (name === "aborterror") return "user-interrupt";
+  return "provider-error";
+}
 import path from "node:path";
 import { types as utilTypes } from "node:util";
 import { InMemoryAgentStore, legacyDiscordKey } from "./agent-store.js";
@@ -386,6 +409,12 @@ export class AgentHost {
   constructor(options = {}) {
     this.runtime = options.runtime;
     if (!this.runtime) throw new Error("AgentHost requires a runtime.");
+    // Observability sink for `this.log?.({ op, ... })`. Before this existed the
+    // field was READ in three places and ASSIGNED NOWHERE, so every steering
+    // event fired into a permanent no-op -- which made "zero steer-undelivered
+    // events" look like a measurement instead of a dead instrument. Defaults to
+    // the RunInspector, which already fsyncs to run-inspector/events.jsonl.
+    this.log = options.log ?? createInspectorLogger(this.runtime.runInspector) ?? null;
     this.store = options.store ?? new InMemoryAgentStore(options.storeOptions);
     const modelProviderOptions = {
       ...(options.modelProviderOptions ?? {}),
@@ -1152,12 +1181,32 @@ export class AgentHost {
     }));
 
     const turnAbortController = new AbortController();
+    // "completed" until something proves otherwise; set in the catch below.
+    let turnAbortCause = "completed";
     // Mark the turn in flight so a concurrent user message can steer it rather
     // than preempt the goal. Cleared in the finally below, on BOTH the success
     // and failure paths, so a crashed turn cannot leave a session permanently
     // "in flight" and silently swallow every later preempt.
     if (!ephemeral) {
       this.runtime.steering?.beginTurn?.(sessionId, { turnId, abortController: turnAbortController });
+
+      // Deliver a correction stranded by a HARNESS-aborted turn (watchdog
+      // stall-stop, provider error). Carried exactly once, into the next turn
+      // of the same session only -- no TTL, because a steer belongs to a
+      // turn's context, not to a stretch of wall-clock time.
+      const carried = this.runtime.steering?.takeCarried?.(sessionId);
+      if (carried) {
+        this.runtime.steering.steer(
+          sessionId,
+          `[carried steer from an aborted turn] ${carried}`
+        );
+        this.log?.({
+          op: "steer-carried",
+          sessionId,
+          channel,
+          chars: String(carried).length
+        });
+      }
     }
     const inputAbortSignal = input.abortSignal;
     const onInputAbort = () => turnAbortController.abort(inputAbortSignal.reason);
@@ -1368,6 +1417,9 @@ export class AgentHost {
         maxTurnSeconds: input.maxTurnSeconds
       });
     } catch (error) {
+      // Classify WHY the turn died so the steering layer can decide whether a
+      // stranded correction is discarded (user's doing) or carried (ours).
+      turnAbortCause = classifyAbortCause(error);
       turnAbortController.abort(error);
       recordRunInspector(this.runtime, {
         runId: turnId,
@@ -1391,12 +1443,18 @@ export class AgentHost {
       // not: the user typed a correction and it went nowhere. Log it so the
       // condition is observable, and count it in steering.stats().
       if (!ephemeral) {
-        const stranded = this.runtime.steering?.endTurn?.(sessionId, { turnId });
+        const stranded = this.runtime.steering?.endTurn?.(
+          sessionId, { turnId, cause: turnAbortCause }
+        );
+        // A returned value means the steer was DISCARDED (user-caused ending).
+        // Harness-caused endings return null because the steer was carried
+        // forward instead -- that path is logged by the carry, not here.
         if (stranded) {
           this.log?.({
             op: "steer-undelivered",
             sessionId,
             channel,
+            cause: turnAbortCause,
             chars: String(stranded).length
           });
         }
