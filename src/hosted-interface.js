@@ -15005,6 +15005,17 @@ switchTab(initialTab);
     var maxH = DH * 0.52;                   /* tallest lick */
     var flicker = 0.75 + rnd() * 0.25;      /* stochastic frame flicker */
 
+    /* Backlight halo behind the creature — additive, drawn in the background
+       pass so the sprite (drawn later, source-over) keeps its own art intact.
+       Reads as the fire lighting the pet from behind. */
+    var hg = ctx.createRadialGradient(DW*0.5, DH*0.52, DW*0.05,
+                                      DW*0.5, DH*0.52, DW*0.52);
+    hg.addColorStop(0, "rgba(120,200,255,0.30)");
+    hg.addColorStop(0.6, "rgba(40,110,230,0.16)");
+    hg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = hg;
+    ctx.fillRect(0, 0, DW, DH);
+
     /* Radiating glow from the fire line — draws first, additive, behind all. */
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
@@ -15050,36 +15061,6 @@ switchTab(initialTab);
       }
     }
     ctx.restore();
-  }
-
-  /* Rim light on the creature's back edge — light from behind. Uses
-     destination-in to keep only the silhouette, then washes the upper tail
-     with cyan. */
-  function drawRimLight(ctx, t, res, form, DW, DH) {
-    var tmp = document.createElement("canvas");
-    tmp.width = DW; tmp.height = DH;
-    var tx = tmp.getContext("2d");
-    tx.drawImage(ctx.canvas, 0, 0);
-    tx.globalCompositeOperation = "destination-in";
-    /* circular wash centred high & slightly right — reads as backlight */
-    var grd = tx.createRadialGradient(DW*0.62, DH*0.30, DW*0.05,
-                                      DW*0.62, DH*0.30, DW*0.55);
-    grd.addColorStop(0, "rgba(255,255,255,1)");
-    grd.addColorStop(0.55, "rgba(255,255,255,0.55)");
-    grd.addColorStop(1, "rgba(255,255,255,0)");
-    tx.fillStyle = grd;
-    tx.fillRect(0, 0, DW, DH);
-    ctx.save();
-    ctx.globalCompositeOperation = "source-atop";
-    /* the incoming frame already has the sprite; only the washed silhouette
-       lands on-opaque pixels, and only where the wash had alpha */
-    ctx.drawImage(tmp, 0, 0);
-    /* cyan wash on top of the washed silhouette */
-    ctx.globalCompositeOperation = "source-in";
-    ctx.fillStyle = "rgba(150,220,255,0.85)";
-    ctx.fillRect(0, 0, DW, DH);
-    ctx.restore();
-    ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;
   }
 
   /* ── settings (persisted) ── */
@@ -16090,8 +16071,6 @@ switchTab(initialTab);
       }
     }
     drawEmbers(nctx, P, DW, DH, res, pal);
-    /* v15 rim light from the fire — ALPHA form only. */
-    if (F.key === "alpha") drawRimLight(nctx, P, res, F.key, DW, DH);
 
     /* OMEGA gets the CRT scanline + vignette overlay on top */
     if (settings.stage >= 3 && !evolving) applyScanlines(nctx, DW, DH, res);
