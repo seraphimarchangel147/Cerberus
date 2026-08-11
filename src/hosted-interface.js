@@ -14987,23 +14987,99 @@ switchTab(initialTab);
         }
         ctx.globalAlpha = 1;
       }
-    } else {  /* alpha: frost settling — slower, downward, blue-white */
-      for (i = 0; i < ps.length; i++) {
-        p = ps[i];
-        y = (t.flick * p.v * 1.2 + p.y) % 172 - 6;           /* drift down */
-        x = p.x + Math.sin(t.flick * 0.045 + p.ph) * 5;      /* lateral sway */
-        a = 0.28 + 0.22 * Math.sin(t.flick * 0.11 + p.ph * 2);
-        if (y < 2) continue;
-        ctx.globalAlpha = Math.max(0, a);
-        ctx.fillStyle = p.c > 0.5 ? "#aeeaff" : "#e8fbff";
-        ctx.fillRect(Math.round(x * res), Math.round(y * res), res, res);
-        if (p.c > 0.8) {  /* occasional twin-mote shimmer */
-          ctx.globalAlpha = Math.max(0, a * 0.6);
-          ctx.fillRect(Math.round(x * res) + 2 * res, Math.round(y * res) - res, res, res);
-        }
-        ctx.globalAlpha = 1;
+    }
+  }
+
+  /* ── v15 ALPHA blue-fire background + rim light ──
+     Replaces the frost-wisps. Real animated fire: a deep-blue fire wall rises
+     from the floor across many independently-licking cell-flames, a glow
+     radiates from the fire line, stochastic flicker is LCG-seeded per frame
+     (deterministic), and the sprite's back edge catches the light as a cyan
+     rim. All in logical DW×DH units scaled by res at draw time. */
+  function drawAlphaFireBg(ctx, t, DW, DH, res) {
+    if (reduced) return;
+    var rnd = _lcg((0xA17A9 + Math.floor(t.flick)) >>> 0);
+    var cells = 12;
+    var cellW = DW / cells;
+    var fireBaseY = DH * 0.72;              /* where flames anchor */
+    var maxH = DH * 0.52;                   /* tallest lick */
+    var flicker = 0.75 + rnd() * 0.25;      /* stochastic frame flicker */
+
+    /* Radiating glow from the fire line — draws first, additive, behind all. */
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    var grad = ctx.createLinearGradient(0, fireBaseY + DH*0.06, 0, fireBaseY - maxH);
+    grad.addColorStop(0, "rgba(30,110,255,0.55)");
+    grad.addColorStop(0.45, "rgba(10,60,200,0.30)");
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, Math.max(0, fireBaseY - maxH), DW, Math.min(DH, maxH + DH*0.06));
+
+    /* Cell-flames: 12 columns, each with its own animated height + brightness. */
+    for (var ci = 0; ci < cells; ci++) {
+      var cx0 = ci * cellW;
+      var cx1 = cx0 + cellW;
+      /* height per cell: layered sines + rnd so neighbours differ but move */
+      var h0 = maxH * (0.30 + 0.22 * Math.sin(t.flick * 0.9 + ci * 1.3)
+                            + 0.16 * Math.sin(t.flick * 1.7 + ci * 2.1)
+                            + 0.10 * rnd());
+      var cellTop = fireBaseY - h0 * flicker;
+      var innerGrad = ctx.createLinearGradient(0, fireBaseY, 0, cellTop);
+      innerGrad.addColorStop(0, "rgba(0,20,80,0.85)");
+      innerGrad.addColorStop(0.5, "rgba(30,100,255,0.55)");
+      innerGrad.addColorStop(1, "rgba(200,240,255,0.95)");
+      ctx.fillStyle = innerGrad;
+      var seg = Math.max(2 * res, 4);
+      for (var sy = fireBaseY; sy > cellTop; sy -= seg) {
+        var segH = Math.min(seg, fireBaseY - sy + seg);
+        var segT = (fireBaseY - sy) / h0;
+        ctx.globalAlpha = (0.5 + 0.5 * (1 - segT)) * (0.65 + 0.35 * rnd());
+        ctx.fillRect(cx0, sy, cellW, segH);
+      }
+      /* white-hot lick at the tip */
+      ctx.globalAlpha = Math.min(1, (h0 / maxH) * flicker);
+      ctx.fillStyle = "#eaffff";
+      ctx.fillRect(cx0, cellTop - 2 * res, cellW, Math.max(1, res * 2));
+      /* rising sparks above the fire line */
+      for (var sn = 0; sn < 3; sn++) {
+        var sx = cx0 + rnd() * cellW;
+        var sy2 = cellTop - (t.flick * (sn + 2) * 0.7 + sn * 47) % (DH * 0.30);
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = sn % 2 ? "#aef4ff" : "#e8fbff";
+        ctx.fillRect(Math.round(sx), Math.round(sy2), res, res);
       }
     }
+    ctx.restore();
+  }
+
+  /* Rim light on the creature's back edge — light from behind. Uses
+     destination-in to keep only the silhouette, then washes the upper tail
+     with cyan. */
+  function drawRimLight(ctx, t, res, form, DW, DH) {
+    var tmp = document.createElement("canvas");
+    tmp.width = DW; tmp.height = DH;
+    var tx = tmp.getContext("2d");
+    tx.drawImage(ctx.canvas, 0, 0);
+    tx.globalCompositeOperation = "destination-in";
+    /* circular wash centred high & slightly right — reads as backlight */
+    var grd = tx.createRadialGradient(DW*0.62, DH*0.30, DW*0.05,
+                                      DW*0.62, DH*0.30, DW*0.55);
+    grd.addColorStop(0, "rgba(255,255,255,1)");
+    grd.addColorStop(0.55, "rgba(255,255,255,0.55)");
+    grd.addColorStop(1, "rgba(255,255,255,0)");
+    tx.fillStyle = grd;
+    tx.fillRect(0, 0, DW, DH);
+    ctx.save();
+    ctx.globalCompositeOperation = "source-atop";
+    /* the incoming frame already has the sprite; only the washed silhouette
+       lands on-opaque pixels, and only where the wash had alpha */
+    ctx.drawImage(tmp, 0, 0);
+    /* cyan wash on top of the washed silhouette */
+    ctx.globalCompositeOperation = "source-in";
+    ctx.fillStyle = "rgba(150,220,255,0.85)";
+    ctx.fillRect(0, 0, DW, DH);
+    ctx.restore();
+    ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;
   }
 
   /* ── settings (persisted) ── */
@@ -15868,6 +15944,9 @@ switchTab(initialTab);
     var pal = PALS[F.pal];
 
     nctx.clearRect(0,0,DW,DH);
+    /* v15 ALPHA blue-fire background — drawn FIRST, behind the sprite and
+       all foreground FX. Only for the alpha atlas form. */
+    if (F.key === "alpha") drawAlphaFireBg(nctx, P, DW, DH, res);
 
     if (evolving) {
       /* 3-phase evolution: charge-up glow + inward streaks -> bright flash ->
@@ -16011,9 +16090,8 @@ switchTab(initialTab);
       }
     }
     drawEmbers(nctx, P, DW, DH, res, pal);
-    /* v14 form auras — atlas forms only (procedural forms already read
-       distinct via the rig). Drawn on the display buffer like drawEmbers. */
-    if (F.key === "omega" || F.key === "alpha") drawAura(nctx, P, F.key, res);
+    /* v15 rim light from the fire — ALPHA form only. */
+    if (F.key === "alpha") drawRimLight(nctx, P, res, F.key, DW, DH);
 
     /* OMEGA gets the CRT scanline + vignette overlay on top */
     if (settings.stage >= 3 && !evolving) applyScanlines(nctx, DW, DH, res);
