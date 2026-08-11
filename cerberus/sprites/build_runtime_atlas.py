@@ -63,9 +63,10 @@ def derived_names(prefix, n):
 # loop's wall-clock duration (n*hold ticks) is unchanged. 30fps sampling,
 # half the pixels flipped per materialization step = smooth transitions.
 # PITFALL (v13): these constants DUPLICATE derive_frames.py's — when a row's
-# frame count changes (e.g. idle 64->128 super-loop) BOTH files must be
-# updated, or the builder packs the stale count and the gate reads a stale n.
-N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 128, 48, 48, 48, 72, 32, 80
+# frame count changes BOTH files must be updated, or the builder packs the
+# stale count and the gate reads a stale n. (v14: alert/working 48->64
+# super-loops.)
+N_IDLE, N_ALERT, N_WORKING, N_ATTACK, N_VICTORY, N_WALK, N_SLEEP = 128, 64, 64, 48, 72, 32, 80
 # Harness-state rows (blocked / straining / hurt / dozing), all derived from
 # the frontal idle_neutral pose.
 N_BLOCKED, N_STRAINING, N_HURT, N_DOZE = 72, 48, 48, 64
@@ -155,51 +156,29 @@ ALIAS = {
     "dozing": "doze",
 }
 
-# ── Transition windows (v12 contract, generalized v13) ─────────────────────
-# Base-cycle spec per row: (bases, k). bases = number of distinct sprites the
-# row cycles through (idle super-loop = 3; every other multi-base row = 2;
-# sleep = 1 => no transition). k = dissolve steps per transition and MUST
-# mirror the build_track([...], N_*, k=...) calls in derive_frames.py — that
-# file is the source of truth; attach_transitions() validates the windows
-# tile the seq so drift fails the build loudly.
-# v12 purpose: the renderer overlays an evolve-style canvas composite (glow
+# ── Transition windows (v14: single source of truth) ───────────────────────
+# The base-cycle layout per row is EMITTED by derive_frames.py's build_track
+# (runtime/track_layout.json) and consumed here VERBATIM. The v13 builder
+# re-derived windows from a hand-maintained ROW_SPEC — that duplication
+# shipped idle's contract wrong (bases=3 vs the real 4-entry track), so the
+# engine's dissolve FX fired over hold frames for two of three transitions.
+# One source of truth kills the bug class; this module only VALIDATES that
+# the emitted windows tile each row's seq.
+# Purpose: the renderer overlays an evolve-style canvas composite (glow
 # bloom + energy streaks + shockwave ring) during dissolve windows so the
 # pixel materialization reads as energy FX instead of cheap pixel flips.
-ROW_SPEC = {
-    "idle": {"bases": 3, "k": 16},     # v13 super-loop: b0 -> C -> D -> b0
-    "alert": {"bases": 2, "k": 8},
-    "working": {"bases": 2, "k": 8},
-    "attack": {"bases": 2, "k": 6},
-    "victory": {"bases": 2, "k": 8},
-    "walk": {"bases": 2, "k": 8},
-    "sleep": {"bases": 1, "k": None},  # single-base: no visual transition
-    "blocked": {"bases": 2, "k": 6},
-    "straining": {"bases": 2, "k": 8},
-    "hurt": {"bases": 2, "k": 10},
-    "doze": {"bases": 2, "k": 16},
-}
+TRACK_LAYOUT_PATH = os.path.join(BASE_DIR, "runtime", "track_layout.json")
 
 
-def transition_windows(n, m, k):
-    """Inclusive seq-index ranges for one row's base cycle.
-
-    Mirrors build_track()'s layout in derive_frames.py EXACTLY:
-      for each base j: hold_j [lo, hi] then dissolve_j [lo, hi]; the last
-      hold absorbs the remainder r. Returned as a list of M
-      {"hold": [lo,hi], "dissolve": [lo,hi]} phase dicts in play order.
-    """
-    h = (n - m * k) // m
-    r = n - m * k - m * h
-    windows, cursor = [], 0
-    for j in range(m):
-        hold_len = h + (r if j == m - 1 else 0)
-        hold = [cursor, cursor + hold_len - 1]
-        cursor += hold_len
-        dis = [cursor, cursor + k - 1]
-        cursor += k
-        windows.append({"hold": hold, "dissolve": dis})
-    assert cursor == n
-    return windows
+def load_track_layouts():
+    if not os.path.exists(TRACK_LAYOUT_PATH):
+        raise SystemExit(f"missing {TRACK_LAYOUT_PATH} — run derive_frames.py first")
+    with open(TRACK_LAYOUT_PATH, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    rows = data.get("rows", {})
+    if not rows:
+        raise SystemExit("track_layout.json has no rows")
+    return rows
 
 
 def pack(form, names):
@@ -247,31 +226,30 @@ def validate(states, index, alias):
             raise SystemExit(f"alias {engine_state!r} -> unknown row {row!r}")
 
 
-def attach_transitions(states):
-    """Add per-row base-cycle windows to the manifest (v12 contract, v13
-    generalized to M bases). Validates ROW_SPEC arithmetic against seq
-    lengths so a k/bases drift in derive_frames.py fails the build instead
-    of mis-timing the renderer's FX overlay."""
+def attach_transitions(states, layouts):
+    """Attach the EMITTED base-cycle layout to each row (v14: single source
+    of truth from build_track). No window re-derivation — this module only
+    VALIDATES that the layout tiles the row's seq, so drift fails the build
+    instead of mis-timing the renderer's FX overlay."""
     for row, spec in states.items():
         n = len(spec["seq"])
-        row_spec = ROW_SPEC.get(row)
-        if row_spec is None:
-            raise SystemExit(f"row {row!r} missing from ROW_SPEC")
-        m, k = row_spec["bases"], row_spec["k"]
+        lay = layouts.get(row)
+        if lay is None:
+            raise SystemExit(f"row {row!r} missing from track_layout.json")
+        m, k, wins = lay["bases"], lay["k"], lay["windows"]
         if m == 1:                         # single-base row: no transition
             spec["transition"] = None
             continue
-        if k < 1 or m * k > n:
-            raise SystemExit(f"row {row!r}: m={m} k={k} invalid for n={n}")
-        wins = transition_windows(n, m, k)
-        # windows must tile [0, n-1] contiguously — catches formula drift
+        if k < 1 or m * k > n or len(wins) != m:
+            raise SystemExit(f"row {row!r}: layout invalid for n={n}: {lay}")
+        # windows must tile [0, n-1] contiguously — catches drift loudly
         covered = []
         for w in wins:
             for key in ("hold", "dissolve"):
                 lo, hi = w[key]
                 covered.extend(range(lo, hi + 1))
         if covered != list(range(n)):
-            raise SystemExit(f"row {row!r}: windows do not tile the seq: {wins}")
+            raise SystemExit(f"row {row!r}: layout windows do not tile the seq: {wins}")
         dissolve_idx = []
         for w in wins:
             dissolve_idx.extend(range(w["dissolve"][0], w["dissolve"][1] + 1))
@@ -289,13 +267,14 @@ def attach_transitions(states):
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     manifest = {"cell": CELL, "alias": ALIAS, "forms": {}}
+    layouts = load_track_layouts()
 
     for form, names, states in (("omega", OMEGA_FRAMES, OMEGA_STATES),
                                 ("alpha", ALPHA_FRAMES, ALPHA_STATES)):
         print(f"{form}:")
         sheet, cols, rows, index = pack(form, names)
         validate(states, index, ALIAS)
-        attach_transitions(states)
+        attach_transitions(states, layouts)
         out_png = os.path.join(OUT_DIR, f"{form}_atlas.png")
         sheet.save(out_png, optimize=True)
         size = os.path.getsize(out_png)

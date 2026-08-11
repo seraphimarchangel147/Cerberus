@@ -14644,6 +14644,53 @@ switchTab(initialTab);
       }
     }
 
+    /* ── v14 curiosity beats — the pet looks around on its own ──
+     Deterministic schedule (no RNG at draw time): every CURIO_PERIOD 60Hz
+     ticks the eyes dart to one of three fixed gaze targets for CURIO_LEN
+     ticks, easing in/out so the look never snaps. Per-form seed offset keeps
+     the two forms from staring in sync. Overrides cursor tracking while
+     active, so the creature reads as having its own attention, not just
+     mirroring the mouse. */
+  var CURIO_PERIOD = 768, CURIO_LEN = 48;   /* ~12.8s cadence, 0.8s look */
+  function cerbCuriosity(form, flick) {
+    var seedOff = form === "alpha" ? 313 : 0;
+    var t = (flick + seedOff) % CURIO_PERIOD;
+    if (t >= CURIO_LEN) return null;
+    var cyc = Math.floor((flick + seedOff) / CURIO_PERIOD);
+    var dirs = [[-1, 0.2], [0.9, -0.7], [-0.5, 0.8]];
+    var d = dirs[cyc % 3];
+    var e = Math.sin(Math.PI * (t / CURIO_LEN));   /* ease in/out */
+    return { gx: d[0] * e, gy: d[1] * e };
+  }
+
+  /* ── v14 cursor-tracking pupils (Creator: "it's watching me") ──────────
+       The engine already smooths a gaze vector toward the mouse for the
+       procedural rig (P.gazeX/gazeY); the sprite path ignored it until now.
+       Eye centers come from the blink-pass registration (EYE_WINDOWS in
+       derive_frames.py, relative to silhouette top; manifest baseline.top
+       anchors that per form). Art→buffer scale is 160/128. OMEGA's eyes are
+       5-14px glow dots, so a 2×2 dark pupil reads clearly; ALPHA's are 1-3px
+       white-hot cores, so it gets a 1×1 pupil with half the excursion.
+       Awake rows only — never over sleep's shut eyes or doze's half-lids. */
+    var AWAKE_ROWS = { idle:1, alert:1, working:1, attack:1, victory:1,
+                       walk:1, blocked:1, straining:1, hurt:1 };
+    var cz = reduced ? null : cerbCuriosity(form, P.flick);
+    var gxs = cz ? cz.gx : P.gazeX, gys = cz ? cz.gy : P.gazeY;
+    if (!reduced && AWAKE_ROWS[rowName] && (gxs || gys)) {
+      var EYES = form === "alpha"
+        ? { top: 5, sc: 1.25, pts: [[14,28],[42,27],[53,27],[79,27]], r: 1, amp: 1 }
+        : { top: 20, sc: 1.25, pts: [[24,23],[57,24],[72,24],[105,23]], r: 2, amp: 2 };
+      var gx = Math.round(gxs * EYES.amp), gy = Math.round(gys * EYES.amp);
+      ctx.globalCompositeOperation = "source-atop";   /* never spill off-silhouette */
+      ctx.fillStyle = form === "alpha" ? "rgba(8,24,40,0.9)" : "rgba(48,10,6,0.85)";
+      for (var pe = 0; pe < EYES.pts.length; pe++) {
+        var ex = Math.round((EYES.pts[pe][0]) * EYES.sc) + gx;
+        var ey = Math.round((EYES.top + EYES.pts[pe][1]) * EYES.sc) + gy;
+        ctx.fillRect(ex - Math.floor(EYES.r/2), ey - Math.floor(EYES.r/2), EYES.r, EYES.r);
+      }
+      ctx.globalCompositeOperation = "source-over";
+    }
+
     ctx.restore();
     return true;
   }
@@ -14895,6 +14942,67 @@ switchTab(initialTab);
       ctx.fillStyle = e.c>0.5 ? pal.flameYel : pal.flameOrg;
       ctx.fillRect(Math.round(e.x*res), Math.round(e.y*res), res, res);
       ctx.globalAlpha = 1;
+    }
+  }
+
+  /* ── v14 per-form ambient auras: the forms differentiate at a glance ──
+     OMEGA = rising embers (orange/gold sparks that flicker and pop as they
+     climb off the creature's shoulders). ALPHA = cold frost wisps (cyan
+     motes that drift DOWN and sideways like settling rime, slower and
+     quieter). Deterministic LCG-seeded, so the pattern is stable across
+     reloads instead of re-rolling every session. Logical space is the form's
+     own 160×160 buffer scaled by res, matching drawEmbers' convention. */
+  function _lcg(seed) { var s = seed >>> 0; return function () {
+    s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  var AURA = { omega: null, alpha: null };
+  function auraParticles(form) {
+    if (AURA[form]) return AURA[form];
+    var rnd = _lcg(form === "alpha" ? 0xA1FA7 : 0x0E6AB);
+    var ps = [], N = 12;
+    for (var i = 0; i < N; i++) {
+      ps.push({ x: 14 + rnd() * 132, y: rnd() * 160,
+                v: 0.10 + rnd() * 0.18, ph: rnd() * 6.28, c: rnd() });
+    }
+    AURA[form] = ps;
+    return ps;
+  }
+  function drawAura(ctx, t, form, res) {
+    if (reduced) return;
+    var ps = auraParticles(form), i, p, x, y, a, fl;
+    if (form === "omega") {
+      for (i = 0; i < ps.length; i++) {
+        p = ps[i];
+        y = 160 - ((t.flick * (p.v * 2) + p.y) % 172);      /* rise */
+        x = p.x + Math.sin(t.flick * 0.07 + p.ph) * 3.5;    /* wander */
+        fl = 0.55 + 0.45 * Math.sin(t.flick * 0.23 + p.ph * 3);  /* flicker */
+        a = Math.min(1, y / 30) * fl;                        /* fade near top */
+        if (y < 4 || a <= 0.02) continue;
+        ctx.globalAlpha = a * 0.8;
+        ctx.fillStyle = p.c > 0.6 ? "#ffd878" : (p.c > 0.25 ? "#ff9a2a" : "#ff5a00");
+        ctx.fillRect(Math.round(x * res), Math.round(y * res), res, res);
+        if (p.c > 0.75) {  /* bright core on the lucky ones */
+          ctx.globalAlpha = a * 0.5;
+          ctx.fillStyle = "#fff4d0";
+          ctx.fillRect(Math.round(x * res) - res, Math.round(y * res), res, res);
+        }
+        ctx.globalAlpha = 1;
+      }
+    } else {  /* alpha: frost settling — slower, downward, blue-white */
+      for (i = 0; i < ps.length; i++) {
+        p = ps[i];
+        y = (t.flick * p.v * 1.2 + p.y) % 172 - 6;           /* drift down */
+        x = p.x + Math.sin(t.flick * 0.045 + p.ph) * 5;      /* lateral sway */
+        a = 0.28 + 0.22 * Math.sin(t.flick * 0.11 + p.ph * 2);
+        if (y < 2) continue;
+        ctx.globalAlpha = Math.max(0, a);
+        ctx.fillStyle = p.c > 0.5 ? "#aeeaff" : "#e8fbff";
+        ctx.fillRect(Math.round(x * res), Math.round(y * res), res, res);
+        if (p.c > 0.8) {  /* occasional twin-mote shimmer */
+          ctx.globalAlpha = Math.max(0, a * 0.6);
+          ctx.fillRect(Math.round(x * res) + 2 * res, Math.round(y * res) - res, res, res);
+        }
+        ctx.globalAlpha = 1;
+      }
     }
   }
 
@@ -15903,6 +16011,9 @@ switchTab(initialTab);
       }
     }
     drawEmbers(nctx, P, DW, DH, res, pal);
+    /* v14 form auras — atlas forms only (procedural forms already read
+       distinct via the rig). Drawn on the display buffer like drawEmbers. */
+    if (F.key === "omega" || F.key === "alpha") drawAura(nctx, P, F.key, res);
 
     /* OMEGA gets the CRT scanline + vignette overlay on top */
     if (settings.stage >= 3 && !evolving) applyScanlines(nctx, DW, DH, res);

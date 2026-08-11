@@ -1,0 +1,330 @@
+{
+  "note": "emitted by derive_frames.py build_track; consumed verbatim by build_runtime_atlas.py",
+  "rows": {
+    "alert": {
+      "bases": 4,
+      "k": 8,
+      "windows": [
+        {
+          "dissolve": [
+            8,
+            15
+          ],
+          "hold": [
+            0,
+            7
+          ]
+        },
+        {
+          "dissolve": [
+            24,
+            31
+          ],
+          "hold": [
+            16,
+            23
+          ]
+        },
+        {
+          "dissolve": [
+            40,
+            47
+          ],
+          "hold": [
+            32,
+            39
+          ]
+        },
+        {
+          "dissolve": [
+            56,
+            63
+          ],
+          "hold": [
+            48,
+            55
+          ]
+        }
+      ]
+    },
+    "attack": {
+      "bases": 2,
+      "k": 6,
+      "windows": [
+        {
+          "dissolve": [
+            18,
+            23
+          ],
+          "hold": [
+            0,
+            17
+          ]
+        },
+        {
+          "dissolve": [
+            42,
+            47
+          ],
+          "hold": [
+            24,
+            41
+          ]
+        }
+      ]
+    },
+    "blocked": {
+      "bases": 2,
+      "k": 6,
+      "windows": [
+        {
+          "dissolve": [
+            30,
+            35
+          ],
+          "hold": [
+            0,
+            29
+          ]
+        },
+        {
+          "dissolve": [
+            66,
+            71
+          ],
+          "hold": [
+            36,
+            65
+          ]
+        }
+      ]
+    },
+    "doze": {
+      "bases": 2,
+      "k": 16,
+      "windows": [
+        {
+          "dissolve": [
+            16,
+            31
+          ],
+          "hold": [
+            0,
+            15
+          ]
+        },
+        {
+          "dissolve": [
+            48,
+            63
+          ],
+          "hold": [
+            32,
+            47
+          ]
+        }
+      ]
+    },
+    "hurt": {
+      "bases": 2,
+      "k": 10,
+      "windows": [
+        {
+          "dissolve": [
+            14,
+            23
+          ],
+          "hold": [
+            0,
+            13
+          ]
+        },
+        {
+          "dissolve": [
+            38,
+            47
+          ],
+          "hold": [
+            24,
+            37
+          ]
+        }
+      ]
+    },
+    "idle": {
+      "bases": 4,
+      "k": 16,
+      "windows": [
+        {
+          "dissolve": [
+            16,
+            31
+          ],
+          "hold": [
+            0,
+            15
+          ]
+        },
+        {
+          "dissolve": [
+            48,
+            63
+          ],
+          "hold": [
+            32,
+            47
+          ]
+        },
+        {
+          "dissolve": [
+            80,
+            95
+          ],
+          "hold": [
+            64,
+            79
+          ]
+        },
+        {
+          "dissolve": [
+            112,
+            127
+          ],
+          "hold": [
+            96,
+            111
+          ]
+        }
+      ]
+    },
+    "sleep": {
+      "bases": 1,
+      "k": null,
+      "windows": []
+    },
+    "straining": {
+      "bases": 2,
+      "k": 8,
+      "windows": [
+        {
+          "dissolve": [
+            16,
+            23
+          ],
+          "hold": [
+            0,
+            15
+          ]
+        },
+        {
+          "dissolve": [
+            40,
+            47
+          ],
+          "hold": [
+            24,
+            39
+          ]
+        }
+      ]
+    },
+    "victory": {
+      "bases": 2,
+      "k": 8,
+      "windows": [
+        {
+          "dissolve": [
+            28,
+            35
+          ],
+          "hold": [
+            0,
+            27
+          ]
+        },
+        {
+          "dissolve": [
+            64,
+            71
+          ],
+          "hold": [
+            36,
+            63
+          ]
+        }
+      ]
+    },
+    "walk": {
+      "bases": 2,
+      "k": 8,
+      "windows": [
+        {
+          "dissolve": [
+            8,
+            15
+          ],
+          "hold": [
+            0,
+            7
+          ]
+        },
+        {
+          "dissolve": [
+            24,
+            31
+          ],
+          "hold": [
+            16,
+            23
+          ]
+        }
+      ]
+    },
+    "working": {
+      "bases": 4,
+      "k": 8,
+      "windows": [
+        {
+          "dissolve": [
+            8,
+            15
+          ],
+          "hold": [
+            0,
+            7
+          ]
+        },
+        {
+          "dissolve": [
+            24,
+            31
+          ],
+          "hold": [
+            16,
+            23
+          ]
+        },
+        {
+          "dissolve": [
+            40,
+            47
+          ],
+          "hold": [
+            32,
+            39
+          ]
+        },
+        {
+          "dissolve": [
+            56,
+            63
+          ],
+          "hold": [
+            48,
+            55
+          ]
+        }
+      ]
+    }
+  }
+}

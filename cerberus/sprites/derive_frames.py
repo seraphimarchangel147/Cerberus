@@ -30,6 +30,7 @@ row must clear a per-state FLOOR (a frozen body is 0 and fails), tops/bottoms
 stay inside ranges, and a max-delta cap keeps frames on-baseline.
 """
 from PIL import Image
+import json
 import numpy as np
 import os, math
 
@@ -222,7 +223,7 @@ def dissolve_frame(b_from, b_to, masks, j, form):
 
 
 def build_track(bases, n, k, form):
-    """Per-frame base track + motion envelope for one row over M bases.
+    """Per-frame base track + motion envelope + layout for one row over M bases.
 
     v13 generalization (idle super-loop): M >= 2 bases cycle
       hold b0 | dissolve->b1 | hold b1 | ... | hold b(M-1) | dissolve->b0
@@ -230,8 +231,17 @@ def build_track(bases, n, k, form):
     dissolve frames per transition. Frame 0 and frame n-1 are both pure b0,
     so the loop wraps seamlessly. M == 2 reproduces the v8 layout exactly.
 
-    Returns (frames, env). env[i] is the geometric-motion envelope for frame i:
-      0.0 on dissolve frames, ramping 0.5 -> 1.0 at hold edges.
+    Returns (frames, env, layout). env[i] is the geometric-motion envelope
+    for frame i: 0.0 on dissolve frames, ramping 0.5 -> 1.0 at hold edges.
+    layout is the ACTUAL phase structure this call produced:
+      {"bases": M, "k": k,
+       "windows": [{"hold": [lo, hi], "dissolve": [lo, hi]}, ...]}
+    v14 contract: the builder consumes this layout verbatim (via
+    track_layout.json, emitted by main) instead of re-deriving it from a
+    hand-maintained ROW_SPEC. The v13 idle row shipped with exactly that
+    duplication wrong (ROW_SPEC said bases=3; the track has 4 entries
+    [b0, vc, b0, vd]), so the engine's dissolve FX fired over HOLD frames
+    for two of three transitions. One source of truth kills the class.
 
     WHY THE ENVELOPE EXISTS: a dissolve frame carries the UNION of both
     bases' silhouette boundaries, so its perimeter is much larger than
@@ -253,7 +263,9 @@ def build_track(bases, n, k, form):
     frames = []
     if identical:
         frames = [b0.copy() for _ in range(n)]
-        return frames, np.ones(n)
+        # single-base row: no phases, no transition (sleep). The builder
+        # publishes transition=None for bases==1 layouts.
+        return frames, np.ones(n), {"bases": 1, "k": None, "windows": []}
     h = (n - m * k) // m
     r = n - m * k - m * h
     if h < 1:
@@ -263,6 +275,7 @@ def build_track(bases, n, k, form):
     cursor = 0
     env = np.ones(n)
     holds = []                       # (lo, hi) per base, documented layout
+    windows = []                     # v14: the REAL phase layout, emitted verbatim
     for j in range(m):
         hold_len = h + (r if j == m - 1 else 0)
         hold_lo, hold_hi = cursor, cursor + hold_len - 1
@@ -275,6 +288,8 @@ def build_track(bases, n, k, form):
             frames.append(dissolve_frame(bases[j], bases[(j + 1) % m],
                                          masks[j], i - dis_lo + 1, form))
         cursor += k
+        windows.append({"hold": [hold_lo, hold_hi],
+                        "dissolve": [dis_lo, dis_hi]})
     assert len(frames) == n and cursor == n
     env = np.ones(n)
     # dissolve frames: motion-free; holds: ramp 0.5 -> 1.0 at the edges
@@ -289,7 +304,7 @@ def build_track(bases, n, k, form):
         for i in range(cursor, cursor + k):
             env[i] = 0.0
         cursor += k
-    return frames, env
+    return frames, env, {"bases": m, "k": k, "windows": windows}
 
 
 def _beat(cycles, n):
@@ -409,7 +424,7 @@ def derive(form, track, sel, amp, wl, cycles, n, prefix, kind, gamp):
     kind 'sway'  : horizontal whole-body weight-shift, +/-gamp px.
     kind 'none'  : geometry untouched (callers that bring their own, e.g. gait).
     """
-    frames, env = track
+    frames, env, _layout = track
     for i in range(n):
         frame = shimmer_frame(frames[i], sel, amp, wl, i, n, cycles)
         e = env[i]
@@ -441,7 +456,7 @@ def expectant(form, track, sel, amp, wl, cycles, n, prefix, gamp, samp):
     the RHYTHM: one long deliberate breath per loop instead of idle's two
     quick ones, plus a sway that reads as leaning in (blocked) or lolling
     (doze). Motion is envelope-scaled: dissolve frames play clean."""
-    frames, env = track
+    frames, env, _layout = track
     for i in range(n):
         frame = shimmer_frame(frames[i], sel, amp, wl, i, n, cycles)
         e = env[i]
@@ -457,7 +472,7 @@ def tremor(form, track, sel, amp, wl, cycles, n, prefix):
     travel — pushing against a wall. Structurally unlike working's on-beat
     bob: the dominant frequency here is ~n/2 cycles per loop, not the gait
     beat. Jitter is envelope-scaled: dissolve frames play clean."""
-    frames, env = track
+    frames, env, _layout = track
     for i in range(n):
         frame = shimmer_frame(frames[i], sel, amp, wl, i, n, cycles)
         e = env[i]
@@ -478,7 +493,7 @@ def hurt(form, track, sel, amp, wl, cycles, n, prefix):
     cxSwing=1 vs doze's symmetric ±1 loll (cxSwing=2) — the two rows stay
     apart on a swing dimension, not just on a fragile 1px cyMean difference.
     Recoil is envelope-scaled: dissolve frames play clean."""
-    frames, env = track
+    frames, env, _layout = track
     for i in range(n):
         frame = shimmer_frame(frames[i], sel, amp, wl, i, n, cycles)
         e = env[i]
@@ -530,7 +545,7 @@ def gait(form, base, track, sel, amp, wl, cycles, n, prefix, dx, mode, gamp, sam
     band geometry is defined by the registered stance, not by the variant.
     All geometry is envelope-scaled: dissolve frames play clean.
     """
-    frames, env = track
+    frames, env, _layout = track
     clusters = leg_clusters(form, base)
     for i in range(n):
         frame = shimmer_frame(frames[i], sel, amp, wl, i, n, cycles)
@@ -566,8 +581,8 @@ def gait(form, base, track, sel, amp, wl, cycles, n, prefix, dx, mode, gamp, sam
 #   walk 16->32 sleep 40->80 blocked 36->72 straining 24->48 hurt 24->48
 #   doze 32->64
 N_IDLE = 128     # v13 super-loop: 4 phases (b0,vc,b0,vd) x (16 hold + 16 dissolve) = 128f, 4.3s — three sprites per loop, v12 rhythm intact
-N_ALERT = 48
-N_WORKING = 48
+N_ALERT = 64     # v14 super-loop: 4 phases (b0,vd,b0,vc) x (8 hold + 8 dissolve), 2.1s — three sprites per loop
+N_WORKING = 64   # v14 super-loop: 4 phases (b0,va,b0,vb), same layout
 N_ATTACK = 48
 N_WALK = 32
 N_VICTORY = 72
@@ -691,6 +706,12 @@ def blink_pass(form, prefix, n, seed, mode="blink"):
 
 
 def main():
+    # v14: record every row's ACTUAL track layout and emit it for the
+    # builder. The builder used to re-derive windows from a hand-maintained
+    # ROW_SPEC — that duplication shipped wrong for idle in v13 (bases=3 vs
+    # the real 4-entry track), mis-timing the engine's dissolve FX. One
+    # source of truth: the code that builds the frames publishes the layout.
+    layouts = {}
     for form in ["omega", "alpha"]:
         b0 = load_base(form, "idle_neutral")
         va = load_base(form, "idle_variant_a")
@@ -726,30 +747,39 @@ def main():
         sel = subset_mask(glow_u, int(0.09 * body), seed=0)
         derive(form, tr, sel, amp=0.28, wl=56, cycles=4, n=N_IDLE,
                prefix="dl", kind="breath", gamp=2)
+        layouts["idle"] = tr[2]
 
-        # alert: watchful scan — variant D (v10)
-        tr = build_track([b0, vd], N_ALERT, k=8, form=form)
+        # alert: watchful scan — v14 SUPER-LOOP: three sprites cycle
+        # (neutral -> D -> neutral -> C), 64 frames / 2.1s, same layout math
+        # as idle. Sway rhythm (5 cycles, gamp=2) unchanged; travel/sec is
+        # resampling-invariant so the gate floor carries over untouched.
+        tr = build_track([b0, vd, b0, vc], N_ALERT, k=8, form=form)
         sel = subset_mask(glow_u, int(0.12 * body), seed=1)
         derive(form, tr, sel, amp=0.40, wl=34, cycles=5, n=N_ALERT,
                prefix="al", kind="sway", gamp=2)
+        layouts["alert"] = tr[2]
 
-        # working: rhythmic processing pulse — variant A
-        tr = build_track([b0, va], N_WORKING, k=8, form=form)
+        # working: rhythmic processing pulse — v14 SUPER-LOOP: three sprites
+        # (neutral -> A -> neutral -> B). Bob rhythm (7 cycles) unchanged.
+        tr = build_track([b0, va, b0, vb], N_WORKING, k=8, form=form)
         sel = subset_mask(glow_u, int(0.10 * body), seed=2)
         derive(form, tr, sel, amp=0.34, wl=46, cycles=7, n=N_WORKING,
                prefix="wo", kind="bob", gamp=2)
+        layouts["working"] = tr[2]
 
         # attack: aggressive surge + lunge — variant B
         tr = build_track([b0, vb], N_ATTACK, k=6, form=form)
         sel = subset_mask(glow_u, int(0.12 * body), seed=3)
         cl = gait(form, b0, tr, sel, amp=0.50, wl=30, cycles=6, n=N_ATTACK,
                   prefix="at", dx=2, mode="attack", gamp=2, samp=3)
+        layouts["attack"] = tr[2]
 
         # victory: celebratory swell + biggest bob — variant C (v10)
         tr = build_track([b0, vc], N_VICTORY, k=8, form=form)
         sel = subset_mask(glow_u, int(0.20 * body), seed=4)
         derive(form, tr, sel, amp=0.38, wl=64, cycles=3, n=N_VICTORY,
                prefix="vc", kind="bob", gamp=3)
+        layouts["victory"] = tr[2]
 
         # walk: stride with the opposite-step variant dissolving in
         bw = load_base(form, "walk_step_right")
@@ -759,6 +789,7 @@ def main():
                           int(0.18 * (bw[:, :, 3] > 0).sum()), seed=5)
         clw = gait(form, bw, tr, sel, amp=0.26, wl=48, cycles=2, n=N_WALK,
                    prefix="wk", dx=2, mode="walk", gamp=2)
+        layouts["walk"] = tr[2]
 
         # sleep: one slow shallow breath — single base (no sleep variant yet)
         b = load_base(form, "sleep_rest")
@@ -766,6 +797,7 @@ def main():
         tr = build_track([b, b], N_SLEEP, k=8, form=form)
         derive(form, tr, sel, amp=0.16, wl=72, cycles=1, n=N_SLEEP,
                prefix="sl", kind="breath", gamp=1)
+        layouts["sleep"] = tr[2]
 
         # ── v6 harness states — now each gets its own variant pairing too,
         # so blocked/straining/hurt/doze read as different SPRITES, not just
@@ -776,18 +808,21 @@ def main():
         sel = subset_mask(glow_u, int(0.10 * body), seed=7)
         expectant(form, tr, sel, amp=0.22, wl=68, cycles=1, n=N_BLOCKED,
                   prefix="bl", gamp=1, samp=2)
+        layouts["blocked"] = tr[2]
 
         # straining: high-freq tremor against a wall — variant A
         tr = build_track([b0, va], N_STRAINING, k=8, form=form)
         sel = subset_mask(glow_u, int(0.12 * body), seed=8)
         tremor(form, tr, sel, amp=0.45, wl=30, cycles=9, n=N_STRAINING,
                prefix="st")
+        layouts["straining"] = tr[2]
 
         # hurt: flinch that settles — variant B
         tr = build_track([b0, vb], N_HURT, k=10, form=form)
         sel = subset_mask(glow_u, int(0.08 * body), seed=9)
         hurt(form, tr, sel, amp=0.20, wl=52, cycles=1, n=N_HURT,
              prefix="hu")
+        layouts["hurt"] = tr[2]
 
         # doze: content rest, quietest shimmer — variant B (v10: blocked took
         # variant D, and putting both 'expectant' rows on the same variant
@@ -799,6 +834,7 @@ def main():
         sel = subset_mask(glow_u, int(0.07 * body), seed=10)
         expectant(form, tr, sel, amp=0.14, wl=76, cycles=1, n=N_DOZE,
                   prefix="dz", gamp=1, samp=1)
+        layouts["doze"] = tr[2]
 
         # ── v11 blinks: eyes animate in every row (RGB-only post-pass).
         # Awake rows blink twice per loop on row-unique seeds (no synced
@@ -819,7 +855,20 @@ def main():
               f"victory={N_VICTORY} walk={N_WALK} sleep={N_SLEEP} "
               f"blocked={N_BLOCKED} straining={N_STRAINING} hurt={N_HURT} doze={N_DOZE}; "
               f"clusters walk={clw} attack={cl})")
-    print("done v11.1 ghost-ramp transitions")
+    # v14: emit the REAL track layouts for the builder (single source of
+    # truth — replaces the hand-maintained ROW_SPEC). Both forms build the
+    # same layout (identical n/k/bases lists), so one form's dict is the
+    # contract; assert agreement before writing.
+    for row, lay in layouts.items():
+        assert set(lay) == {"bases", "k", "windows"}, f"bad layout {row}"
+    out = os.path.join(REPO, "runtime", "track_layout.json")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump({"note": "emitted by derive_frames.py build_track; "
+                           "consumed verbatim by build_runtime_atlas.py",
+                   "rows": layouts}, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    print(f"wrote {out} ({len(layouts)} rows)")
+    print("done v14 track-layout contract")
 
 
 if __name__ == "__main__":
