@@ -1,0 +1,61 @@
+--- a/cerberus/sprites/derive_frames.py	2026-08-02 22:02:41.176372027 -0400
++++ b/cerberus/sprites/derive_frames.py	2026-08-02 22:02:41.180372080 -0400
+@@ -36,12 +36,40 @@
+     return np.array(Image.open(os.path.join(REPO, form, f"{name}.png")).convert("RGBA")).astype(np.int32)
+ 
+ 
+-def glow_mask(base, form):
+-    r, g, b, a = base[:, :, 0], base[:, :, 1], base[:, :, 2], base[:, :, 3]
++MAX_SUBSET = 0.20  # largest per-state subset requested below (victory)
++
++
++def glow_mask(base, form, min_frac=MAX_SUBSET * 1.15):
++    """Glow pool for shimmer. MUST stay larger than the biggest per-state subset,
++    otherwise every state clamps to the same pixels and all choreography collapses
++    into one animation (alpha regression, 2026-08-02).
++
++    The strict hue rule is kept as the preferred core; if it yields too small a
++    pool for this form's palette, the pool is grown by cool/warm-cast ranking so
++    each state still gets a distinct region. Geometry is never touched.
++    """
++    r, g, b, a = (base[:, :, i].astype(np.int32) for i in range(4))
+     op = a > 0
+     if form == "omega":
+-        return op & (r > 150) & (g < r) & (b < 100)
+-    return op & (b > 150) & (g > 120) & (r < 110)
++        core = op & (r > 150) & (g < r) & (b < 100)
++        score = r - (g + b) // 2          # warm-cast ranking
++    else:
++        core = op & (b > 150) & (g > 120) & (r < 110)
++        score = (b + g) // 2 - r          # cool-cast ranking
++
++    need = int(min_frac * op.sum())
++    if core.sum() >= need:
++        return core
++
++    # grow: keep the core, then add the highest-scoring remaining body pixels
++    pool = core.copy()
++    cand = op & ~core
++    ys, xs = np.where(cand)
++    if len(ys):
++        order = np.argsort(-score[ys, xs], kind="stable")
++        take = order[: max(0, need - int(core.sum()))]
++        pool[ys[take], xs[take]] = True
++    return pool
+ 
+ 
+ def subset_mask(glow, target, seed=0):
+@@ -52,7 +80,12 @@
+     n = len(xs)
+     sel = np.zeros(glow.shape, dtype=bool)
+     if n <= target:
+-        sel[glow] = True
++        # Clamping means this state gets the WHOLE pool -- and so does every other
++        # state that clamps, making their choreography byte-identical in extent.
++        raise ValueError(
++            f"glow pool exhausted: {n} px available, {target} requested (seed={seed}). "
++            "Every clamping state would animate the identical pixel set. "
++            "Widen glow_mask() for this form instead of clamping.")
+     else:
+         order = np.roll(np.arange(n), seed * 7919)
+         idx = order[np.linspace(0, n - 1, target).astype(int)]

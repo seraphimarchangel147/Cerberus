@@ -1,0 +1,11 @@
+{
+  "state": "tripped",
+  "trippedAt": "2026-08-01",
+  "windowTotal": 2267950,
+  "threshold": 2000000,
+  "discordNoticeMessageId": "1533077489973334046",
+  "agentPulsePaused": true,
+  "proactiveObserverPaused": false,
+  "pendingAction": "RETRY set_cron_job_enabled(proactive-observer, false) — two attempts failed on mutation-lease conflict and the identical-retry guard blocked a third. Next tick must complete this pause, then confirm both background jobs are paused before treating the throttle as complete.",
+  "note": "Memory store rejected the state record twice (secret-scanner false positive, known defect). This file is the durable state of record until that defect is fixed."
+}

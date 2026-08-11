@@ -5,7 +5,7 @@
 **Battery:** `docs/qa/harness-upgrade-qa-battery-2026-07-29.md`
 **Pre-check:** `node scripts/qa-wave-probes.mjs` reproduced live — **all passed, 0 failed** (13/13; count partially masked by output scrubber, see Finding F2).
 
-**Status: Phase A complete except A4 negative control. Phase B NOT started — flags stay OFF per protocol.**
+**Status: Phase A COMPLETE — A4 closed 2026-08-06 (addendum below: live charged-variant card + two stalled-turn stop records captured verbatim via channel_history + journal forensics). Phase B NOT started — flags stay OFF per protocol.**
 
 ---
 
@@ -16,11 +16,11 @@
 | A1 config surface | **PASS** | Source defaults confirmed: retries 5, retry delay cap 30000ms, checkpoints 3, free extensions 3, lease TTL default (900000ms per spec), repeat limit 8. `systemctl --user show openagi-azazel -p Environment`: **no overrides** for any wave knob — only wave-adjacent var present is `OPENAGI_MEMTREE`. Wave 3 flags absent (= OFF). |
 | A2 `mutation_lease_status` reachable + unblockable | **PASS** | Idle: valid, empty, no error. Mid-flight (while `execute_code` held the foreground lease): returned successfully, listed the live lease. Verbatim below. |
 | A3 actionable conflict error | **PASS** | Genuine conflict forced; new actionable error captured verbatim (below). Bare string is gone. |
-| A4 progress-aware wall-clock | **PARTIAL** | Source strings confirmed (`discord-channel.js:66-79`, `model-provider.js:1108-1120`). Live checkpoint captured — see verbatim section. Negative control (stalled turn → charged) **not run live**; code path + fail-safe default (charge on unknown) verified in source. |
+| A4 progress-aware wall-clock | **PASS** | Formatter `discord-channel.js:65-79`, decision logic `model-provider.js:1047-1116`, cadence 900s. Live charged-variant Discord card captured verbatim (addendum). Stalled-turn negative control: two stopped turns with verbatim stop records (3 idle allowances consumed → STALLED; one also records 1 free progress extension granted while output flowed). Free-variant card string code-verified; live free-variant card not recoverable (60s wall-clock throttle + concurrent turns). Minor anomaly filed: one card rendered `? idle allowances left`. See addendum. |
 | A5 output-aware repeat detection | **PASS w/ deviation** | Changing output: 24 calls, zero flags. Identical output: exactly ONE advisory at count 8, never re-fired (10-call rerun: zero flags). Deviation: error shape, see below. |
 | A6 shell self-kill guidance | **PASS** | Live `code_shell` description: "capture its PID or process group… Never use broad command-line matching such as `pkill -f` or `killall` - the pattern can match this agent's own supervising process and terminate the harness mid-task." |
 | A7 retry window | **PASS** | `DEFAULT_PROVIDER_MAX_RETRIES = 5`, `MAX_PROVIDER_RETRY_DELAY_MS = 30000` (`model-provider.js:95-97`); Retry-After honored with full value for quota-exhausted/rate-limit kinds (:341-345); retryable set via `RETRYABLE_PROVIDER_STATUSES` + network errors (:320-324). No live 429/529 observed during the battery. |
-| A8 reasoning effort opt-in | **PASS (code-path)** | `resolveReasoningEffort`: unset/empty → `null`; `reasoningRequestFields`: `!effort → {}` — **no reasoning key in the outgoing body** when unset. Unsupported tier → omitted with logged note, never downgraded (:626-643). Unit env confirmed unset. **Honest limit: no live wire capture (no proxy); this is source-level verification of the omission path.** |
+| A8 reasoning effort opt-in | **PASS** | `resolveReasoningEffort`: unset/empty → `null`; `reasoningRequestFields`: `!effort → {}` — **no reasoning key in the outgoing body** when unset; spread at 8 construction sites (3221, 3239, 4579, 4871, 5317, 5684, 5919, 6267) adds nothing. Unsupported tier → omitted with logged note, never downgraded (:626-643). Unit env confirmed unset. **Strengthened 2026-08-06:** executable probe — `resolveReasoningEffort(env unset) -> null`; constructed body keys exactly `model,messages`; `reasoning`/`thinking` absent; control `env=high -> "high"`. Live daemon `/proc/<pid>/environ` contains zero occurrences of the var. Honest limit stands: construction-level + live-env proof, not a wire capture. |
 | B1–B3 | **DEFERRED** | Phase B flags OFF, one variable at a time per protocol. |
 
 ---
@@ -245,6 +245,37 @@ F4 and the meta-bug are all closed.
 
 ## Addendum — A4 live capture
 
-_(appended after the checkpoint fired — see git working-tree timestamp)_
+_(filled 2026-08-06 by Azazel; captured via `channel_history` — the read-back lane F4 added — plus session-journal forensics)_
 
-**[TO BE FILLED AT CHECKPOINT]**
+**Charged (idle) variant — verbatim live Discord card.** Channel `1477780117496271030`, message id `1534157898714841208`, author Azazel (bot), 2026-08-04T11:15:46.329Z:
+
+```
+Idle checkpoint - progress unreadable; idle fail-safe (? idle allowances left before the turn is stopped as stalled)
+```
+
+This is the fail-safe branch of `formatWallClockCheckpointActivity` (`discord-channel.js:75-78`) rendered live. The `?` means the emitted checkpoint event lacked a safe-integer `idleStrikesLeft` (formatter fallback, :66-68). **Anomaly filed:** the card pipeline works, but that checkpoint path did not carry the numeric strikes field — worth one look (likely partial checkpoint state on that turn; every other field rendered correctly).
+
+**Stalled-turn negative control — verbatim stop records.** Session `~/.openagi/agent-host/sessions/session-cb6a2a9e….json` (2026-08-04, the QA-battery session, turn channel `1477780117496271030`) contains two wall-clock stops:
+
+```
+Turn stopped after 27 iterations because it went idle — no new output-aware progress across every idle allowance. All 3 idle allowances were consumed without new output. 1 free progress extension were granted earlier while output was flowing…
+```
+
+```
+Turn stopped after 63 iterations because it went idle — no new output-aware progress across every idle allowance. All 3 idle allowances were consumed without new output. The turn was stopped as STALLED: …
+```
+
+The 63-iteration stop is the pure negative control: a genuinely stalled turn was CHARGED all 3 idle allowances and stopped as STALLED. The 27-iteration stop proves both mechanics in one artifact: while output flowed the turn was extended FREE (1 progress extension), and once stalled it was CHARGED (3 allowances consumed) and stopped. This matches `evaluateWallClockCheckpoint` exactly (`model-provider.js:1084-1101`): progress → `extensionKind:"progress"`, strikes reset to total, `progressExtensions += 1`; no progress → one strike spent; 0 left → stop.
+
+**Free-variant Discord card:** string code-verified at `discord-channel.js:73` (`Checkpoint - turn still producing output, extended free (N progress extension(s) granted; idle allowances restored to M)`). A live instance was not recoverable from 2026-08-04 channel history: the listener throttles `agent-activity:wall-clock` to 1 post/60s (`discord-channel.js:1306`) and several Azazel turns were running concurrently that morning, so cards suppressed each other. The free grant itself is proven verbatim by the stop record above. Operator note: if per-turn card fidelity matters, the shared 60s throttle key is the thing to revisit.
+
+**A8 reinforcement (2026-08-06):** executable probe in repo checkout —
+
+```
+resolveReasoningEffort(env unset) -> null
+body keys: model,messages
+reasoning key present: false | thinking key present: false
+control (env=high) -> "high"
+```
+
+Live daemon process environment (PID 1249831): `OPENAGI_REASONING_EFFORT` occurs 0 times; also absent from the systemd unit Environment. Production request bodies carry no reasoning/thinking keys today.

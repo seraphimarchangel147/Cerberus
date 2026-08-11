@@ -2782,3 +2782,16 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-08-08T12:29:04.748Z · **azazel** · create `drafts/stakeholder-update-email-2026-08-08.md` — Draft stakeholder wrap-up email (dashboard status + goal-loop verification), not sent
 - 2026-08-09T04:03:04.541Z · **azazel** · edit `src/model-provider.js` — Goal loop: judge active goals on watchdog/timeout/evidence-incomplete turn endings (tail evaluation, both lanes) — kills zombie-goal gap
 - 2026-08-09T04:03:42.996Z · **azazel** · edit `test/persistent-goals.test.js` — Regression tests: tail goal evaluation judges watchdog-stopped turns (completes) and fails open on judge error (never pauses)
+- 2026-08-09T12:30:15.094Z · **azazel** · create `drafts/monday-review-scheduling-email-2026-08-09.md` — Draft Monday-review scheduling email (placeholder invite, draft-only)
+- 2026-08-09T12:31:02.000Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend skeleton header to cover 2026-08-09 re-issue
+- 2026-08-09T12:31:38.899Z · **azazel** · create `drafts/monday-reminder-confirm-attendees-2026-08-09.md` — Draft Monday reminder proposal (confirm attendees & pre-read) — not scheduled
+- 2026-08-09T20:30:02.664Z · **azazel** · create `drafts/monday-review-slot-proposal-2026-08-10.md` — Draft Monday 2026-08-10 review slot proposal (report review + next-iteration planning)
+- 2026-08-09T20:30:28.816Z · **azazel** · create `drafts/weekend-build-block-provider-auth-dashboard-2026-08-09.md` — Draft weekend focused-build block proposal for provider-auth dashboard
+- 2026-08-10T12:01:11.108Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend draft header to cover 2026-08-10 re-issue (task_c57f3ec4ee424d17)
+- 2026-08-10T12:01:44.392Z · **azazel** · create `drafts/monday-reminder-finalize-integration-report-2026-08-10.md` — Draft Monday reminder proposal for finalizing/sending the integration report
+- 2026-08-11T10:10:26.542Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-11T10:11:05.587Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-11T10:11:23.372Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-11T10:11:59.296Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-11T10:12:24.479Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-11T10:14:11.747Z · **azazel** · create `test/stream-truncation-retry.test.js`

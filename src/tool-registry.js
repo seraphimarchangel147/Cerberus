@@ -1081,6 +1081,12 @@ export class ToolRegistry {
         if (!evaluation.comparable) {
           scope.entries.delete(fingerprint);
           tracking.outputProgress = false;
+          // Uncomparable output (signature could not be formed) must still
+          // count as liveness: a successful call COMPLETED, which is evidence
+          // of a working turn, not of a stall. Repeat-detection for this
+          // fingerprint is reset above, so anti-spin is unaffected -- only a
+          // later identical comparable output can accrue a repeat count.
+          recordTurnProgress(tracking.progressContext);
           return null;
         }
         scope.entries.set(fingerprint, {

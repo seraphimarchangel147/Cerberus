@@ -1117,7 +1117,22 @@ for (const spec of [
       /too late/.test(result.text) || /OPENAGI_MAX_TURN_SECONDS|wall-clock/i.test(result.text),
       `expected a forced answer or a wall-clock summary, got: ${result.text}`
     );
-    assert.deepEqual(events, [{ phase: "iteration", n: 1, max: 5 }]);
+    // Every watchdog stop now also emits an auditable wall-clock-stopped event
+    // with the reason and the non-progress receipt -- the legacy hard-stop path
+    // included. The exact event contract is asserted so a silent shape change
+    // cannot erode the audit trail Seraphim asked for.
+    assert.deepEqual(events, [
+      { phase: "iteration", n: 1, max: 5 },
+      {
+        phase: "wall-clock-stopped",
+        reason: "stalled",
+        idleStrikesLeft: 0,
+        progressExtensions: 0,
+        trackedOutputs: 0,
+        nonProgressiveOutputs: 0,
+        lastNonProgressiveCallIds: []
+      }
+    ]);
   });
 }
 
