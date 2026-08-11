@@ -152,6 +152,37 @@ ALIAS = {
     "dozing": "doze",
 }
 
+# ── Transition windows (v12) ────────────────────────────────────────────────
+# Dissolve step count k per row. MUST mirror the build_track(b0, b1, N_*, k=...)
+# calls in derive_frames.py — that file is the source of truth for k; this
+# table is validated below against len(seq) so drift fails the build loudly.
+# v12 purpose: the renderer overlays an evolve-style canvas composite (glow
+# bloom + energy streaks + shockwave ring) during these windows so the pixel
+# materialization reads as energy FX instead of cheap pixel flips. Sleep is
+# single-base (build_track(b, b, ...)) => no visual transition => null.
+ROW_K = {
+    "idle": 16, "alert": 8, "working": 8, "attack": 6, "victory": 8,
+    "walk": 8, "sleep": None, "blocked": 6, "straining": 8, "hurt": 10,
+    "doze": 16,
+}
+
+
+def transition_windows(n, k):
+    """Inclusive seq-index ranges for one row's dissolve phases.
+
+    Mirrors build_track()'s layout in derive_frames.py EXACTLY:
+      hold b0 [0, h) | dissolve fwd [h, h+k) | hold b1 [h+k, 2h+k+r)
+      | dissolve rev [2h+k+r, n). Returned as inclusive [start, end] pairs.
+    """
+    h = (n - 2 * k) // 2
+    r = n - 2 * k - 2 * h
+    return {
+        "hold_a": [0, h - 1],
+        "fwd": [h, h + k - 1],
+        "hold_b": [h + k, 2 * h + k + r - 1],
+        "rev": [2 * h + k + r, n - 1],
+    }
+
 
 def pack(form, names):
     """Pack `names` from cerberus/sprites/<form>/ into a square-ish sheet."""
@@ -198,6 +229,41 @@ def validate(states, index, alias):
             raise SystemExit(f"alias {engine_state!r} -> unknown row {row!r}")
 
 
+def attach_transitions(states):
+    """Add per-row dissolve windows to the manifest (v12). Validates ROW_K
+    arithmetic against seq lengths so a k drift in derive_frames.py fails
+    the build instead of mis-timing the renderer's FX overlay."""
+    for row, spec in states.items():
+        n = len(spec["seq"])
+        k = ROW_K.get(row)
+        if k is None:                      # single-base row: no transition
+            spec["transition"] = None
+            continue
+        if k < 1 or 2 * k > n:
+            raise SystemExit(f"row {row!r}: k={k} invalid for n={n}")
+        h = (n - 2 * k) // 2
+        r = n - 2 * k - 2 * h
+        wins = transition_windows(n, k)
+        # windows must tile [0, n-1] contiguously — catches formula drift
+        covered = []
+        for key in ("hold_a", "fwd", "hold_b", "rev"):
+            lo, hi = wins[key]
+            covered.extend(range(lo, hi + 1))
+        if covered != list(range(n)):
+            raise SystemExit(f"row {row!r}: windows do not tile the seq: {wins}")
+        spec["transition"] = {
+            "k": k,
+            "windows": wins,
+            # engine convenience: dissolve frames in seq order (fwd then rev),
+            # so an FX overlay can fire on membership instead of index math.
+            "dissolve_idx": list(range(wins["fwd"][0], wins["fwd"][1] + 1))
+            + list(range(wins["rev"][0], wins["rev"][1] + 1)),
+            "hold_b_last": wins["hold_b"][1],
+            "rem": r,
+        }
+    return states
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     manifest = {"cell": CELL, "alias": ALIAS, "forms": {}}
@@ -207,6 +273,7 @@ def main():
         print(f"{form}:")
         sheet, cols, rows, index = pack(form, names)
         validate(states, index, ALIAS)
+        attach_transitions(states)
         out_png = os.path.join(OUT_DIR, f"{form}_atlas.png")
         sheet.save(out_png, optimize=True)
         size = os.path.getsize(out_png)
