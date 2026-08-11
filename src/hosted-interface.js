@@ -14545,6 +14545,101 @@ switchTab(initialTab);
     ctx.save();
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(cerbAtlas.images[form], sx, sy, cell, cell, 0, 0, 160, 160);
+
+    /* ── v12 transition FX: evolve-style canvas composite over dissolves ──
+       Creator 2026-08-10: the pixel dissolve "just looks kinda cheap", so do
+       the evolve treatment for ALL animations. The manifest's spec.transition
+       (Levi's FX contract, build_runtime_atlas.py attach_transitions) exposes
+       the exact dissolve idx windows per row; during those windows we wreath
+       the sprite in the same charge -> burst energy language as the evolve
+       effect (~line 15691) instead of letting raw pixel flips read as static.
+       Additive-only ('lighter') except one legibility re-blit in phase 2, so
+       it never obscures the art. Per-form palette: OMEGA volcanic gold/lava,
+       ALPHA cold plasma cyan (Creator's form identities). Non-loop rows
+       (attack) clamp idx at the end — the FX must stop once the row has
+       finished playing, so it is keyed to elapsed < n as well as the window. */
+    var tr = spec.transition;
+    if (tr && !reduced) {
+      var w = tr.windows;
+      var inFwd = idx >= w.fwd[0] && idx <= w.fwd[1];
+      var inRev = idx >= w.rev[0] && idx <= w.rev[1];
+      if ((inFwd || inRev) && (spec.loop || elapsed < n)) {
+        var pal = form === "alpha"
+          ? { hot: "#e8fbff", bloom: "#f2feff", a: "#aeeaff", b: "#66d4ff", c: "#4fc3ff" }
+          : { hot: "#fff8e0", bloom: "#fffef0", a: "#ffd878", b: "#ff9a2a", c: "#ff5a00" };
+        var kk = tr.k;
+        var jj = inFwd ? idx - w.fwd[0] : idx - w.rev[0];
+        var p = (jj + 0.5) / kk;               /* progress through the window */
+        var env = Math.sin(Math.PI * p);       /* fade in/out — no edge pop */
+        var cx = 80, cy = 88;                  /* sprite center (evolve: DH*0.55) */
+        /* per-row phase so streak angles differ across states, not synced */
+        var rph = 0;
+        for (var rc = 0; rc < rowName.length; rc++) rph += rowName.charCodeAt(rc);
+        var tAng = P.flick * 0.05 + rph;
+        ctx.globalCompositeOperation = "lighter";
+        if (p < 0.5) {
+          /* PHASE 1 — charge: white-hot build + inward energy streaks */
+          var p1 = p / 0.5;
+          ctx.globalAlpha = p1 * 0.85 * env;
+          ctx.drawImage(cerbAtlas.images[form], sx, sy, cell, cell, 0, 0, 160, 160);
+          ctx.drawImage(cerbAtlas.images[form], sx, sy, cell, cell, 0, 0, 160, 160);
+          for (var ep = 0; ep < 12; ep++) {
+            var ang = ep * (Math.PI * 2 / 12) + tAng;
+            var radOut = (1 - p1) * 46 + 6;
+            var radIn = radOut - 9;
+            ctx.globalAlpha = (0.4 + 0.5 * p1) * env;
+            ctx.strokeStyle = ep % 2 ? pal.a : pal.b; ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx + Math.cos(ang) * radOut, cy + Math.sin(ang) * radOut * 0.7);
+            ctx.lineTo(cx + Math.cos(ang) * radIn, cy + Math.sin(ang) * radIn * 0.7);
+            ctx.stroke();
+          }
+        } else {
+          /* PHASE 2 — burst: radial flash + bloom + shockwave + particles */
+          var t2 = (p - 0.5) / 0.5;
+          var flashA = Math.max(0, 1 - t2 * 1.6) * 0.5 * env;
+          if (flashA > 0.01) {
+            /* radial flash, not a full-canvas fill — stays circular so it
+               never shows a square edge over the dashboard background */
+            var fg = ctx.createRadialGradient(cx, cy, 4, cx, cy, 72);
+            fg.addColorStop(0, pal.hot);
+            fg.addColorStop(1, "rgba(0,0,0,0)");
+            ctx.globalAlpha = flashA;
+            ctx.fillStyle = fg;
+            ctx.fillRect(0, 0, 160, 160);
+          }
+          ctx.globalAlpha = Math.max(0, 1 - t2) * 0.6 * env;
+          ctx.fillStyle = pal.bloom;
+          ctx.beginPath(); ctx.arc(cx, cy, 12 + t2 * 46, 0, Math.PI * 2); ctx.fill();
+          /* re-solidify the sprite through the burst (evolve's fade-in) */
+          ctx.globalCompositeOperation = "source-over";
+          ctx.globalAlpha = Math.min(1, 0.55 + t2 * 0.45);
+          ctx.drawImage(cerbAtlas.images[form], sx, sy, cell, cell, 0, 0, 160, 160);
+          ctx.globalCompositeOperation = "lighter";
+          for (var rr = 0; rr < 3; rr++) {
+            var rt = Math.min(1, t2 * 1.2 + rr * 0.18);
+            ctx.globalAlpha = (1 - rt) * 0.8 * env;
+            ctx.strokeStyle = rr % 2 ? pal.a : pal.c; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(cx, cy, rt * 58, 0, Math.PI * 2); ctx.stroke();
+          }
+          for (var bp = 0; bp < 16; bp++) {
+            var bang = bp * (Math.PI * 2 / 16) + 0.2 + rph * 0.1;
+            var brad = t2 * 54;
+            var brad0 = Math.max(0, brad - 8);
+            ctx.globalAlpha = (1 - t2) * env;
+            ctx.strokeStyle = bp % 3 === 0 ? pal.hot : (bp % 2 ? pal.a : pal.c);
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx + Math.cos(bang) * brad0, cy + Math.sin(bang) * brad0 * 0.75);
+            ctx.lineTo(cx + Math.cos(bang) * brad, cy + Math.sin(bang) * brad * 0.75);
+            ctx.stroke();
+          }
+        }
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
+      }
+    }
+
     ctx.restore();
     return true;
   }
