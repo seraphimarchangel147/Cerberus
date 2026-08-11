@@ -10,6 +10,42 @@ import { createInspectorLogger } from "./host-logger.js";
  * user-initiated cancel surfaces as a plain AbortError with no harness code,
  * which is exactly the case we must NOT carry.
  */
+/**
+ * Graceful (non-throwing) turn endings that were the HARNESS's decision, not
+ * the user's. The idle watchdog is the important one: maybeWallClockCheckpoint
+ * returns null and the caller breaks with stopReason instead of throwing, so a
+ * stall-stop never reaches a catch block. Classifying only thrown errors missed
+ * the single most common way a turn dies.
+ */
+export const HARNESS_STOP_REASONS = new Set([
+  "turn-timeout",
+  "stalled",
+  "provider-error",
+  "request-timeout",
+  "context-too-large",
+  "iteration-cap",
+  "budget-cap"
+]);
+
+/**
+ * Resolve the steering cause for a finished turn from BOTH signals.
+ *
+ * A thrown error wins: an explicit user interrupt must not be overridden by an
+ * incidental stopReason from the same turn. Absent a throw, a harness
+ * stopReason still means the user's correction died through no fault of theirs.
+ */
+export function resolveTurnCause({ thrown = null, stopReason = null } = {}) {
+  if (thrown) return classifyAbortCause(thrown);
+  const reason = String(stopReason ?? "").toLowerCase();
+  if (HARNESS_STOP_REASONS.has(reason)) {
+    // Reuse the fine-grained labels where they exist so receipts stay precise.
+    if (reason === "stalled") return "stalled";
+    if (reason === "provider-error") return "provider-error";
+    return "wall-clock";
+  }
+  return "completed";
+}
+
 export function classifyAbortCause(error) {
   const code = String(error?.code ?? "").toLowerCase();
   const name = String(error?.name ?? "").toLowerCase();
@@ -1181,8 +1217,10 @@ export class AgentHost {
     }));
 
     const turnAbortController = new AbortController();
-    // "completed" until something proves otherwise; set in the catch below.
-    let turnAbortCause = "completed";
+    // Set in the catch below when the turn throws. A turn can also die
+    // GRACEFULLY (watchdog stall-stop returns a stopReason instead of
+    // throwing), so the cause is resolved from both signals in the finally.
+    let thrownTurnError = null;
     // Mark the turn in flight so a concurrent user message can steer it rather
     // than preempt the goal. Cleared in the finally below, on BOTH the success
     // and failure paths, so a crashed turn cannot leave a session permanently
@@ -1417,9 +1455,10 @@ export class AgentHost {
         maxTurnSeconds: input.maxTurnSeconds
       });
     } catch (error) {
-      // Classify WHY the turn died so the steering layer can decide whether a
-      // stranded correction is discarded (user's doing) or carried (ours).
-      turnAbortCause = classifyAbortCause(error);
+      // Remember WHAT was thrown; the cause is resolved in the finally, where
+      // the graceful stopReason is also in scope. Classifying here would miss
+      // every non-throwing harness stop (the idle watchdog's normal path).
+      thrownTurnError = error;
       turnAbortController.abort(error);
       recordRunInspector(this.runtime, {
         runId: turnId,
@@ -1443,6 +1482,14 @@ export class AgentHost {
       // not: the user typed a correction and it went nowhere. Log it so the
       // condition is observable, and count it in steering.stats().
       if (!ephemeral) {
+        // Resolve from BOTH signals: a thrown error (user interrupt, provider
+        // failure) and the graceful stopReason the watchdog sets when it stops
+        // a turn without throwing. `modelResult` is undefined if the turn threw
+        // before assignment, hence the optional chain.
+        const turnAbortCause = resolveTurnCause({
+          thrown: thrownTurnError,
+          stopReason: modelResult?.stopReason ?? null
+        });
         const stranded = this.runtime.steering?.endTurn?.(
           sessionId, { turnId, cause: turnAbortCause }
         );
