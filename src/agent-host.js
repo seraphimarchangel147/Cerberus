@@ -92,6 +92,7 @@ import {
   incrementMemoryRequestMetric,
   initializeMemoryRequestMetrics
 } from "./memory-request-metrics.js";
+import { shouldWriteTurnMemory } from "./memory-intake-policy.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -445,6 +446,9 @@ export class AgentHost {
   constructor(options = {}) {
     this.runtime = options.runtime;
     if (!this.runtime) throw new Error("AgentHost requires a runtime.");
+    this.recordHarnessCounter = typeof options.recordHarnessCounter === "function"
+      ? options.recordHarnessCounter
+      : null;
     // Observability sink for `this.log?.({ op, ... })`. Before this existed the
     // field was READ in three places and ASSIGNED NOWHERE, so every steering
     // event fired into a permanent no-op -- which made "zero steer-undelivered
@@ -1661,7 +1665,10 @@ export class AgentHost {
       });
     }
 
-    if (!ephemeral) {
+    if (!ephemeral && shouldWriteTurnMemory({
+      channel,
+      explicit: input.memory === true
+    })) {
       this.runtime.memory.remember(
         {
           source: "agent-host",
@@ -1684,6 +1691,23 @@ export class AgentHost {
           strength: output.scrutiny.score
         }
       );
+    } else if (!ephemeral) {
+      const suppression = {
+        channel,
+        sessionId,
+        agentId,
+        projectId: project.id
+      };
+      try {
+        this.log?.({ op: "memory-write-suppressed", ...suppression });
+      } catch {}
+      try {
+        const pending = this.recordHarnessCounter?.(
+          "memory-write-suppressed",
+          suppression
+        );
+        pending?.catch?.(() => {});
+      } catch {}
     }
 
     recordRunInspector(this.runtime, {

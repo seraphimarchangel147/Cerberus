@@ -8,6 +8,37 @@ const MAX_MEMORY_TAG_CHARS = 64;
 const ALLOWED_BACKGROUND_KINDS = new Set(["preference", "correction", "environment"]);
 const ALLOWED_CONFIDENCE = new Set(["high", "medium", "low"]);
 
+export const SYSTEM_MEMORY_SUPPRESSION_KILL_SWITCH = "OPENAGI_SYSTEM_MEMORY_SUPPRESSION";
+export const SYSTEM_MEMORY_CHANNELS = new Set([
+  "cron",
+  "job",
+  "autopilot",
+  "heartbeat",
+  "system"
+]);
+
+export function isSystemOriginatedTurn(channel) {
+  if (typeof channel !== "string") return false;
+  return SYSTEM_MEMORY_CHANNELS.has(channel.trim().toLowerCase());
+}
+
+export function shouldWriteTurnMemory({
+  channel,
+  explicit = false,
+  env = process.env
+} = {}) {
+  if (explicit === true) return true;
+  try {
+    if (String(env?.[SYSTEM_MEMORY_SUPPRESSION_KILL_SWITCH] ?? "").trim() === "0") {
+      return true;
+    }
+  } catch {
+    // A policy-read failure must not silently discard a human turn.
+    return true;
+  }
+  return !isSystemOriginatedTurn(channel);
+}
+
 // Only credential-shaped names become configured-secret needles. The store also
 // owns ordinary configuration (OPENAGI_AUTO_APPROVE=1, OPENAGI_CHECKPOINTS=3,
 // OPENAGI_MAX_TURN_SECONDS=1200), and treating a value such as "1" or "3" as a
