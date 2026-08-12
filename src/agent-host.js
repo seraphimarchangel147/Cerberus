@@ -93,6 +93,7 @@ import {
   initializeMemoryRequestMetrics
 } from "./memory-request-metrics.js";
 import { shouldWriteTurnMemory } from "./memory-intake-policy.js";
+import { HarnessCounterJournal } from "./harness-counters.js";
 
 // Internal tools every specialist gets regardless of scope: its own memory
 // and the task queue it drains. Everything else comes from the specialist's
@@ -446,9 +447,16 @@ export class AgentHost {
   constructor(options = {}) {
     this.runtime = options.runtime;
     if (!this.runtime) throw new Error("AgentHost requires a runtime.");
+    this.harnessCounters = options.harnessCounters ?? (
+      typeof this.runtime.dataDir === "string" && this.runtime.dataDir
+        ? new HarnessCounterJournal({ dataDir: this.runtime.dataDir })
+        : null
+    );
     this.recordHarnessCounter = typeof options.recordHarnessCounter === "function"
       ? options.recordHarnessCounter
-      : null;
+      : typeof this.harnessCounters?.record === "function"
+        ? this.harnessCounters.record.bind(this.harnessCounters)
+        : null;
     // Observability sink for `this.log?.({ op, ... })`. Before this existed the
     // field was READ in three places and ASSIGNED NOWHERE, so every steering
     // event fired into a permanent no-op -- which made "zero steer-undelivered
@@ -1248,6 +1256,11 @@ export class AgentHost {
           channel,
           chars: String(carried).length
         });
+        emitHarnessCounter(this.recordHarnessCounter, "steer-carried", {
+          sessionId,
+          channel,
+          chars: String(carried).length
+        });
       }
     }
     const inputAbortSignal = input.abortSignal;
@@ -1508,6 +1521,12 @@ export class AgentHost {
             cause: turnAbortCause,
             chars: String(stranded).length
           });
+          emitHarnessCounter(this.recordHarnessCounter, "steer-undelivered", {
+            sessionId,
+            channel,
+            cause: turnAbortCause,
+            chars: String(stranded).length
+          });
         }
       }
     }
@@ -1701,13 +1720,11 @@ export class AgentHost {
       try {
         this.log?.({ op: "memory-write-suppressed", ...suppression });
       } catch {}
-      try {
-        const pending = this.recordHarnessCounter?.(
-          "memory-write-suppressed",
-          suppression
-        );
-        pending?.catch?.(() => {});
-      } catch {}
+      emitHarnessCounter(
+        this.recordHarnessCounter,
+        "memory-write-suppressed",
+        suppression
+      );
     }
 
     recordRunInspector(this.runtime, {
@@ -2847,6 +2864,13 @@ function recordRunInspector(runtime, event) {
   } catch {
     // Operational visibility is advisory and cannot break an agent turn.
   }
+}
+
+function emitHarnessCounter(record, kind, meta) {
+  try {
+    const pending = record?.(kind, meta);
+    pending?.catch?.(() => {});
+  } catch {}
 }
 
 function inspectorUsageValue(usage, ...keys) {
