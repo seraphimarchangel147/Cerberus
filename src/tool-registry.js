@@ -63,6 +63,7 @@ import { isProfileMemoryScope } from "./memory-system.js";
 import { DenialBreaker, denialSessionKey } from "./denial-breaker.js";
 import { readableMemoryScopes } from "../lib/memtree.js";
 import { incrementMemoryRequestMetric } from "./memory-request-metrics.js";
+import { classifyToolFailure } from "./error-classifier.js";
 import {
   recordTurnProgress,
   recordTurnProgressOutput
@@ -78,7 +79,12 @@ const REGISTRY_FAILURE_STATE = new WeakMap();
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 const MAX_TURN_FAILURE_SCOPES = 256;
+const MAX_FAILURE_EPOCH_UNBLOCKS = 5;
 const DEFAULT_REPEATED_SUCCESS_LIMIT = 8;
+const EPOCH_UNBLOCKABLE_FAILURE_CLASSES = new Set([
+  "RESOURCE",
+  "TRANSIENT"
+]);
 const EXECUTION_DECISION_STOP_STATUSES = new Set([
   "blocked",
   "cancelled",
@@ -195,6 +201,7 @@ export function evaluateRepeatedOutcome(input = {}) {
 export class ToolRegistry {
   constructor(options = {}) {
     this.tools = new Map();
+    this.env = options.env ?? process.env;
     // Hermes's "always" choice is intentionally bounded to one live session.
     // Keeping it in memory guarantees a daemon restart clears every allowance.
     this.sessionAllows = new Set();
@@ -202,14 +209,14 @@ export class ToolRegistry {
     // Consecutive-denial valve. Escalates the BLOCK MESSAGE TEXT after N
     // denials in a session; never aborts a turn or touches message history.
     this.denialBreaker = options.denialBreaker ?? new DenialBreaker({
-      env: options.env ?? process.env
+      env: this.env
     });
     this.toolSearchController = options.toolSearchController ?? null;
     this.projects = options.projects ?? null;
     this.profiles = options.profiles ?? null;
     this.timeline = options.timeline ?? null;
     this.repeatedSuccessLimit = resolveRepeatedSuccessLimit(
-      options.env ?? process.env
+      this.env
     );
     this.startupBarrier = null;
     REGISTRY_FAILURE_STATE.set(this, {
@@ -991,7 +998,7 @@ export class ToolRegistry {
       };
     }
     const scope = fingerprint ? this._failureScope(context) : null;
-    const prior = scope?.entries.get(fingerprint);
+    let prior = scope?.entries.get(fingerprint);
     if (!scope || !fingerprint) return null;
     if (scope.retired && !prior?.inFlight) {
       return {
@@ -1022,6 +1029,23 @@ export class ToolRegistry {
         })
       };
     }
+    const priorEpoch = failureEntryEpoch(prior, scope.epoch);
+    if (
+      prior
+      && priorEpoch !== scope.epoch
+      && EPOCH_UNBLOCKABLE_FAILURE_CLASSES.has(prior.failureClass)
+      && !resumingPending
+    ) {
+      const unblockCount = scope.epochUnblocks.get(fingerprint) ?? 0;
+      if (unblockCount >= MAX_FAILURE_EPOCH_UNBLOCKS) {
+        return {
+          blocked: repeatedFailureEnvelope(prior.envelope, prior.attempts + 1)
+        };
+      }
+      scope.epochUnblocks.set(fingerprint, unblockCount + 1);
+      scope.entries.delete(fingerprint);
+      prior = null;
+    }
     const allowedAttempts = prior?.envelope?.outcome?.retryable === true ? 2 : 1;
     if (prior && prior.attempts >= allowedAttempts && !resumingPending) {
       return {
@@ -1033,6 +1057,8 @@ export class ToolRegistry {
       envelope: prior?.envelope ?? null,
       outputSignature: prior?.outputSignature ?? null,
       repeatedSuccessCount: prior?.repeatedSuccessCount ?? 0,
+      epoch: failureEntryEpoch(prior, scope.epoch),
+      failureClass: prior?.failureClass ?? null,
       inFlight: true
     });
     const tracking = {
@@ -1063,6 +1089,7 @@ export class ToolRegistry {
       return null;
     }
     if (envelope?.ok === true && envelope?.outcome?.status !== "pending") {
+      bumpFailureScopeEpoch(scope);
       try {
         // ensureSemanticToolEnvelope has already applied the existing bounded
         // result snapshot, so the existing fingerprint hash never sees an
@@ -1088,6 +1115,8 @@ export class ToolRegistry {
           envelope: null,
           outputSignature,
           repeatedSuccessCount: evaluation.repeatedSuccessCount,
+          epoch: scope.epoch,
+          failureClass: null,
           inFlight: false
         });
         tracking.outputProgress = evaluation.progressed;
@@ -1115,9 +1144,24 @@ export class ToolRegistry {
     }
     const previous = scope.entries.get(fingerprint);
     const attempts = (previous?.attempts ?? 0) + 1;
+    const failureClass = normalizedToolFailureClass(
+      tracking.failureClass
+      ?? classifyToolFailure({
+        envelope,
+        outcome: envelope?.outcome,
+        error: envelope?.error,
+        env: this.env
+      })
+    );
+    const classifiedEnvelope = toolFailureGuidanceEnvelope(
+      envelope,
+      failureClass
+    );
     scope.entries.set(fingerprint, {
       attempts,
-      envelope: failureTrackerEnvelope(envelope),
+      envelope: failureTrackerEnvelope(classifiedEnvelope),
+      epoch: scope.epoch,
+      failureClass,
       inFlight: false
     });
     tracking.outputProgress = false;
@@ -1136,7 +1180,7 @@ export class ToolRegistry {
     if (attempts === 1) {
       recordTurnProgress(tracking.progressContext);
     }
-    return null;
+    return classifiedEnvelope === envelope ? null : classifiedEnvelope;
   }
 
   _releaseFailureTracking(tracking) {
@@ -1950,6 +1994,24 @@ export class ToolRegistry {
       return semantic;
     } catch (error) {
       const errorDetails = safeToolErrorDetails(error);
+      const errorCode = errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
+        ? "checkpoint_target_ambiguous"
+        // A mutation-lease conflict is a transient serialization conflict,
+        // not a broken handler. Keep its stable semantic code while retaining
+        // the original error for the internal retry classifier below.
+        : errorDetails.code === "MUTATION_LEASE_CONFLICT"
+          ? "mutation_lease_conflict"
+          : "handler_error";
+      if (failureTracking?.reserved) {
+        failureTracking.failureClass = classifyToolFailure({
+          error,
+          outcome: {
+            code: errorCode,
+            retryable: errorDetails.retryable
+          },
+          env: this.env
+        });
+      }
       if (invocationWasAborted(context)) {
         markExecutionDecision(receiptState, "cancellation", "cancelled");
       } else if (!receiptState?.decisionBlockedAt) {
@@ -1961,16 +2023,7 @@ export class ToolRegistry {
             evidence: checkpointEvidence(checkpointCapture)
           })
         : semanticToolError(tool, errorDetails.message, {
-            code: errorDetails.code === "CHECKPOINT_TARGET_AMBIGUOUS"
-              ? "checkpoint_target_ambiguous"
-              // A mutation-lease conflict is a transient serialization
-              // conflict, not a broken handler. Collapsing it into
-              // `handler_error` made it indistinguishable from a real failure,
-              // so the model retried the same parallel batch instead of
-              // serializing -- 16 calls lost to that loop in one observed turn.
-              : errorDetails.code === "MUTATION_LEASE_CONFLICT"
-                ? "mutation_lease_conflict"
-                : "handler_error",
+            code: errorCode,
             retryable: errorDetails.retryable,
             changed: dispatched && tool?.sideEffects !== false ? null : false,
             evidence: checkpointEvidence(checkpointCapture)
@@ -2095,11 +2148,24 @@ function failureActiveKey(context, fingerprint) {
 function createFailureScope({ turnKey = null, context = null } = {}) {
   return {
     entries: new Map(),
+    epoch: 0,
+    epochUnblocks: new Map(),
     retired: false,
     turnKey,
     context,
     operationNamespace: createId("operation")
   };
+}
+
+function bumpFailureScopeEpoch(scope) {
+  if (!scope || !Number.isSafeInteger(scope.epoch) || scope.epoch < 0) return;
+  if (scope.epoch < Number.MAX_SAFE_INTEGER) scope.epoch += 1;
+}
+
+function failureEntryEpoch(entry, fallback) {
+  return Number.isSafeInteger(entry?.epoch) && entry.epoch >= 0
+    ? entry.epoch
+    : fallback;
 }
 
 function createOperationReceipt(scope, fingerprint) {
@@ -3403,6 +3469,30 @@ function classifyLegacyToolFailure(value) {
     return { code: "approval_not_granted", status: "blocked" };
   }
   return { code: "tool_error", status: value?.blocked === true ? "blocked" : "failed" };
+}
+
+function normalizedToolFailureClass(value) {
+  return ["MODEL", "PERMANENT", "RESOURCE", "TRANSIENT"].includes(value)
+    ? value
+    : "PERMANENT";
+}
+
+function toolFailureGuidanceEnvelope(value, failureClass) {
+  const current = value?.outcome?.nextSteps;
+  if (Array.isArray(current) && current.length > 0) return value;
+  const nextSteps = failureClass === "MODEL"
+    ? ["Correct the tool arguments or input to match the declared schema before retrying."]
+    : failureClass === "RESOURCE"
+      ? ["Free the exhausted local resource or reduce resource use before retrying."]
+      : null;
+  if (!nextSteps) return value;
+  return {
+    ...value,
+    outcome: {
+      ...value.outcome,
+      nextSteps
+    }
+  };
 }
 
 function failureTrackerEnvelope(value) {

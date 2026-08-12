@@ -1,9 +1,56 @@
 // Attribution: adapted from OmniRoute's provider-failure classification concepts
 // (MIT, commit ed7db3e). This implementation is original to OpenAGI.
 
+import { types as utilTypes } from "node:util";
+
 export const DEFAULT_QUOTA_BACKOFF_MS = 60 * 60 * 1000;
 export const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60 * 1000;
 export const ERROR_CLASSIFIER_KILL_SWITCH = "OPENAGI_ERROR_CLASSIFIER";
+export const TOOL_ERROR_CLASSIFIER_KILL_SWITCH = "OPENAGI_TOOL_ERROR_CLASSIFIER";
+
+const TOOL_RESOURCE_CODES = new Set([
+  "EMFILE",
+  "ENFILE",
+  "ENOMEM",
+  "ENOSPC",
+  "OOM"
+]);
+const TOOL_TRANSIENT_CODES = new Set([
+  "EAGAIN",
+  "EBUSY",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "EPIPE",
+  "ETIMEDOUT",
+  "MUTATION_LEASE_CONFLICT",
+  "RATE_LIMIT",
+  "TOO_MANY_REQUESTS"
+]);
+const TOOL_PERMANENT_CODES = new Set([
+  "EACCES",
+  "EISDIR",
+  "ENOENT",
+  "ENOTDIR",
+  "EPERM",
+  "INVALID_TOOL_RESULT",
+  "VALIDATION_FAILED",
+  "VERIFICATION_FAILED"
+]);
+const TOOL_MODEL_CODES = new Set([
+  "ARGUMENTS_NOT_FINGERPRINTABLE",
+  "BAD_ARGUMENTS",
+  "INVALID_ARGUMENT",
+  "INVALID_ARGUMENTS",
+  "INVALID_INPUT",
+  "INVALID_TOOL_ARGUMENTS",
+  "SCHEMA_VALIDATION"
+]);
+const TOOL_RESOURCE_LANGUAGE = /\b(?:heap exhausted|out of memory|no space left|too many open files|resource exhausted)\b/i;
+const TOOL_TRANSIENT_LANGUAGE = /\b(?:lease (?:is )?held|mutation conflicts? with another active invocation|temporar(?:y|ily)|timed? ?out|timeout|connection reset|socket reset|rate.?limit|service unavailable|try again)\b/i;
+const TOOL_MODEL_LANGUAGE = /\b(?:bad|invalid|malformed|missing|required|unknown)\b.{0,48}\b(?:argument|arguments|input|parameter|parameters)\b|\b(?:argument|arguments|input|parameter|parameters)\b.{0,48}\b(?:bad|invalid|malformed|missing|required|unknown|do not match)\b/i;
+const TOOL_PERMANENT_LANGUAGE = /\b(?:access denied|permission denied|no such file|not found|validation fail(?:ed|ure)|unsupported operation)\b/i;
 
 const RESET_HEADERS = Object.freeze([
   "x-ratelimit-reset",
@@ -16,6 +63,83 @@ const QUOTA_LANGUAGE = /(?:insufficient[_ -]?quota|\bquota\b|\bbilling\b|\bpayme
 
 export function errorClassifierEnabled(env = process.env) {
   return String(env?.[ERROR_CLASSIFIER_KILL_SWITCH] ?? "").trim() !== "0";
+}
+
+export function toolErrorClassifierEnabled(env = process.env) {
+  return String(
+    toolFailureOwnValue(env, TOOL_ERROR_CLASSIFIER_KILL_SWITCH) ?? ""
+  ).trim() !== "0";
+}
+
+export function classifyToolFailure(input = {}) {
+  try {
+    const env = toolFailureOwnValue(input, "env") ?? process.env;
+    if (!toolErrorClassifierEnabled(env)) return null;
+    const envelope = toolFailureOwnValue(input, "envelope") ?? null;
+    const outcome = toolFailureOwnValue(input, "outcome")
+      ?? toolFailureOwnValue(envelope, "outcome")
+      ?? null;
+    const error = toolFailureOwnValue(input, "error")
+      ?? toolFailureOwnValue(envelope, "error")
+      ?? null;
+    const code = toolFailureCode(
+      toolFailureOwnValue(input, "code"),
+      toolFailureOwnValue(error, "code"),
+      toolFailureOwnValue(outcome, "code"),
+      toolFailureOwnValue(envelope, "code")
+    );
+    const message = toolFailureMessage(
+      toolFailureOwnValue(input, "message"),
+      typeof error === "string"
+        ? error
+        : toolFailureOwnValue(error, "message"),
+      toolFailureOwnValue(envelope, "error"),
+      toolFailureOwnValue(outcome, "message")
+    );
+    const status = toolFailureStatus(
+      toolFailureOwnValue(input, "status"),
+      toolFailureOwnValue(error, "status"),
+      toolFailureOwnValue(error, "statusCode"),
+      toolFailureOwnValue(envelope, "status"),
+      toolFailureOwnValue(envelope, "statusCode")
+    );
+    const retryable = toolFailureOwnValue(input, "retryable") === true
+      || toolFailureOwnValue(error, "retryable") === true
+      || toolFailureOwnValue(outcome, "retryable") === true
+      || toolFailureOwnValue(envelope, "retryable") === true;
+
+    if (TOOL_RESOURCE_CODES.has(code) || TOOL_RESOURCE_LANGUAGE.test(message)) {
+      return "RESOURCE";
+    }
+    if (TOOL_MODEL_CODES.has(code) || TOOL_MODEL_LANGUAGE.test(message)) {
+      return "MODEL";
+    }
+    // Existing tool contracts own explicit retryability. Never contradict a
+    // handler or normalizer that has already made that bounded declaration.
+    if (retryable) return "TRANSIENT";
+    if (
+      TOOL_TRANSIENT_CODES.has(code)
+      || status === 429
+      || (status >= 500 && status <= 599)
+      || TOOL_TRANSIENT_LANGUAGE.test(message)
+      || /\bHTTP\s+(?:429|5\d\d)\b/i.test(message)
+    ) {
+      return "TRANSIENT";
+    }
+    if (
+      TOOL_PERMANENT_CODES.has(code)
+      || (status >= 400 && status <= 499)
+      || TOOL_PERMANENT_LANGUAGE.test(message)
+      || /\bHTTP\s+4\d\d\b/i.test(message)
+    ) {
+      return "PERMANENT";
+    }
+    // Unknown failures are not known-retryable. Defaulting to PERMANENT
+    // preserves today's anti-spin behavior if evidence is incomplete.
+    return "PERMANENT";
+  } catch {
+    return null;
+  }
 }
 
 export function classifyProviderOutcome({
@@ -135,4 +259,46 @@ function durationMs(value) {
 
 function nonBlank(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function toolFailureCode(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const code = String(value).trim().toUpperCase().replace(/[.-]/g, "_");
+    if (/^[A-Z][A-Z0-9_]{0,63}$/.test(code)) return code;
+  }
+  return "";
+}
+
+function toolFailureOwnValue(value, key) {
+  if (!value || typeof value !== "object" || utilTypes.isProxy(value)) {
+    return undefined;
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && Object.hasOwn(descriptor, "value")
+    ? descriptor.value
+    : undefined;
+}
+
+function toolFailureMessage(...values) {
+  const parts = [];
+  let length = 0;
+  for (const value of values) {
+    if (value === undefined || value === null || length >= 4096) continue;
+    const part = String(value).slice(0, 4096 - length);
+    if (!part) continue;
+    parts.push(part);
+    length += part.length;
+  }
+  return parts.join(" ");
+}
+
+function toolFailureStatus(...values) {
+  for (const value of values) {
+    const status = Number(value);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) {
+      return status;
+    }
+  }
+  return 0;
 }

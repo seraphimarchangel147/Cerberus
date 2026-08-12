@@ -147,3 +147,5 @@ explicitly in your commit message.
 - Finish by appending this literal line as the last line of THIS file, in the same commit:
 
 RETRY GUARD EPOCH PHASE COMPLETE
+
+RETRY GUARD EPOCH PHASE COMPLETE
