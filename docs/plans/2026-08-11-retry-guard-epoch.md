@@ -63,8 +63,20 @@ retry is legitimate: clear the entry and let the call through.
 
 ### 3.2 Error classification
 
-Add a classifier (a new exported function in `src/tool-registry.js`, or a small new module if you
-prefer — your call) returning one of:
+**`src/error-classifier.js` ALREADY EXISTS — read it first (138 lines).** It is *provider*-scoped:
+`classifyProviderOutcome({status, body, headers})` handles HTTP responses (429 rate-limit vs
+quota-exhausted, 200-with-empty-body silent failure). It does **not** classify tool handler errors,
+so it does not solve this problem — but do NOT duplicate it. Either extend that module with a new
+exported `classifyToolFailure(...)` (preferred, keeps error taxonomy in one file) or add the
+classifier to `tool-registry.js` and justify the split in your commit message.
+
+Mirror two conventions from that file:
+- a kill-switch env const (it uses `ERROR_CLASSIFIER_KILL_SWITCH = "OPENAGI_ERROR_CLASSIFIER"`);
+  add an equivalent so this behaviour can be disabled in production without a redeploy.
+- the whole classifier body is wrapped in `try { ... } catch { return null; }` — classification must
+  never throw into the call path. Keep that property.
+
+The classifier returns one of:
 
 | class | meaning | retry policy |
 |---|---|---|
