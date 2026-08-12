@@ -17,6 +17,7 @@
 
 import readline from "node:readline";
 import { resolveDataDir } from "../src/data-dir.js";
+import { logBootProvenance } from "../src/boot-provenance.js";
 import {
   resolveTarget,
   CliClient,
@@ -77,6 +78,9 @@ async function cmdServe(flags) {
   const { startServer } = await import("../src/boot.js");
   const { address, host } = await startServer({ host: flags.host, port: flags.port });
   console.log(c(GREEN, `OpenAGI main listening at ${address.url}`));
+  // Which code is actually running? Prevents "pushed to main" being mistaken
+  // for "deployed" when the checkout is on another branch.
+  logBootProvenance({ logger: (line) => console.log(c(DIM, line)) });
   if (host === "127.0.0.1") {
     console.log(c(DIM, "Bound to localhost only. To let other devices connect as nodes, run with --host 0.0.0.0"));
     console.log(c(DIM, "(auth token required — set one via `openagi setup` first)."));
