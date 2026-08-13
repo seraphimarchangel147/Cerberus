@@ -162,8 +162,14 @@ export class TurnSteering {
     const key = String(sessionId ?? "");
     const entry = this.#inFlight.get(key);
     if (entry) {
-      if (turnId != null && entry.turns.has(turnId)) entry.turns.delete(turnId);
-      else if (entry.turns.size > 0) {
+      if (turnId != null) {
+        // An IDENTIFIED turn ends only itself. If that id is not registered the
+        // call is STALE (a late `finally`, a double-run endTurn for a turn that
+        // already ended) and must be a NO-OP: falling through to "drop the
+        // oldest" here let a dead turn unregister a live sibling, which is the
+        // very cross-clear this per-turn registry exists to prevent.
+        if (!entry.turns.delete(turnId)) return null;
+      } else if (entry.turns.size > 0) {
         // Caller did not identify the turn (legacy call site): drop the oldest
         // so repeated calls still drain rather than wedging the session.
         entry.turns.delete(entry.turns.keys().next().value);
