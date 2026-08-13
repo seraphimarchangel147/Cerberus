@@ -1,0 +1,212 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>FORGE rig</title>
+<style>html,body{margin:0;background:#120808;} #pixel{image-rendering:pixelated;}</style>
+</head><body>
+<canvas id="pixel" width="480" height="480"></canvas>
+<script type="module">
+import * as THREE from "/node_modules/three/build/three.module.js";
+
+/* ── FORGE experimental rig: 2D-ref-style creature built from primitives,
+      real joint hierarchy, procedural walk, REAL lighting (blue fire = point
+      light + additive tongues), pixelated orthographic render. ── */
+
+const LW = 96, LH = 96;                       /* low-res render target */
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setSize(LW, LH, false);
+renderer.setPixelRatio(1);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x140a0a);
+
+const cam = new THREE.OrthographicCamera(-3.4, 3.4, 3.4, -3.4, 0.1, 50);
+cam.position.set(5.2, 3.6, 7.5);
+cam.lookAt(0, 1.15, 0);
+
+/* ── palette: ALPHA cold-plasma ── */
+const M = {
+  body:   new THREE.MeshStandardMaterial({ color: 0x2b3542, roughness: 0.75, metalness: 0.25 }),
+  armor:  new THREE.MeshStandardMaterial({ color: 0x9fb4c8, roughness: 0.35, metalness: 0.7 }),
+  dark:   new THREE.MeshStandardMaterial({ color: 0x1a2029, roughness: 0.9 }),
+  eye:    new THREE.MeshBasicMaterial({ color: 0x9ef4ff }),
+  orb:    new THREE.MeshBasicMaterial({ color: 0x3fd2ff }),
+  crystal:new THREE.MeshStandardMaterial({ color: 0x54e8ff, emissive: 0x1899cc, emissiveIntensity: 1.4,
+                                           roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.92 }),
+  flameA: new THREE.MeshBasicMaterial({ color: 0x1450e0, transparent: true, opacity: 0.55,
+                                        blending: THREE.AdditiveBlending, depthWrite: false }),
+  flameB: new THREE.MeshBasicMaterial({ color: 0x54d8ff, transparent: true, opacity: 0.6,
+                                        blending: THREE.AdditiveBlending, depthWrite: false }),
+  ground: new THREE.MeshStandardMaterial({ color: 0x241114, roughness: 1 }),
+};
+
+const rig = {};   /* named joints */
+
+/* ground */
+const ground = new THREE.Mesh(new THREE.CylinderGeometry(3.2, 3.4, 0.3, 24), M.ground);
+ground.position.y = -0.15;
+scene.add(ground);
+
+/* ── body root ── */
+const root = new THREE.Group();
+scene.add(root);
+rig.root = root;
+
+const torso = new THREE.Mesh(new THREE.BoxGeometry(2.3, 1.15, 1.15), M.body);
+torso.position.y = 1.35;
+root.add(torso);
+rig.torso = torso;
+
+/* chest orb + housing */
+const orb = new THREE.Mesh(new THREE.SphereGeometry(0.26, 12, 10), M.orb);
+orb.position.set(0, 1.42, 0.62);
+root.add(orb);
+const orbRing = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.05, 8, 16), M.armor);
+orbRing.position.copy(orb.position);
+root.add(orbRing);
+
+/* ── legs: hip pivot -> upper -> knee pivot -> lower -> paw ── */
+function makeLeg(x, z, name) {
+  const hip = new THREE.Group();
+  hip.position.set(x, 1.25, z);
+  root.add(hip);
+  const upper = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.7, 0.34), M.body);
+  upper.position.y = -0.35;
+  hip.add(upper);
+  const knee = new THREE.Group();
+  knee.position.y = -0.7;
+  hip.add(knee);
+  const lower = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.62, 0.26), M.dark);
+  lower.position.y = -0.31;
+  knee.add(lower);
+  const paw = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.16, 0.44), M.armor);
+  paw.position.set(0, -0.66, 0.06);
+  knee.add(paw);
+  rig[name + "_hip"] = hip;
+  rig[name + "_knee"] = knee;
+  return hip;
+}
+makeLeg( 0.85,  0.42, "legFR");
+makeLeg(-0.85,  0.42, "legFL");
+makeLeg( 0.85, -0.42, "legBR");
+makeLeg(-0.85, -0.42, "legBL");
+
+/* ── three necks + crowned heads (ALPHA's tri-head silhouette) ── */
+function makeHead(angleY, tiltZ, len, name) {
+  const neckPivot = new THREE.Group();
+  neckPivot.position.set(0, 1.85, 0.45);
+  neckPivot.rotation.y = angleY;
+  root.add(neckPivot);
+  const neck = new THREE.Mesh(new THREE.BoxGeometry(0.3, len, 0.3), M.body);
+  neck.position.y = len / 2;
+  neck.rotation.z = tiltZ;
+  neckPivot.add(neck);
+  const headG = new THREE.Group();
+  headG.position.set(-Math.sin(tiltZ) * len, Math.cos(tiltZ) * len, 0);
+  neckPivot.add(headG);
+  const skull = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.42, 0.55), M.body);
+  headG.add(skull);
+  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.22, 0.34), M.dark);
+  snout.position.set(0, -0.06, 0.4);
+  headG.add(snout);
+  /* crown spikes */
+  for (let i = -1; i <= 1; i++) {
+    const spike = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.34 - Math.abs(i) * 0.08, 4), M.armor);
+    spike.position.set(i * 0.14, 0.32, -0.05);
+    headG.add(spike);
+  }
+  /* glowing eyes */
+  for (const ex of [-0.12, 0.12]) {
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 0.03), M.eye);
+    eye.position.set(ex, 0.05, 0.28);
+    headG.add(eye);
+  }
+  rig[name] = headG;
+  rig[name + "_neck"] = neckPivot;
+  return neckPivot;
+}
+makeHead(-0.55,  0.42, 0.95, "headL");
+makeHead( 0.0,   0.10, 1.25, "headC");
+makeHead( 0.55, -0.42, 0.95, "headR");
+
+/* shoulder crystals */
+for (const sx of [-1.05, 1.05]) {
+  const crys = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.75, 5), M.crystal);
+  crys.position.set(sx, 2.0, 0.2);
+  crys.rotation.z = sx > 0 ? -0.35 : 0.35;
+  root.add(crys);
+}
+
+/* tail */
+const tailPivot = new THREE.Group();
+tailPivot.position.set(0, 1.5, -0.6);
+root.add(tailPivot);
+rig.tail = tailPivot;
+let tailParent = tailPivot;
+for (let i = 0; i < 4; i++) {
+  const seg = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.42), i % 2 ? M.dark : M.body);
+  seg.position.z = -0.38;
+  tailParent.add(seg);
+  tailParent = seg;
+}
+
+/* ── BLUE FIRE: real point light + additive tongues behind the model ── */
+const fireLight = new THREE.PointLight(0x3fb6ff, 30, 14, 1.6);
+fireLight.position.set(0, 2.6, -1.9);
+scene.add(fireLight);
+rig.fireLight = fireLight;
+
+const tongues = [];
+for (let i = 0; i < 7; i++) {
+  const h = 1.2 + (i % 3) * 0.5;
+  const tongue = new THREE.Mesh(new THREE.ConeGeometry(0.3 + (i % 2) * 0.14, h, 6), i % 2 ? M.flameB : M.flameA);
+  tongue.position.set(-1.5 + i * 0.5, h / 2 + 0.05, -2.1 + (i % 2) * 0.3);
+  scene.add(tongue);
+  tongues.push(tongue);
+}
+
+/* fill + key so the model isn't pure silhouette */
+scene.add(new THREE.AmbientLight(0x40303a, 1.2));
+const key = new THREE.DirectionalLight(0xffe8d8, 1.1);
+key.position.set(4, 6, 5);
+scene.add(key);
+
+/* ── deterministic pose from phase p in [0,1) ── */
+function setPhase(p) {
+  const t = p * Math.PI * 2;
+  /* diagonal-pair trot — pronounced stride */
+  const legs = [["legFR", 0], ["legBL", 0], ["legFL", Math.PI], ["legBR", Math.PI]];
+  for (const [name, ph] of legs) {
+    const s = Math.sin(t + ph);
+    rig[name + "_hip"].rotation.x = s * 0.85;
+    rig[name + "_knee"].rotation.x = Math.max(0, -Math.sin(t + ph - 0.7)) * 1.35;
+  }
+  rig.root.position.y = Math.abs(Math.sin(t * 2)) * 0.12;
+  /* slow turntable so the rig reads as true 3D across the cycle */
+  rig.root.rotation.y = p * Math.PI * 2 * 0.35;
+  rig.torso.rotation.x = Math.sin(t) * 0.03;
+  /* heads bob counter-phase */
+  rig.headC.rotation.x = Math.sin(t * 2) * 0.08;
+  rig.headL.rotation.y = Math.sin(t + 1) * 0.1;
+  rig.headR.rotation.y = Math.sin(t + 2) * 0.1;
+  rig.tail.rotation.y = Math.sin(t) * 0.4;
+  rig.tail.rotation.x = 0.25 + Math.sin(t * 2) * 0.08;
+  /* fire flicker (phase-locked so frames are reproducible) */
+  const fl = 0.75 + 0.25 * Math.sin(t * 3.1) + 0.12 * Math.sin(t * 7.3);
+  fireLight.intensity = 26 * fl;
+  tongues.forEach((tg, i) => {
+    const f = 0.8 + 0.35 * Math.sin(t * 2.7 + i * 1.9);
+    tg.scale.set(0.85 + 0.2 * Math.sin(t * 3 + i), f, 0.85 + 0.2 * Math.cos(t * 2.2 + i));
+    tg.rotation.z = Math.sin(t * 2 + i * 2.3) * 0.14;
+  });
+  renderer.render(scene, cam);
+  /* pixelate upscale into the visible canvas */
+  const pc = document.getElementById("pixel");
+  const ctx = pc.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(renderer.domElement, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
+}
+
+window.__forge = { setPhase, rig, LW, LH };
+setPhase(0);
+document.title = "FORGE ready";
+</script>
+</body></html>
