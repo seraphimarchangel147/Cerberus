@@ -6,10 +6,12 @@
 <script type="module">
 import * as THREE from "/node_modules/three/build/three.module.js";
 
-/* ── FORGE v2: detailed rigged creature, toon shading + inverted-hull
-      outlines + palette quantization = sprite look, still zero image-gen. ── */
+/* ── FORGE v6: VOXEL pipeline. The rigged model (primitives + joint
+      hierarchy) is the animation source; every frame it is voxelized —
+      triangles sampled onto a 3D grid, drawn as instanced cubes. One
+      unified cube language, real lighting, zero image-gen. ── */
 
-const LW = 160, LH = 160;                     /* internal render res (3x -> 480) */
+const LW = 160, LH = 160;
 const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
 renderer.setSize(LW, LH, false);
 renderer.setPixelRatio(1);
@@ -21,7 +23,6 @@ const cam = new THREE.OrthographicCamera(-3.0, 3.0, 3.0, -3.0, 0.1, 60);
 cam.position.set(7.4, 3.1, 2.2);
 cam.lookAt(0, 1.25, 0);
 
-/* ── toon gradient: 4 hard light bands ── */
 const gradTex = new THREE.DataTexture(
   new Uint8Array([70,70,70,255, 135,135,135,255, 200,200,200,255, 255,255,255,255]),
   4, 1, THREE.RGBAFormat);
@@ -32,9 +33,9 @@ const toon = (color, opts = {}) =>
   new THREE.MeshToonMaterial(Object.assign({ color, gradientMap: gradTex }, opts));
 
 const M = {
-  body:   toon(0x33404f),
+  body:   toon(0x41566e),
   bodyFr: toon(0x41526a),
-  bodyDk: toon(0x232c38),
+  bodyDk: toon(0x2c3a4c),
   armor:  toon(0xa8bfd2),
   armorDk:toon(0x6b7f94),
   dark:   toon(0x161b23),
@@ -43,26 +44,21 @@ const M = {
   orb:    new THREE.MeshBasicMaterial({ color: 0x46d6ff }),
   crystal:new THREE.MeshToonMaterial({ color: 0x67ecff, emissive: 0x1899cc, emissiveIntensity: 1.2, gradientMap: gradTex }),
   outline:new THREE.MeshBasicMaterial({ color: 0x07090d, side: THREE.BackSide }),
-  flameA: new THREE.MeshBasicMaterial({ color: 0x1450e0, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }),
-  flameB: new THREE.MeshBasicMaterial({ color: 0x54d8ff, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false }),
+  flameA: new THREE.MeshBasicMaterial({ color: 0x1a5cf0 }),
+  flameB: new THREE.MeshBasicMaterial({ color: 0x64dcff }),
   ground: toon(0x2a1418),
 };
 
-/* outline helper: inverted hull with PIXEL-TARGETED thickness (~1.5 internal
-   px regardless of part size). Computes per-axis inflation from the geometry
-   bounding box so big boxes and small cones both get a readable contour. */
-const OUTLINE_UNITS = 1.5 * (6.0 / 160);   /* 1.5px in world units (ortho: 6u/160px) */
+/* ── everything animatable/model goes under sourceRoot; it is voxelized
+      each frame and hidden from the final render (voxels replace it) ── */
+const sourceRoot = new THREE.Group();
+scene.add(sourceRoot);
+
+/* outline helper (kept in source for silhouette thickness in voxel space) */
 function outlined(mesh) {
-  mesh.geometry.computeBoundingBox();
-  const bb = mesh.geometry.boundingBox;
-  const size = new THREE.Vector3();
-  bb.getSize(size);
   const o = new THREE.Mesh(mesh.geometry, M.outline);
-  o.scale.set(
-    Math.min(1.4, 1 + (2 * OUTLINE_UNITS) / Math.max(size.x, 0.001)),
-    Math.min(1.4, 1 + (2 * OUTLINE_UNITS) / Math.max(size.y, 0.001)),
-    Math.min(1.4, 1 + (2 * OUTLINE_UNITS) / Math.max(size.z, 0.001))
-  );
+  o.scale.setScalar(1.045);
+  o.userData.isOutline = true;
   mesh.add(o);
   return mesh;
 }
@@ -70,26 +66,27 @@ const O = outlined;
 
 const rig = {};
 
-/* ground pedestal + fire glow pool */
-scene.add(O(new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.25, 0.28, 24), M.ground)));
-scene.children[scene.children.length - 1].position.y = -0.14;
+/* ground pedestal + glow pool + shadow */
+const ground = O(new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.25, 0.28, 24), M.ground));
+ground.position.y = -0.14;
+sourceRoot.add(ground);
 const glowPool = new THREE.Mesh(new THREE.CircleGeometry(2.2, 24),
-  new THREE.MeshBasicMaterial({ color: 0x1450c8, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
+  new THREE.MeshBasicMaterial({ color: 0x1450c8 }));
 glowPool.rotation.x = -Math.PI / 2;
 glowPool.position.set(0, 0.02, -0.9);
-scene.add(glowPool);
+sourceRoot.add(glowPool);
 rig.glowPool = glowPool;
 const blobShadow = new THREE.Mesh(new THREE.CircleGeometry(1.7, 20),
-  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45 }));
+  new THREE.MeshBasicMaterial({ color: 0x120608 }));
 blobShadow.rotation.x = -Math.PI / 2;
 blobShadow.position.y = 0.03;
-scene.add(blobShadow);
+sourceRoot.add(blobShadow);
 
 const root = new THREE.Group();
-scene.add(root);
+sourceRoot.add(root);
 rig.root = root;
 
-/* ── torso: chest + hindquarters + belly plate + back spikes ── */
+/* torso */
 const chest = O(new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 1.1), M.body));
 chest.position.set(0.35, 1.5, 0);
 root.add(chest);
@@ -99,14 +96,12 @@ root.add(hind);
 const belly = O(new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.5, 0.75), M.armorDk));
 belly.position.set(0.05, 0.98, 0);
 root.add(belly);
-/* back spikes */
 for (let i = 0; i < 4; i++) {
   const sp = O(new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.42 - i * 0.05, 4), M.armor));
   sp.position.set(0.75 - i * 0.45, 2.12 - i * 0.04, 0);
   sp.rotation.z = -0.18;
   root.add(sp);
 }
-/* chest orb + spiked housing */
 const orb = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), M.orb);
 orb.position.set(0.5, 1.62, 0.58);
 root.add(orb);
@@ -121,7 +116,7 @@ for (let i = 0; i < 6; i++) {
   root.add(st);
 }
 
-/* ── legs with thigh armor + claws ── */
+/* legs */
 function makeLeg(x, z, name, front) {
   const hip = new THREE.Group();
   hip.position.set(x, 1.28, z);
@@ -155,7 +150,7 @@ makeLeg(-0.9,   0.52, "legFL", true);
 makeLeg( 0.72, -0.52, "legBR", false);
 makeLeg(-0.9,  -0.50, "legBL", false);
 
-/* shoulder pauldrons with icicle drips */
+/* pauldrons */
 for (const sx of [-1, 1]) {
   const pd = O(new THREE.Mesh(new THREE.SphereGeometry(0.34, 10, 8), M.armor));
   pd.position.set(0.55, 2.05, sx * 0.62);
@@ -168,13 +163,12 @@ for (const sx of [-1, 1]) {
   }
 }
 
-/* ── three necks + detailed heads ── */
+/* heads */
 function makeHead(angleY, tiltZ, len, name) {
   const neckPivot = new THREE.Group();
   neckPivot.position.set(0.5, 1.95, 0.28);
   neckPivot.rotation.y = angleY;
   root.add(neckPivot);
-  /* neck as two segments for thickness taper */
   const n1 = O(new THREE.Mesh(new THREE.BoxGeometry(0.34, len * 0.55, 0.34), M.body));
   n1.position.y = len * 0.28;
   neckPivot.add(n1);
@@ -182,7 +176,6 @@ function makeHead(angleY, tiltZ, len, name) {
   headG.position.set(-Math.sin(tiltZ) * len, Math.cos(tiltZ) * len, 0);
   headG.rotation.z = tiltZ;
   neckPivot.add(headG);
-  /* skull + muzzle + jaw */
   headG.add(O(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.42, 0.5), M.body)));
   const snout = O(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.34), M.bodyDk));
   snout.position.set(0, -0.07, 0.38);
@@ -190,14 +183,12 @@ function makeHead(angleY, tiltZ, len, name) {
   const jaw = O(new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.09, 0.3), M.dark));
   jaw.position.set(0, -0.2, 0.34);
   headG.add(jaw);
-  /* ears/horns */
   for (const ex of [-0.16, 0.16]) {
     const ear = O(new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.26, 4), M.armorDk));
     ear.position.set(ex, 0.3, -0.12);
     ear.rotation.z = ex > 0 ? -0.25 : 0.25;
     headG.add(ear);
   }
-  /* crown: base band + 3 spikes + center gem */
   const band = O(new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.21, 0.09, 8), M.armor));
   band.position.set(0, 0.26, 0.02);
   headG.add(band);
@@ -209,17 +200,14 @@ function makeHead(angleY, tiltZ, len, name) {
   const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.05), M.orb);
   gem.position.set(0, 0.31, 0.2);
   headG.add(gem);
-  /* brow ridge */
   const brow = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.06), M.dark);
   brow.position.set(0, 0.13, 0.25);
   headG.add(brow);
-  /* glowing eyes (bigger) */
   for (const ex of [-0.13, 0.13]) {
     const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.09, 0.04), M.eye);
     eye.position.set(ex, 0.06, 0.27);
     headG.add(eye);
   }
-  /* teeth on the jaw line (front of snout) */
   for (const tx of [-0.09, 0, 0.09]) {
     const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.1, 0.03), M.armor);
     tooth.position.set(tx, -0.17, 0.56);
@@ -232,7 +220,7 @@ makeHead(-0.72, 0.5, 1.0, "headL");
 makeHead( 0.0, 0.14, 1.35, "headC");
 makeHead( 0.72, -0.5, 1.0, "headR");
 
-/* tail: 5 segments + blade tip */
+/* tail */
 const tailPivot = new THREE.Group();
 tailPivot.position.set(-1.35, 1.6, 0);
 root.add(tailPivot);
@@ -249,18 +237,27 @@ blade.position.z = -0.42;
 blade.rotation.x = -Math.PI / 2;
 tailParent.add(blade);
 
-/* ── BLUE FIRE: point light + additive tongues (rim lighting is physical) ── */
+/* blue fire (gets voxelized too — voxel flames) */
 const fireLight = new THREE.PointLight(0x3fb6ff, 30, 14, 1.6);
 fireLight.position.set(0, 2.6, -2.2);
 scene.add(fireLight);
 rig.fireLight = fireLight;
+
+/* additive glow halo so the fire reads as emitting light, not water */
+const glowMat = new THREE.MeshBasicMaterial({ color: 0x2a7fff, transparent: true,
+  opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+const fireGlow = new THREE.Mesh(new THREE.PlaneGeometry(4.6, 4.2), glowMat);
+fireGlow.position.set(0, 2.0, -2.4);
+fireGlow.lookAt(cam.position);
+scene.add(fireGlow);
+rig.fireGlow = fireGlow;
 
 const tongues = [];
 for (let i = 0; i < 8; i++) {
   const h = 1.1 + (i % 3) * 0.55;
   const tongue = new THREE.Mesh(new THREE.ConeGeometry(0.28 + (i % 2) * 0.15, h, 6), i % 2 ? M.flameB : M.flameA);
   tongue.position.set(-1.7 + i * 0.5, h / 2 + 0.05, -2.0 + (i % 2) * 0.3);
-  scene.add(tongue);
+  sourceRoot.add(tongue);
   tongues.push(tongue);
 }
 
@@ -269,7 +266,91 @@ const key = new THREE.DirectionalLight(0xffe8d8, 1.15);
 key.position.set(4, 6, 5);
 scene.add(key);
 
-/* ── pixel pass: quantize to banded palette at internal res, then 4x upscale ── */
+/* ── VOXELIZER: sample every triangle onto a grid, emit instanced cubes ── */
+const VOX = 0.13;
+const BMIN = { x: -3.4, y: -0.5, z: -3.4 };
+const BMAX = { x: 3.4, y: 4.4, z: 3.4 };
+const NX = Math.ceil((BMAX.x - BMIN.x) / VOX);
+const NY = Math.ceil((BMAX.y - BMIN.y) / VOX);
+const NZ = Math.ceil((BMAX.z - BMIN.z) / VOX);
+const MAXV = 90000;
+
+const voxMesh = new THREE.InstancedMesh(
+  new THREE.BoxGeometry(VOX * 1.02, VOX * 1.02, VOX * 1.02),   /* 2% overlap hides seams */
+  new THREE.MeshToonMaterial({ color: 0xffffff, gradientMap: gradTex }),
+  MAXV);
+voxMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(voxMesh);
+
+let vSeed = 12345;
+function rndV() { vSeed = (vSeed * 1664525 + 1013904223) >>> 0; return vSeed / 4294967296; }
+
+const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
+const _m4 = new THREE.Matrix4(), _col = new THREE.Color();
+
+function buildVoxels() {
+  vSeed = 777;                       /* constant seed -> stable sampling */
+  const cells = new Map();
+  sourceRoot.updateMatrixWorld(true);
+  sourceRoot.traverse((obj) => {
+    if (!obj.isMesh || obj.userData.isOutline) return;
+    const geom = obj.geometry;
+    const pos = geom.attributes.position;
+    const idx = geom.index;
+    let r = 1, g = 1, b = 1;
+    if (obj.material.color) { r = obj.material.color.r; g = obj.material.color.g; b = obj.material.color.b; }
+    if (obj.material.emissive) {
+      const e = obj.material.emissive, ei = obj.material.emissiveIntensity || 1;
+      r = Math.min(1, r + e.r * ei); g = Math.min(1, g + e.g * ei); b = Math.min(1, b + e.b * ei);
+    }
+    const packed = (Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255);
+    const tris = idx ? idx.count / 3 : pos.count / 3;
+    for (let t = 0; t < tris; t++) {
+      const i0 = idx ? idx.getX(t * 3)     : t * 3;
+      const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+      const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      _va.fromBufferAttribute(pos, i0).applyMatrix4(obj.matrixWorld);
+      _vb.fromBufferAttribute(pos, i1).applyMatrix4(obj.matrixWorld);
+      _vc.fromBufferAttribute(pos, i2).applyMatrix4(obj.matrixWorld);
+      const abx = _vb.x - _va.x, aby = _vb.y - _va.y, abz = _vb.z - _va.z;
+      const acx = _vc.x - _va.x, acy = _vc.y - _va.y, acz = _vc.z - _va.z;
+      const cx = aby * acz - abz * acy, cy = abz * acx - abx * acz, cz = abx * acy - aby * acx;
+      const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+      if (area < 1e-9) continue;
+      const n = Math.max(3, Math.ceil(area / (VOX * VOX) * 1.6));
+      for (let s = 0; s < n; s++) {
+        let u = rndV(), v = rndV();
+        if (u + v > 1) { u = 1 - u; v = 1 - v; }
+        const w = 1 - u - v;
+        const px = _va.x * w + _vb.x * u + _vc.x * v;
+        const py = _va.y * w + _vb.y * u + _vc.y * v;
+        const pz = _va.z * w + _vb.z * u + _vc.z * v;
+        const ix = Math.floor((px - BMIN.x) / VOX);
+        const iy = Math.floor((py - BMIN.y) / VOX);
+        const iz = Math.floor((pz - BMIN.z) / VOX);
+        if (ix < 0 || iy < 0 || iz < 0 || ix >= NX || iy >= NY || iz >= NZ) continue;
+        cells.set((ix * NY + iy) * NZ + iz, packed);
+      }
+    }
+  });
+  let i = 0;
+  cells.forEach((col, key) => {
+    if (i >= MAXV) return;
+    const iz = key % NZ;
+    const iy = Math.floor(key / NZ) % NY;
+    const ix = Math.floor(key / (NZ * NY));
+    _m4.makeTranslation(BMIN.x + (ix + 0.5) * VOX, BMIN.y + (iy + 0.5) * VOX, BMIN.z + (iz + 0.5) * VOX);
+    voxMesh.setMatrixAt(i, _m4);
+    voxMesh.setColorAt(i, _col.setRGB(((col >> 16) & 255) / 255, ((col >> 8) & 255) / 255, (col & 255) / 255));
+    i++;
+  });
+  voxMesh.count = i;
+  voxMesh.instanceMatrix.needsUpdate = true;
+  if (voxMesh.instanceColor) voxMesh.instanceColor.needsUpdate = true;
+  return i;
+}
+
+/* ── pixel pass: posterize at internal res, 3x upscale ── */
 const small = document.createElement("canvas");
 small.width = LW; small.height = LH;
 const sctx = small.getContext("2d", { willReadFrequently: true });
@@ -277,22 +358,13 @@ const pc = document.getElementById("pixel");
 const pctx = pc.getContext("2d");
 
 function present() {
-  sctx.clearRect(0, 0, LW, LH);
-  sctx.drawImage(renderer.domElement, 0, 0, LW, LH);
-  const id = sctx.getImageData(0, 0, LW, LH);
-  const d = id.data;
-  for (let i = 0; i < d.length; i += 4) {
-    /* 6-level posterize per channel -> hand-painted banding */
-    d[i]     = Math.min(255, Math.round(d[i] / 48) * 48);
-    d[i + 1] = Math.min(255, Math.round(d[i + 1] / 48) * 48);
-    d[i + 2] = Math.min(255, Math.round(d[i + 2] / 48) * 48);
-  }
-  sctx.putImageData(id, 0, 0);
+  /* crisp upscale only — voxel toon shading already bands the light */
   pctx.imageSmoothingEnabled = false;
-  pctx.drawImage(small, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
+  pctx.clearRect(0, 0, pc.width, pc.height);
+  pctx.drawImage(renderer.domElement, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
 }
 
-/* ── deterministic pose from phase p in [0,1) ── */
+/* ── deterministic pose ── */
 function setPhase(p) {
   const t = p * Math.PI * 2;
   const legs = [["legFR", 0], ["legBL", 0], ["legFL", Math.PI], ["legBR", Math.PI]];
@@ -310,18 +382,25 @@ function setPhase(p) {
   rig.tail.rotation.x = 0.25 + Math.sin(t * 2) * 0.08;
   const fl = 0.75 + 0.25 * Math.sin(t * 3.1) + 0.12 * Math.sin(t * 7.3);
   fireLight.intensity = 26 * fl;
-  glowPool.material.opacity = 0.22 + 0.18 * fl;
+  rig.fireGlow.material.opacity = 0.22 + 0.2 * fl;
   tongues.forEach((tg, i) => {
     const f = 0.8 + 0.35 * Math.sin(t * 2.7 + i * 1.9);
     tg.scale.set(0.85 + 0.2 * Math.sin(t * 3 + i), f, 0.85 + 0.2 * Math.cos(t * 2.2 + i));
     tg.rotation.z = Math.sin(t * 2 + i * 2.3) * 0.14;
   });
+
+  /* voxel pass: animate rig -> voxelize -> hide source -> render voxels */
+  const count = buildVoxels();
+  sourceRoot.visible = false;
   renderer.render(scene, cam);
+  sourceRoot.visible = true;
   present();
+  return count;
 }
 
 window.__forge = { setPhase, rig, LW, LH };
-setPhase(0);
+const n0 = setPhase(0);
 document.title = "FORGE ready";
+console.log("voxels frame0:", n0);
 </script>
 </body></html>
