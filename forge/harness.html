@@ -6,173 +6,295 @@
 <script type="module">
 import * as THREE from "/node_modules/three/build/three.module.js";
 
-/* ── FORGE experimental rig: 2D-ref-style creature built from primitives,
-      real joint hierarchy, procedural walk, REAL lighting (blue fire = point
-      light + additive tongues), pixelated orthographic render. ── */
+/* ── FORGE v2: detailed rigged creature, toon shading + inverted-hull
+      outlines + palette quantization = sprite look, still zero image-gen. ── */
 
-const LW = 96, LH = 96;                       /* low-res render target */
+const LW = 160, LH = 160;                     /* internal render res (3x -> 480) */
 const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
 renderer.setSize(LW, LH, false);
 renderer.setPixelRatio(1);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x140a0a);
+scene.background = new THREE.Color(0x6e3a2e);
 
-const cam = new THREE.OrthographicCamera(-3.4, 3.4, 3.4, -3.4, 0.1, 50);
-cam.position.set(5.2, 3.6, 7.5);
-cam.lookAt(0, 1.15, 0);
+const cam = new THREE.OrthographicCamera(-3.0, 3.0, 3.0, -3.0, 0.1, 60);
+cam.position.set(7.4, 3.1, 2.2);
+cam.lookAt(0, 1.25, 0);
 
-/* ── palette: ALPHA cold-plasma ── */
+/* ── toon gradient: 4 hard light bands ── */
+const gradTex = new THREE.DataTexture(
+  new Uint8Array([70,70,70,255, 135,135,135,255, 200,200,200,255, 255,255,255,255]),
+  4, 1, THREE.RGBAFormat);
+gradTex.needsUpdate = true;
+gradTex.minFilter = gradTex.magFilter = THREE.NearestFilter;
+
+const toon = (color, opts = {}) =>
+  new THREE.MeshToonMaterial(Object.assign({ color, gradientMap: gradTex }, opts));
+
 const M = {
-  body:   new THREE.MeshStandardMaterial({ color: 0x2b3542, roughness: 0.75, metalness: 0.25 }),
-  armor:  new THREE.MeshStandardMaterial({ color: 0x9fb4c8, roughness: 0.35, metalness: 0.7 }),
-  dark:   new THREE.MeshStandardMaterial({ color: 0x1a2029, roughness: 0.9 }),
-  eye:    new THREE.MeshBasicMaterial({ color: 0x9ef4ff }),
-  orb:    new THREE.MeshBasicMaterial({ color: 0x3fd2ff }),
-  crystal:new THREE.MeshStandardMaterial({ color: 0x54e8ff, emissive: 0x1899cc, emissiveIntensity: 1.4,
-                                           roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.92 }),
-  flameA: new THREE.MeshBasicMaterial({ color: 0x1450e0, transparent: true, opacity: 0.55,
-                                        blending: THREE.AdditiveBlending, depthWrite: false }),
-  flameB: new THREE.MeshBasicMaterial({ color: 0x54d8ff, transparent: true, opacity: 0.6,
-                                        blending: THREE.AdditiveBlending, depthWrite: false }),
-  ground: new THREE.MeshStandardMaterial({ color: 0x241114, roughness: 1 }),
+  body:   toon(0x33404f),
+  bodyFr: toon(0x41526a),
+  bodyDk: toon(0x232c38),
+  armor:  toon(0xa8bfd2),
+  armorDk:toon(0x6b7f94),
+  dark:   toon(0x161b23),
+  claw:   toon(0x8fe9ff),
+  eye:    new THREE.MeshBasicMaterial({ color: 0xaef6ff }),
+  orb:    new THREE.MeshBasicMaterial({ color: 0x46d6ff }),
+  crystal:new THREE.MeshToonMaterial({ color: 0x67ecff, emissive: 0x1899cc, emissiveIntensity: 1.2, gradientMap: gradTex }),
+  outline:new THREE.MeshBasicMaterial({ color: 0x07090d, side: THREE.BackSide }),
+  flameA: new THREE.MeshBasicMaterial({ color: 0x1450e0, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }),
+  flameB: new THREE.MeshBasicMaterial({ color: 0x54d8ff, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false }),
+  ground: toon(0x2a1418),
 };
 
-const rig = {};   /* named joints */
+/* outline helper: inverted hull with PIXEL-TARGETED thickness (~1.5 internal
+   px regardless of part size). Computes per-axis inflation from the geometry
+   bounding box so big boxes and small cones both get a readable contour. */
+const OUTLINE_UNITS = 1.5 * (6.0 / 160);   /* 1.5px in world units (ortho: 6u/160px) */
+function outlined(mesh) {
+  mesh.geometry.computeBoundingBox();
+  const bb = mesh.geometry.boundingBox;
+  const size = new THREE.Vector3();
+  bb.getSize(size);
+  const o = new THREE.Mesh(mesh.geometry, M.outline);
+  o.scale.set(
+    Math.min(1.4, 1 + (2 * OUTLINE_UNITS) / Math.max(size.x, 0.001)),
+    Math.min(1.4, 1 + (2 * OUTLINE_UNITS) / Math.max(size.y, 0.001)),
+    Math.min(1.4, 1 + (2 * OUTLINE_UNITS) / Math.max(size.z, 0.001))
+  );
+  mesh.add(o);
+  return mesh;
+}
+const O = outlined;
 
-/* ground */
-const ground = new THREE.Mesh(new THREE.CylinderGeometry(3.2, 3.4, 0.3, 24), M.ground);
-ground.position.y = -0.15;
-scene.add(ground);
+const rig = {};
 
-/* ── body root ── */
+/* ground pedestal + fire glow pool */
+scene.add(O(new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.25, 0.28, 24), M.ground)));
+scene.children[scene.children.length - 1].position.y = -0.14;
+const glowPool = new THREE.Mesh(new THREE.CircleGeometry(2.2, 24),
+  new THREE.MeshBasicMaterial({ color: 0x1450c8, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
+glowPool.rotation.x = -Math.PI / 2;
+glowPool.position.set(0, 0.02, -0.9);
+scene.add(glowPool);
+rig.glowPool = glowPool;
+const blobShadow = new THREE.Mesh(new THREE.CircleGeometry(1.7, 20),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45 }));
+blobShadow.rotation.x = -Math.PI / 2;
+blobShadow.position.y = 0.03;
+scene.add(blobShadow);
+
 const root = new THREE.Group();
 scene.add(root);
 rig.root = root;
 
-const torso = new THREE.Mesh(new THREE.BoxGeometry(2.3, 1.15, 1.15), M.body);
-torso.position.y = 1.35;
-root.add(torso);
-rig.torso = torso;
-
-/* chest orb + housing */
-const orb = new THREE.Mesh(new THREE.SphereGeometry(0.26, 12, 10), M.orb);
-orb.position.set(0, 1.42, 0.62);
+/* ── torso: chest + hindquarters + belly plate + back spikes ── */
+const chest = O(new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 1.1), M.body));
+chest.position.set(0.35, 1.5, 0);
+root.add(chest);
+const hind = O(new THREE.Mesh(new THREE.BoxGeometry(1.35, 1.05, 1.05), M.bodyDk));
+hind.position.set(-0.75, 1.38, 0);
+root.add(hind);
+const belly = O(new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.5, 0.75), M.armorDk));
+belly.position.set(0.05, 0.98, 0);
+root.add(belly);
+/* back spikes */
+for (let i = 0; i < 4; i++) {
+  const sp = O(new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.42 - i * 0.05, 4), M.armor));
+  sp.position.set(0.75 - i * 0.45, 2.12 - i * 0.04, 0);
+  sp.rotation.z = -0.18;
+  root.add(sp);
+}
+/* chest orb + spiked housing */
+const orb = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), M.orb);
+orb.position.set(0.5, 1.62, 0.58);
 root.add(orb);
-const orbRing = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.05, 8, 16), M.armor);
+const orbRing = O(new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.05, 8, 16), M.armor));
 orbRing.position.copy(orb.position);
 root.add(orbRing);
+for (let i = 0; i < 6; i++) {
+  const a = (i / 6) * Math.PI * 2;
+  const st = O(new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.42, 4), M.armor));
+  st.position.set(orb.position.x + Math.cos(a) * 0.44, orb.position.y + Math.sin(a) * 0.44, orb.position.z + 0.06);
+  st.rotation.z = a - Math.PI / 2;
+  root.add(st);
+}
 
-/* ── legs: hip pivot -> upper -> knee pivot -> lower -> paw ── */
-function makeLeg(x, z, name) {
+/* ── legs with thigh armor + claws ── */
+function makeLeg(x, z, name, front) {
   const hip = new THREE.Group();
-  hip.position.set(x, 1.25, z);
+  hip.position.set(x, 1.28, z);
   root.add(hip);
-  const upper = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.7, 0.34), M.body);
-  upper.position.y = -0.35;
-  hip.add(upper);
+  const thigh = O(new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.62, 0.4), front ? M.bodyFr : M.bodyDk));
+  thigh.position.y = -0.31;
+  hip.add(thigh);
   const knee = new THREE.Group();
-  knee.position.y = -0.7;
+  knee.position.y = -0.62;
   hip.add(knee);
-  const lower = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.62, 0.26), M.dark);
-  lower.position.y = -0.31;
-  knee.add(lower);
-  const paw = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.16, 0.44), M.armor);
-  paw.position.set(0, -0.66, 0.06);
+  const shin = O(new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.58, 0.28), M.dark));
+  shin.position.y = -0.29;
+  knee.add(shin);
+  const greave = O(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.24, 0.32), M.armor));
+  greave.position.y = -0.5;
+  knee.add(greave);
+  const paw = O(new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.15, 0.48), M.bodyDk));
+  paw.position.set(0, -0.63, 0.07);
   knee.add(paw);
+  for (const cx of [-0.11, 0.11]) {
+    const claw = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.24, 4), M.claw);
+    claw.position.set(cx, -0.7, 0.36);
+    claw.rotation.x = Math.PI / 2;
+    knee.add(claw);
+  }
   rig[name + "_hip"] = hip;
   rig[name + "_knee"] = knee;
-  return hip;
 }
-makeLeg( 0.85,  0.42, "legFR");
-makeLeg(-0.85,  0.42, "legFL");
-makeLeg( 0.85, -0.42, "legBR");
-makeLeg(-0.85, -0.42, "legBL");
+makeLeg( 0.72,  0.54, "legFR", true);
+makeLeg(-0.9,   0.52, "legFL", true);
+makeLeg( 0.72, -0.52, "legBR", false);
+makeLeg(-0.9,  -0.50, "legBL", false);
 
-/* ── three necks + crowned heads (ALPHA's tri-head silhouette) ── */
+/* shoulder pauldrons with icicle drips */
+for (const sx of [-1, 1]) {
+  const pd = O(new THREE.Mesh(new THREE.SphereGeometry(0.34, 10, 8), M.armor));
+  pd.position.set(0.55, 2.05, sx * 0.62);
+  root.add(pd);
+  for (let d = 0; d < 2; d++) {
+    const drip = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.22, 4), M.crystal);
+    drip.position.set(0.55 + (d - 0.5) * 0.16, 1.72, sx * 0.62);
+    drip.rotation.x = Math.PI;
+    root.add(drip);
+  }
+}
+
+/* ── three necks + detailed heads ── */
 function makeHead(angleY, tiltZ, len, name) {
   const neckPivot = new THREE.Group();
-  neckPivot.position.set(0, 1.85, 0.45);
+  neckPivot.position.set(0.5, 1.95, 0.28);
   neckPivot.rotation.y = angleY;
   root.add(neckPivot);
-  const neck = new THREE.Mesh(new THREE.BoxGeometry(0.3, len, 0.3), M.body);
-  neck.position.y = len / 2;
-  neck.rotation.z = tiltZ;
-  neckPivot.add(neck);
+  /* neck as two segments for thickness taper */
+  const n1 = O(new THREE.Mesh(new THREE.BoxGeometry(0.34, len * 0.55, 0.34), M.body));
+  n1.position.y = len * 0.28;
+  neckPivot.add(n1);
   const headG = new THREE.Group();
   headG.position.set(-Math.sin(tiltZ) * len, Math.cos(tiltZ) * len, 0);
+  headG.rotation.z = tiltZ;
   neckPivot.add(headG);
-  const skull = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.42, 0.55), M.body);
-  headG.add(skull);
-  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.22, 0.34), M.dark);
-  snout.position.set(0, -0.06, 0.4);
+  /* skull + muzzle + jaw */
+  headG.add(O(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.42, 0.5), M.body)));
+  const snout = O(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.34), M.bodyDk));
+  snout.position.set(0, -0.07, 0.38);
   headG.add(snout);
-  /* crown spikes */
-  for (let i = -1; i <= 1; i++) {
-    const spike = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.34 - Math.abs(i) * 0.08, 4), M.armor);
-    spike.position.set(i * 0.14, 0.32, -0.05);
-    headG.add(spike);
+  const jaw = O(new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.09, 0.3), M.dark));
+  jaw.position.set(0, -0.2, 0.34);
+  headG.add(jaw);
+  /* ears/horns */
+  for (const ex of [-0.16, 0.16]) {
+    const ear = O(new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.26, 4), M.armorDk));
+    ear.position.set(ex, 0.3, -0.12);
+    ear.rotation.z = ex > 0 ? -0.25 : 0.25;
+    headG.add(ear);
   }
-  /* glowing eyes */
-  for (const ex of [-0.12, 0.12]) {
-    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 0.03), M.eye);
-    eye.position.set(ex, 0.05, 0.28);
+  /* crown: base band + 3 spikes + center gem */
+  const band = O(new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.21, 0.09, 8), M.armor));
+  band.position.set(0, 0.26, 0.02);
+  headG.add(band);
+  for (let i = -1; i <= 1; i++) {
+    const cs = O(new THREE.Mesh(new THREE.ConeGeometry(0.075, (i === 0 ? 0.42 : 0.3), 4), M.armor));
+    cs.position.set(i * 0.13, 0.4, 0.02);
+    headG.add(cs);
+  }
+  const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.05), M.orb);
+  gem.position.set(0, 0.31, 0.2);
+  headG.add(gem);
+  /* brow ridge */
+  const brow = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.06), M.dark);
+  brow.position.set(0, 0.13, 0.25);
+  headG.add(brow);
+  /* glowing eyes (bigger) */
+  for (const ex of [-0.13, 0.13]) {
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.09, 0.04), M.eye);
+    eye.position.set(ex, 0.06, 0.27);
     headG.add(eye);
+  }
+  /* teeth on the jaw line (front of snout) */
+  for (const tx of [-0.09, 0, 0.09]) {
+    const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.1, 0.03), M.armor);
+    tooth.position.set(tx, -0.17, 0.56);
+    headG.add(tooth);
   }
   rig[name] = headG;
   rig[name + "_neck"] = neckPivot;
-  return neckPivot;
 }
-makeHead(-0.55,  0.42, 0.95, "headL");
-makeHead( 0.0,   0.10, 1.25, "headC");
-makeHead( 0.55, -0.42, 0.95, "headR");
+makeHead(-0.72, 0.5, 1.0, "headL");
+makeHead( 0.0, 0.14, 1.35, "headC");
+makeHead( 0.72, -0.5, 1.0, "headR");
 
-/* shoulder crystals */
-for (const sx of [-1.05, 1.05]) {
-  const crys = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.75, 5), M.crystal);
-  crys.position.set(sx, 2.0, 0.2);
-  crys.rotation.z = sx > 0 ? -0.35 : 0.35;
-  root.add(crys);
-}
-
-/* tail */
+/* tail: 5 segments + blade tip */
 const tailPivot = new THREE.Group();
-tailPivot.position.set(0, 1.5, -0.6);
+tailPivot.position.set(-1.35, 1.6, 0);
 root.add(tailPivot);
 rig.tail = tailPivot;
 let tailParent = tailPivot;
-for (let i = 0; i < 4; i++) {
-  const seg = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.42), i % 2 ? M.dark : M.body);
-  seg.position.z = -0.38;
+for (let i = 0; i < 6; i++) {
+  const seg = O(new THREE.Mesh(new THREE.BoxGeometry(0.2 - i * 0.02, 0.2 - i * 0.02, 0.42), i % 2 ? M.dark : M.body));
+  seg.position.z = -0.4;
   tailParent.add(seg);
   tailParent = seg;
 }
+const blade = O(new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.44, 4), M.crystal));
+blade.position.z = -0.42;
+blade.rotation.x = -Math.PI / 2;
+tailParent.add(blade);
 
-/* ── BLUE FIRE: real point light + additive tongues behind the model ── */
+/* ── BLUE FIRE: point light + additive tongues (rim lighting is physical) ── */
 const fireLight = new THREE.PointLight(0x3fb6ff, 30, 14, 1.6);
-fireLight.position.set(0, 2.6, -1.9);
+fireLight.position.set(0, 2.6, -2.2);
 scene.add(fireLight);
 rig.fireLight = fireLight;
 
 const tongues = [];
-for (let i = 0; i < 7; i++) {
-  const h = 1.2 + (i % 3) * 0.5;
-  const tongue = new THREE.Mesh(new THREE.ConeGeometry(0.3 + (i % 2) * 0.14, h, 6), i % 2 ? M.flameB : M.flameA);
-  tongue.position.set(-1.5 + i * 0.5, h / 2 + 0.05, -2.1 + (i % 2) * 0.3);
+for (let i = 0; i < 8; i++) {
+  const h = 1.1 + (i % 3) * 0.55;
+  const tongue = new THREE.Mesh(new THREE.ConeGeometry(0.28 + (i % 2) * 0.15, h, 6), i % 2 ? M.flameB : M.flameA);
+  tongue.position.set(-1.7 + i * 0.5, h / 2 + 0.05, -2.0 + (i % 2) * 0.3);
   scene.add(tongue);
   tongues.push(tongue);
 }
 
-/* fill + key so the model isn't pure silhouette */
-scene.add(new THREE.AmbientLight(0x40303a, 1.2));
-const key = new THREE.DirectionalLight(0xffe8d8, 1.1);
+scene.add(new THREE.AmbientLight(0x40303a, 1.35));
+const key = new THREE.DirectionalLight(0xffe8d8, 1.15);
 key.position.set(4, 6, 5);
 scene.add(key);
+
+/* ── pixel pass: quantize to banded palette at internal res, then 4x upscale ── */
+const small = document.createElement("canvas");
+small.width = LW; small.height = LH;
+const sctx = small.getContext("2d", { willReadFrequently: true });
+const pc = document.getElementById("pixel");
+const pctx = pc.getContext("2d");
+
+function present() {
+  sctx.clearRect(0, 0, LW, LH);
+  sctx.drawImage(renderer.domElement, 0, 0, LW, LH);
+  const id = sctx.getImageData(0, 0, LW, LH);
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    /* 6-level posterize per channel -> hand-painted banding */
+    d[i]     = Math.min(255, Math.round(d[i] / 48) * 48);
+    d[i + 1] = Math.min(255, Math.round(d[i + 1] / 48) * 48);
+    d[i + 2] = Math.min(255, Math.round(d[i + 2] / 48) * 48);
+  }
+  sctx.putImageData(id, 0, 0);
+  pctx.imageSmoothingEnabled = false;
+  pctx.drawImage(small, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
+}
 
 /* ── deterministic pose from phase p in [0,1) ── */
 function setPhase(p) {
   const t = p * Math.PI * 2;
-  /* diagonal-pair trot — pronounced stride */
   const legs = [["legFR", 0], ["legBL", 0], ["legFL", Math.PI], ["legBR", Math.PI]];
   for (const [name, ph] of legs) {
     const s = Math.sin(t + ph);
@@ -180,29 +302,22 @@ function setPhase(p) {
     rig[name + "_knee"].rotation.x = Math.max(0, -Math.sin(t + ph - 0.7)) * 1.35;
   }
   rig.root.position.y = Math.abs(Math.sin(t * 2)) * 0.12;
-  /* slow turntable so the rig reads as true 3D across the cycle */
-  rig.root.rotation.y = p * Math.PI * 2 * 0.35;
-  rig.torso.rotation.x = Math.sin(t) * 0.03;
-  /* heads bob counter-phase */
+  rig.root.rotation.y = Math.sin(t) * 0.16;
   rig.headC.rotation.x = Math.sin(t * 2) * 0.08;
   rig.headL.rotation.y = Math.sin(t + 1) * 0.1;
   rig.headR.rotation.y = Math.sin(t + 2) * 0.1;
   rig.tail.rotation.y = Math.sin(t) * 0.4;
   rig.tail.rotation.x = 0.25 + Math.sin(t * 2) * 0.08;
-  /* fire flicker (phase-locked so frames are reproducible) */
   const fl = 0.75 + 0.25 * Math.sin(t * 3.1) + 0.12 * Math.sin(t * 7.3);
   fireLight.intensity = 26 * fl;
+  glowPool.material.opacity = 0.22 + 0.18 * fl;
   tongues.forEach((tg, i) => {
     const f = 0.8 + 0.35 * Math.sin(t * 2.7 + i * 1.9);
     tg.scale.set(0.85 + 0.2 * Math.sin(t * 3 + i), f, 0.85 + 0.2 * Math.cos(t * 2.2 + i));
     tg.rotation.z = Math.sin(t * 2 + i * 2.3) * 0.14;
   });
   renderer.render(scene, cam);
-  /* pixelate upscale into the visible canvas */
-  const pc = document.getElementById("pixel");
-  const ctx = pc.getContext("2d");
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(renderer.domElement, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
+  present();
 }
 
 window.__forge = { setPhase, rig, LW, LH };
