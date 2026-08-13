@@ -13,10 +13,11 @@ import { fileURLToPath } from "node:url";
  *
  * One line at boot makes that class of mistake self-evident:
  *
- *   [boot] sha=3a61554 branch=feat/new-artwork dirty=6 ancestor_of_origin_main=no
+ *   [boot] sha=3a61554 branch=feat/new-artwork dirty=6 contains_origin_main=no
  *
- * `ancestor_of_origin_main=no` is the tell: the running tree is missing
- * commits that main has, or carries commits main has never seen.
+ * `contains_origin_main=no` is the tell: the running tree is missing
+ * commits that main has. (`yes` means main is fully contained in HEAD; a
+ * feature branch ahead of main is the normal, healthy case.)
  *
  * Everything here is best-effort. A daemon must never fail to start because
  * provenance could not be determined — every failure degrades to "unknown".
@@ -49,15 +50,18 @@ export function bootProvenance({ cwd = REPO_ROOT } = {}) {
   const status = git(["status", "--porcelain"], { cwd });
   const dirty = status === null ? null : (status === "" ? 0 : status.split("\n").length);
 
-  // `--is-ancestor` exits 0 for true, 1 for false, and non-zero for "no such
-  // ref" — which git() flattens to null. Distinguish "not an ancestor" from
-  // "could not determine" by checking the ref resolves at all first.
-  let ancestorOfOriginMain = null;
+  // `--is-ancestor A B` answers "is A an ancestor of B". We ask whether
+  // origin/main is contained in HEAD — i.e. "does the running tree CONTAIN
+  // main?" — so the honest field name is containsOriginMain. It exits 0 for
+  // true, 1 for false, and non-zero for "no such ref" — which git() flattens
+  // to null. Distinguish "does not contain" from "could not determine" by
+  // checking the ref resolves at all first.
+  let containsOriginMain = null;
   if (git(["rev-parse", "--verify", "--quiet", "origin/main"], { cwd })) {
-    ancestorOfOriginMain = git(["merge-base", "--is-ancestor", "origin/main", "HEAD"], { cwd }) !== null;
+    containsOriginMain = git(["merge-base", "--is-ancestor", "origin/main", "HEAD"], { cwd }) !== null;
   }
 
-  return { sha, branch, dirty, ancestorOfOriginMain, available: true };
+  return { sha, branch, dirty, containsOriginMain, available: true };
 }
 
 export function formatBootProvenance(info) {
@@ -66,8 +70,8 @@ export function formatBootProvenance(info) {
     `sha=${info.sha}`,
     `branch=${info.branch ?? "unknown"}`,
     `dirty=${info.dirty ?? "unknown"}`,
-    `ancestor_of_origin_main=${
-      info.ancestorOfOriginMain === null ? "unknown" : (info.ancestorOfOriginMain ? "yes" : "no")
+    `contains_origin_main=${
+      info.containsOriginMain === null ? "unknown" : (info.containsOriginMain ? "yes" : "no")
     }`
   ];
   return `[boot] ${parts.join(" ")}`;

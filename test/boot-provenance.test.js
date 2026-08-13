@@ -12,7 +12,7 @@ import { bootProvenance, formatBootProvenance, logBootProvenance } from "../src/
  * Real incident (2026-08-11): a fix was pushed to origin/main and the daemon
  * restarted, but the daemon's checkout sat on a feature branch that did not
  * contain the commit. The restart deployed nothing while the report said the
- * fix was live. `ancestor_of_origin_main=no` makes that visible in one line.
+ * fix was live. `contains_origin_main=no` makes that visible in one line.
  */
 
 function git(args, cwd) {
@@ -53,11 +53,11 @@ test("counts dirty files", () => {
   assert.equal(bootProvenance({ cwd: work }).dirty, 2);
 });
 
-test("HEAD containing origin/main reports ancestor_of_origin_main=yes", () => {
+test("HEAD containing origin/main reports contains_origin_main=yes", () => {
   const { work } = makeRepoPair();
   const info = bootProvenance({ cwd: work });
-  assert.equal(info.ancestorOfOriginMain, true);
-  assert.match(formatBootProvenance(info), /ancestor_of_origin_main=yes/);
+  assert.equal(info.containsOriginMain, true);
+  assert.match(formatBootProvenance(info), /contains_origin_main=yes/);
 });
 
 test("THE REAL BUG: a branch missing origin/main's commits reports no", () => {
@@ -75,11 +75,11 @@ test("THE REAL BUG: a branch missing origin/main's commits reports no", () => {
   const info = bootProvenance({ cwd: work });
   assert.equal(info.branch, "feature");
   assert.equal(
-    info.ancestorOfOriginMain,
+    info.containsOriginMain,
     false,
     "a checkout missing origin/main's commits must be flagged — this is the deploy-drift tell"
   );
-  assert.match(formatBootProvenance(info), /ancestor_of_origin_main=no/);
+  assert.match(formatBootProvenance(info), /contains_origin_main=no/);
 });
 
 test("a non-git directory degrades to unavailable, never throws", () => {
@@ -100,8 +100,8 @@ test("a repo with no origin/main reports unknown, not false", () => {
 
   const info = bootProvenance({ cwd: root });
   assert.equal(info.available, true);
-  assert.equal(info.ancestorOfOriginMain, null, "absent ref is unknown, not a failed ancestry check");
-  assert.match(formatBootProvenance(info), /ancestor_of_origin_main=unknown/);
+  assert.equal(info.containsOriginMain, null, "absent ref is unknown, not a failed ancestry check");
+  assert.match(formatBootProvenance(info), /contains_origin_main=unknown/);
 });
 
 test("logBootProvenance emits one line and never throws", () => {
@@ -119,4 +119,35 @@ test("a throwing logger does not propagate out of boot", () => {
     logger: () => { throw new Error("logger exploded"); },
     cwd: work
   }));
+});
+
+// REGRESSION (found in live QA, 2026-08-13): the daemon printed
+// `ancestor_of_origin_main=yes` while HEAD was 20 commits AHEAD of origin/main
+// — a state where HEAD is provably NOT an ancestor of main. The computation was
+// right (`--is-ancestor origin/main HEAD` = "HEAD contains main"); the LABEL was
+// inverted, so the healthy case read as a false claim. The original suite could
+// not catch it: no case asserted the direction of the relation, only its value.
+test("REGRESSION: a branch AHEAD of origin/main is contains=yes, and is NOT an ancestor of main", () => {
+  const { work } = makeRepoPair();
+  git(["checkout", "--quiet", "-b", "ahead"], work);
+  fs.writeFileSync(path.join(work, "ahead.txt"), "feature work\n");
+  git(["add", "."], work);
+  git(["commit", "--quiet", "-m", "ahead of main"], work);
+
+  const info = bootProvenance({ cwd: work });
+  assert.equal(info.containsOriginMain, true, "HEAD contains all of origin/main");
+
+  // Ground truth for the OPPOSITE direction — the one the old name claimed.
+  let headIsAncestorOfMain = true;
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", "HEAD", "origin/main"], { cwd: work });
+  } catch {
+    headIsAncestorOfMain = false;
+  }
+  assert.equal(headIsAncestorOfMain, false, "HEAD is ahead, so it is NOT an ancestor of origin/main");
+
+  // The line must not assert the false relation.
+  const line = formatBootProvenance(info);
+  assert.match(line, /contains_origin_main=yes/);
+  assert.doesNotMatch(line, /ancestor_of_origin_main/, "the inverted label must not come back");
 });
