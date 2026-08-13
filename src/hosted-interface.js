@@ -14990,77 +14990,142 @@ switchTab(initialTab);
     }
   }
 
-  /* ── v15 ALPHA blue-fire background + rim light ──
-     Replaces the frost-wisps. Real animated fire: a deep-blue fire wall rises
-     from the floor across many independently-licking cell-flames, a glow
-     radiates from the fire line, stochastic flicker is LCG-seeded per frame
-     (deterministic), and the sprite's back edge catches the light as a cyan
-     rim. All in logical DW×DH units scaled by res at draw time. */
+  /* ── v15.2 ALPHA blue-fire background + real rim lighting ──
+     Fire = jagged multi-layer tongue polygons (deep blue -> bright blue ->
+     pale cyan core) with per-frame LCG jitter, additive tip glow, ambient
+     flickering backlight, and rising sparks. Rim light is applied to the
+     sprite via a scratch-canvas crescent (sprite minus offset-sprite),
+     tinted cyan and added with 'lighter' — it never touches background
+     pixels. Everything deterministic per frame (LCG seeded by t.flick). */
+  var rimScratch = document.createElement("canvas");
+  function _fireFlick(t) {
+    return 0.72 + 0.14 * Math.sin(t.flick * 0.9) + 0.08 * Math.sin(t.flick * 2.3) + 0.06 * Math.sin(t.flick * 0.37);
+  }
   function drawAlphaFireBg(ctx, t, DW, DH, res) {
     if (reduced) return;
     var rnd = _lcg((0xA17A9 + Math.floor(t.flick)) >>> 0);
-    var cells = 12;
-    var cellW = DW / cells;
-    var fireBaseY = DH * 0.72;              /* where flames anchor */
-    var maxH = DH * 0.52;                   /* tallest lick */
-    var flicker = 0.75 + rnd() * 0.25;      /* stochastic frame flicker */
+    var flick = _fireFlick(t);
+    var baseY = DH * 0.82;          /* flame roots near the ground line */
+    var NT = 9;                     /* tongue count */
+    ctx.save();
 
-    /* Backlight halo behind the creature — additive, drawn in the background
-       pass so the sprite (drawn later, source-over) keeps its own art intact.
-       Reads as the fire lighting the pet from behind. */
-    var hg = ctx.createRadialGradient(DW*0.5, DH*0.52, DW*0.05,
-                                      DW*0.5, DH*0.52, DW*0.52);
-    hg.addColorStop(0, "rgba(120,200,255,0.30)");
-    hg.addColorStop(0.6, "rgba(40,110,230,0.16)");
+    /* ambient backlight — flickering, additive, behind everything */
+    ctx.globalCompositeOperation = "lighter";
+    var hg = ctx.createRadialGradient(DW * 0.5, DH * 0.55, DW * 0.08, DW * 0.5, DH * 0.55, DW * 0.62);
+    hg.addColorStop(0, "rgba(90,170,255," + (0.20 * flick).toFixed(3) + ")");
+    hg.addColorStop(0.6, "rgba(30,90,220," + (0.10 * flick).toFixed(3) + ")");
     hg.addColorStop(1, "rgba(0,0,0,0)");
     ctx.fillStyle = hg;
     ctx.fillRect(0, 0, DW, DH);
 
-    /* Radiating glow from the fire line — draws first, additive, behind all. */
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    var grad = ctx.createLinearGradient(0, fireBaseY + DH*0.06, 0, fireBaseY - maxH);
-    grad.addColorStop(0, "rgba(30,110,255,0.55)");
-    grad.addColorStop(0.45, "rgba(10,60,200,0.30)");
-    grad.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, Math.max(0, fireBaseY - maxH), DW, Math.min(DH, maxH + DH*0.06));
+    /* ground glow strip where the fire sits */
+    var gg = ctx.createLinearGradient(0, baseY, 0, baseY - DH * 0.30);
+    gg.addColorStop(0, "rgba(60,140,255," + (0.35 * flick).toFixed(3) + ")");
+    gg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = gg;
+    ctx.fillRect(0, baseY - DH * 0.30, DW, DH * 0.30);
 
-    /* Cell-flames: 12 columns, each with its own animated height + brightness. */
-    for (var ci = 0; ci < cells; ci++) {
-      var cx0 = ci * cellW;
-      var cx1 = cx0 + cellW;
-      /* height per cell: layered sines + rnd so neighbours differ but move */
-      var h0 = maxH * (0.30 + 0.22 * Math.sin(t.flick * 0.9 + ci * 1.3)
-                            + 0.16 * Math.sin(t.flick * 1.7 + ci * 2.1)
-                            + 0.10 * rnd());
-      var cellTop = fireBaseY - h0 * flicker;
-      var innerGrad = ctx.createLinearGradient(0, fireBaseY, 0, cellTop);
-      innerGrad.addColorStop(0, "rgba(0,20,80,0.85)");
-      innerGrad.addColorStop(0.5, "rgba(30,100,255,0.55)");
-      innerGrad.addColorStop(1, "rgba(200,240,255,0.95)");
-      ctx.fillStyle = innerGrad;
-      var seg = Math.max(2 * res, 4);
-      for (var sy = fireBaseY; sy > cellTop; sy -= seg) {
-        var segH = Math.min(seg, fireBaseY - sy + seg);
-        var segT = (fireBaseY - sy) / h0;
-        ctx.globalAlpha = (0.5 + 0.5 * (1 - segT)) * (0.65 + 0.35 * rnd());
-        ctx.fillRect(cx0, sy, cellW, segH);
+    /* flame tongues — jagged 3-layer polygons, no rectangular slabs */
+    ctx.globalCompositeOperation = "source-over";
+    var layers = [
+      { s: 1.00, col: "rgba(16,60,180,0.88)" },
+      { s: 0.66, col: "rgba(50,130,255,0.88)" },
+      { s: 0.36, col: "rgba(160,228,255,0.92)" }
+    ];
+    var tips = [];
+    for (var ti = 0; ti < NT; ti++) {
+      var cxp = DW * ((ti + 0.5) / NT) + (rnd() - 0.5) * DW * 0.05;
+      var w0 = DW * (0.055 + rnd() * 0.05);
+      var h0 = DH * (0.26 + rnd() * 0.28) * flick;
+      var sway = Math.sin(t.flick * (0.8 + rnd() * 0.8) + ti * 1.7) * w0 * 0.5;
+      tips.push({ x: cxp + sway, y: baseY - h0 });
+      for (var li = 0; li < 3; li++) {
+        var L = layers[li];
+        var w = w0 * L.s, h = h0 * L.s;
+        ctx.fillStyle = L.col;
+        ctx.beginPath();
+        ctx.moveTo(cxp - w, baseY);
+        var steps = 4, si2;
+        for (si2 = 1; si2 <= steps; si2++) {           /* left edge, jagged */
+          ctx.lineTo(cxp - w * (1 - si2 / steps) * (0.8 + 0.4 * rnd()) + sway * (si2 / steps) + (rnd() - 0.5) * w * 0.5,
+                     baseY - h * (si2 / steps));
+        }
+        ctx.lineTo(cxp + sway, baseY - h - rnd() * DH * 0.03);   /* tip */
+        for (si2 = steps; si2 >= 1; si2--) {           /* right edge */
+          ctx.lineTo(cxp + w * (1 - si2 / steps) * (0.8 + 0.4 * rnd()) + sway * (si2 / steps) + (rnd() - 0.5) * w * 0.5,
+                     baseY - h * (si2 / steps));
+        }
+        ctx.closePath();
+        ctx.fill();
       }
-      /* white-hot lick at the tip */
-      ctx.globalAlpha = Math.min(1, (h0 / maxH) * flicker);
-      ctx.fillStyle = "#eaffff";
-      ctx.fillRect(cx0, cellTop - 2 * res, cellW, Math.max(1, res * 2));
-      /* rising sparks above the fire line */
-      for (var sn = 0; sn < 3; sn++) {
-        var sx = cx0 + rnd() * cellW;
-        var sy2 = cellTop - (t.flick * (sn + 2) * 0.7 + sn * 47) % (DH * 0.30);
-        ctx.globalAlpha = 0.5;
-        ctx.fillStyle = sn % 2 ? "#aef4ff" : "#e8fbff";
-        ctx.fillRect(Math.round(sx), Math.round(sy2), res, res);
+      /* turbulence pockets inside the outer layer */
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = "#0a2a70";
+      for (var pk = 0; pk < 3; pk++) {
+        ctx.fillRect(Math.round(cxp + (rnd() - 0.5) * w0), Math.round(baseY - rnd() * h0 * 0.7), res, res * 2);
       }
+      ctx.globalAlpha = 1;
     }
+
+    /* white-hot tips + additive glow bleed around each tip */
+    ctx.globalCompositeOperation = "lighter";
+    for (var gi = 0; gi < tips.length; gi++) {
+      var tp = tips[gi];
+      var gr2 = ctx.createRadialGradient(tp.x, tp.y, 0, tp.x, tp.y, DW * 0.075);
+      gr2.addColorStop(0, "rgba(150,225,255," + (0.24 * flick).toFixed(3) + ")");
+      gr2.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = gr2;
+      ctx.fillRect(tp.x - DW * 0.075, tp.y - DW * 0.075, DW * 0.15, DW * 0.15);
+      ctx.fillStyle = "#eaffff";
+      ctx.fillRect(Math.round(tp.x), Math.round(tp.y - res), Math.max(1, res), Math.max(1, res));
+    }
+
+    /* rising sparks */
+    ctx.globalCompositeOperation = "source-over";
+    for (var sn = 0; sn < 26; sn++) {
+      var sx = rnd() * DW;
+      var life = (t.flick * (0.4 + rnd() * 0.8) + rnd() * 100) % DH;
+      var sy = baseY - life * 0.6;
+      if (sy < 0) continue;
+      ctx.globalAlpha = Math.max(0, 0.7 - life / DH) * flick;
+      ctx.fillStyle = sn % 3 === 0 ? "#eaffff" : (sn % 2 ? "#8fd8ff" : "#3fa0ff");
+      var ss = (sn % 5 === 0) ? 2 * res : res;
+      ctx.fillRect(Math.round(sx), Math.round(sy), ss, ss);
+    }
+    ctx.globalAlpha = 1;
     ctx.restore();
+  }
+
+  /* Rim light pass for the ALPHA sprite — call AFTER the sprite is drawn.
+     Scratch-canvas crescent technique: sprite minus two offset copies leaves
+     only the upper silhouette edges; tint cyan, composite additively. This
+     operates on the sprite's own pixels only — background never touched. */
+  function drawAlphaRim(nctx, b, ox0, oy, DW, DH, res, t, flipped) {
+    if (reduced) return;
+    if (rimScratch.width !== DW) rimScratch.width = DW;
+    if (rimScratch.height !== DH) rimScratch.height = DH;
+    var sctx = rimScratch.getContext("2d");
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.clearRect(0, 0, DW, DH);
+    var place = function(dx, dy) {   /* draw sprite into scratch exactly as on screen */
+      sctx.save();
+      if (flipped) { sctx.translate(DW, 0); sctx.scale(-1, 1); }
+      sctx.drawImage(b.canvas, ox0 + dx, oy + dy);
+      sctx.restore();
+    };
+    place(0, 0);
+    sctx.globalCompositeOperation = "destination-out";
+    place(2 * res, 3 * res);   /* subtract shifted copies: leaves upper-edge crescents */
+    place(-2 * res, 3 * res);
+    sctx.globalCompositeOperation = "source-in";
+    sctx.fillStyle = "rgba(140,215,255,1)";
+    sctx.fillRect(0, 0, DW, DH);
+    sctx.globalCompositeOperation = "source-over";
+    nctx.save();
+    nctx.globalCompositeOperation = "lighter";
+    nctx.globalAlpha = 0.5 * _fireFlick(t);
+    nctx.drawImage(rimScratch, 0, 0);
+    nctx.restore();
   }
 
   /* ── settings (persisted) ── */
@@ -16032,6 +16097,9 @@ switchTab(initialTab);
       if (P.view === "side" && needFlip) { nctx.translate(DW, 0); nctx.scale(-1, 1); ox = DW-ox-sw; }
       nctx.drawImage(b.canvas, ox, oy);
       nctx.restore();
+      /* v15.2 rim light from the blue fire — ALPHA form only; replicates the
+         same flip transform so the crescent hugs the drawn sprite exactly */
+      if (F.key === "alpha") drawAlphaRim(nctx, b, ox, oy, DW, DH, res, P, P.view === "side" && needFlip);
 
       /* egg FX layered on the display buffer (in buffer-pixel space) */
       var fcx = DW/2;
