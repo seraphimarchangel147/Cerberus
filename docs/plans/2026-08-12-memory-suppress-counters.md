@@ -163,3 +163,5 @@ unbounded journal on a long-lived daemon is a disk leak.
 - Finish by appending this literal line as the last line of THIS file, in the final commit:
 
 MEMORY SUPPRESS AND COUNTERS PHASE COMPLETE
+
+MEMORY SUPPRESS AND COUNTERS PHASE COMPLETE
