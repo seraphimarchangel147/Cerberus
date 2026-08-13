@@ -1039,7 +1039,10 @@ export class ToolRegistry {
       const unblockCount = scope.epochUnblocks.get(fingerprint) ?? 0;
       if (unblockCount >= MAX_FAILURE_EPOCH_UNBLOCKS) {
         return {
-          blocked: repeatedFailureEnvelope(prior.envelope, prior.attempts + 1)
+          blocked: repeatedFailureEnvelope(prior.envelope, prior.attempts + 1, {
+            failureClass: prior.failureClass,
+            unblocksRemaining: 0
+          })
         };
       }
       scope.epochUnblocks.set(fingerprint, unblockCount + 1);
@@ -1049,7 +1052,12 @@ export class ToolRegistry {
     const allowedAttempts = prior?.envelope?.outcome?.retryable === true ? 2 : 1;
     if (prior && prior.attempts >= allowedAttempts && !resumingPending) {
       return {
-        blocked: repeatedFailureEnvelope(prior.envelope, prior.attempts + 1)
+        blocked: repeatedFailureEnvelope(prior.envelope, prior.attempts + 1, {
+          failureClass: prior.failureClass,
+          unblocksRemaining: EPOCH_UNBLOCKABLE_FAILURE_CLASSES.has(prior.failureClass)
+            ? Math.max(0, MAX_FAILURE_EPOCH_UNBLOCKS - (scope.epochUnblocks.get(fingerprint) ?? 0))
+            : 0
+        })
       };
     }
     scope.entries.set(fingerprint, {

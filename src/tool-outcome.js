@@ -244,9 +244,38 @@ export function safeToolErrorDetails(error, fallback = "Tool execution failed.")
   return details;
 }
 
-export function repeatedFailureEnvelope(previous, attempts) {
+export function repeatedFailureEnvelope(previous, attempts, options = {}) {
   const count = Math.max(2, Math.floor(Number(attempts) || 2));
   const original = boundedText(previous?.error ?? "The tool failed.");
+  const failureClass = typeof options.failureClass === "string"
+    ? options.failureClass
+    : null;
+  const unblocksRemaining = Number.isSafeInteger(options.unblocksRemaining)
+    ? Math.max(0, options.unblocksRemaining)
+    : null;
+  // The retry guard auto-clears a TRANSIENT/RESOURCE failure after ANY
+  // intervening successful tool call (the scope epoch bumps on success and the
+  // prior entry is dropped on the next attempt). Telling the model to "change
+  // the arguments" for a transient failure teaches guard-evasion (the observed
+  // name-vs-id workaround) and hides the real recovery path. Say so explicitly.
+  const epochUnblockable = failureClass === "TRANSIENT" || failureClass === "RESOURCE";
+  const nextSteps = epochUnblockable && unblocksRemaining !== 0
+    ? [
+        "This failure class is transient — do NOT change the arguments just to evade this guard.",
+        "Run any other successful tool call (a read such as mutation_lease_status suffices), then retry the identical call: the retry guard auto-clears after an intervening success.",
+        unblocksRemaining === null
+          ? "If the condition persists after a successful intervening call, treat it as a real outage and report it."
+          : `Transient-retry budget remaining for this call this turn: ${unblocksRemaining}. If it reaches 0, change the arguments or wait for the next turn.`
+      ]
+    : epochUnblockable
+      ? [
+          "The transient-retry budget for this identical call is exhausted for this turn.",
+          "Change the arguments, wait for the next turn, or ask the user."
+        ]
+      : [
+          "Change the arguments or satisfy the missing prerequisite.",
+          "Inspect a different tool or ask the user for the required input."
+        ];
   return {
     ok: false,
     error: `Unchanged retry stopped after ${count} identical failures. ${original}`,
@@ -261,10 +290,7 @@ export function repeatedFailureEnvelope(previous, attempts) {
         status: "not_requested",
         summary: null
       },
-      nextSteps: [
-        "Change the arguments or satisfy the missing prerequisite.",
-        "Inspect a different tool or ask the user for the required input."
-      ]
+      nextSteps
     }
   };
 }
