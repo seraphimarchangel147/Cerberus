@@ -11625,8 +11625,12 @@ function renderProviderSwitch(p) {
   if (!ctx) return;
   const accent = (getComputedStyle(document.documentElement).getPropertyValue("--accent") || "").trim() || "#7fd4e8";
   let mode = "ring";
+  let flashUntil = 0; // mode-change pulse: brief accent ring so state transitions are visible
   const MODE_FOR = { working: "orbits", thinking: "globe", straining: "wave", blocked: "globe", error: "wave", done: "ring", idle: "ring" };
-  window.orbReact = function (m) { mode = MODE_FOR[m] || "ring"; };
+  window.orbReact = function (m) {
+    const next = MODE_FOR[m] || "ring";
+    if (next !== mode) { mode = next; flashUntil = performance.now() + 450; }
+  };
 
   const TILT = 0.42;
   const C = SIZE / 2;
@@ -11651,11 +11655,11 @@ function renderProviderSwitch(p) {
     ring(t) { // breathing: concentric tilted rings, gentle radial pulse
       for (let lane = 0; lane < 5; lane++) {
         const base = R * (0.35 + 0.65 * (lane / 4));
-        const pulse = 1 + 0.07 * Math.sin(t * 1.6 - lane * 0.7);
+        const pulse = 1 + 0.12 * Math.sin(t * 2.2 - lane * 0.7);
         const segs = 8 + lane * 5;
         const dir = lane % 2 ? -1 : 1;
         for (let i = 0; i < segs; i++) {
-          const a = (i / segs) * Math.PI * 2 + t * 0.12 * dir;
+          const a = (i / segs) * Math.PI * 2 + t * 0.45 * dir;
           dot(project(Math.cos(a) * base * pulse, 0, Math.sin(a) * base * pulse, 0), 0.9, 0.8);
         }
       }
@@ -11702,6 +11706,15 @@ function renderProviderSwitch(p) {
     ctx.clearRect(0, 0, SIZE, SIZE);
     ctx.globalAlpha = 1;
     (DRAW[mode] || DRAW.ring)(nowMs / 1000);
+    if (nowMs < flashUntil) {
+      const p = 1 - (flashUntil - nowMs) / 450;
+      ctx.globalAlpha = 0.85 * (1 - p);
+      ctx.beginPath();
+      ctx.arc(C, C, R * (0.3 + 0.7 * p), 0, Math.PI * 2);
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    }
     ctx.globalAlpha = 1;
   }
   if (typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches) { frame(600); return; }
@@ -11758,10 +11771,12 @@ evt.addEventListener("agent-activity", (e) => {
   try {
     const data = JSON.parse(e.data);
     const phase = data.phase;
-    if (phase === "start") petActivityPoke("working");
+    if (phase === "start" || phase === "turn_start" || phase === "turn-start" || phase === "tool_start" || phase === "tool-batch") petActivityPoke("working");
     else if (phase === "iteration" || phase === "verdict" || phase === "subagent") petActivityPoke("thinking");
-    else if (phase === "end") petActivityPoke(data.ok === false ? "error" : "working");
-    else if (phase === "turn-end") petActivityPoke("done");
+    else if (phase === "end" || phase === "tool_end") petActivityPoke(data.ok === false ? "error" : "working");
+    else if (phase === "turn-end" || phase === "turn_complete" || phase === "turn-complete") petActivityPoke("done");
+    else if (phase === "turn_failed" || phase === "turn-failed") petActivityPoke("error");
+    else if (phase === "wall-clock-checkpoint" || phase === "context-compression" || phase === "completion-evidence" || phase === "credential-rotation") petActivityPoke("thinking");
     else if (phase === "awaiting-approval") petActivityPoke("blocked");
     /* The provider is backing off (rate limit / 5xx). Without this the pet
        keeps its working pose through the whole retry ladder, so a stalled

@@ -1054,6 +1054,21 @@ export class AgentHost {
         scrutinyScore: output.scrutiny.score
       }
     });
+    if (!ephemeral) {
+      try {
+        // Turn lifecycle on the bus: dashboard surfaces (status orb, pixel
+        // pet, Ops feed) need crisp working/done/error bookends for turns
+        // from ANY channel, not only mid-turn iteration events. Ephemeral
+        // probes are excluded, matching every other lifecycle hook.
+        this.runtime.events?.emit?.("agent-activity", {
+          projectId: project.id,
+          sessionId,
+          channel,
+          agentId,
+          phase: "turn_start"
+        });
+      } catch { /* advisory — never let a listener fault break the turn */ }
+    }
     if (typeof input.onToolEvent === "function") {
       try { input.onToolEvent({ phase: "verdict", action: verdict, score: output.scrutiny.score }); } catch { /* advisory */ }
     }
@@ -1488,6 +1503,18 @@ export class AgentHost {
           errorCode: error?.code ?? error?.name ?? "provider_error"
         }
       });
+      if (!ephemeral) {
+        try {
+          this.runtime.events?.emit?.("agent-activity", {
+            projectId: project.id,
+            sessionId,
+            channel,
+            agentId,
+            phase: "turn_failed",
+            ok: false
+          });
+        } catch { /* advisory */ }
+      }
       throw error;
     } finally {
       toolRegistry?.clearFailureScope?.(modelContext);
@@ -1768,6 +1795,18 @@ export class AgentHost {
         )
       }
     });
+    if (!ephemeral) {
+      try {
+        this.runtime.events?.emit?.("agent-activity", {
+          projectId: project.id,
+          sessionId,
+          channel,
+          agentId,
+          phase: "turn_complete",
+          ok: modelResult.completionEvidence?.status !== "incomplete"
+        });
+      } catch { /* advisory */ }
+    }
 
     // A webhook consumer that only sees post_tool_call cannot tell when the
     // agent actually finished. Routed through _notifyHook so the payload is
