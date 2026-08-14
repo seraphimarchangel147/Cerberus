@@ -176,7 +176,19 @@ export function appendChangelog(action, filePath, summary, root = REPO_ROOT) {
     const rel = path.relative(root, filePath);
     if (rel.startsWith("..")) return false; // outside the repo — not harness surface
     const changesPath = path.join(root, "CHANGES.md");
-    const entry = `\n- ${nowIso()} · **azazel** · ${action} \`${rel}\`${summary ? ` — ${String(summary).slice(0, 160)}` : ""}`;
+    const stamp = nowIso();
+    // Same-day dedupe guard: refuse an identical entry (same file + action +
+    // summary) already recorded today. Kills double-appends from retried
+    // edits without blocking legitimate same-day entries for other files.
+    const today = stamp.slice(0, 10);
+    const signature = `${action} \`${rel}\`${summary ? ` — ${String(summary).slice(0, 160)}` : ""}`;
+    try {
+      const tail = fs.readFileSync(changesPath, "utf8").split("\n").slice(-40);
+      for (const line of tail) {
+        if (line.includes(today) && line.includes(signature)) return false;
+      }
+    } catch { /* unreadable changelog — append anyway */ }
+    const entry = `\n- ${stamp} · **azazel** · ${action} \`${rel}\`${summary ? ` — ${String(summary).slice(0, 160)}` : ""}`;
     fs.appendFileSync(changesPath, entry, "utf8");
     return true;
   } catch {

@@ -218,6 +218,55 @@ test("thrown errors and repeated failures expose repair hints without secrets", 
   assert.equal(repeated.outcome.code, "repeated_failure");
   assert.equal(repeated.outcome.retryable, false);
   assert.equal(repeated.outcome.nextSteps.length, 2);
+test("repeated failure guidance for transient classes teaches the auto-clear path", () => {
+  const failed = semanticToolError(readTool, new Error(
+    "Mutation conflicts with another active invocation."
+  ), {
+    code: "mutation_lease_conflict",
+    retryable: true
+  });
+  const blocked = repeatedFailureEnvelope(failed, 3, {
+    failureClass: "TRANSIENT",
+    unblocksRemaining: 4
+  });
+
+  assert.equal(blocked.outcome.code, "repeated_failure");
+  assert.equal(blocked.outcome.nextSteps.length, 3);
+  assert.match(blocked.outcome.nextSteps[0], /do NOT change the arguments/);
+  assert.match(blocked.outcome.nextSteps[1], /auto-clears after an intervening success/);
+  assert.match(blocked.outcome.nextSteps[2], /budget remaining.*4/);
+});
+
+test("repeated failure guidance for exhausted transient budget names the limit", () => {
+  const failed = semanticToolError(readTool, new Error("timeout"), {
+    code: "network_error",
+    retryable: true
+  });
+  const blocked = repeatedFailureEnvelope(failed, 2, {
+    failureClass: "TRANSIENT",
+    unblocksRemaining: 0
+  });
+
+  assert.match(blocked.outcome.nextSteps[0], /budget.*exhausted/);
+  assert.doesNotMatch(blocked.outcome.nextSteps.join(" "), /auto-clears/);
+});
+
+test("repeated failure guidance without a failure class keeps the generic steps", () => {
+  const failed = semanticToolError(readTool, new Error("validation failed"), {
+    code: "validation_error"
+  });
+  const blocked = repeatedFailureEnvelope(failed, 2);
+  const withModelClass = repeatedFailureEnvelope(failed, 2, {
+    failureClass: "MODEL",
+    unblocksRemaining: 5
+  });
+
+  assert.deepEqual(blocked.outcome.nextSteps, [
+    "Change the arguments or satisfy the missing prerequisite.",
+    "Inspect a different tool or ask the user for the required input."
+  ]);
+  assert.deepEqual(withModelClass.outcome.nextSteps, blocked.outcome.nextSteps);
+});
 });
 
 test("failure fingerprints are stable across object key order but not arguments", () => {

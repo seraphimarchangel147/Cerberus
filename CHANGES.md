@@ -2815,3 +2815,19 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-08-11T10:11:59.296Z · **azazel** · edit `src/model-provider.js`
 - 2026-08-11T10:12:24.479Z · **azazel** · edit `src/model-provider.js`
 - 2026-08-11T10:14:11.747Z · **azazel** · create `test/stream-truncation-retry.test.js`
+- 2026-08-11T12:04:17.472Z · **azazel** · edit `drafts/provider-auth-dashboard-outline.md` — Extend draft header to cover 2026-08-11 re-issue of dashboard outline task
+- 2026-08-11T12:05:20.979Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend report skeleton header to cover 2026-08-11 re-issue
+- 2026-08-11T12:05:59.100Z · **azazel** · create `drafts/eod-checkpoint-reminder-2026-08-11.md` — Draft EOD checkpoint reminder proposal for 2026-08-11
+- 2026-08-11T15:48:37.173Z · **azazel** · create `.tmp-legion-send.py` — temp: one-shot legion mailbox sender script (deleted after use)
+- 2026-08-12T12:02:01.624Z · **azazel** · create `drafts/report-outline-template-2026-08-12.md` — Draft generic report outline template (goal/architecture/verification/evidence/blockers/next steps) for planner task task_aa8802d9239744fe.
+- 2026-08-12T12:02:44.333Z · **azazel** · create `drafts/eod-review-block-2026-08-12.md` — Draft 30-min EOD review proposal (5 PM ET) for planner task task_22efc5a631184045; draft-only, nothing scheduled.
+- 2026-08-13T12:04:14.175Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend report skeleton header to 2026-08-13 re-issue
+- 2026-08-13T12:04:14.175Z · **azazel** · edit `drafts/evidence-artifact-checklist.md` — Extend evidence checklist header to 2026-08-13 re-issue
+- 2026-08-13T12:04:57.732Z · **azazel** · edit `drafts/eod-status-update-template.md` — Extend EOD status template header to 2026-08-13 re-issue
+- 2026-08-13T12:05:32.545Z · **azazel** · create `drafts/eod-reminder-2026-08-13.md` — Draft EOD 5 PM reminder proposal (not scheduled)
+- 2026-08-13T14:53:12.131Z · **azazel** · edit `src/tool-outcome.js` — repeatedFailureEnvelope: failure-class-aware nextSteps — transient failures get the auto-clear recovery path instead of guard-evasion advice
+- 2026-08-13T14:54:30.910Z · **azazel** · edit `src/tool-registry.js` — Pass failureClass + remaining epoch-unblock budget into repeatedFailureEnvelope at both guard call sites
+- 2026-08-13T14:55:23.027Z · **azazel** · edit `test/tool-outcome.test.js` — Regression tests: transient repeated-failure guidance teaches auto-clear path; exhaustion and generic paths unchanged
+- 2026-08-13T23:20:40.072Z · **azazel** · edit `src/code-tools.js` — appendChangelog: same-day identical-entry dedupe guard
+- 2026-08-13T23:21:12.393Z · **azazel** · create `test/changelog-dedupe.test.js` — First real coverage for appendChangelog same-day dedupe guard
+- 2026-08-13T23:24:58.708Z · **azazel** · edit `src/hosted-interface.js` — Status orb in topbar: dotted thought-orb (ring/orbits/globe/wave) driven by the pet activity lane

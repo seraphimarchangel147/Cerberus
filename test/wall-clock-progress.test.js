@@ -592,8 +592,17 @@ test("a generous idle budget lets a quiet-but-alive turn finish (Creator tuning)
     (event) => event.phase === "wall-clock-checkpoint"
   );
   assert.ok(checkpoints.length >= 4, "several idle checkpoints were spent");
+  // The first checkpoint is legitimately "progress": the first-ever call of
+  // the fingerprint produces novel output, which earns a free extension and
+  // resets strikes. Anti-spin is what happens AFTER that novelty — every
+  // later checkpoint over identical output must spend an idle allowance.
+  assert.equal(
+    checkpoints[0].extensionKind,
+    "progress",
+    "first-call novelty earns the single free progress extension"
+  );
   assert.ok(
-    checkpoints.every((event) => event.extensionKind === "idle"),
+    checkpoints.slice(1).every((event) => event.extensionKind === "idle"),
     "identical output still spends allowances -- anti-spin bookkeeping intact"
   );
   assert.ok(

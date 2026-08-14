@@ -6024,6 +6024,7 @@ function renderApp() {
     }
     .topbar .status { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
     .topbar .status .status-pill { white-space: nowrap; padding: 2px 8px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); }
+    #statusOrb { flex: 0 0 auto; display: block; }
 
     .body { display: grid; grid-template-columns: 280px 1fr; min-height: 0; min-width: 0; }
     .body.no-sidebar { grid-template-columns: 1fr; }
@@ -6706,6 +6707,7 @@ function renderApp() {
   </aside>
   <div class="content">
     <div class="topbar">
+      <canvas id="statusOrb" width="20" height="20" role="img" aria-label="Live agent activity" title="Live agent state"></canvas>
       <span id="status" class="status">connecting…</span>
     </div>
     <div class="body">
@@ -11606,6 +11608,111 @@ function renderProviderSwitch(p) {
   });
 }
 
+// ── Status orb (dotted thought-orb, inspired by orbs.jakubantalik.com) ───
+// Live agent state in the topbar: ring = idle/breathing, orbits = working,
+// globe = thinking, wave = straining/error. petActivityPoke calls orbReact()
+// alongside the pet/holo hooks, so the orb tracks turns from every channel.
+(function initStatusOrb() {
+  const canvas = document.getElementById("statusOrb");
+  if (!canvas) return;
+  const SIZE = 20;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.round(SIZE * dpr);
+  canvas.height = Math.round(SIZE * dpr);
+  canvas.style.width = SIZE + "px";
+  canvas.style.height = SIZE + "px";
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const accent = (getComputedStyle(document.documentElement).getPropertyValue("--accent") || "").trim() || "#7fd4e8";
+  let mode = "ring";
+  const MODE_FOR = { working: "orbits", thinking: "globe", straining: "wave", blocked: "globe", error: "wave", done: "ring", idle: "ring" };
+  window.orbReact = function (m) { mode = MODE_FOR[m] || "ring"; };
+
+  const TILT = 0.42;
+  const C = SIZE / 2;
+  const R = SIZE / 2 - 2.5;
+  function project(x, y, z, ry) {
+    const c = Math.cos(ry), s = Math.sin(ry);
+    const x1 = x * c - z * s, z1 = x * s + z * c;
+    const ct = Math.cos(TILT), st = Math.sin(TILT);
+    return { x: x1, y: y * ct - z1 * st, z: y * st + z1 * ct };
+  }
+  function dot(p, rBase, alpha) {
+    const d = (p.z / R + 1) / 2; // 0 far → 1 near
+    const r = Math.max(0.3, rBase * (0.45 + 0.55 * Math.pow(d, 0.6)));
+    ctx.globalAlpha = Math.min(1, alpha * (0.35 + 0.65 * d));
+    ctx.beginPath();
+    ctx.arc(C + p.x, C + p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+  }
+
+  const DRAW = {
+    ring(t) { // breathing: concentric tilted rings, gentle radial pulse
+      for (let lane = 0; lane < 5; lane++) {
+        const base = R * (0.35 + 0.65 * (lane / 4));
+        const pulse = 1 + 0.07 * Math.sin(t * 1.6 - lane * 0.7);
+        const segs = 8 + lane * 5;
+        const dir = lane % 2 ? -1 : 1;
+        for (let i = 0; i < segs; i++) {
+          const a = (i / segs) * Math.PI * 2 + t * 0.12 * dir;
+          dot(project(Math.cos(a) * base * pulse, 0, Math.sin(a) * base * pulse, 0), 0.9, 0.8);
+        }
+      }
+    },
+    orbits(t) { // working: tilted orbit rings, bright particle + 2-dot trail
+      for (let ring = 0; ring < 3; ring++) {
+        const tilt = ring * (Math.PI / 3);
+        const dir = ring % 2 ? -1 : 1;
+        for (let i = 0; i < 14; i++) {
+          const a = (i / 14) * Math.PI * 2;
+          dot(project(Math.cos(a) * R, Math.sin(a) * R * Math.cos(tilt), Math.sin(a) * R * Math.sin(tilt), 0), 0.55, 0.35);
+        }
+        for (let k = 0; k < 3; k++) {
+          const a = (t * 3.9 + ring) * dir - k * 0.22 * dir;
+          const fade = 1 - k * 0.34;
+          dot(project(Math.cos(a) * R, Math.sin(a) * R * Math.cos(tilt), Math.sin(a) * R * Math.sin(tilt), 0), k === 0 ? 1.1 : 0.7, 0.95 * fade);
+        }
+      }
+    },
+    globe(t) { // thinking: rotating dotted sphere (fibonacci distribution)
+      const N = 42, golden = Math.PI * (3 - Math.sqrt(5));
+      for (let i = 0; i < N; i++) {
+        const y = 1 - (i / (N - 1)) * 2;
+        const rad = Math.sqrt(Math.max(0, 1 - y * y));
+        const th = golden * i;
+        dot(project(Math.cos(th) * rad * R, y * R, Math.sin(th) * rad * R, t * 2.0), 0.85, 0.85);
+      }
+    },
+    wave(t) { // straining/error: sonar rings expanding outward
+      for (let k = 0; k < 3; k++) {
+        const phase = (t * 0.9 + k / 3) % 1;
+        const r = R * (0.25 + 0.75 * phase);
+        const alpha = 0.9 * (1 - phase);
+        for (let i = 0; i < 18; i++) {
+          const a = (i / 18) * Math.PI * 2;
+          dot(project(Math.cos(a) * r, 0, Math.sin(a) * r, 0), 0.7, alpha);
+        }
+      }
+    }
+  };
+
+  function frame(nowMs) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, SIZE, SIZE);
+    ctx.globalAlpha = 1;
+    (DRAW[mode] || DRAW.ring)(nowMs / 1000);
+    ctx.globalAlpha = 1;
+  }
+  if (typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches) { frame(600); return; }
+  let running = false, raf = 0;
+  function loop(now) { frame(now); if (running) raf = requestAnimationFrame(loop); }
+  function start() { if (!running) { running = true; raf = requestAnimationFrame(loop); } }
+  function stop() { running = false; cancelAnimationFrame(raf); }
+  document.addEventListener("visibilitychange", () => { document.visibilityState === "hidden" ? stop() : start(); });
+  start();
+})();
+
 const evt = new EventSource("/events?project=" + encodeURIComponent(state.projectId || "default"));
 evt.addEventListener("message", (e) => {
   try {
@@ -11626,6 +11733,7 @@ evt.addEventListener("cron", () => { if (state.tab === "cron") refreshCron(); })
 var petActivityIdle = null;
 function petActivityPoke(mode) {
   if (window.cerbPetReact) { try { window.cerbPetReact(mode); } catch (e) {} }
+  if (window.orbReact) { try { window.orbReact(mode); } catch (e) {} }
   if (window.cerbHoloReact) {
     try { window.cerbHoloReact(mode === "done" ? "idle" : "thinking"); } catch (e) {}
   }
@@ -11642,6 +11750,7 @@ function petActivityPoke(mode) {
     petActivityIdle = setTimeout(function () {
       if (window.cerbPetReact) { try { window.cerbPetReact("idle"); } catch (e) {} }
       if (window.cerbHoloReact) { try { window.cerbHoloReact("idle"); } catch (e) {} }
+      if (window.orbReact) { try { window.orbReact("idle"); } catch (e) {} }
     }, 45000);
   }
 }
