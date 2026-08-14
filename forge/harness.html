@@ -78,18 +78,43 @@ const rig = {};
 /* ground pedestal + glow pool + shadow */
 const ground = O(new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.25, 0.28, 24), M.ground));
 ground.position.y = -0.14;
+ground.userData.voxDens = 8;   /* thin cap fan needs dense sampling to fill solid */
 sourceRoot.add(ground);
-const glowPool = new THREE.Mesh(new THREE.CircleGeometry(2.2, 24),
-  new THREE.MeshBasicMaterial({ color: 0x1450c8 }));
+/* fire spill pool: scene-space radial gradient (not voxelized = no noise) */
+const poolCanvas = document.createElement("canvas");
+poolCanvas.width = poolCanvas.height = 64;
+const plCtx = poolCanvas.getContext("2d");
+const plGrad = plCtx.createRadialGradient(32, 32, 2, 32, 32, 32);
+plGrad.addColorStop(0, "rgba(70,170,255,0.85)");
+plGrad.addColorStop(0.55, "rgba(25,90,220,0.5)");
+plGrad.addColorStop(1, "rgba(10,40,140,0)");
+plCtx.fillStyle = plGrad;
+plCtx.fillRect(0, 0, 64, 64);
+const poolTex = new THREE.CanvasTexture(poolCanvas);
+const glowPool = new THREE.Mesh(new THREE.PlaneGeometry(4.4, 4.4),
+  new THREE.MeshBasicMaterial({ map: poolTex, transparent: true, depthWrite: false,
+                                blending: THREE.AdditiveBlending }));
 glowPool.rotation.x = -Math.PI / 2;
-glowPool.position.set(0, 0.02, -0.9);
-sourceRoot.add(glowPool);
+glowPool.position.set(0, 0.032, -0.9);
+scene.add(glowPool);
 rig.glowPool = glowPool;
-const blobShadow = new THREE.Mesh(new THREE.CircleGeometry(1.7, 20),
-  new THREE.MeshBasicMaterial({ color: 0x120608 }));
+/* contact shadow: radial-gradient disc so it reads as soft shadow, not noise */
+const shCanvas = document.createElement("canvas");
+shCanvas.width = shCanvas.height = 64;
+const shCtx = shCanvas.getContext("2d");
+const shGrad = shCtx.createRadialGradient(32, 32, 4, 32, 32, 32);
+shGrad.addColorStop(0, "rgba(8,4,10,0.85)");
+shGrad.addColorStop(0.7, "rgba(8,4,10,0.5)");
+shGrad.addColorStop(1, "rgba(8,4,10,0)");
+shCtx.fillStyle = shGrad;
+shCtx.fillRect(0, 0, 64, 64);
+const shTex = new THREE.CanvasTexture(shCanvas);
+shTex.magFilter = shTex.minFilter = THREE.LinearFilter;
+const blobShadow = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 3.4),
+  new THREE.MeshBasicMaterial({ map: shTex, transparent: true, depthWrite: false }));
 blobShadow.rotation.x = -Math.PI / 2;
-blobShadow.position.y = 0.03;
-sourceRoot.add(blobShadow);
+blobShadow.position.y = 0.031;
+scene.add(blobShadow);   /* scene-space (not voxelized) = smooth soft shadow */
 
 const root = new THREE.Group();
 sourceRoot.add(root);
@@ -332,7 +357,7 @@ function buildVoxels() {
       const cx = aby * acz - abz * acy, cy = abz * acx - abx * acz, cz = abx * acy - aby * acx;
       const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (area < 1e-9) continue;
-      const dens = isOutline ? 3.6 : 1.6;      /* outlines need continuous lines */
+      const dens = isOutline ? 3.6 : (obj.userData.voxDens || 1.6);
     const n = Math.max(3, Math.ceil(area / (VOX * VOX) * dens));
       for (let s = 0; s < n; s++) {
         let u = rndV(), v = rndV();
@@ -376,8 +401,15 @@ function buildVoxels() {
     const wy = BMIN.y + (iy + 0.5) * VOX;
     let rr = (col >> 16) & 255, gg = (col >> 8) & 255, bb = col & 255;
     const isContour = rr < 40 && gg < 45 && bb < 60;   /* keep contours dark */
-    if (!isContour && wz < -0.55 && wy < 2.6) {        /* rear surface near fire */
-      rr = Math.min(255, rr * 0.75); gg = Math.min(255, gg + 22); bb = Math.min(255, bb * 1.12 + 18);
+    if (!isContour && wy < 2.6) {
+      /* smooth falloff: full kiss at z=-1.6, fading to zero by z=0.2 */
+      const k = Math.max(0, Math.min(1, (-wz + 0.2) / 1.8));
+      if (k > 0.01) {
+        const kk = k * k;
+        rr = Math.min(255, rr * (1 - 0.25 * kk));
+        gg = Math.min(255, gg + 22 * kk);
+        bb = Math.min(255, bb * (1 + 0.12 * kk) + 18 * kk);
+      }
     }
     _m4.makeTranslation(BMIN.x + (ix + 0.5) * VOX, wy, wz);
     voxMesh.setMatrixAt(i, _m4);
@@ -397,11 +429,41 @@ const sctx = small.getContext("2d", { willReadFrequently: true });
 const pc = document.getElementById("pixel");
 const pctx = pc.getContext("2d");
 
+/* despeckle: kill isolated single-pixel outliers in the low-res frame */
+const work = document.createElement("canvas");
+work.width = LW; work.height = LH;
+const wctx = work.getContext("2d", { willReadFrequently: true });
+function despeckle(img) {
+  const d = img.data, W = img.width, H = img.height;
+  const out = new Uint8ClampedArray(d);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = (y * W + x) * 4;
+      const l = (x - 1) * 4, r = (x + 1) * 4, u = ((y - 1) * W + x) * 4, dn = ((y + 1) * W + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const v = d[i + c];
+        const n1 = d[l + c], n2 = d[r + c], n3 = d[u + c], n4 = d[dn + c];
+        /* if this pixel is an isolated spike vs all 4 neighbours, pull to their mean */
+        const mean = (n1 + n2 + n3 + n4) / 4;
+        if (Math.abs(v - mean) > 90 &&
+            Math.abs(v - n1) > 60 && Math.abs(v - n2) > 60 &&
+            Math.abs(v - n3) > 60 && Math.abs(v - n4) > 60) {
+          out[i + c] = mean;
+        }
+      }
+    }
+  }
+  return out;
+}
 function present() {
-  /* crisp upscale only — voxel toon shading already bands the light */
+  wctx.clearRect(0, 0, LW, LH);
+  wctx.drawImage(renderer.domElement, 0, 0, LW, LH);
+  const img = wctx.getImageData(0, 0, LW, LH);
+  img.data.set(despeckle(img));
+  wctx.putImageData(img, 0, 0);
   pctx.imageSmoothingEnabled = false;
   pctx.clearRect(0, 0, pc.width, pc.height);
-  pctx.drawImage(renderer.domElement, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
+  pctx.drawImage(work, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
 }
 
 /* rising ember sparks (voxelized with everything else) */
