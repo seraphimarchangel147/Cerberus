@@ -6707,7 +6707,7 @@ function renderApp() {
   </aside>
   <div class="content">
     <div class="topbar">
-      <canvas id="statusOrb" width="20" height="20" role="img" aria-label="Live agent activity" title="Live agent state"></canvas>
+      <canvas id="statusOrb" width="34" height="34" role="img" aria-label="Live agent activity" title="Live agent state"></canvas>
       <span id="status" class="status">connecting…</span>
     </div>
     <div class="body">
@@ -11615,7 +11615,7 @@ function renderProviderSwitch(p) {
 (function initStatusOrb() {
   const canvas = document.getElementById("statusOrb");
   if (!canvas) return;
-  const SIZE = 20;
+  const SIZE = 34;
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   canvas.width = Math.round(SIZE * dpr);
   canvas.height = Math.round(SIZE * dpr);
