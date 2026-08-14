@@ -3,15 +3,24 @@
 <style>html,body{margin:0;background:#120808;} #pixel{image-rendering:pixelated;}</style>
 </head><body>
 <canvas id="pixel" width="480" height="480"></canvas>
+<script type="importmap">
+{ "imports": {
+  "three": "/node_modules/three/build/three.module.js",
+  "three/addons/": "/node_modules/three/examples/jsm/"
+} }
+</script>
 <script type="module">
-import * as THREE from "/node_modules/three/build/three.module.js";
+import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 
 /* ── FORGE v6: VOXEL pipeline. The rigged model (primitives + joint
       hierarchy) is the animation source; every frame it is voxelized —
       triangles sampled onto a 3D grid, drawn as instanced cubes. One
       unified cube language, real lighting, zero image-gen. ── */
 
-const LW = 160, LH = 160;
+const LW = 200, LH = 200;
 const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
 renderer.setSize(LW, LH, false);
 renderer.setPixelRatio(1);
@@ -33,9 +42,9 @@ const toon = (color, opts = {}) =>
   new THREE.MeshToonMaterial(Object.assign({ color, gradientMap: gradTex }, opts));
 
 const M = {
-  body:   toon(0x41566e),
-  bodyFr: toon(0x41526a),
-  bodyDk: toon(0x2c3a4c),
+  body:   toon(0x6f8cab),
+  bodyFr: toon(0x89a7c4),
+  bodyDk: toon(0x455a73),
   armor:  toon(0xa8bfd2),
   armorDk:toon(0x6b7f94),
   dark:   toon(0x161b23),
@@ -57,7 +66,7 @@ scene.add(sourceRoot);
 /* outline helper (kept in source for silhouette thickness in voxel space) */
 function outlined(mesh) {
   const o = new THREE.Mesh(mesh.geometry, M.outline);
-  o.scale.setScalar(1.045);
+  o.scale.setScalar(1.06);
   o.userData.isOutline = true;
   mesh.add(o);
   return mesh;
@@ -216,9 +225,9 @@ function makeHead(angleY, tiltZ, len, name) {
   rig[name] = headG;
   rig[name + "_neck"] = neckPivot;
 }
-makeHead(-0.72, 0.5, 1.0, "headL");
+makeHead(-0.82, 0.52, 1.0, "headL");
 makeHead( 0.0, 0.14, 1.35, "headC");
-makeHead( 0.72, -0.5, 1.0, "headR");
+makeHead( 0.82, -0.52, 1.0, "headR");
 
 /* tail */
 const tailPivot = new THREE.Group();
@@ -267,13 +276,17 @@ key.position.set(4, 6, 5);
 scene.add(key);
 
 /* ── VOXELIZER: sample every triangle onto a grid, emit instanced cubes ── */
-const VOX = 0.13;
+const VOX = 0.095;
 const BMIN = { x: -3.4, y: -0.5, z: -3.4 };
 const BMAX = { x: 3.4, y: 4.4, z: 3.4 };
 const NX = Math.ceil((BMAX.x - BMIN.x) / VOX);
 const NY = Math.ceil((BMAX.y - BMIN.y) / VOX);
 const NZ = Math.ceil((BMAX.z - BMIN.z) / VOX);
-const MAXV = 90000;
+const MAXV = 150000;
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, cam));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(LW, LH), 0.4, 0.45, 0.62));
 
 const voxMesh = new THREE.InstancedMesh(
   new THREE.BoxGeometry(VOX * 1.02, VOX * 1.02, VOX * 1.02),   /* 2% overlap hides seams */
@@ -293,12 +306,14 @@ function buildVoxels() {
   const cells = new Map();
   sourceRoot.updateMatrixWorld(true);
   sourceRoot.traverse((obj) => {
-    if (!obj.isMesh || obj.userData.isOutline) return;
+    if (!obj.isMesh) return;
+    const isOutline = !!obj.userData.isOutline;
     const geom = obj.geometry;
     const pos = geom.attributes.position;
     const idx = geom.index;
     let r = 1, g = 1, b = 1;
-    if (obj.material.color) { r = obj.material.color.r; g = obj.material.color.g; b = obj.material.color.b; }
+    if (isOutline) { r = 0.055; g = 0.07; b = 0.13; }   /* dark-navy contour voxels */
+    else if (obj.material.color) { r = obj.material.color.r; g = obj.material.color.g; b = obj.material.color.b; }
     if (obj.material.emissive) {
       const e = obj.material.emissive, ei = obj.material.emissiveIntensity || 1;
       r = Math.min(1, r + e.r * ei); g = Math.min(1, g + e.g * ei); b = Math.min(1, b + e.b * ei);
@@ -317,7 +332,8 @@ function buildVoxels() {
       const cx = aby * acz - abz * acy, cy = abz * acx - abx * acz, cz = abx * acy - aby * acx;
       const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (area < 1e-9) continue;
-      const n = Math.max(3, Math.ceil(area / (VOX * VOX) * 1.6));
+      const dens = isOutline ? 3.6 : 1.6;      /* outlines need continuous lines */
+    const n = Math.max(3, Math.ceil(area / (VOX * VOX) * dens));
       for (let s = 0; s < n; s++) {
         let u = rndV(), v = rndV();
         if (u + v > 1) { u = 1 - u; v = 1 - v; }
@@ -333,15 +349,39 @@ function buildVoxels() {
       }
     }
   });
-  let i = 0;
+  /* cheap top-light AO: shaded if covered from above, brightened if exposed */
+  const NYZ = NZ;  /* stride within a column */
+  const shaded = new Map();
   cells.forEach((col, key) => {
+    const iy = Math.floor(key / NZ) % NY;
+    const ix = Math.floor(key / (NZ * NY));
+    const iz = key % NZ;
+    const above = (ix * NY + (iy + 1)) * NZ + iz;
+    const rr = (col >> 16) & 255, gg = (col >> 8) & 255, bb = col & 255;
+    let f = 1;
+    if (cells.has(above) && iy + 1 < NY) f = 0.84;
+    else f = 1.0;
+    shaded.set(key, (Math.min(255, Math.round(rr * f)) << 16) |
+                    (Math.min(255, Math.round(gg * f)) << 8) |
+                     Math.min(255, Math.round(bb * f)));
+  });
+  /* fake GI: voxels facing the fire (z < -0.6 band) pick up cyan bounce */
+  let i = 0;
+  shaded.forEach((col, key) => {
     if (i >= MAXV) return;
     const iz = key % NZ;
     const iy = Math.floor(key / NZ) % NY;
     const ix = Math.floor(key / (NZ * NY));
-    _m4.makeTranslation(BMIN.x + (ix + 0.5) * VOX, BMIN.y + (iy + 0.5) * VOX, BMIN.z + (iz + 0.5) * VOX);
+    const wz = BMIN.z + (iz + 0.5) * VOX;
+    const wy = BMIN.y + (iy + 0.5) * VOX;
+    let rr = (col >> 16) & 255, gg = (col >> 8) & 255, bb = col & 255;
+    const isContour = rr < 40 && gg < 45 && bb < 60;   /* keep contours dark */
+    if (!isContour && wz < -0.55 && wy < 2.6) {        /* rear surface near fire */
+      rr = Math.min(255, rr * 0.75); gg = Math.min(255, gg + 22); bb = Math.min(255, bb * 1.12 + 18);
+    }
+    _m4.makeTranslation(BMIN.x + (ix + 0.5) * VOX, wy, wz);
     voxMesh.setMatrixAt(i, _m4);
-    voxMesh.setColorAt(i, _col.setRGB(((col >> 16) & 255) / 255, ((col >> 8) & 255) / 255, (col & 255) / 255));
+    voxMesh.setColorAt(i, _col.setRGB(rr / 255, gg / 255, bb / 255));
     i++;
   });
   voxMesh.count = i;
@@ -362,6 +402,15 @@ function present() {
   pctx.imageSmoothingEnabled = false;
   pctx.clearRect(0, 0, pc.width, pc.height);
   pctx.drawImage(renderer.domElement, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
+}
+
+/* rising ember sparks (voxelized with everything else) */
+const sparks = [];
+for (let i = 0; i < 14; i++) {
+  const sp = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.09),
+    new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xeaffff : 0x7fe0ff }));
+  sourceRoot.add(sp);
+  sparks.push({ mesh: sp, x: -1.9 + (i * 0.31) % 3.8, ph: (i * 0.618) % 1, v: 0.5 + (i % 4) * 0.22 });
 }
 
 /* ── deterministic pose ── */
@@ -390,9 +439,15 @@ function setPhase(p) {
   });
 
   /* voxel pass: animate rig -> voxelize -> hide source -> render voxels */
+  /* sparks rise from the fire line */
+  for (const s of sparks) {
+    const life = (p + s.ph) % 1;
+    s.mesh.position.set(s.x + Math.sin((p + s.ph) * 12.6) * 0.14, 0.1 + life * 3.4, -1.9 + Math.sin(s.ph * 9.4) * 0.5);
+    s.mesh.visible = life > 0.03 && life < 0.9;
+  }
   const count = buildVoxels();
   sourceRoot.visible = false;
-  renderer.render(scene, cam);
+  composer.render();
   sourceRoot.visible = true;
   present();
   return count;
