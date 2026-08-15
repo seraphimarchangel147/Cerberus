@@ -294,6 +294,30 @@ export function stripDeliveredPaths(text, successfulCandidates = []) {
     .trim();
 }
 
+// Tool-envelope safety: raw candidates carry a Buffer (`buffer`) plus match
+// spans. The tool-outcome serializer (cloneJsonValue) throws on anything that
+// is not a plain object, so returning raw candidates from deliverAgentReply
+// converted a SUCCESSFUL upload into a false tool failure. These summaries
+// keep the agent-visible metadata and drop everything non-JSON.
+export function summarizeDeliverable(candidate) {
+  if (!candidate || typeof candidate !== "object") return null;
+  return {
+    filename: String(candidate.filename ?? ""),
+    size: Number.isFinite(Number(candidate.size)) ? Number(candidate.size) : 0,
+    category: String(candidate.category ?? ""),
+    delivery: String(candidate.delivery ?? ""),
+    extension: String(candidate.extension ?? ""),
+    mimeType: String(candidate.mimeType ?? ""),
+    path: String(candidate.resolvedPath ?? candidate.path ?? candidate.raw ?? "")
+  };
+}
+
+export function summarizeDeliverables(candidates = []) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  return list.map(summarizeDeliverable).filter(Boolean);
+}
+
+
 function scanSettings(options) {
   const projectId = typeof options.projectId === "string" && options.projectId.trim()
     ? options.projectId.trim().toLowerCase()

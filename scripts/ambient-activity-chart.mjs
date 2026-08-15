@@ -2,17 +2,20 @@
 // Ambient Activity → PNG chart (zero dependencies).
 // Pulls /observations/timeline (last 24h) + /observations/stats from the local
 // daemon and renders a stacked hourly bar chart to a PNG file.
-// Output path: $OUT or ~/.openagi/workspace/ambient-activity.png
+// Output path: $OUT or out/ambient-activity.png (project-relative).
 import http from "node:http";
 import zlib from "node:zlib";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+// Output path: $OUT or out/ambient-activity.png inside the project (the
+// ~/.openagi tree is hard-blocked from the deliverable/vision lanes, so
+// workspace output can never be attached or visually verified).
 const BASE = process.env.OPENAGI_BASE_URL || "http://127.0.0.1:43210";
 const OUT =
   process.env.OUT ||
-  path.join(os.homedir(), ".openagi", "workspace", "ambient-activity.png");
+  path.resolve("out", "ambient-activity.png");
 
 function getJson(route) {
   return new Promise((resolve, reject) => {

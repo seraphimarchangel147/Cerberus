@@ -23,7 +23,7 @@ import { ANSI, COLORS, embed } from "./discord-embeds.js";
 import { approvePendingAction } from "./pending-actions.js";
 import { redactKnownValues, sanitizeForAudit } from "./redact.js";
 import { secretRedactionSpellings } from "./credential-redaction.js";
-import { scanDeliverables, stripDeliveredPaths } from "./deliverable.js";
+import { scanDeliverables, stripDeliveredPaths, summarizeDeliverables } from "./deliverable.js";
 
 const API = "https://discord.com/api/v10";
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
@@ -592,8 +592,11 @@ export class DiscordChannel {
       if (streamed) {
         return {
           text: cleaned,
-          candidates,
-          successfulCandidates,
+          // Raw candidates carry Buffers — the tool-envelope serializer
+          // rejects them, turning a successful upload into a false tool
+          // failure. Return plain-JSON summaries instead.
+          candidates: summarizeDeliverables(candidates),
+          successfulCandidates: summarizeDeliverables(successfulCandidates),
           streamed: true,
           // Streamed edits are confirmed by the stream itself; it only reports
           // success after the REST edit landed.
@@ -613,8 +616,8 @@ export class DiscordChannel {
     const messageId = sent?.id ? String(sent.id) : null;
     return {
       text: cleaned,
-      candidates,
-      successfulCandidates,
+      candidates: summarizeDeliverables(candidates),
+      successfulCandidates: summarizeDeliverables(successfulCandidates),
       streamed: false,
       delivered: Boolean(messageId),
       ...(messageId ? {} : {

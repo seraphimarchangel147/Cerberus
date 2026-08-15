@@ -5,7 +5,7 @@ import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 import { TelegramPairing } from "./telegram-pairing.js";
 import { DiscordChannel } from "./discord-channel.js";
-import { scanDeliverables, stripDeliveredPaths } from "./deliverable.js";
+import { scanDeliverables, stripDeliveredPaths, summarizeDeliverables } from "./deliverable.js";
 import { redactKnownValues } from "./redact.js";
 import { secretRedactionSpellings } from "./credential-redaction.js";
 
@@ -258,8 +258,11 @@ export class TelegramChannel {
     const message = await this.sendMessage(chatId, cleaned);
     return {
       text: cleaned,
-      candidates,
-      successfulCandidates,
+      // Plain-JSON summaries only: raw candidates carry Buffers, which the
+      // tool-envelope serializer rejects — that turned successful uploads
+      // into false tool failures.
+      candidates: summarizeDeliverables(candidates),
+      successfulCandidates: summarizeDeliverables(successfulCandidates),
       message
     };
   }

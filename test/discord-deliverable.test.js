@@ -58,6 +58,41 @@ test("Discord uploads and strips a referenced chart", async (t) => {
   assert.equal(result.successfulCandidates.length, 1);
 });
 
+// Regression: raw candidates carried Buffers, which the tool-outcome
+// serializer (cloneJsonValue) rejects — a SUCCESSFUL upload then surfaced as
+// "Tool results must contain only plain JSON objects." The reply contract now
+// returns plain-JSON summaries; lock that in.
+test("deliverAgentReply returns plain-JSON candidate summaries, never Buffers", async (t) => {
+  const directory = makeWorkspace(t);
+  writeFixture(directory, "chart.png", Buffer.from("image-bytes"));
+  const harness = makeChannel(directory);
+
+  const result = await harness.channel.deliverAgentReply(
+    "channel-json",
+    `Chart: ~/chart.png`
+  );
+
+  const containsBuffer = (value, seen = new Set()) => {
+    if (Buffer.isBuffer(value)) return true;
+    if (!value || typeof value !== "object" || seen.has(value)) return false;
+    seen.add(value);
+    return Object.values(value).some((entry) => containsBuffer(entry, seen));
+  };
+  assert.equal(containsBuffer(result), false);
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(result)));
+
+  const summary = result.successfulCandidates[0];
+  assert.equal(summary.filename, "chart.png");
+  assert.equal(summary.size, Buffer.byteLength("image-bytes"));
+  assert.equal(summary.category, "image");
+  assert.equal(summary.delivery, "inline");
+  assert.equal(typeof summary.path, "string");
+  assert.equal("buffer" in summary, false);
+  assert.equal("occurrences" in summary, false);
+  assert.equal("start" in summary, false);
+});
+
+
 test("Discord ignores fenced, inline-code, and source paths", async (t) => {
   const directory = makeWorkspace(t);
   writeFixture(directory, "fenced.png");

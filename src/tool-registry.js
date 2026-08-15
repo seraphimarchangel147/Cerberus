@@ -5062,8 +5062,10 @@ export function registerCoreTools(registry, runtime) {
       if (!runtime.channels?.deliver) throw new Error("Channels are not bound to runtime.");
       // Wrap the raw transport result with an explicit success signal. The
       // Discord transport returns { text, candidates, successfulCandidates }
-      // where `candidates` are FILE ATTACHMENTS — a plain text message legitimately
-      // has zero candidates, which a model can misread as "nothing delivered."
+      // where candidates are plain-JSON FILE-ATTACHMENT SUMMARIES (filename,
+      // size, category…) — raw Buffers stay channel-side so this envelope stays
+      // serializable. A plain text message legitimately has zero candidates,
+      // which a model can misread as "nothing delivered."
       // Normalize so the agent sees a clear delivered flag.
       const finalize = (raw, deliveredChannel, deliveredTarget) => {
         // Meta-bug from the 2026-07-29 QA battery: this used to be
