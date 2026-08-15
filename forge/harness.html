@@ -20,7 +20,7 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
       triangles sampled onto a 3D grid, drawn as instanced cubes. One
       unified cube language, real lighting, zero image-gen. ── */
 
-const LW = 200, LH = 200;
+const LW = 240, LH = 240;
 const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
 renderer.setSize(LW, LH, false);
 renderer.setPixelRatio(1);
@@ -76,7 +76,9 @@ const O = outlined;
 const rig = {};
 
 /* ground pedestal + glow pool + shadow */
-const ground = O(new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.25, 0.28, 24), M.ground));
+/* ground: NO outline shell — the thin outline layer of a flat disc scatters
+   dark contour voxels across the whole top face as speckle noise */
+const ground = new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.25, 0.28, 24), M.ground);
 ground.position.y = -0.14;
 ground.userData.voxDens = 8;   /* thin cap fan needs dense sampling to fill solid */
 sourceRoot.add(ground);
@@ -234,18 +236,45 @@ function makeHead(angleY, tiltZ, len, name) {
   const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.05), M.orb);
   gem.position.set(0, 0.31, 0.2);
   headG.add(gem);
-  const brow = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.06), M.dark);
-  brow.position.set(0, 0.13, 0.25);
+  const brow = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.06, 0.07), M.dark);
+  brow.position.set(0, 0.145, 0.25);
   headG.add(brow);
   for (const ex of [-0.13, 0.13]) {
-    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.09, 0.04), M.eye);
-    eye.position.set(ex, 0.06, 0.27);
-    headG.add(eye);
+    /* sclera */
+    const scl = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.11, 0.04),
+      new THREE.MeshBasicMaterial({ color: 0xe8fbff }));
+    scl.position.set(ex, 0.06, 0.265);
+    headG.add(scl);
+    /* iris */
+    const iris = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.09, 0.025),
+      new THREE.MeshBasicMaterial({ color: 0x46d6ff }));
+    iris.position.set(ex, 0.055, 0.288);
+    headG.add(iris);
+    /* pupil */
+    const pupil = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.055, 0.02),
+      new THREE.MeshBasicMaterial({ color: 0x0a1220 }));
+    pupil.position.set(ex, 0.055, 0.302);
+    headG.add(pupil);
   }
-  for (const tx of [-0.09, 0, 0.09]) {
-    const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.1, 0.03), M.armor);
-    tooth.position.set(tx, -0.17, 0.56);
+  /* nostrils */
+  for (const nx of [-0.06, 0.06]) {
+    const nos = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.03, 0.02), M.dark);
+    nos.position.set(nx, 0.02, 0.56);
+    headG.add(nos);
+  }
+  for (let ti = -1; ti <= 1; ti++) {
+    const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.12, 4),
+      new THREE.MeshBasicMaterial({ color: 0xf2f8ff }));
+    tooth.position.set(ti * 0.085, -0.2, 0.54);
+    tooth.rotation.x = Math.PI;      /* point down */
     headG.add(tooth);
+  }
+  /* lower fangs pointing up */
+  for (const fx of [-0.11, 0.11]) {
+    const fang = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.1, 4),
+      new THREE.MeshBasicMaterial({ color: 0xf2f8ff }));
+    fang.position.set(fx, -0.12, 0.5);
+    headG.add(fang);
   }
   rig[name] = headG;
   rig[name + "_neck"] = neckPivot;
@@ -301,13 +330,13 @@ key.position.set(4, 6, 5);
 scene.add(key);
 
 /* ── VOXELIZER: sample every triangle onto a grid, emit instanced cubes ── */
-const VOX = 0.095;
+const VOX = 0.06;
 const BMIN = { x: -3.4, y: -0.5, z: -3.4 };
 const BMAX = { x: 3.4, y: 4.4, z: 3.4 };
 const NX = Math.ceil((BMAX.x - BMIN.x) / VOX);
 const NY = Math.ceil((BMAX.y - BMIN.y) / VOX);
 const NZ = Math.ceil((BMAX.z - BMIN.z) / VOX);
-const MAXV = 150000;
+const MAXV = 300000;
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, cam));
@@ -315,7 +344,7 @@ composer.addPass(new UnrealBloomPass(new THREE.Vector2(LW, LH), 0.4, 0.45, 0.62)
 
 const voxMesh = new THREE.InstancedMesh(
   new THREE.BoxGeometry(VOX * 1.02, VOX * 1.02, VOX * 1.02),   /* 2% overlap hides seams */
-  new THREE.MeshToonMaterial({ color: 0xffffff, gradientMap: gradTex }),
+  new THREE.MeshBasicMaterial({ color: 0xffffff }),            /* unlit: shading baked into instance colors */
   MAXV);
 voxMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 scene.add(voxMesh);
@@ -357,7 +386,7 @@ function buildVoxels() {
       const cx = aby * acz - abz * acy, cy = abz * acx - abx * acz, cz = abx * acy - aby * acx;
       const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (area < 1e-9) continue;
-      const dens = isOutline ? 3.6 : (obj.userData.voxDens || 1.6);
+      const dens = isOutline ? 5.0 : (obj.userData.voxDens || 2.6);
     const n = Math.max(3, Math.ceil(area / (VOX * VOX) * dens));
       for (let s = 0; s < n; s++) {
         let u = rndV(), v = rndV();
@@ -410,6 +439,14 @@ function buildVoxels() {
         gg = Math.min(255, gg + 22 * kk);
         bb = Math.min(255, bb * (1 + 0.12 * kk) + 18 * kk);
       }
+    }
+    /* baked top-light: brighter on high surfaces, darker toward the base */
+    if (!isContour) {
+      const topK = Math.max(0, Math.min(1, (wy + 0.6) / 3.6));
+      const shade = 0.62 + 0.42 * topK;
+      rr = Math.min(255, Math.round(rr * shade));
+      gg = Math.min(255, Math.round(gg * shade));
+      bb = Math.min(255, Math.round(bb * shade));
     }
     _m4.makeTranslation(BMIN.x + (ix + 0.5) * VOX, wy, wz);
     voxMesh.setMatrixAt(i, _m4);
