@@ -6,7 +6,8 @@ const fs = require("fs");
 const path = require("path");
 const ROOT = path.join(__dirname);
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
-               ".json": "application/json", ".png": "image/png", ".css": "text/css" };
+               ".json": "application/json", ".png": "image/png", ".css": "text/css",
+               ".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".bin": "application/octet-stream" };
 const PORT = 45210;
 http.createServer((req, res) => {
   let p = decodeURIComponent(req.url.split("?")[0]);

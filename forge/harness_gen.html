@@ -1,0 +1,267 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>FORGE gen loading</title>
+<style>html,body{margin:0;background:#120808;} #pixel{image-rendering:pixelated;}</style>
+</head><body>
+<canvas id="pixel" width="480" height="480"></canvas>
+<script type="importmap">
+{ "imports": {
+  "three": "/node_modules/three/build/three.module.js",
+  "three/addons/": "/node_modules/three/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+
+/* ── FORGE GEN: AI-generated mesh (Hunyuan3D-2-mini) voxelized. Same
+      renderer architecture as the rig harness: composer -> default
+      framebuffer -> present() blit to #pixel display canvas. ── */
+
+const LW = 240, LH = 240;
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setSize(LW, LH, false);
+renderer.setPixelRatio(1);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x6e3a2e);
+
+const cam = new THREE.OrthographicCamera(-3.0, 3.0, 3.0, -3.0, 0.1, 60);
+cam.position.set(7.4, 3.1, 2.2);
+cam.lookAt(0, 1.25, 0);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, cam));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(LW, LH), 0.4, 0.45, 0.62));
+
+/* lighting: warm key + cyan fire rim */
+scene.add(new THREE.AmbientLight(0x8a93aa, 0.6));
+const key = new THREE.DirectionalLight(0xfff4e0, 1.6);
+key.position.set(4, 7, 5);
+scene.add(key);
+const fireLight = new THREE.PointLight(0x4fc3ff, 26, 14, 1.8);
+fireLight.position.set(0.5, 1.8, -2.2);
+scene.add(fireLight);
+
+/* source root: everything voxelizable */
+const sourceRoot = new THREE.Group();
+scene.add(sourceRoot);
+
+const ground = new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.25, 0.28, 24),
+  new THREE.MeshBasicMaterial({ color: 0x232733 }));
+ground.position.y = -0.14;
+ground.userData.voxDens = 8;
+sourceRoot.add(ground);
+
+const root = new THREE.Group();
+sourceRoot.add(root);
+
+/* fire tongue background FX */
+const tongue = new THREE.Mesh(new THREE.ConeGeometry(0.42, 2.6, 8),
+  new THREE.MeshBasicMaterial({ color: 0x9fdcff }));
+tongue.position.set(0.4, 1.4, -2.0);
+tongue.userData.voxDens = 2.2;
+sourceRoot.add(tongue);
+
+/* ── load generated mesh ── */
+let meshReady = false;
+let meshInfo = null;
+
+const loader = new GLTFLoader();
+loader.load("/assets/cerberus_gen.glb", (gltf) => {
+  const obj = gltf.scene;
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const scale = 3.7 / Math.max(size.x, size.y, size.z);
+  obj.scale.setScalar(scale);
+  obj.position.set(-center.x * scale, -center.y * scale + (size.y * scale) / 2, -center.z * scale);
+  let verts = 0, tris = 0;
+  obj.traverse((o) => {
+    if (o.isMesh) {
+      verts += o.geometry.attributes.position.count;
+      tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
+      o.material = new THREE.MeshBasicMaterial({ color: 0x31508c });
+      o.userData.voxDens = 1.4;   /* dense mesh: moderate sampling fills solid without blowing budget */
+    }
+  });
+  root.add(obj);
+  meshReady = true;
+  meshInfo = { verts, tris: Math.round(tris) };
+  console.log("GEN MESH LOADED", JSON.stringify(meshInfo));
+  document.title = "FORGE gen ready";
+}, undefined, (err) => {
+  console.error("GEN LOAD FAIL:", err && err.message);
+  document.title = "FORGE gen FAILED";
+});
+
+/* ── voxel grid ── */
+const VOX = 0.06;
+const BMIN = { x: -4.5, y: -0.5, z: -4.5 };
+const BMAX = { x: 4.5, y: 8.6, z: 4.5 };
+const NX = Math.ceil((BMAX.x - BMIN.x) / VOX);
+const NY = Math.ceil((BMAX.y - BMIN.y) / VOX);
+const NZ = Math.ceil((BMAX.z - BMIN.z) / VOX);
+const MAXV = 420000;
+let vSeed = 777;
+function rndV() { vSeed = (vSeed * 16807) % 2147483647; return vSeed / 2147483647; }
+const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
+
+function buildVoxels() {
+  vSeed = 777;
+  const voxCells = new Map();
+  sourceRoot.updateMatrixWorld(true);
+  sourceRoot.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const geom = obj.geometry;
+    const pos = geom.attributes.position;
+    const idx = geom.index;
+    let r = 1, g = 1, b = 1;
+    if (obj.material.color) { r = obj.material.color.r; g = obj.material.color.g; b = obj.material.color.b; }
+    const packed = (Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255);
+    const tris = idx ? idx.count / 3 : pos.count / 3;
+    for (let t = 0; t < tris; t++) {
+      const i0 = idx ? idx.getX(t * 3)     : t * 3;
+      const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+      const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      _va.fromBufferAttribute(pos, i0).applyMatrix4(obj.matrixWorld);
+      _vb.fromBufferAttribute(pos, i1).applyMatrix4(obj.matrixWorld);
+      _vc.fromBufferAttribute(pos, i2).applyMatrix4(obj.matrixWorld);
+      const abx = _vb.x - _va.x, aby = _vb.y - _va.y, abz = _vb.z - _va.z;
+      const acx = _vc.x - _va.x, acy = _vc.y - _va.y, acz = _vc.z - _va.z;
+      const cx = aby * acz - abz * acy, cy = abz * acx - abx * acz, cz = abx * acy - aby * acx;
+      const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+      if (area < 1e-9) continue;
+      const dens = obj.userData.voxDens || 2.0;
+      const n = Math.max(2, Math.ceil(area / (VOX * VOX) * dens));
+      for (let s = 0; s < n; s++) {
+        let u = rndV(), v = rndV();
+        if (u + v > 1) { u = 1 - u; v = 1 - v; }
+        const w = 1 - u - v;
+        const px = _va.x * w + _vb.x * u + _vc.x * v;
+        const py = _va.y * w + _vb.y * u + _vc.y * v;
+        const pz = _va.z * w + _vb.z * u + _vc.z * v;
+        const ix = Math.floor((px - BMIN.x) / VOX);
+        const iy = Math.floor((py - BMIN.y) / VOX);
+        const iz = Math.floor((pz - BMIN.z) / VOX);
+        if (ix < 0 || iy < 0 || iz < 0 || ix >= NX || iy >= NY || iz >= NZ) continue;
+        voxCells.set((ix * NY + iy) * NZ + iz, packed);
+      }
+    }
+  });
+  /* AO: covered-from-above voxels shaded */
+  const shaded = new Map();
+  voxCells.forEach((col, key) => {
+    const iy = Math.floor(key / NZ) % NY;
+    const ix = Math.floor(key / (NZ * NY));
+    const iz = key % NZ;
+    const above = (ix * NY + (iy + 1)) * NZ + iz;
+    const rr = (col >> 16) & 255, gg = (col >> 8) & 255, bb = col & 255;
+    const f = (voxCells.has(above) && iy + 1 < NY) ? 0.86 : 1.0;
+    shaded.set(key, (Math.min(255, Math.round(rr * f)) << 16) |
+                    (Math.min(255, Math.round(gg * f)) << 8) |
+                     Math.min(255, Math.round(bb * f)));
+  });
+  /* cyan GI from fire side + fill instanced buffers */
+  let i = 0;
+  shaded.forEach((col, key) => {
+    if (i >= MAXV) return;
+    const iz = key % NZ;
+    const iy = Math.floor(key / NZ) % NY;
+    const ix = Math.floor(key / (NZ * NY));
+    const wz = BMIN.z + (iz + 0.5) * VOX;
+    const wy = BMIN.y + (iy + 0.5) * VOX;
+    let rr = (col >> 16) & 255, gg = (col >> 8) & 255, bb = col & 255;
+    if (wy < 3.4) {
+      const k = Math.max(0, Math.min(1, (-wz + 0.2) / 2.0));
+      if (k > 0.01) {
+        rr = Math.round(rr * (1 - k * 0.55) + 40 * k);
+        gg = Math.round(gg * (1 - k * 0.30) + 150 * k);
+        bb = Math.min(255, Math.round(bb * (1 - k * 0.10) + 255 * k * 0.8));
+      }
+    }
+    _m.setPosition(BMIN.x + (ix + 0.5) * VOX, BMIN.y + (iy + 0.5) * VOX, BMIN.z + (iz + 0.5) * VOX);
+    voxMesh.setMatrixAt(i, _m);
+    _c.setRGB(rr / 255, gg / 255, bb / 255);
+    voxMesh.setColorAt(i, _c);
+    i++;
+  });
+  voxMesh.count = i;
+  voxMesh.instanceMatrix.needsUpdate = true;
+  if (voxMesh.instanceColor) voxMesh.instanceColor.needsUpdate = true;
+  return i;
+}
+
+/* instanced voxel mesh (2% overlap hides seams; unlit, colors baked) */
+const voxMesh = new THREE.InstancedMesh(
+  new THREE.BoxGeometry(VOX * 1.02, VOX * 1.02, VOX * 1.02),
+  new THREE.MeshBasicMaterial({ color: 0xffffff }),
+  MAXV);
+voxMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(voxMesh);
+const _m = new THREE.Matrix4();
+const _c = new THREE.Color();
+
+/* ── pixel pass: blit -> despeckle -> 2x display ── */
+const small = document.createElement("canvas");
+small.width = LW; small.height = LH;
+const pc = document.getElementById("pixel");
+const pctx = pc.getContext("2d");
+const work = document.createElement("canvas");
+work.width = LW; work.height = LH;
+const wctx = work.getContext("2d", { willReadFrequently: true });
+
+function despeckle(img) {
+  const d = img.data, W = img.width, H = img.height;
+  const out = new Uint8ClampedArray(d);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = (y * W + x) * 4;
+      const l = (x - 1) * 4, r = (x + 1) * 4, u = ((y - 1) * W + x) * 4, dn = ((y + 1) * W + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const v = d[i + c];
+        const n1 = d[l + c], n2 = d[r + c], n3 = d[u + c], n4 = d[dn + c];
+        const mean = (n1 + n2 + n3 + n4) / 4;
+        if (Math.abs(v - mean) > 90 &&
+            Math.abs(v - n1) > 60 && Math.abs(v - n2) > 60 &&
+            Math.abs(v - n3) > 60 && Math.abs(v - n4) > 60) {
+          out[i + c] = mean;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function present() {
+  wctx.clearRect(0, 0, LW, LH);
+  wctx.drawImage(renderer.domElement, 0, 0, LW, LH);
+  const img = wctx.getImageData(0, 0, LW, LH);
+  img.data.set(despeckle(img));
+  wctx.putImageData(img, 0, 0);
+  pctx.imageSmoothingEnabled = false;
+  pctx.clearRect(0, 0, pc.width, pc.height);
+  pctx.drawImage(work, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
+}
+
+/* ── turntable pose ── */
+function setPhase(p) {
+  const t = p * Math.PI * 2;
+  root.rotation.y = t;
+  root.position.y = Math.abs(Math.sin(t * 2)) * 0.05;
+  const fl = 0.75 + 0.25 * Math.sin(t * 3.1);
+  fireLight.intensity = 26 * fl;
+  tongue.scale.y = 0.85 + 0.2 * Math.sin(t * 2.7);
+  const count = buildVoxels();
+  sourceRoot.visible = false;
+  composer.render();
+  sourceRoot.visible = true;
+  present();
+  return count;
+}
+
+window.__forge = { setPhase, LW, ready: () => meshReady, meshInfo: () => meshInfo };
+console.log("FORGE GEN HARNESS BOOTED");
+</script></body></html>
