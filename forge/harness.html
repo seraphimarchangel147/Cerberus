@@ -357,7 +357,7 @@ const _m4 = new THREE.Matrix4(), _col = new THREE.Color();
 
 function buildVoxels() {
   vSeed = 777;                       /* constant seed -> stable sampling */
-  const cells = new Map();
+  voxCells = new Map();
   sourceRoot.updateMatrixWorld(true);
   sourceRoot.traverse((obj) => {
     if (!obj.isMesh) return;
@@ -399,21 +399,21 @@ function buildVoxels() {
         const iy = Math.floor((py - BMIN.y) / VOX);
         const iz = Math.floor((pz - BMIN.z) / VOX);
         if (ix < 0 || iy < 0 || iz < 0 || ix >= NX || iy >= NY || iz >= NZ) continue;
-        cells.set((ix * NY + iy) * NZ + iz, packed);
+        voxCells.set((ix * NY + iy) * NZ + iz, packed);
       }
     }
   });
   /* cheap top-light AO: shaded if covered from above, brightened if exposed */
   const NYZ = NZ;  /* stride within a column */
   const shaded = new Map();
-  cells.forEach((col, key) => {
+  voxCells.forEach((col, key) => {
     const iy = Math.floor(key / NZ) % NY;
     const ix = Math.floor(key / (NZ * NY));
     const iz = key % NZ;
     const above = (ix * NY + (iy + 1)) * NZ + iz;
     const rr = (col >> 16) & 255, gg = (col >> 8) & 255, bb = col & 255;
     let f = 1;
-    if (cells.has(above) && iy + 1 < NY) f = 0.84;
+    if (voxCells.has(above) && iy + 1 < NY) f = 0.84;
     else f = 1.0;
     shaded.set(key, (Math.min(255, Math.round(rr * f)) << 16) |
                     (Math.min(255, Math.round(gg * f)) << 8) |
@@ -498,6 +498,7 @@ function present() {
   const img = wctx.getImageData(0, 0, LW, LH);
   img.data.set(despeckle(img));
   wctx.putImageData(img, 0, 0);
+  drawOverlay(wctx);                    /* crisp 2D detail layer */
   pctx.imageSmoothingEnabled = false;
   pctx.clearRect(0, 0, pc.width, pc.height);
   pctx.drawImage(work, 0, 0, LW, LH, 0, 0, pc.width, pc.height);
@@ -510,6 +511,98 @@ for (let i = 0; i < 14; i++) {
     new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xeaffff : 0x7fe0ff }));
   sourceRoot.add(sp);
   sparks.push({ mesh: sp, x: -1.9 + (i * 0.31) % 3.8, ph: (i * 0.618) % 1, v: 0.5 + (i % 4) * 0.22 });
+}
+
+/* ── v17 HYBRID compositor: crisp 2D pixel details at 3D-tracked anchors.
+      The rig drives pose; anchors ride the bones; each frame we project them
+      to screen space, occlusion-test through the voxel grid, and stamp
+      hand-placed pixel patterns (eyes w/ pupils+glints, crown gems, fang
+      tips, orb highlight). This is the generated-art-density layer. ── */
+let voxCells = new Map();
+const OVERLAY = [];
+function addAnchor(parent, kind, x, y, z) {
+  const a = new THREE.Object3D();
+  a.position.set(x, y, z);
+  parent.add(a);
+  OVERLAY.push({ node: a, kind, _dot: 1 });
+  return a;
+}
+for (const hk of ["headL", "headC", "headR"]) {
+  const hg = rig[hk];
+  addAnchor(hg, "eye", -0.13, 0.06, 0.36);
+  addAnchor(hg, "eye",  0.13, 0.06, 0.36);
+  addAnchor(hg, "gem", 0, 0.31, 0.27);
+  addAnchor(hg, "fang", -0.085, -0.27, 0.56);
+  addAnchor(hg, "fang",  0.085, -0.27, 0.56);
+}
+addAnchor(root, "orb", 0.5, 1.78, 0.68);
+
+const _owa = new THREE.Vector3(), _owb = new THREE.Vector3();
+const _ofwd = new THREE.Vector3(), _oq = new THREE.Quaternion();
+
+/* DDA raymarch through the voxel grid: camera -> anchor. A hit before the
+   last ~1.5 voxels means something solid stands in front of the detail. */
+function occluded(from, to) {
+  const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+  const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  const steps = Math.ceil(dist / (VOX * 0.5));
+  for (let i = 2; i < steps - 3; i++) {
+    const t = i / steps;
+    const px = from.x + dx*t, py = from.y + dy*t, pz = from.z + dz*t;
+    const ix = Math.floor((px - BMIN.x) / VOX), iy = Math.floor((py - BMIN.y) / VOX), iz = Math.floor((pz - BMIN.z) / VOX);
+    if (ix < 0 || iy < 0 || iz < 0 || ix >= NX || iy >= NY || iz >= NZ) continue;
+    if (voxCells.has((ix * NY + iy) * NZ + iz)) return true;
+  }
+  return false;
+}
+
+function drawOverlay(ctx) {
+  let drawn = 0;
+  const items = [];
+  for (const a of OVERLAY) {
+    a.node.getWorldPosition(_owa);
+    if (a.kind === "eye" || a.kind === "fang") {
+      /* facing test: head-local +z (snout dir) must face the camera */
+      a.node.parent.getWorldQuaternion(_oq);
+      _ofwd.set(0, 0, 1).applyQuaternion(_oq);
+      _owb.copy(cam.position).sub(_owa).normalize();
+      const dot = _ofwd.dot(_owb);
+      if (dot < 0.22) continue;
+      a._dot = dot;
+    }
+    if (occluded(cam.position, _owa)) continue;
+    _owb.copy(_owa).project(cam);
+    items.push({ a, sx: Math.round((_owb.x + 1) / 2 * LW), sy: Math.round((1 - _owb.y) / 2 * LH), depth: _owb.z });
+  }
+  items.sort((p2, q2) => q2.depth - p2.depth);   /* far details first */
+  for (const it of items) {
+    const sx = it.sx, sy = it.sy, a = it.a;
+    if (a.kind === "eye") {
+      const w = Math.max(2, Math.round(5 * a._dot));       /* foreshorten */
+      const x0 = sx - Math.floor(w / 2);
+      ctx.fillStyle = "#eefaff"; ctx.fillRect(x0, sy - 1, w, 3);          /* sclera */
+      const ix = sx - 1;
+      ctx.fillStyle = "#35c8ff"; ctx.fillRect(ix, sy - 1, 2, 2);          /* iris   */
+      ctx.fillStyle = "#081018"; ctx.fillRect(ix + (w > 3 ? 1 : 0), sy, 1, 1); /* pupil */
+      ctx.fillStyle = "#ffffff"; ctx.fillRect(ix, sy - 1, 1, 1);          /* glint  */
+      drawn++;
+    } else if (a.kind === "gem") {
+      ctx.fillStyle = "#8ff4ff";
+      ctx.fillRect(sx, sy - 1, 1, 1); ctx.fillRect(sx - 1, sy, 3, 1); ctx.fillRect(sx, sy + 1, 1, 1);
+      ctx.fillStyle = "#ffffff"; ctx.fillRect(sx, sy, 1, 1);
+      drawn++;
+    } else if (a.kind === "orb") {
+      ctx.fillStyle = "#d8fbff";
+      ctx.fillRect(sx - 2, sy - 1, 1, 1); ctx.fillRect(sx - 1, sy - 2, 2, 1);
+      ctx.fillStyle = "#ffffff"; ctx.fillRect(sx - 1, sy - 2, 1, 1);
+      drawn++;
+    } else if (a.kind === "fang") {
+      ctx.fillStyle = "#ffffff"; ctx.fillRect(sx, sy, 1, 1);
+      ctx.fillStyle = "#0c1420"; ctx.fillRect(sx, sy + 1, 1, 1);
+      drawn++;
+    }
+  }
+  window.__overlayCount = drawn;
 }
 
 /* ── deterministic pose ── */
@@ -546,7 +639,9 @@ function setPhase(p) {
   }
   const count = buildVoxels();
   sourceRoot.visible = false;
-  composer.render();
+  window.__renderMode = window.__renderMode || "composer";
+  if (window.__renderMode === "direct") renderer.render(scene, cam);
+  else composer.render();
   sourceRoot.visible = true;
   present();
   return count;
