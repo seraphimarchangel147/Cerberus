@@ -122,22 +122,79 @@ const root = new THREE.Group();
 sourceRoot.add(root);
 rig.root = root;
 
-/* torso */
-const chest = O(new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 1.1), M.body));
-chest.position.set(0.35, 1.5, 0);
-root.add(chest);
-const hind = O(new THREE.Mesh(new THREE.BoxGeometry(1.35, 1.05, 1.05), M.bodyDk));
-hind.position.set(-0.75, 1.38, 0);
-root.add(hind);
-const belly = O(new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.5, 0.75), M.armorDk));
-belly.position.set(0.05, 0.98, 0);
-root.add(belly);
-for (let i = 0; i < 4; i++) {
-  const sp = O(new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.42 - i * 0.05, 4), M.armor));
-  sp.position.set(0.75 - i * 0.45, 2.12 - i * 0.04, 0);
-  sp.rotation.z = -0.18;
+/* ── v18 BODY HULL: the v17 torso was three overlapping boxes — the fused-box
+      seams and constant cross-section are exactly what reads as "boxy". Replace
+      with a parametric organic hull: radius profile along the spine (chest
+      bulge -> waist dip -> rump bulge), elliptical cross-section (taller than
+      wide), one continuous smooth surface. Legs/necks embed into it. ── */
+const SPINE = [ /* [x, radius, z-squash] along body axis */
+  [-1.50, 0.16, 0.88],   /* rump tip */
+  [-1.18, 0.42, 0.94],
+  [-0.72, 0.50, 0.98],   /* rump bulge */
+  [-0.22, 0.40, 1.00],   /* waist dip */
+  [ 0.32, 0.56, 0.96],   /* chest bulge (peak) */
+  [ 0.82, 0.48, 0.92],
+  [ 1.10, 0.20, 0.88],   /* shoulder point */
+];
+const HULL_SY = 0.88;    /* vertical squash factor on radius */
+function hullGeometry() {
+  const SEG = 22, RING = 16;
+  const verts = [], idx = [];
+  const _p = new THREE.Vector3(), _q = new THREE.Vector3();
+  for (let i = 0; i < SPINE.length; i++) {
+    const [x, r, zs] = SPINE[i];
+    _p.set(x, 0, 0);
+    const next = SPINE[Math.min(i + 1, SPINE.length - 1)];
+    const prev = SPINE[Math.max(i - 1, 0)];
+    _q.set(next[0] - prev[0], 0, 0).normalize();          /* spine tangent */
+    const up = new THREE.Vector3(0, 1, 0);
+    const side = new THREE.Vector3().crossVectors(_q, up).normalize();
+    const upv = new THREE.Vector3().crossVectors(side, _q).normalize();
+    for (let j = 0; j <= RING; j++) {
+      const a = (j / RING) * Math.PI * 2;
+      const off = new THREE.Vector3()
+        .addScaledVector(upv, Math.cos(a) * r * HULL_SY)
+        .addScaledVector(side, Math.sin(a) * r * zs);
+      verts.push(_p.x + off.x, _p.y + off.y, _p.z + off.z);
+    }
+  }
+  for (let i = 0; i < SPINE.length - 1; i++) {
+    for (let j = 0; j < RING; j++) {
+      const a = i * (RING + 1) + j;
+      const b = a + RING + 1;
+      idx.push(a, b, a + 1, b, b + 1, a + 1);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  g.computeBoundingSphere();
+  return g;
+}
+const hull = O(new THREE.Mesh(hullGeometry(), M.body));
+hull.position.y = 1.5;
+hull.userData.voxDens = 3.0;   /* smooth hull surface: slightly denser sampling */
+root.add(hull);
+
+/* spine ridge: cones riding the hull crest, rump -> chest */
+for (let i = 0; i < 5; i++) {
+  const t = i / 4;
+  const x = -1.1 + t * 1.7;
+  /* hull radius at x (interpolate SPINE) */
+  let r = 0.4;
+  for (let k = 0; k < SPINE.length - 1; k++) {
+    if (x >= SPINE[k][0] && x <= SPINE[k + 1][0]) {
+      const f = (x - SPINE[k][0]) / (SPINE[k + 1][0] - SPINE[k][0]);
+      r = SPINE[k][1] + f * (SPINE[k + 1][1] - SPINE[k][1]);
+    }
+  }
+  const sp = O(new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.34 - i * 0.03, 4), M.armor));
+  sp.position.set(x, 1.5 + r * HULL_SY + 0.14, 0);
+  sp.rotation.z = -0.15;
   root.add(sp);
 }
+/* chest orb + ring + satellite spikes (anchored to hull front) */
 const orb = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), M.orb);
 orb.position.set(0.5, 1.62, 0.58);
 root.add(orb);
