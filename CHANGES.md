@@ -2831,3 +2831,32 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-08-13T23:20:40.072Z · **azazel** · edit `src/code-tools.js` — appendChangelog: same-day identical-entry dedupe guard
 - 2026-08-13T23:21:12.393Z · **azazel** · create `test/changelog-dedupe.test.js` — First real coverage for appendChangelog same-day dedupe guard
 - 2026-08-13T23:24:58.708Z · **azazel** · edit `src/hosted-interface.js` — Status orb in topbar: dotted thought-orb (ring/orbits/globe/wave) driven by the pet activity lane
+- 2026-08-14T12:57:41.904Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Refresh header to cover 2026-08-14 re-issue and repair broken line
+- 2026-08-14T12:58:34.707Z · **azazel** · create `drafts/provider-auth-dashboard-build-checklist.md` — Draft build checklist: UI shell, auth wiring, data fetch, verification phases
+- 2026-08-14T12:59:06.771Z · **azazel** · create `drafts/eod-review-reminder-2026-08-14.md` — Draft EOD 15-min review reminder proposal, not scheduled
+- 2026-08-14T20:26:07.598Z · **azazel** · edit `src/hosted-interface.js` — Enlarge status orb 20px → 34px (bigger presence in topbar; all draw math derives from SIZE)
+- 2026-08-14T21:48:05.603Z · **azazel** · edit `src/agent-host.js`
+- 2026-08-15T01:42:00.606Z · **azazel** · create `scripts/ambient-activity-chart.mjs`
+- 2026-08-15T01:50:20.529Z · **azazel** · edit `src/deliverable.js` — deliverable: add plain-JSON candidate summarizer for tool envelopes
+- 2026-08-15T01:50:39.785Z · **azazel** · edit `src/discord-channel.js` — discord: return plain-JSON deliverable summaries (kills false tool failure after upload)
+- 2026-08-15T01:51:10.985Z · **azazel** · edit `src/discord-channel.js` — discord: dedupe candidate keys in non-streamed deliverable return
+- 2026-08-15T01:51:27.169Z · **azazel** · edit `src/channels.js` — telegram: return plain-JSON deliverable summaries (same false-failure fix)
+- 2026-08-15T01:51:40.336Z · **azazel** · edit `src/tool-registry.js` — registry: note deliverable candidates are now plain-JSON summaries
+- 2026-08-15T01:52:25.355Z · **azazel** · edit `test/discord-deliverable.test.js` — test: lock deliverable replies to plain-JSON summaries (no Buffers in tool envelope)
+- 2026-08-15T01:53:53.464Z · **azazel** · edit `src/discord-channel.js` — discord: restore text field in streamed deliverable return
+- 2026-08-15T01:54:40.262Z · **azazel** · edit `scripts/ambient-activity-chart.mjs` — ambient chart: default output to project out/ so the deliverable lane can attach it
+- 2026-08-15T01:54:54.060Z · **azazel** · edit `scripts/ambient-activity-chart.mjs` — ambient chart: fix header comment for new default output path
+- 2026-08-15T02:16:22.312Z · **azazel** · create `out/deliverable-probe.txt` — QA probe artifact for deliverable lane test
+- 2026-08-18T11:27:00.269Z · **azazel** · create `scripts/ambient-collector.mjs`
+- 2026-08-18T12:17:03.470Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend planner re-issue header to 2026-08-18
+- 2026-08-18T12:17:44.619Z · **azazel** · edit `drafts/evidence-artifact-checklist.md` — Repair and extend planner re-issue header to 2026-08-18
+- 2026-08-18T12:18:25.820Z · **azazel** · create `drafts/standup-update-2026-08-18.md` — Draft stand-up update for Monday progress on dashboard + loop verification
+- 2026-08-18T12:18:57.434Z · **azazel** · create `drafts/eod-review-reminder-2026-08-18.md` — Draft EOD 15-min evidence check-in reminder proposal (not scheduled)
+- 2026-08-18T14:49:56.167Z · **azazel** · edit `src/model-provider.js` — Goal-judge malformed-JSON patch: bounded schema-repair retries + typed GoalJudgeMalformedError with digest receipt + deterministic resumable pause
+- 2026-08-18T14:51:55.827Z · **azazel** · edit `test/persistent-goals.test.js` — Add goal-judge malformed-JSON regression tests: bounded repair success (OpenAI+Anthropic) and deterministic pause with digest receipt on exhaustion
+- 2026-08-18T16:54:21.864Z · **azazel** · edit `src/model-provider.js` — Restore missing return in parseGoalJudgeVerdict so valid verdicts parse (fixes judge-repair off-by-one, turn-cap regression, and suite hang)
+- 2026-08-18T21:32:34.725Z · **azazel** · create `test/legion-link-v2.test.js` — Add legion link-envelope v2 Node port test suite (frozen spec fixture corpus + shared vector verification)
+- 2026-08-18T21:39:22.184Z · **azazel** · edit `test/legion-link-v2.test.js` — Craft TTL/seq schema violations by post-signing tampering
+- 2026-08-18T21:39:41.932Z · **azazel** · edit `test/legion-link-v2.test.js` — Craft id/principal/kind violations by post-signing tampering
+- 2026-08-18T22:53:44.663Z · **azazel** · create `src/legion-link-v2.js` — Legion Link Envelope v2: strict parser (dup-key/lexeme), HMAC-SHA256 auth over recomputed body hash, replay/dedupe state, send/receive store — implements frozen
+- 2026-08-18T22:54:11.939Z · **azazel** · edit `test/legion-link-v2.test.js` — Align two error-code expectations with the frozen cross-harness vectors: body tamper → InvalidMac, duplicate keys → InvalidJson

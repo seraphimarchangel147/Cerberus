@@ -240,6 +240,106 @@ test("goal judge errors fail open and return the main assistant reply", async (t
   assert.match(goals.get("session-goal").reason, /judge unavailable/);
 });
 
+test("goal judge repairs malformed JSON within bounded retries (OpenAI)", async (t) => {
+  const { runtime, goals } = goalRuntime(t);
+  const provider = new OpenAIResponsesProvider({ apiKey: "test", maxIterations: 6 });
+  const sent = [];
+  let mainRequests = 0;
+  let judgeRequests = 0;
+  provider.postResponses = async (body) => {
+    if (String(body.instructions).includes("goal-completion judge")) {
+      judgeRequests += 1;
+      sent.push(structuredClone(body));
+      return {
+        id: `judge-${judgeRequests}`,
+        output_text: judgeRequests === 1
+          ? "I think the goal is basically done, hard to say."
+          : '{"satisfied":true,"why":"done"}',
+        output: []
+      };
+    }
+    mainRequests += 1;
+    return { id: "main", output_text: "Finished the work.", output: [] };
+  };
+
+  const result = await provider.generate({ input: "Work on goal", agent, context: goalContext(runtime) });
+  assert.equal(mainRequests, 1);
+  assert.equal(judgeRequests, 2);
+  assert.equal(result.stopReason, "goal-satisfied");
+  assert.equal(goals.get("session-goal").status, "completed");
+  const repairBody = sent[1];
+  assert.match(repairBody.input[0].content, /not the required JSON verdict object/);
+  assert.match(repairBody.input[0].content, /Finish both release steps/);
+  assert.equal(sent[0].input[0].content.includes("not the required JSON verdict object"), false);
+});
+
+test("goal judge pauses deterministically with a digest receipt after exhausting repairs", async (t) => {
+  const { runtime, goals } = goalRuntime(t);
+  const events = [];
+  const provider = new OpenAIResponsesProvider({ apiKey: "test", maxIterations: 6 });
+  let judgeRequests = 0;
+  provider.postResponses = async (body) => {
+    if (String(body.instructions).includes("goal-completion judge")) {
+      judgeRequests += 1;
+      return { id: `judge-${judgeRequests}`, output_text: `garbage verdict ${judgeRequests}`, output: [] };
+    }
+    return { id: "main", output_text: "Partial progress.", output: [] };
+  };
+
+  const result = await provider.generate({ input: "Work on goal", agent, context: goalContext(runtime, events) });
+  assert.equal(result.stopReason, "goal-judge-error");
+  // Bounded: exactly 1 initial + 2 repair attempts, never a fourth.
+  assert.equal(judgeRequests, 3);
+  const goal = goals.get("session-goal");
+  assert.equal(goal.status, "paused");
+  assert.match(goal.reason, /malformed JSON after 3 bounded attempt\(s\)/);
+  assert.match(goal.reason, /resume with \/goal resume/);
+  const receipt = events.find((event) => event.action === "judge-malformed");
+  assert.ok(receipt, "expected a judge-malformed failure receipt event");
+  assert.equal(receipt.attempts, 3);
+  assert.equal(receipt.diagnostics.length, 3);
+  for (const [index, diagnostic] of receipt.diagnostics.entries()) {
+    assert.equal(diagnostic.attempt, index + 1);
+    assert.match(diagnostic.sha256, /^[0-9a-f]{64}$/);
+    assert.ok(diagnostic.excerpt.length <= 200);
+  }
+  assert.equal(events.filter((event) => event.action === "stopped" && event.reason === "judge-error").length, 1);
+});
+
+test("goal judge repairs malformed JSON within bounded retries (Anthropic)", async (t) => {
+  const { runtime, goals } = goalRuntime(t);
+  const provider = new AnthropicProvider({ apiKey: "test", model: "strong-model", maxIterations: 6 });
+  const sent = [];
+  let judgeRequests = 0;
+  provider.postMessages = async (body) => {
+    if (typeof body.system === "string" && body.system.includes("goal-completion judge")) {
+      judgeRequests += 1;
+      sent.push(structuredClone(body));
+      return {
+        id: `judge-${judgeRequests}`,
+        stop_reason: "end_turn",
+        usage: { input_tokens: 3, output_tokens: 1, cache_read_input_tokens: 0 },
+        content: [{
+          type: "text",
+          text: judgeRequests === 1 ? "not json at all" : '{"satisfied":true,"why":"done"}'
+        }]
+      };
+    }
+    return {
+      id: "main",
+      stop_reason: "end_turn",
+      usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 0 },
+      content: [{ type: "text", text: "Finished the work." }]
+    };
+  };
+
+  const result = await provider.generate({ input: "Work on goal", agent, context: goalContext(runtime) });
+  assert.equal(judgeRequests, 2);
+  assert.equal(result.stopReason, "goal-satisfied");
+  assert.equal(goals.get("session-goal").status, "completed");
+  assert.match(sent[1].messages[0].content, /not the required JSON verdict object/);
+});
+
 test("a user preemption while the judge is pending prevents continuation", async (t) => {
   const { runtime, goals } = goalRuntime(t);
   const provider = new OpenAIResponsesProvider({ apiKey: "test", maxIterations: 6 });

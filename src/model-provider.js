@@ -151,7 +151,10 @@ const GOAL_JUDGE_INSTRUCTIONS = [
   "Return only JSON: {\"satisfied\":true|false,\"progress\":true|false,\"why\":\"short reason\",\"critique\":\"one-line post-run critique\",\"nextAdjustment\":\"one concrete adjustment for the next turn\"}."
 ].join(" ");
 const GOAL_JUDGE_MAX_TOKENS = 320;
-
+// Malformed judge output is repaired, not fatal: each judge call gets this many
+// bounded repair retries before the goal pauses deterministically with a receipt.
+const GOAL_JUDGE_MAX_REPAIR_ATTEMPTS = 2;
+const GOAL_JUDGE_MALFORMED_EXCERPT_CHARS = 200;
 class TurnDeadlineError extends Error {
   constructor() {
     super("The turn wall-clock deadline was reached.");
@@ -2598,7 +2601,57 @@ export function parseGoalJudgeVerdict(value) {
         : null;
   const critique = String(parsed.critique ?? "").trim().slice(0, 1000) || null;
   const nextAdjustment = String(parsed.nextAdjustment ?? "").trim().slice(0, 1000) || null;
-  return { satisfied, why: why || "No reason supplied.", progress, critique, nextAdjustment };
+  return { satisfied, progress, why, critique, nextAdjustment };
+}
+
+export class GoalJudgeMalformedError extends Error {
+  constructor(diagnostics) {
+    const digests = diagnostics.map((d) => d.sha256.slice(0, 12)).join(", ");
+    super(`Goal judge returned malformed JSON after ${diagnostics.length} bounded attempt(s) (digests: ${digests}). The goal is paused, not lost — resume with /goal resume.`);
+    this.name = "GoalJudgeMalformedError";
+    this.code = "GOAL_JUDGE_MALFORMED_JSON";
+    this.diagnostics = diagnostics;
+  }
+}
+
+function goalJudgeMalformedDiagnostic(attempt, rawText) {
+  const text = String(rawText ?? "");
+  return {
+    attempt,
+    sha256: createHash("sha256").update(text).digest("hex"),
+    excerpt: text.trim().slice(0, GOAL_JUDGE_MALFORMED_EXCERPT_CHARS) || "(empty judge output)"
+  };
+}
+
+function goalJudgeRepairPrompt(basePrompt, diagnostic) {
+  return [
+    "Your previous response was not the required JSON verdict object and had to be discarded.",
+    `Invalid output (digest ${diagnostic.sha256.slice(0, 12)}):`,
+    diagnostic.excerpt,
+    "Respond again with only the JSON object — no prose, no code fences:",
+    "{\"satisfied\":true|false,\"progress\":true|false,\"why\":\"short reason\",\"critique\":\"one-line post-run critique\",\"nextAdjustment\":\"one concrete adjustment for the next turn\"}",
+    "Original task:",
+    basePrompt
+  ].join("\n\n");
+}
+
+// Bounded repair loop shared by both providers: validate the verdict, and on
+// malformed output re-ask with a schema-repair prompt at most
+// GOAL_JUDGE_MAX_REPAIR_ATTEMPTS times. Exhaustion throws GoalJudgeMalformedError
+// carrying per-attempt digests — the caller pauses the goal deterministically
+// with that receipt instead of looping or discarding the turn silently.
+async function runGoalJudgeWithRepair({ provider, turnBudget, usageAccumulator, request, extractText }) {
+  const malformed = [];
+  for (let attempt = 1; attempt <= GOAL_JUDGE_MAX_REPAIR_ATTEMPTS + 1; attempt += 1) {
+    checkRequestBudget(provider, turnBudget);
+    const response = await request(attempt, malformed.at(-1) ?? null);
+    addProviderUsage(usageAccumulator, response?.usage);
+    const rawText = extractText(response);
+    const verdict = parseGoalJudgeVerdict(rawText);
+    if (verdict) return verdict;
+    malformed.push(goalJudgeMalformedDiagnostic(attempt, rawText));
+  }
+  throw new GoalJudgeMalformedError(malformed);
 }
 
 function goalJudgePrompt(goal, assistantText) {
@@ -2645,6 +2698,11 @@ async function evaluateGoalTurn({ provider, context, assistantText, deadline, tu
     if (!verdict) throw new Error("Goal judge returned an invalid verdict.");
   } catch (error) {
     try { store.pause(sessionId, `goal judge error: ${error?.message ?? String(error)}`, advanced.revision); } catch { /* stale state wins */ }
+    if (error instanceof GoalJudgeMalformedError) {
+      // Failure receipt: bounded digests of every malformed judge output, so the
+      // pause is auditable from the event log without storing raw model text.
+      emitGoalEvent(context, { action: "judge-malformed", attempts: error.diagnostics.length, diagnostics: error.diagnostics });
+    }
     emitGoalEvent(context, { action: "stopped", reason: "judge-error" });
     return { handled: true, continue: false, stopReason: "goal-judge-error" };
   }
@@ -4764,32 +4822,38 @@ export class OpenAIResponsesProvider {
   async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null, usageAccumulator = null) {
     checkRequestBudget(this, turnBudget);
     const goalModel = this.resolveModel({ task: "goal" });
-    const response = await withinTurn(this, deadline, (remainingMs) => this.postResponses({
-      model: goalModel,
-      max_output_tokens: GOAL_JUDGE_MAX_TOKENS,
-      store: false,
-      prompt_cache_key: createOpenAIPromptCacheKey({
-        model: goalModel,
-        stableInstructions: GOAL_JUDGE_INSTRUCTIONS,
-        tools: []
-      }),
-      instructions: GOAL_JUDGE_INSTRUCTIONS,
-      input: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }],
-      ...reasoningRequestFields(this, {
-        format: "openai",
-        model: goalModel
-      })
-    }, context, {
-      timeoutMs: remainingMs,
+    const basePrompt = goalJudgePrompt(goal, assistantText);
+    return runGoalJudgeWithRepair({
+      provider: this,
       turnBudget,
-      credentialRequest,
-      task: "goal",
-      attempt: 1
-    }), context);
-    addProviderUsage(usageAccumulator, response?.usage);
-    const verdict = parseGoalJudgeVerdict(extractResponseText(response));
-    if (!verdict) throw new Error("Goal judge returned invalid JSON.");
-    return verdict;
+      usageAccumulator,
+      extractText: extractResponseText,
+      request: (attempt, lastMalformed) => withinTurn(this, deadline, (remainingMs) => this.postResponses({
+        model: goalModel,
+        max_output_tokens: GOAL_JUDGE_MAX_TOKENS,
+        store: false,
+        prompt_cache_key: createOpenAIPromptCacheKey({
+          model: goalModel,
+          stableInstructions: GOAL_JUDGE_INSTRUCTIONS,
+          tools: []
+        }),
+        instructions: GOAL_JUDGE_INSTRUCTIONS,
+        input: [{
+          role: "user",
+          content: lastMalformed ? goalJudgeRepairPrompt(basePrompt, lastMalformed) : basePrompt
+        }],
+        ...reasoningRequestFields(this, {
+          format: "openai",
+          model: goalModel
+        })
+      }, context, {
+        timeoutMs: remainingMs,
+        turnBudget,
+        credentialRequest,
+        task: "goal",
+        attempt
+      }), context)
+    });
   }
 
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools = [], toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
@@ -5890,27 +5954,33 @@ export class AnthropicProvider {
   async judgeGoal(goal, assistantText, context, deadline, turnBudget, credentialRequest = null, usageAccumulator = null) {
     checkRequestBudget(this, turnBudget);
     const goalModel = this.resolveModel({ task: "goal" });
-    const response = await withinTurn(this, deadline, (remainingMs) => this.postMessages({
-      model: goalModel,
-      max_tokens: GOAL_JUDGE_MAX_TOKENS,
-      system: GOAL_JUDGE_INSTRUCTIONS,
-      messages: [{ role: "user", content: goalJudgePrompt(goal, assistantText) }],
-      ...reasoningRequestFields(this, {
-        format: "anthropic",
-        model: goalModel,
-        maxTokens: GOAL_JUDGE_MAX_TOKENS
-      })
-    }, context, {
-      timeoutMs: remainingMs,
+    const basePrompt = goalJudgePrompt(goal, assistantText);
+    return runGoalJudgeWithRepair({
+      provider: this,
       turnBudget,
-      credentialRequest,
-      task: "goal",
-      attempt: 1
-    }), context);
-    addProviderUsage(usageAccumulator, response?.usage);
-    const verdict = parseGoalJudgeVerdict(extractAnthropicText(response));
-    if (!verdict) throw new Error("Goal judge returned invalid JSON.");
-    return verdict;
+      usageAccumulator,
+      extractText: extractAnthropicText,
+      request: (attempt, lastMalformed) => withinTurn(this, deadline, (remainingMs) => this.postMessages({
+        model: goalModel,
+        max_tokens: GOAL_JUDGE_MAX_TOKENS,
+        system: GOAL_JUDGE_INSTRUCTIONS,
+        messages: [{
+          role: "user",
+          content: lastMalformed ? goalJudgeRepairPrompt(basePrompt, lastMalformed) : basePrompt
+        }],
+        ...reasoningRequestFields(this, {
+          format: "anthropic",
+          model: goalModel,
+          maxTokens: GOAL_JUDGE_MAX_TOKENS
+        })
+      }, context, {
+        timeoutMs: remainingMs,
+        turnBudget,
+        credentialRequest,
+        task: "goal",
+        attempt
+      }), context)
+    });
   }
 
   async generate({ input, instructions, sessionMemorySnapshot, turnContext, messages = [], memoryHits = [], scrutiny, agent, tools: requestTools, toolRegistry, context = {}, model: modelOverride, tier, task, images = [], maxIterations: maxIterationsOverride, maxTurnSeconds: maxTurnSecondsOverride, onDelta }) {
