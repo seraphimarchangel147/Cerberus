@@ -420,7 +420,24 @@ test("shared cross-harness test vectors verify byte-for-byte when published", (t
       const ring = keyring([[entry.key_id, Buffer.from(entry.key_hex, "hex")]]);
       if (entry.expect.accept === true) {
         const accepted = store.verifyAndAccept(entry.line, entry.now_ms, ring);
-        assert.equal(accepted.envelope.id, parseLinkEnvelope(entry.line).id, label);
+        const parsed = parseLinkEnvelope(entry.line);
+        assert.equal(accepted.envelope.id, parsed.id, label);
+        if (entry.body_sha256 !== undefined) {
+          assert.equal(bodySha256V2(accepted.body), entry.body_sha256, `${label}: body hash`);
+        }
+        if (entry.preimage !== undefined) {
+          assert.equal(hmacPreimageV2(accepted.envelope), entry.preimage, `${label}: preimage`);
+        }
+        if (entry.mac !== undefined) {
+          assert.equal(accepted.envelope.auth.mac, entry.mac, `${label}: MAC`);
+        }
+        if (entry.expect.permits_auto_ack !== undefined) {
+          assert.equal(
+            permitsAutoAckV2(accepted.envelope.kind),
+            entry.expect.permits_auto_ack,
+            `${label}: permits_auto_ack`
+          );
+        }
       } else {
         const code = entry.expect.error;
         assert.ok(code, `${label}: negative vector must name an expected error code`);
