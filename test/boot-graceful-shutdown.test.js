@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { installGracefulShutdown } from "../src/boot.js";
+import {
+  DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+  GRACEFUL_SHUTDOWN_TIMEOUT_ENV,
+  installGracefulShutdown,
+  resolveGracefulShutdownTimeoutMs
+} from "../src/boot.js";
 
 class FakeProcess extends EventEmitter {
   constructor() {
@@ -114,4 +119,33 @@ test("a repeated installation replaces stale signal handlers", async () => {
   assert.deepEqual(processLike.exitCalls, [0]);
   assert.equal(processLike.listenerCount("SIGINT"), 0);
   assert.equal(processLike.listenerCount("SIGTERM"), 0);
+});
+
+test("graceful shutdown budget defaults when the env override is absent", () => {
+  assert.equal(resolveGracefulShutdownTimeoutMs({}), DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS);
+  assert.equal(
+    resolveGracefulShutdownTimeoutMs({ [GRACEFUL_SHUTDOWN_TIMEOUT_ENV]: "" }),
+    DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS
+  );
+});
+
+test("graceful shutdown budget honors a valid env override", () => {
+  assert.equal(
+    resolveGracefulShutdownTimeoutMs({ [GRACEFUL_SHUTDOWN_TIMEOUT_ENV]: "15000" }),
+    15_000
+  );
+  assert.equal(
+    resolveGracefulShutdownTimeoutMs({ [GRACEFUL_SHUTDOWN_TIMEOUT_ENV]: "0" }),
+    0
+  );
+});
+
+test("graceful shutdown budget rejects malformed env overrides fail-closed to the default", () => {
+  for (const raw of ["abc", "-5", "NaN", "Infinity", " 12x"]) {
+    assert.equal(
+      resolveGracefulShutdownTimeoutMs({ [GRACEFUL_SHUTDOWN_TIMEOUT_ENV]: raw }),
+      DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+      `rejects ${JSON.stringify(raw)}`
+    );
+  }
 });

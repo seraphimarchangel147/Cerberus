@@ -81,6 +81,25 @@ export function installCrashGuards() {
 }
 
 export const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 65_000;
+export const GRACEFUL_SHUTDOWN_TIMEOUT_ENV = "OPENAGI_GRACEFUL_SHUTDOWN_TIMEOUT_MS";
+
+// The in-app graceful budget must sit BELOW the supervisor's stop budget
+// (systemd TimeoutStopSec, default 90s, this deployment 20s). When the app
+// budget is larger, every `systemctl stop` whose close path runs long ends in
+// "stop-sigterm timed out. Killing." — observed on every openagi-azazel
+// restart. Supervised deployments set OPENAGI_GRACEFUL_SHUTDOWN_TIMEOUT_MS
+// a few seconds under TimeoutStopSec so we exit cleanly before SIGKILL.
+export function resolveGracefulShutdownTimeoutMs(env = {}) {
+  const raw = env?.[GRACEFUL_SHUTDOWN_TIMEOUT_ENV];
+  if (raw === undefined || raw === null || raw === "") {
+    return DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MS;
+  }
+  return parsed;
+}
 
 // One daemon process should have one termination path, even when startServer()
 // is exercised repeatedly in an embedding process or test. Replacing an older
@@ -343,7 +362,9 @@ export async function startServer({ host, port } = {}) {
     secretsStore: secrets,
     env: process.env
   });
-  const shutdown = installGracefulShutdown(app);
+  const shutdown = installGracefulShutdown(app, {
+    timeoutMs: resolveGracefulShutdownTimeoutMs(process.env)
+  });
   return {
     app,
     runtime,
