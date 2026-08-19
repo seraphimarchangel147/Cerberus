@@ -369,6 +369,14 @@ function expectedMacV2(envelope, key) {
   return { mac, recomputed };
 }
 
+// Acceptance-receipt commitment: sha256 over the canonical compact
+// serialization. Matches zerohermes envelope_commitment byte-for-byte —
+// serde_json::to_vec emits the same frozen field order this module
+// serializes, a property the cross-harness vector corpus already proves.
+function envelopeCommitmentV2(envelope) {
+  return crypto.createHash("sha256").update(serializeLinkEnvelope(envelope), "utf8").digest("hex");
+}
+
 export function signLinkEnvelopeV2(fields, key, keyId = DEFAULT_SIGNING_KEY_ID) {
   const bodyHash = bodySha256V2(fields.body ?? "");
   const unsigned = { ...fields, body_sha256: bodyHash, auth: { alg: "HMAC-SHA256", key_id: keyId, mac: "" } };
@@ -410,28 +418,38 @@ export function permitsAutoAckV2(kind) {
 // ---------------------------------------------------------------------------
 
 export class LegionLinkKeyring {
+  // Keys are scoped by (sender principal, key id), mirroring the Rust
+  // reference keyring: a key provisioned for one sender must never
+  // authenticate envelopes claiming a different `from`.
   #keys = new Map();
 
   constructor(entries) {
     if (!Array.isArray(entries) || entries.length === 0) {
-      fail("EmptyKeyring", "keyring requires at least one [keyId, key] entry");
+      fail("EmptyKeyring", "keyring requires at least one [from, keyId, key] entry");
     }
-    for (const [keyId, key] of entries) {
+    for (const [from, keyId, key] of entries) {
+      const scope = String(from);
+      if (!PRINCIPAL_RE.test(scope)) fail("Schema", `malformed key scope ${JSON.stringify(scope)}`);
       if (!KEY_ID_RE.test(String(keyId))) fail("Schema", `malformed key id ${JSON.stringify(String(keyId))}`);
-      if (this.#keys.has(String(keyId))) fail("Schema", `duplicate key id ${JSON.stringify(String(keyId))}`);
+      const compound = `${scope}\n${String(keyId)}`;
+      if (this.#keys.has(compound)) {
+        fail("Schema", `duplicate key id ${JSON.stringify(String(keyId))} for scope ${JSON.stringify(scope)}`);
+      }
       const buffer = Buffer.isBuffer(key) ? key : Buffer.from(key ?? "");
       if (buffer.length < 32) fail("WeakKey", `key ${JSON.stringify(String(keyId))} is ${buffer.length} bytes, minimum 32`);
-      this.#keys.set(String(keyId), buffer);
+      this.#keys.set(compound, buffer);
     }
   }
 
-  has(keyId) {
-    return this.#keys.has(String(keyId));
+  has(from, keyId) {
+    return this.#keys.has(`${String(from)}\n${String(keyId)}`);
   }
 
-  lookup(keyId) {
-    const key = this.#keys.get(String(keyId));
-    if (!key) fail("UnknownKey", `unknown key id ${JSON.stringify(String(keyId))}`);
+  lookup(from, keyId) {
+    const key = this.#keys.get(`${String(from)}\n${String(keyId)}`);
+    if (!key) {
+      fail("UnknownKey", `unknown key id ${JSON.stringify(String(keyId))} for sender ${JSON.stringify(String(from))}`);
+    }
     return key;
   }
 }
@@ -529,7 +547,7 @@ export class LegionMailboxStoreV2 {
     try {
       raw = fs.readFileSync(this.acceptPath, "utf8");
     } catch (error) {
-      if (error?.code === "ENOENT") return { version: 1, ids: [], high_water: {} };
+      if (error?.code === "ENOENT") return { version: 1, ids: [], high_water: {}, receipts: {} };
       throw error;
     }
     let parsed;
@@ -540,6 +558,30 @@ export class LegionMailboxStoreV2 {
     }
     if (!isPlainObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.ids) || !isPlainObject(parsed.high_water)) {
       fail("CorruptState", `${this.acceptPath} has an unexpected shape; refusing to fail open`);
+    }
+    // Receipts are optional on read (zerohermes serde default parity) but
+    // validated when present; every write carries them.
+    if (parsed.receipts === undefined) parsed.receipts = {};
+    if (!isPlainObject(parsed.receipts)) {
+      fail("CorruptState", `${this.acceptPath} has malformed receipts; refusing to fail open`);
+    }
+    // zerohermes AcceptState::validate parity: bounded, unique, well-formed.
+    if (parsed.ids.length > this.dedupeCapacity) {
+      fail("CorruptState", `${this.acceptPath} dedupe state exceeds configured capacity`);
+    }
+    if (new Set(parsed.ids).size !== parsed.ids.length) {
+      fail("CorruptState", `${this.acceptPath} dedupe state contains duplicate ids`);
+    }
+    if (Object.keys(parsed.receipts).length > this.dedupeCapacity) {
+      fail("CorruptState", `${this.acceptPath} acceptance receipt state exceeds configured capacity`);
+    }
+    for (const [id, receipt] of Object.entries(parsed.receipts)) {
+      if (!MESSAGE_ID_RE.test(id) || !isPlainObject(receipt) ||
+          !PRINCIPAL_RE.test(String(receipt.from)) || !KEY_ID_RE.test(String(receipt.key_id)) ||
+          !Number.isSafeInteger(receipt.seq) || receipt.seq < 1 ||
+          !BODY_SHA256_RE.test(String(receipt.envelope_sha256))) {
+        fail("CorruptState", `${this.acceptPath} contains a malformed acceptance receipt`);
+      }
     }
     return parsed;
   }
@@ -573,14 +615,16 @@ export class LegionMailboxStoreV2 {
 
   // -- receive path -----------------------------------------------------------
 
-  verifyAndAccept(line, nowMs, keyring) {
+  // Steps 1-8 of the frozen verification order: framing, strict parse,
+  // schema, key resolution, body/MAC authentication, time window, hop bound.
+  #authenticateEnvelope(line, nowMs, keyring) {
     // Steps 1-3: framing, strict parse, schema.
     const envelope = parseLinkEnvelope(line);
     if (!keyring || typeof keyring.lookup !== "function") {
       fail("EmptyKeyring", "verifyAndAccept requires a LegionLinkKeyring");
     }
     // Step 4: key resolution (fail closed on unknown ids).
-    const key = keyring.lookup(envelope.auth.key_id);
+    const key = keyring.lookup(envelope.from, envelope.auth.key_id);
     // Steps 5-6: recompute the body hash and authenticate the ACTUAL body.
     const { mac, recomputed } = expectedMacV2(envelope, key);
     const claimed = Buffer.from(envelope.auth.mac, "base64url");
@@ -588,7 +632,7 @@ export class LegionMailboxStoreV2 {
       fail("InvalidMac", "auth.mac does not match the signed fields and body");
     }
     if (envelope.body_sha256 !== recomputed) {
-      fail("BodyHashMismatch", "declared body_sha256 disagrees with the authenticated body");
+      fail("BodyHashMismatch", `declared body_sha256 disagrees with the authenticated body`);
     }
     // Step 7: time window. The future-skew allowance does not extend expiry.
     const now = Number(nowMs);
@@ -602,6 +646,22 @@ export class LegionMailboxStoreV2 {
     if (envelope.hop_count > envelope.max_hops) {
       fail("HopLimit", `hop_count ${envelope.hop_count} exceeds max_hops ${envelope.max_hops}`);
     }
+    return envelope;
+  }
+
+  // Step 11: destination membership (shared by both verification paths).
+  #checkLocalDestination(envelope) {
+    if (envelope.to.startsWith("agent:")) {
+      if (envelope.to !== this.localAgent) {
+        fail("WrongDestination", `envelope addressed to ${envelope.to}, local agent is ${this.localAgent}`);
+      }
+    } else if (!this.groups.includes(envelope.to)) {
+      fail("WrongDestination", `envelope addressed to unsubscribed group ${envelope.to}`);
+    }
+  }
+
+  verifyAndAccept(line, nowMs, keyring) {
+    const envelope = this.#authenticateEnvelope(line, nowMs, keyring);
     // Steps 9-10: replay + dedupe state, persisted before the body is exposed.
     return this.#withLock("accepted", () => {
       const state = this.#loadAcceptState();
@@ -617,17 +677,50 @@ export class LegionMailboxStoreV2 {
         fail("DuplicateId", `id ${envelope.id} already processed`);
       }
       // Step 11: destination membership.
-      if (envelope.to.startsWith("agent:")) {
-        if (envelope.to !== this.localAgent) {
-          fail("WrongDestination", `envelope addressed to ${envelope.to}, local agent is ${this.localAgent}`);
-        }
-      } else if (!this.groups.includes(envelope.to)) {
-        fail("WrongDestination", `envelope addressed to unsubscribed group ${envelope.to}`);
-      }
+      this.#checkLocalDestination(envelope);
       state.high_water[waterKey] = envelope.seq;
       state.ids.push(envelope.id);
-      while (state.ids.length > this.dedupeCapacity) state.ids.shift();
+      // Durable acceptance receipt (zerohermes parity): proves the exact
+      // authenticated identity on later idempotent reads; evicted with its id.
+      state.receipts[envelope.id] = {
+        from: envelope.from,
+        key_id: envelope.auth.key_id,
+        seq: envelope.seq,
+        envelope_sha256: envelopeCommitmentV2(envelope)
+      };
+      while (state.ids.length > this.dedupeCapacity) {
+        const evicted = state.ids.shift();
+        delete state.receipts[evicted];
+      }
       this.#persistAcceptState(state);
+      return { envelope, body: envelope.body };
+    });
+  }
+
+  // Idempotent read path for an immutable inbox record: re-authenticate and
+  // prove the exact identity was already durably accepted, WITHOUT mutating
+  // replay state. Fresh ingress must use verifyAndAccept. Port of zerohermes
+  // verify_previously_accepted.
+  verifyPreviouslyAccepted(line, nowMs, keyring) {
+    const envelope = this.#authenticateEnvelope(line, nowMs, keyring);
+    this.#checkLocalDestination(envelope);
+    return this.#withLock("accepted", () => {
+      const state = this.#loadAcceptState();
+      const waterKey = `${envelope.from}\n${envelope.auth.key_id}`;
+      const highWater = Number(state.high_water[waterKey] ?? 0);
+      const receipt = state.receipts[envelope.id];
+      if (!receipt) {
+        fail("CorruptState", `record ${envelope.id} is authenticated but has no durable acceptance receipt`);
+      }
+      if (
+        envelope.seq > highWater ||
+        receipt.from !== envelope.from ||
+        receipt.key_id !== envelope.auth.key_id ||
+        receipt.seq !== envelope.seq ||
+        receipt.envelope_sha256 !== envelopeCommitmentV2(envelope)
+      ) {
+        fail("CorruptState", `record ${envelope.id} does not match its durable acceptance receipt`);
+      }
       return { envelope, body: envelope.body };
     });
   }
@@ -644,7 +737,7 @@ export class LegionMailboxStoreV2 {
       fail("HopLimit", `refusing to send: hop_count ${hopCount} exceeds max_hops ${maxHops}`);
     }
     if (!keyring || typeof keyring.lookup !== "function") fail("EmptyKeyring", "send requires a LegionLinkKeyring");
-    const key = keyring.lookup(keyId);
+    const key = keyring.lookup(this.localAgent, keyId);
 
     return this.#withLock("accepted", () => {
       const seq = this.#allocateSeq(keyId);

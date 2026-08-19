@@ -168,7 +168,7 @@ vectors.push(acceptVector({
 
 // --- Self-verification: every vector must behave as expected under THIS ---
 // --- implementation before it is published for the Rust side.           ---
-const keyring = new LegionLinkKeyring([[KEY_ID, KEY]]);
+const keyring = new LegionLinkKeyring([["agent:azazel", KEY_ID, KEY]]);
 const failures = [];
 for (const vector of vectors) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "legion-v2-vecgen-"));

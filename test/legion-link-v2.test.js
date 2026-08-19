@@ -28,7 +28,7 @@ const KEY = Buffer.from("0123456789abcdef0123456789abcdef", "utf8");
 const VECTOR_ROOT = process.env.LEGION_LINK_V2_VECTORS
   ?? path.join(os.homedir(), ".legion", "protocol", "test-vectors");
 
-function keyring(entries = [[KEY_ID, KEY]]) {
+function keyring(entries = [["agent:azazel", KEY_ID, KEY]]) {
   return new LegionLinkKeyring(entries);
 }
 
@@ -146,7 +146,7 @@ test("rejects an unknown key id", () => {
   const { store } = makeStore();
   const line = signedLine(baseFields());
   expectLinkError("UnknownKey", () =>
-    store.verifyAndAccept(line, NOW, keyring([["other-key.v1", KEY]])));
+    store.verifyAndAccept(line, NOW, keyring([["agent:azazel", "other-key.v1", KEY]])));
 });
 
 test("rejects duplicate JSON keys and unknown fields", () => {
@@ -272,10 +272,24 @@ test("rejects oversized lines, invalid UTF-8, and interior line breaks", () => {
 });
 
 test("keyring rejects weak keys, empty keyrings, and malformed key ids", () => {
-  expectLinkError("WeakKey", () => keyring([["weak", Buffer.alloc(16)]]));
+  expectLinkError("WeakKey", () => keyring([["agent:azazel", "weak", Buffer.alloc(16)]]));
   expectLinkError("EmptyKeyring", () => keyring([]));
-  expectLinkError("Schema", () => keyring([["bad key!", KEY]]));
-  expectLinkError("Schema", () => keyring([[KEY_ID, KEY], [KEY_ID, KEY]]));
+  expectLinkError("Schema", () => keyring([["agent:azazel", "bad key!", KEY]]));
+  expectLinkError("Schema", () => keyring([["agent:azazel", KEY_ID, KEY], ["agent:azazel", KEY_ID, KEY]]));
+  expectLinkError("Schema", () => keyring([["azazel", KEY_ID, KEY]]));
+});
+
+test("keyring scopes keys by sender principal like the Rust reference", () => {
+  const { store } = makeStore();
+  const line = signedLine(baseFields());
+  // Same key id and bytes, but provisioned under a different sender: the
+  // envelope's `from` (agent:azazel) must not resolve agent:ziz's scope.
+  expectLinkError("UnknownKey", () =>
+    store.verifyAndAccept(line, NOW, keyring([["agent:ziz", KEY_ID, KEY]])));
+  // A ring holding both scopes authenticates the matching sender.
+  const ring = keyring([["agent:ziz", KEY_ID, KEY], ["agent:azazel", KEY_ID, KEY]]);
+  const accepted = store.verifyAndAccept(line, NOW, ring);
+  assert.equal(accepted.envelope.from, "agent:azazel");
 });
 
 test("rejects envelopes addressed to other agents", () => {
@@ -417,7 +431,9 @@ test("shared cross-harness test vectors verify byte-for-byte when published", (t
         localAgent: entry.local_agent,
         groups: entry.groups ?? []
       });
-      const ring = keyring([[entry.key_id, Buffer.from(entry.key_hex, "hex")]]);
+      const fromMatch = entry.line.match(/"from":"([^"]+)"/u);
+      assert.ok(fromMatch, `${label}: vector line carries a from principal`);
+      const ring = keyring([[fromMatch[1], entry.key_id, Buffer.from(entry.key_hex, "hex")]]);
       if (entry.expect.accept === true) {
         const accepted = store.verifyAndAccept(entry.line, entry.now_ms, ring);
         const parsed = parseLinkEnvelope(entry.line);

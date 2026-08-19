@@ -34,7 +34,10 @@
   "bin": {
     "openagi": "bin/openagi.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "gif-encoder-2": "^1.0.5",
+    "three": "^0.185.1"
+  },
   "optionalDependencies": {
     "axe-core": "^4.12.1",
     "pixelmatch": "^7.2.0",

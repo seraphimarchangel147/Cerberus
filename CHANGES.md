@@ -2860,3 +2860,11 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-08-18T21:39:41.932Z · **azazel** · edit `test/legion-link-v2.test.js` — Craft id/principal/kind violations by post-signing tampering
 - 2026-08-18T22:53:44.663Z · **azazel** · create `src/legion-link-v2.js` — Legion Link Envelope v2: strict parser (dup-key/lexeme), HMAC-SHA256 auth over recomputed body hash, replay/dedupe state, send/receive store — implements frozen
 - 2026-08-18T22:54:11.939Z · **azazel** · edit `test/legion-link-v2.test.js` — Align two error-code expectations with the frozen cross-harness vectors: body tamper → InvalidMac, duplicate keys → InvalidJson
+- 2026-08-18T23:41:22.165Z · **azazel** · create `scripts/generate-link-v2-vectors.mjs`
+- 2026-08-19T10:04:54.010Z · **azazel** · edit `src/legion-link-v2.js` — legion-link-v2: extract #authenticateEnvelope, add verifyPreviouslyAccepted + durable acceptance receipts (zerohermes parity)
+- 2026-08-19T10:07:49.040Z · **azazel** · rewrite `test/legion-mailbox.test.js` — legion-mailbox tests: v2 envelope suite — signed delivery, verified idempotent reads, tamper/replay rejection, fail-closed keys, gated v1 compat
+- 2026-08-19T10:08:58.936Z · **azazel** · edit `scripts/generate-link-v2-vectors.mjs`
+- 2026-08-19T10:08:58.986Z · **azazel** · edit `test/legion-link-v2.test.js`
+- 2026-08-19T10:10:21.742Z · **azazel** · edit `src/legion-mailbox.js`
+- 2026-08-19T10:17:44.696Z · **azazel** · rewrite `src/legion-mailbox.js`
+- 2026-08-19T12:18:11.905Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend re-issue header to 2026-08-19
