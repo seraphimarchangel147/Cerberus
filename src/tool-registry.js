@@ -5046,6 +5046,85 @@ export function registerCoreTools(registry, runtime) {
   });
 
   registry.register({
+    name: "cron_manage",
+    description: "Inspect and control scheduled cron jobs (schedule_message prompts and built-in runtime jobs). Actions: 'list' (jobs in your project), 'status' (one job by id), 'pause' (disable; clears nextRunAt), 'resume' (re-enable; recomputes nextRunAt), 'cancel' (remove permanently). Project-scoped and fail-closed: jobs owned by another project are invisible and immutable.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "status", "pause", "resume", "cancel"], description: "Operation to perform." },
+        id: { type: "string", description: "Cron job id (e.g. job_...). Required for status, pause, resume, cancel." },
+        includeDisabled: { type: "boolean", description: "For list: include disabled jobs. Defaults to true." }
+      },
+      required: ["action"],
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (!runtime.cron) throw new Error("Cron scheduler is not available.");
+      const projectId = String(context?.__projectId ?? "default").trim() || "default";
+      const jobProject = (job) =>
+        String(job?.input?.projectId ?? "default").trim() || "default";
+      const summarize = (job) => ({
+        id: job.id,
+        name: job.name ?? null,
+        task: job.task ?? null,
+        enabled: job.enabled !== false,
+        nextRunAt: job.nextRunAt ?? null,
+        lastRunAt: job.lastRunAt ?? null,
+        intervalMs: job.intervalMs ?? null,
+        dailyAt: job.dailyAt ?? null,
+        oneShot: Boolean(job?.input?.oneShot),
+        promptPreview: typeof job?.input?.prompt === "string"
+          ? job.input.prompt.slice(0, 80)
+          : null,
+        pinnedProvider: job.pinnedProvider ?? null,
+        pinnedModel: job.pinnedModel ?? null,
+        projectId: jobProject(job)
+      });
+      const jobs = typeof runtime.cron.listJobs === "function"
+        ? runtime.cron.listJobs()
+        : [...(runtime.cron.jobs?.values?.() ?? [])];
+      const action = String(args.action ?? "").trim();
+      if (action === "list") {
+        const includeDisabled = args.includeDisabled !== false;
+        const listed = jobs.filter((job) =>
+          jobProject(job) === projectId
+          && (includeDisabled || job.enabled !== false)
+        );
+        return { count: listed.length, jobs: listed.map(summarize) };
+      }
+      const id = String(args.id ?? "").trim();
+      if (!id) throw new Error(`cron_manage action '${action}' requires a job id.`);
+      const job = jobs.find((candidate) => candidate.id === id);
+      if (!job || jobProject(job) !== projectId) {
+        // Fail closed: do not reveal whether the id exists in another project.
+        throw new Error(`Unknown cron job: ${id}`);
+      }
+      if (action === "status") return summarize(job);
+      if (action === "pause" || action === "resume") {
+        if (typeof runtime.cron.enableJob !== "function") {
+          throw new Error("This cron scheduler does not support pause/resume.");
+        }
+        return summarize(runtime.cron.enableJob(id, action === "resume"));
+      }
+      if (action === "cancel") {
+        const removed = runtime.cron.removeJob(id);
+        if (removed !== false && runtime.projects?.detachResource) {
+          try {
+            runtime.projects.detachResource(projectId, "scheduleIds", id, {
+              actor: context?.from ?? "tool:cron_manage"
+            });
+          } catch {
+            // Best effort: non-prompt jobs have no scheduleIds attachment.
+          }
+        }
+        return { id, removed: removed !== false };
+      }
+      throw new Error(`Unsupported cron_manage action: ${action}`);
+    }
+  });
+
+
+  registry.register({
     name: "send_message",
     description: "Proactively send a message via a channel. channel='discord' posts to a Discord channel id; channel='sibling' resolves a Legion agent name and sends a real raw-ID mention in that agent's Discord channel; channel='mailbox' writes to the sibling's local WSL inbox under ~/.legion/mailbox. Use the mailbox lane when Discord is unavailable or asynchronous local delivery is preferred. Returns a structured delivery envelope.",
     parameters: {

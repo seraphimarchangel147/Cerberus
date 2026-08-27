@@ -2868,3 +2868,19 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-08-19T10:10:21.742Z · **azazel** · edit `src/legion-mailbox.js`
 - 2026-08-19T10:17:44.696Z · **azazel** · rewrite `src/legion-mailbox.js`
 - 2026-08-19T12:18:11.905Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend re-issue header to 2026-08-19
+- 2026-08-19T13:38:55.177Z · **azazel** · edit `src/boot.js` — Make graceful-shutdown budget env-configurable (OPENAGI_GRACEFUL_SHUTDOWN_TIMEOUT_MS) so supervised deployments can stay under systemd TimeoutStopSec
+- 2026-08-19T13:39:16.246Z · **azazel** · edit `test/boot-graceful-shutdown.test.js` — Cover resolveGracefulShutdownTimeoutMs: default, valid override, malformed fail-closed
+- 2026-08-20T12:18:38.787Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend planner re-issue header to 2026-08-20
+- 2026-08-20T12:19:13.813Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Extend planner re-issue header to 2026-08-20
+- 2026-08-20T12:19:50.293Z · **azazel** · create `drafts/thursday-gap-review-block-2026-08-21.md` — Draft Thursday 30-min gap-review block proposal
+- 2026-08-21T12:49:11.607Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Extend re-issue header to 2026-08-21 task_268c6d1bd32448e1
+- 2026-08-21T12:49:54.738Z · **azazel** · create `drafts/followup-reminders-integration-report-2026-08-22.md` — Draft follow-up reminder proposal for 2026-08-22 (review + share integration report)
+- 2026-08-26T13:06:20.993Z · **azazel** · edit `src/tool-registry.js` — Add cron_manage tool: project-scoped list/status/pause/resume/cancel for cron jobs (Hermes/dsh-style unified cron control)
+- 2026-08-26T13:07:16.845Z · **azazel** · create `test/cron-manage-tool.test.js`
+- 2026-08-26T13:11:26.817Z · **azazel** · edit `test/cron-manage-tool.test.js` — Create alpha/beta projects before cross-project fail-closed test (project_scope gate requires real projects)
+- 2026-08-26T13:15:17.903Z · **azazel** · edit `test/cron-manage-tool.test.js` — Bind alpha/beta sessions to their projects via resolveForSession so the project_scope gate passes
+- 2026-08-26T13:17:15.551Z · **azazel** · edit `test/cron-manage-tool.test.js` — Make project setup idempotent — createDefaultRuntime shares the global data dir across runs
+- 2026-08-26T16:30:55.391Z · **azazel** · edit `test/cron-manage-tool.test.js` — Inject live project revision into alpha/beta contexts so the project_scope gate passes
+- 2026-08-26T16:34:09.167Z · **azazel** · edit `test/cron-manage-tool.test.js` — Give every test an isolated temp data dir via freshRuntime() helper
+- 2026-08-26T16:35:46.809Z · **azazel** · edit `test/cron-manage-tool.test.js` — Grant wildcard tool policy to alpha/beta test projects (fresh projects default to zero-capability)
+- 2026-08-26T20:04:17.565Z · **azazel** · edit `test/credential-pool.test.js` — Isolate env auto-discovery test from live credential-pool state via tmp dataDir
