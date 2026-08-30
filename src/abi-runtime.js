@@ -116,6 +116,7 @@ import {
   webQaEnabled
 } from "./web-qa.js";
 import { RunInspector } from "./run-inspector.js";
+import { SessionProjectionStore } from "./session-projection.js";
 import { registerDefaultWorkflows, WorkflowRegistry } from "./workflow-registry.js";
 import { applyPersona } from "./persona.js";
 import { createId, nowIso } from "./utils.js";
@@ -697,6 +698,13 @@ export class AbiRuntime {
           runtime: this,
           dataDir: secretsDataDir,
           ...(options.runInspectorOptions ?? {})
+        });
+    this.projections = options.projections === false
+      ? null
+      : options.projections ?? new SessionProjectionStore({
+          runtime: this,
+          dataDir: secretsDataDir,
+          ...(options.projectionsOptions ?? {})
         });
     this.semanticBrowser = resolveSemanticBrowser(this, options, {
       dataDir: secretsDataDir,
