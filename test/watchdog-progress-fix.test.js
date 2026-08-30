@@ -122,13 +122,24 @@ test("ANTI-SPIN PRESERVED: hammering the SAME failing call credits once", () => 
   );
 });
 
-test("progress-aware watchdog does not reintroduce a hard wall-clock ceiling", async () => {
+test("progress-aware watchdog: elapsed-time guards stay non-binding for productive turns", async () => {
+  // RECONCILED CONTRACT (was: doesNotMatch DEFAULT_MAX_TURN_HARD_SECONDS).
+  // The original grep predates the 2026-08-09 runaway backstop (da8dcb35),
+  // which added an 8h absolute ceiling for the one failure mode idle-strike
+  // detection cannot see: a loop producing novel-looking-but-worthless output
+  // every cycle. That backstop has its own passing suite (wall-clock-progress)
+  // and env overrides, so the unified contract is:
+  //   1. Work-bounded primary — idle strikes stop turns, elapsed time below
+  //      the backstop never does (pinned by the BUG 1/2 tests above).
+  //   2. The absolute backstop, if present, must default to >= 8h so a
+  //      productive turn can never realistically hit it.
   const src = await import("node:fs").then((fs) =>
     fs.promises.readFile(new URL("../src/model-provider.js", import.meta.url), "utf8")
   );
-  assert.doesNotMatch(
-    src,
-    /DEFAULT_MAX_TURN_HARD_SECONDS/,
-    "productive turns are work-bounded and must not regain an elapsed-time ceiling"
+  const match = src.match(/DEFAULT_MAX_TURN_HARD_SECONDS = (\d+)/);
+  assert.ok(match, "runaway backstop constant exists (wall-clock-progress suite depends on it)");
+  assert.ok(
+    Number(match[1]) >= 28800,
+    "absolute backstop defaults to >= 8h — non-binding for any productive turn"
   );
 });

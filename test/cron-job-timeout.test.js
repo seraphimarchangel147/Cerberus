@@ -10,6 +10,9 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { CronScheduler, TIMEOUT_MS, resolveJobTimeoutMs } from "../src/cron-scheduler.js";
 import { createDefaultRuntime } from "../src/index.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 test("TIMEOUT_MS defaults to 10 minutes; env override validated finite>0", () => {
   assert.equal(TIMEOUT_MS, 10 * 60 * 1000);
@@ -78,7 +81,13 @@ test("a throwing handler records a failed fire instead of aborting the loop", as
 });
 
 test("runtime tick emits cron-job-timeout on the event bus for a hung task", { timeout: 5000 }, async () => {
-  const runtime = createDefaultRuntime({ agentHost: false });
+  // Isolated data dir — createDefaultRuntime() otherwise shares the live
+  // ~/.openagi state, and the tick loads the entire real-world job store,
+  // which overruns the 5s test budget on a populated box.
+  const runtime = createDefaultRuntime({
+    agentHost: false,
+    dataDir: fs.mkdtempSync(path.join(os.tmpdir(), "cron-timeout-test-"))
+  });
   runtime.condenser.condense = () => new Promise(() => {}); // hang the handler
   runtime.cron.addJob({
     id: "hung-condense",
