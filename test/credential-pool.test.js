@@ -253,9 +253,15 @@ test("exhaustion invokes fallback exactly once with a typed, redacted signal", a
   assert.doesNotMatch(fallbacks[0].message, /raw-secret/);
 });
 
-test("single existing env key is auto-discovered as a one-key pool", () => {
+test("single existing env key is auto-discovered as a one-key pool", (t) => {
+  // Isolated dataDir: without it the pool restores live state from ~/.openagi
+  // (a persisted blockedReason/cooldown on the real env credential makes
+  // acquire() throw CREDENTIAL_POOL_EXHAUSTED — test pollution, not a bug).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openagi-credential-pool-env-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const registry = createCredentialPoolRegistry({
     config: {},
+    dataDir: dir,
     env: { OPENAI_API_KEY: "existing-env-secret" },
     providerEnvKeys: { openai: "OPENAI_API_KEY" }
   });

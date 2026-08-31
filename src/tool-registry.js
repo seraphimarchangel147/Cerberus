@@ -5787,6 +5787,203 @@ export function registerCoreTools(registry, runtime) {
     }
   });
 
+  // dsh-style session telemetry projection: expose the run inspector's
+  // content-free event journal to the agent. Scoping is fail-closed — the
+  // inspector filters by projectId internally (same semantics as the HTTP
+  // /runs routes), so cross-project reads return empty/not-found.
+  const runInspectorProject = (context) => (
+    String(context?.__projectId ?? "default").trim() || "default"
+  );
+
+  registry.register({
+    name: "list_runs",
+    sideEffects: false,
+    description: "List recent execution runs (turns, cron jobs, coder runs, QA runs) recorded by the run inspector for the current project. Content-free: run ids, kinds, statuses, phases, durations, token counts, tool names — never prompts, arguments, or payloads. Use run_detail with a runId for one run's full event timeline.",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["turn", "coder", "job", "qa"],
+          description: "Optional run kind filter."
+        },
+        status: {
+          type: "string",
+          description: "Optional status filter (e.g. succeeded, failed, blocked, running)."
+        },
+        limit: {
+          type: "integer",
+          description: "Max runs to return, most recent first (default 50; larger values are clamped to 200, not rejected)."
+        }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (typeof runtime.runInspector?.list !== "function") {
+        throw new Error("Run inspector is not available.");
+      }
+      const projectId = runInspectorProject(context);
+      const limit = Number.isFinite(args?.limit)
+        ? Math.min(Math.max(Math.floor(args.limit), 1), 200)
+        : 50;
+      const runs = runtime.runInspector.list({
+        projectId,
+        kind: args?.kind ?? null,
+        status: args?.status ?? null,
+        limit
+      });
+      return { projectId, count: runs.length, runs };
+    }
+  });
+
+  registry.register({
+    name: "run_detail",
+    sideEffects: false,
+    description: "Get one run's full event timeline (phases, gates, durations, metadata) from the run inspector. Fail-closed to the current project: a runId from another project returns not-found. Use list_runs first to find run ids.",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["turn", "coder", "job", "qa"],
+          description: "The run kind, as shown by list_runs."
+        },
+        runId: {
+          type: "string",
+          description: "The run id, as shown by list_runs."
+        }
+      },
+      required: ["kind", "runId"],
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (typeof runtime.runInspector?.detail !== "function") {
+        throw new Error("Run inspector is not available.");
+      }
+      const projectId = runInspectorProject(context);
+      const run = runtime.runInspector.detail({
+        projectId,
+        kind: args.kind,
+        runId: String(args.runId ?? "").trim()
+      });
+      if (!run) {
+        return {
+          found: false,
+          message: `No ${args.kind} run "${String(args.runId ?? "").trim()}" in project '${projectId}'. Use list_runs to see valid run ids.`
+        };
+      }
+      return { found: true, run };
+    }
+  });
+
+  registry.register({
+    name: "projection_capture",
+    sideEffects: true,
+    description: "Capture a session projection: a consistent, content-free cut across the run inspector (turns/jobs/coder/QA runs) and the workspace timeline head, with a provenance hash. Two captures of unchanged system state share the same provenanceHash. Use projection_diff between two cuts to see what changed across the whole system, and projection_export for an outbound-safe redacted envelope.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, context) => {
+      if (typeof runtime.projections?.capture !== "function") {
+        throw new Error("Session projections are not available.");
+      }
+      const projectId = runInspectorProject(context);
+      const record = runtime.projections.capture({ projectId });
+      return {
+        projectId,
+        id: record.id,
+        capturedAt: record.capturedAt,
+        provenanceHash: record.provenanceHash,
+        runCount: record.cut.runs.length,
+        timelineHead: record.cut.timelineHead
+      };
+    }
+  });
+
+  registry.register({
+    name: "projection_list",
+    sideEffects: false,
+    description: "List captured session projections for the current project, most recent first (ids, timestamps, provenance hashes, run counts). Use projection_capture first.",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "integer",
+          description: "Max projections to return, most recent first (default 50; larger values are clamped to 200, not rejected)."
+        }
+      },
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (typeof runtime.projections?.list !== "function") {
+        throw new Error("Session projections are not available.");
+      }
+      const projectId = runInspectorProject(context);
+      const limit = Number.isFinite(args?.limit)
+        ? Math.min(Math.max(Math.floor(args.limit), 1), 200)
+        : 50;
+      const projections = runtime.projections.list({ projectId, limit });
+      return { projectId, count: projections.length, projections };
+    }
+  });
+
+  registry.register({
+    name: "projection_diff",
+    sideEffects: false,
+    description: "Diff a captured session projection against another cut (toId) or against live system state (omit toId). Reports runs added, runs aged out, run status transitions, and whether the workspace timeline head moved. identical:true means the provenance hashes match — nothing observable changed.",
+    parameters: {
+      type: "object",
+      properties: {
+        fromId: {
+          type: "string",
+          description: "The earlier projection id (proj_…), from projection_capture or projection_list."
+        },
+        toId: {
+          type: "string",
+          description: "Optional later projection id. Omit to diff fromId against current live state."
+        }
+      },
+      required: ["fromId"],
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (typeof runtime.projections?.diff !== "function") {
+        throw new Error("Session projections are not available.");
+      }
+      const projectId = runInspectorProject(context);
+      return runtime.projections.diff({
+        projectId,
+        fromId: String(args.fromId ?? "").trim(),
+        toId: args.toId != null ? String(args.toId).trim() : null
+      });
+    }
+  });
+
+  registry.register({
+    name: "projection_export",
+    sideEffects: false,
+    description: "Export one captured projection as an outbound-safe telemetry envelope: severity ladder (err if any failed run, warn on blocked/cancelled/interrupted, else info), provenance hash, and a redaction waterfall over the body. Content-free by design; safe to send to external sinks.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The projection id (proj_…) to export."
+        }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    handler: async (args, context) => {
+      if (typeof runtime.projections?.export !== "function") {
+        throw new Error("Session projections are not available.");
+      }
+      const projectId = runInspectorProject(context);
+      return runtime.projections.export({
+        projectId,
+        id: String(args.id ?? "").trim()
+      });
+    }
+  });
+
   registry.register({
     name: "get_audit",
     metadata: { projectScope: "default" },
