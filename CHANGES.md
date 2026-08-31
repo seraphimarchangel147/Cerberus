@@ -2884,3 +2884,15 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-08-26T16:34:09.167Z · **azazel** · edit `test/cron-manage-tool.test.js` — Give every test an isolated temp data dir via freshRuntime() helper
 - 2026-08-26T16:35:46.809Z · **azazel** · edit `test/cron-manage-tool.test.js` — Grant wildcard tool policy to alpha/beta test projects (fresh projects default to zero-capability)
 - 2026-08-26T20:04:17.565Z · **azazel** · edit `test/credential-pool.test.js` — Isolate env auto-discovery test from live credential-pool state via tmp dataDir
+- 2026-08-27T12:22:16.928Z · **azazel** · edit `src/tool-registry.js`
+- 2026-08-27T12:23:38.799Z · **azazel** · create `test/run-inspector-tools.test.js`
+- 2026-08-27T21:32:39.986Z · **azazel** · create `src/session-projection.js`
+- 2026-08-27T21:33:40.078Z · **azazel** · edit `src/session-projection.js`
+- 2026-08-27T21:34:09.754Z · **azazel** · edit `src/abi-runtime.js`
+- 2026-08-27T21:36:57.978Z · **azazel** · create `test/session-projection.test.js`
+- 2026-08-27T21:38:21.566Z · **azazel** · edit `test/session-projection.test.js`
+- 2026-08-27T21:43:31.518Z · **azazel** · edit `test/run-inspector-tools.test.js`
+- 2026-08-30T18:50:17.866Z · **azazel** · edit `test/cron-job-timeout.test.js` — Isolate cron-job-timeout tick test from live data dir (mkdtemp) — fixes 5s timeout overrun
+- 2026-08-30T18:51:37.487Z · **azazel** · edit `test/watchdog-progress-fix.test.js` — Reconcile watchdog contract with the Aug-9 8h runaway backstop: pin backstop >= 8h instead of forbidding the constant
+- 2026-08-31T00:47:02.900Z · **azazel** · edit `src/model-provider.js`
+- 2026-08-31 · **azazel** · feat(wrap-up): forced-answer prompt now demands a structured wrap-up report at every short-stop (iteration-cap, stalled, request-timeout, provider-error, turn-timeout) — sections Done / Remaining / Blocked / Next, under 400 words; canned localPartialSummary fallback unchanged. WRAP-UP REPORT COMPLETE

@@ -4653,7 +4653,7 @@ function wallClockConsumptionText(wallClock) {
 }
 
 function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
-  const base = "[system] Stop here and answer the user now. Do NOT call any tools. Using the conversation and any tool results above, give the best complete answer you can with what you have.";
+  const base = "[system] Stop here and answer the user now. Do NOT call any tools. Using the conversation and any tool results above, produce a wrap-up report with exactly these sections: '## Done' (what was completed, with concrete evidence), '## Remaining' (work left undone), '## Blocked' (what is blocking progress, if anything), and '## Next' (the single next action). Keep it under 400 words. If the user's request was already fully answered, answer it directly and mark the remaining sections '—'.";
   if (reason === "iteration-cap") {
     return `${base} The turn reached its iteration limit after ${iterations}/${maxIterations} steps; if work remains, say briefly what's left and note OPENAGI_MAX_ITERATIONS can be raised.`;
   }
