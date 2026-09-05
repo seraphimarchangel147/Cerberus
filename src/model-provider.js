@@ -9,6 +9,7 @@ import {
 } from "./credential-pool.js";
 import { MoaProvider, normalizeMoaModelSpec } from "./moa-provider.js";
 import { ModelRouter } from "./model-router.js";
+import { lssEnabled, resolveViaLss, urlHost } from "./lss-adapter.js";
 import {
   applyProviderRouting,
   isProviderRoutingEndpoint,
@@ -4775,16 +4776,34 @@ function resolveRequestTimeoutMs(options) {
   return positiveInteger(process.env.OPENAGI_REQUEST_TIMEOUT_MS, 300000);
 }
 
+// LSS choke point (SPEC §3): when OPENAGI_LSS=1 and a SecretsStore is wired,
+// key material resolves through the destination-pinned adapter and a denied
+// destination FAILS CONSTRUCTION with a typed LssError. Flag off (or no
+// store): the pre-LSS ambient env path is byte-identical to before.
+function resolveProviderApiKey(store, envName, baseUrl, env) {
+  const sourceEnv = env ?? process.env;
+  if (!lssEnabled(sourceEnv) || !store || typeof store.getSecretWithRecord !== "function") {
+    return process.env[envName];
+  }
+  const handle = resolveViaLss(store, envName, {
+    agent: sourceEnv.OPENAGI_AGENT_ID ?? "azazel",
+    project: "default",
+    destination: urlHost(baseUrl)
+  });
+  return handle.material;
+}
+
 export class OpenAIResponsesProvider {
   constructor(options = {}) {
-    this.apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
-    this.model = options.model ?? process.env.OPENAI_MODEL ?? "gpt-5";
+    const lssStore = options.secretsStore ?? options.secrets ?? null;
     this.baseUrl = options.baseUrl ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+    this.apiKey = options.apiKey ?? resolveProviderApiKey(lssStore, "OPENAI_API_KEY", this.baseUrl, options.env);
+    this.model = options.model ?? process.env.OPENAI_MODEL ?? "gpt-5";
     this.providerRouting = normalizeProviderRouting(options.providerRouting);
     this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
-    this.secretsStore = options.secretsStore ?? options.secrets ?? null;
+    this.secretsStore = lssStore;
     this.zeroDataRetention = options.zeroDataRetention === true;
     this.responsesContinuationStore = options.responsesContinuationStore
       ?? new ResponsesContinuationStore({
@@ -5917,16 +5936,17 @@ export class OpenAIResponsesProvider {
 
 export class AnthropicProvider {
   constructor(options = {}) {
-    this.apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
-    this.model = options.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
+    const lssStore = options.secretsStore ?? options.secrets ?? null;
     this.baseUrl = options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com/v1";
+    this.apiKey = options.apiKey ?? resolveProviderApiKey(lssStore, "ANTHROPIC_API_KEY", this.baseUrl, options.env);
+    this.model = options.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
     this.providerRouting = normalizeProviderRouting(options.providerRouting);
     this.version = options.version ?? "2023-06-01";
     this.maxTokens = options.maxTokens ?? (Number(process.env.OPENAGI_MAX_TOKENS) || 8192);
     this.timeoutMs = resolveRequestTimeoutMs(options);
     applyIterationSettings(this, options);
     this.budgetGuard = options.budgetGuard ?? null;
-    this.secretsStore = options.secretsStore ?? options.secrets ?? null;
+    this.secretsStore = lssStore;
     this.ownsRouter = !options.router;
     this.router = options.router ?? new ModelRouter({
       envPrefix: "ANTHROPIC",

@@ -2896,3 +2896,12 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-08-30T18:51:37.487Z · **azazel** · edit `test/watchdog-progress-fix.test.js` — Reconcile watchdog contract with the Aug-9 8h runaway backstop: pin backstop >= 8h instead of forbidding the constant
 - 2026-08-31T00:47:02.900Z · **azazel** · edit `src/model-provider.js`
 - 2026-08-31 · **azazel** · feat(wrap-up): forced-answer prompt now demands a structured wrap-up report at every short-stop (iteration-cap, stalled, request-timeout, provider-error, turn-timeout) — sections Done / Remaining / Blocked / Next, under 400 words; canned localPartialSummary fallback unchanged. WRAP-UP REPORT COMPLETE
+
+- 2026-09-03T22:16:36.543Z · **azazel** · edit `src/secrets-store.js` — O1: LSS v2 store schema — destinations/scopes/fingerprint/verifiedStatus metadata, getSecretRecord, getSecretWithRecord, setSecretMeta; metadata survives setSec
+- 2026-09-03T22:17:42.044Z · **azazel** · create `test/secrets-store-v2.test.js` — O1 tests: v2 schema persistence, rotate-carry-forward, strict meta validation, reload survival, fail-safe load normalization, audit hygiene, v1 back-compat
+- 2026-09-03T22:20:22.801Z · **azazel** · create `src/lss-adapter.js` — O2a: LSS adapter — resolveViaLss (scope+destination+verified gates, secret:requested audit), wildcard destination matching, probe/install/rotate for S5/S6
+- 2026-09-03T22:22:01.540Z · **azazel** · edit `src/model-provider.js` — O2b: providers resolve API keys through the LSS adapter (destination-pinned, fail-closed) when OPENAGI_LSS=1; ambient env path unchanged when flag off
+- 2026-09-03T22:23:41.526Z · **azazel** · create `test/lss-adapter.test.js` — O2a tests: conformance S1–S7 against real SecretsStore+adapter, wildcard rule, project scope, fail-closed posture, flag gate
+- 2026-09-03T22:24:02.575Z · **azazel** · edit `test/lss-adapter.test.js` — placeholder
+- 2026-09-03T22:24:59.211Z · **azazel** · edit `test/lss-adapter.test.js` — Revert stray inserted line; rewrite S4 to assert openAGI's self-heal perms enforcement (documented deviation from reference refuse-to-open)
+- 2026-09-03T22:25:49.756Z · **azazel** · create `test/lss-provider-wiring.test.js` — O2b tests: provider constructors resolve via LSS under flag, fail closed on denied destination/missing key, env behavior unchanged with flag off

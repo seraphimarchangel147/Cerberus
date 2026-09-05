@@ -163,7 +163,86 @@ export class SecretsStore {
     });
   }
 
-  setSecret(name, value, { decidedBy = "system:set" } = {}) {
+  // LSS v2: metadata without material. The dashboard and audit surfaces must
+  // be able to show pinning/health without ever touching the value.
+  getSecretRecord(name, { decidedBy = "system:access" } = {}) {
+    return this.#withMutationLock(() => {
+      const secretName = this.#assertAllowed(name, { action: "access-meta", decidedBy });
+      const { snapshot } = this.#loadFresh({ decidedBy });
+      const record = snapshot.secrets[secretName];
+      this.#audit({
+        action: "access-meta",
+        name: secretName,
+        decidedBy,
+        found: Boolean(record)
+      });
+      if (!record) return null;
+      return {
+        name: secretName,
+        updatedAt: record.updatedAt,
+        ...normalizeRecordMetadata(record),
+        hasValue: true
+      };
+    });
+  }
+
+  // LSS v2: value + policy metadata from ONE locked load, so the LSS adapter
+  // can never pair a pre-rotate value with post-rotate metadata.
+  getSecretWithRecord(name, { decidedBy = "system:access" } = {}) {
+    return this.#withMutationLock(() => {
+      const secretName = this.#assertAllowed(name, { action: "access", decidedBy });
+      const { snapshot } = this.#loadFresh({ decidedBy });
+      const record = snapshot.secrets[secretName];
+      this.#audit({
+        action: "access",
+        name: secretName,
+        decidedBy,
+        found: Boolean(record)
+      });
+      if (!record) return null;
+      return {
+        value: record.value,
+        record: {
+          name: secretName,
+          updatedAt: record.updatedAt,
+          ...normalizeRecordMetadata(record)
+        }
+      };
+    });
+  }
+
+  // LSS v2: policy/health mutation without touching the value. Strictly
+  // validated -- a malformed destination list must fail the call, never
+  // silently weaken pinning.
+  setSecretMeta(name, patch = {}, { decidedBy = "system:meta" } = {}) {
+    return this.#withMutationLock(() => {
+      const secretName = this.#assertAllowed(name, { action: "meta", decidedBy });
+      const unknownKeys = Object.keys(patch).filter((key) => !SECRET_META_KEYS.has(key));
+      if (unknownKeys.length) {
+        throw new TypeError(`Unsupported secret metadata keys: ${unknownKeys.sort().join(", ")}`);
+      }
+      const { snapshot } = this.#loadFresh({ decidedBy });
+      const record = snapshot.secrets[secretName];
+      if (!record) {
+        this.#audit({ action: "meta", name: secretName, decidedBy, accepted: false, reason: "not-found" });
+        throw new TypeError("Cannot set metadata for an unknown secret");
+      }
+      const meta = normalizeRecordMetadata({ ...record, ...patch }, { strict: true });
+      snapshot.secrets[secretName] = { ...record, ...meta };
+      snapshot.updatedAt = this.#timestamp();
+      this.#persistSnapshot(snapshot);
+      this.#audit({
+        action: "meta",
+        name: secretName,
+        decidedBy,
+        accepted: true,
+        keys: Object.keys(patch).sort()
+      });
+      return { name: secretName, ...meta };
+    });
+  }
+
+  setSecret(name, value, { decidedBy = "system:set", destinations, scopes } = {}) {
     return this.#withMutationLock(() => {
       const secretName = this.#assertAllowed(name, { action: "set", decidedBy });
       const normalized = normalizeSecretValue(value);
@@ -180,10 +259,18 @@ export class SecretsStore {
 
       const { snapshot } = this.#loadFresh({ decidedBy });
       const timestamp = this.#timestamp();
-      snapshot.secrets[secretName] = {
+      // LSS v2: rotating a value must never silently strip destination pinning
+      // or scope metadata -- carry the prior record's policy forward.
+      const nextRecord = {
+        ...normalizeRecordMetadata(snapshot.secrets[secretName]),
         value: normalized,
-        updatedAt: timestamp
+        updatedAt: timestamp,
+        fingerprint: secretFingerprint(normalized)
       };
+      if (destinations !== undefined) nextRecord.destinations = normalizeDestinations(destinations);
+      if (scopes !== undefined) nextRecord.scopes = normalizeScopes(scopes);
+      snapshot.secrets[secretName] = nextRecord;
+      snapshot.updatedAt = timestamp;
       snapshot.updatedAt = timestamp;
       this.#persistSnapshot(snapshot);
       this.#hydrateProcessEnv(snapshot);
@@ -591,6 +678,10 @@ function normalizeSnapshot(raw, fallbackTimestamp, allowlist) {
     const value = normalizeSecretValue(record?.value);
     if (!value) continue;
     secrets[name] = {
+      // LSS v2 policy/health metadata survives snapshot normalization. Load is
+      // non-strict: malformed fields are dropped so one hand-edited record
+      // cannot DoS the whole store; mutation paths validate strictly.
+      ...normalizeRecordMetadata(record),
       value,
       updatedAt: validTimestamp(record?.updatedAt, fallbackTimestamp)
     };
@@ -606,6 +697,129 @@ function validTimestamp(value, fallback) {
   const date = new Date(value ?? "");
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
+
+const VERIFIED_STATUSES = new Set(["ok", "stale", "dead", "unverified"]);
+const SECRET_META_KEYS = new Set([
+  "destinations",
+  "scopes",
+  "verifiedStatus",
+  "lastVerifiedAt",
+  "rotatedAt",
+  "history",
+  "notes"
+]);
+const DESTINATION_HOST_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const SCOPE_RE = /^(agent|project):[A-Za-z0-9*][A-Za-z0-9._-]{0,63}$/;
+const MAX_SECRET_HISTORY = 16;
+const MAX_SECRET_NOTES = 500;
+
+// SPEC fingerprint: first4 + last4 -- the only derivation of secret material
+// that may ever cross a log/audit/dashboard boundary.
+export function secretFingerprint(value) {
+  const text = String(value ?? "");
+  if (text.length < 12) return "****";
+  return `${text.slice(0, 4)}…${text.slice(-4)}`;
+}
+
+function normalizeDestinations(input) {
+  if (!Array.isArray(input)) {
+    throw new TypeError("Secret destinations must be an array of hostnames");
+  }
+  const hosts = [];
+  for (const raw of input) {
+    const host = String(raw ?? "").trim().toLowerCase();
+    if (!DESTINATION_HOST_RE.test(host)) {
+      throw new TypeError("Invalid secret destination host");
+    }
+    if (!hosts.includes(host)) hosts.push(host);
+  }
+  return hosts;
+}
+
+function normalizeScopes(input) {
+  if (!Array.isArray(input)) {
+    throw new TypeError("Secret scopes must be an array of agent:/project: entries");
+  }
+  const scopes = [];
+  for (const raw of input) {
+    const scope = String(raw ?? "").trim();
+    if (!SCOPE_RE.test(scope)) {
+      throw new TypeError("Invalid secret scope; expected agent:<id> or project:<id>");
+    }
+    if (!scopes.includes(scope)) scopes.push(scope);
+  }
+  return scopes;
+}
+
+function optionalTimestamp(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+// Sanitizes the optional LSS v2 policy/health fields of a stored record.
+// strict=true (mutations): malformed input throws. strict=false (loads):
+// malformed fields are dropped so one hand-edited record cannot DoS the store.
+function normalizeRecordMetadata(record, { strict = false } = {}) {
+  if (!record || typeof record !== "object") return {};
+  const meta = {};
+  const attempt = (assign) => {
+    try {
+      assign();
+    } catch (error) {
+      if (strict) throw error;
+    }
+  };
+  if (record.destinations !== undefined) {
+    attempt(() => { meta.destinations = normalizeDestinations(record.destinations); });
+  }
+  if (record.scopes !== undefined) {
+    attempt(() => { meta.scopes = normalizeScopes(record.scopes); });
+  }
+  if (typeof record.fingerprint === "string" && record.fingerprint) {
+    meta.fingerprint = record.fingerprint;
+  }
+  if (record.verifiedStatus !== undefined) {
+    const status = String(record.verifiedStatus ?? "");
+    if (VERIFIED_STATUSES.has(status)) {
+      meta.verifiedStatus = status;
+    } else if (strict) {
+      throw new TypeError(`Invalid verifiedStatus: expected one of ${[...VERIFIED_STATUSES].join(", ")}`);
+    }
+  }
+  const lastVerifiedAt = optionalTimestamp(record.lastVerifiedAt);
+  if (lastVerifiedAt) meta.lastVerifiedAt = lastVerifiedAt;
+  else if (record.lastVerifiedAt !== undefined && strict) {
+    throw new TypeError("Invalid lastVerifiedAt timestamp");
+  }
+  const rotatedAt = optionalTimestamp(record.rotatedAt);
+  if (rotatedAt) meta.rotatedAt = rotatedAt;
+  else if (record.rotatedAt !== undefined && strict) {
+    throw new TypeError("Invalid rotatedAt timestamp");
+  }
+  if (record.history !== undefined) {
+    attempt(() => {
+      if (!Array.isArray(record.history)) throw new TypeError("Secret history must be an array");
+      const history = [];
+      for (const entry of record.history.slice(-MAX_SECRET_HISTORY)) {
+        const fingerprintEntry = typeof entry?.fingerprint === "string" ? entry.fingerprint : "";
+        if (!fingerprintEntry) throw new TypeError("Secret history entries require a fingerprint");
+        const when = optionalTimestamp(entry?.rotatedAt);
+        history.push(when ? { fingerprint: fingerprintEntry, rotatedAt: when } : { fingerprint: fingerprintEntry });
+      }
+      meta.history = history;
+    });
+  }
+  if (record.notes !== undefined) {
+    attempt(() => {
+      const notes = String(record.notes ?? "");
+      if (notes.length > MAX_SECRET_NOTES) throw new TypeError("Secret notes too long");
+      if (notes) meta.notes = notes;
+    });
+  }
+  return meta;
+}
+
 
 function maskedSecret(name, value) {
   const last4 = value.length > 4 ? value.slice(-4) : null;
