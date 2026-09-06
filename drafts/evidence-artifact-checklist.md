@@ -1,6 +1,6 @@
 # End-to-End Verification — Evidence Artifact Checklist
 
-_DRAFT — prepared by Azazel (daily-plan task task_21b42dc5a4b247e3, 2026-08-06; re-issued 2026-08-07 as task_88045ea3b0d64d1f with explicit metrics scope — this checklist covers both). Review before use. Not sent, published, or scheduled._
+_Re-issued by daily planner: 2026-08-06 (task_f3a1b58176344c10), 2026-08-07 (task_88045ea3b0d64d1f, explicit metrics scope), 2026-08-13 (task_9dc668d1ec1c4c1f, structured outline scope), 2026-08-18 (task_c3dd73ae7e9c432a, screenshots/logs/metric snapshots scope) — this checklist covers them all._
 
 Purpose: a consistent inventory of artifacts to capture during every verification run, so any two runs are directly comparable. Use alongside `drafts/goal-loop-verification-evidence-template.md` (per-stage slots) and `drafts/goal-mode-e2e-verification-checklist.md` (step sequence).
 

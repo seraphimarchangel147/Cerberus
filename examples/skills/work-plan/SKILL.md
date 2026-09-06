@@ -7,7 +7,7 @@ category: engineering
 Use this skill when the user asks for a plan, when a build spans several components, or when sequencing mistakes would be expensive. Produce the plan only; do not execute it unless the user also asks you to proceed.
 
 1. Restate the goal and the observable definition of done in one short paragraph.
-2. Inspect the relevant repository structure and existing tests before naming changes. Do not invent paths.
+2. Inspect the relevant repository structure and existing tests before naming changes. Do not invent paths; if inspection is impossible, label proposed paths as unverified instead of presenting them as fact.
 3. Break the work into numbered, bite-sized steps. Each step must include:
    - the exact file path or subsystem;
    - the concrete change and why it belongs there;

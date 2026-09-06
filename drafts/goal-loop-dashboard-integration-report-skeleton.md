@@ -1,6 +1,6 @@
 # Goal-Loop ↔ Dashboard Integration — Verification Report
 
-_DRAFT SKELETON — prepared by Azazel (daily-plan task task_d94767e25fcc4c03, 2026-08-03; re-issued 2026-08-04 as task_ed39f0f17a934bee, 2026-08-05 as task_9c86ed66f7984dc6, 2026-08-06 as task_0b703d1116ac47bb, 2026-08-07 as task_db8a4b7ff428470b, 2026-08-08 as task_17567e873b65420b, 2026-08-09 as task_aea7ac70ceca4a06, and 2026-08-10 as task_c57f3ec4ee424d17, same scope — this skeleton covers all eight). Ready to populate once the verification run completes. Not sent, published, or scheduled._
+_Re-issued by daily planner: 2026-07-29 through 2026-08-21 (latest: task_268c6d1bd32448e1 — structured outline with sections for goal, implementation, evidence, and next steps). Scope each time: goal-mode loop flow, overview, evidence, open items — this skeleton covers them all._
 
 **Report status:** ☐ Not started ☐ In progress ☐ Complete
 **Verification run ref:** `drafts/goal-loop-verification-evidence-template.md` (Run ID: ______)

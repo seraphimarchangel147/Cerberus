@@ -1,6 +1,6 @@
 # Goal-Mode End-to-End Verification Checklist (DRAFT)
 
-Prepared by daily planner (2026-07-26; re-issued 2026-07-27, 2026-07-28, 2026-07-29, 2026-07-30, 2026-08-04, 2026-08-05 (task_c55f71cca65042b4) — same scope; this draft covers all). Draft only — nothing here has been executed.
+Prepared by daily planner (2026-07-26; re-issued 2026-07-27, 2026-07-28, 2026-07-29, 2026-07-30, 2026-08-04, 2026-08-05 (task_c55f71cca65042b4), 2026-08-20 (task_269e4d12fd4b433a — exact steps and expected outcomes to test the goal-mode loop with provider auth, ready to run through) — same scope; this draft covers all). Draft only — nothing here has been executed.
 Verify each item against the live system; check off as confirmed. Source of truth: `~/openagi` runtime + `goal_status` tool. Scope: goal-mode loop, dashboard, auth, and provider states.
 Verify each item against the live system; check off as confirmed. Source of truth: `~/openagi` runtime + `goal_status` tool.
 

@@ -1,6 +1,6 @@
 # Provider-Auth Dashboard — Functional Outline & Wireframe
 
-**Status:** DRAFT for review (prepared by Azazel, 2026-07-29, planner task `task_3664f0f3c82647d0`). Nothing built, sent, or scheduled — awaiting approval.
+**Status:** DRAFT for review (prepared by Azazel, 2026-07-29, planner task `task_3664f0f3c82647d0`; re-issued 2026-08-11 as `task_e69ec40ee3ca48b9` — same scope: screens, data sources, auth states tied to the goal-mode loop; this draft covers both). Nothing built, sent, or scheduled — awaiting approval.
 
 ---
 

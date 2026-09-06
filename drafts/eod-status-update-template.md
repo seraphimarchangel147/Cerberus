@@ -1,6 +1,6 @@
 # End-of-Day Status Update — Template
 
-**Status:** DRAFT for review (prepared by Azazel, 2026-07-31, planner task `task_5173ad320d5c4936`). Template only — not sent, published, or scheduled. Fill in bracketed sections before sharing with stakeholders.
+**Status:** DRAFT for review (prepared by Azazel, 2026-07-31, planner task `task_5173ad320d5c4936`; re-issued 2026-08-13 as `task_76325f9d9d99484e` with same scope — dashboard build progress + verification pass/fail — this template covers both). Template only — not sent, published, or scheduled. Fill in bracketed sections before sharing with stakeholders.
 
 ---
 
