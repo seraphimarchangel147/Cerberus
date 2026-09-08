@@ -5829,8 +5829,11 @@ export class OpenAIResponsesProvider {
     // main loop, goal judge, forced answer — stays compatible.
     if (/chatgpt\.com\/backend-api/i.test(String(this.baseUrl ?? ""))) {
       const incompatible = ["max_output_tokens", "previous_response_id"];
-      if (body.store !== false || incompatible.some((k) => body[k] !== undefined)) {
-        body = { ...body, store: false };
+      if (body.store !== false || body.stream !== true || incompatible.some((k) => body[k] !== undefined)) {
+        // Codex also rejects non-streaming requests ("Stream must be set to
+        // true"); forcing it here is safe because `streaming` below derives
+        // from the sanitized body, so the SSE parser engages automatically.
+        body = { ...body, store: false, stream: true };
         for (const k of incompatible) delete body[k];
       }
     }
