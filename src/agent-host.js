@@ -2685,8 +2685,8 @@ export function formatFastLaneNotice(fastLane) {
     "Conversational fast lane (token-saving trim):",
     `- This casual turn advertises only ${fastLane.advertised} core tools; ${fastLane.hidden} more are registered but held back to save tokens. Nothing was removed — the full toolset is still invokable.`,
     "- This trim fires automatically on chat-shaped turns. It is NOT a bug or a lost capability, and it is NOT gated on any trigger word.",
-    "- When the turn is actually WORK (edit/read files, run code, control cron/jobs, drive the desktop, anything beyond the core set), call searcmcp_tools to pull the tool you need, or just proceed — a work-shaped request auto-restores the full arsenal on the next turn.",
-    "- Use judgment: don't reflexively expand on every message, but don't report yourself as blocked or tool-less either. If you need a hidden tool, searcmcp_tools is always available on this lane."
+    "- When the turn is actually WORK (edit/read files, run code, control cron/jobs, drive the desktop, anything beyond the core set), call tool_search to find the internal tool you need, then tool_describe + tool_call to invoke it — or just proceed: a work-shaped request auto-restores the full arsenal on the next turn. (searcmcp_tools only searches connected MCP servers, NOT the internal catalog.)",
+    "- Use judgment: don't reflexively expand on every message, but don't report yourself as blocked or tool-less either. The tool_search/tool_describe/tool_call bridge is injected on this lane whenever tools are held back — use it before concluding a capability is missing."
   ].join("\n");
 }
 

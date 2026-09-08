@@ -345,9 +345,11 @@ test("formatFastLaneNotice is self-declaring only when tools were actually trimm
   const notice = formatFastLaneNotice({ advertised: 13, hidden: 102 });
   assert.match(notice, /Conversational fast lane/);
   assert.match(notice, /13 core tools; 102 more are registered/);
-  // Awareness + agency, no trigger word: it must name searcmcp_tools as the
-  // escalation path and explicitly say it is NOT gated on a codeword.
-  assert.match(notice, /searcmcp_tools/);
+  // Awareness + agency, no trigger word: it must name tool_search as the
+  // internal discovery bridge, clarify searcmcp_tools is MCP-only, and
+  // explicitly say the trim is NOT gated on a codeword.
+  assert.match(notice, /call tool_search to find the internal tool you need/);
+  assert.match(notice, /searcmcp_tools only searches connected MCP servers/);
   assert.match(notice, /NOT gated on any trigger word/);
 });
 
@@ -371,7 +373,7 @@ test("a trimmed chat turn injects the self-declaring fast-lane notice into the m
     requests[0].turnContext,
     new RegExp(`only ${CHAT_CORE_TOOLS.length} core tools; 2 more are registered`)
   );
-  assert.match(requests[0].turnContext, /searcmcp_tools/);
+  assert.match(requests[0].turnContext, /call tool_search to find the internal tool you need/);
 });
 
 test("a full-lane work turn does NOT inject the fast-lane notice", async (t) => {

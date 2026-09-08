@@ -196,3 +196,28 @@ test("scope and unknown-tool failures receive stable semantic codes", async () =
   assert.equal(unknown.outcome.status, "failed");
   assert.equal(unknown.outcome.code, "unknown_tool");
 });
+
+test("a thrown mutation-lease conflict surfaces retryable even without the flag on the error", async () => {
+  // The lease machinery sets error.retryable = true, but a conflict raised
+  // before dispatch (or rethrown through a wrapper) can lose it. The registry
+  // mapping is the single semantic site, so it must force retryable for this
+  // code — otherwise the agent reads a transient lock conflict as terminal.
+  const registry = new ToolRegistry();
+  register(registry, {
+    name: "conflicted_tool",
+    handler: () => {
+      const error = new Error("Mutation conflicts with another active invocation.");
+      error.code = "MUTATION_LEASE_CONFLICT";
+      throw error;
+    }
+  });
+
+  const result = await registry.invoke("conflicted_tool", {}, {
+    sessionId: "session-lease",
+    __turnId: "turn-lease"
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome.code, "mutation_lease_conflict");
+  assert.equal(result.outcome.retryable, true);
+});

@@ -62,6 +62,9 @@ test("registry validates nested input contracts before preflight, hooks, or hand
   assert.match(result.error, /\$\.target\.path must contain at least 1 characters/u);
   assert.match(result.error, /\$\.target\.retries must be at most 3/u);
   assert.match(result.error, /\$\.target\.surprise is not an allowed property/u);
+  // The rejection names the allowed keys so the agent self-corrects in one
+  // retry instead of burning a round-trip on schema discovery.
+  assert.match(result.error, /\(allowed: [^)]*path[^)]*\)/u);
   assert.equal(preflights, 0);
   assert.equal(hooks, 0);
   assert.equal(handlers, 0);

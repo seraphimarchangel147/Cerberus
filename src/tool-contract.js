@@ -311,7 +311,14 @@ function validateObject(schema, value, path, issues, state, depth) {
     if (Object.hasOwn(properties, key)) {
       validateValue(properties[key], value[key], childPath(path, key), issues, state, depth + 1);
     } else if (schema.additionalProperties === false) {
-      addIssue(issues, `${childPath(path, key)} is not an allowed property`);
+      // Name the allowed keys so the agent can self-correct in one retry
+      // instead of burning a round-trip on tool_describe. Cap the list so a
+      // wide schema can't flood the error channel.
+      const allowedNames = Object.keys(properties);
+      const hint = allowedNames.length === 0
+        ? ""
+        : ` (allowed: ${allowedNames.slice(0, 12).join(", ")}${allowedNames.length > 12 ? `, +${allowedNames.length - 12} more` : ""})`;
+      addIssue(issues, `${childPath(path, key)} is not an allowed property${hint}`);
     } else if (isPlainRecord(schema.additionalProperties) || typeof schema.additionalProperties === "boolean") {
       validateValue(
         schema.additionalProperties,

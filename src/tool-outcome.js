@@ -468,10 +468,16 @@ function envelope(rawResult, outcome) {
 function normalizeOutcome(tool, value) {
   const status = normalizedStatus(value.status);
   const idempotent = tool?.capability?.idempotent === true;
+  const code = safeCode(value.code, status === "succeeded" ? "ok" : status);
   return Object.freeze({
     status,
-    code: safeCode(value.code, status === "succeeded" ? "ok" : status),
-    retryable: value.retryable === true && idempotent,
+    code,
+    // Idempotency clamp: only idempotent tools may advertise retryable
+    // failures, because a retried mutation could double-apply. A mutation-
+    // lease conflict is the exemption: the coordinator raises it BEFORE the
+    // tool dispatches, so nothing applied and the retry is always safe.
+    retryable: (value.retryable === true && idempotent)
+      || code === "mutation_lease_conflict",
     changed: value.changed === true ? true : value.changed === false ? false : null,
     artifacts: Object.freeze(normalizeReferences(value.artifacts)),
     evidence: Object.freeze(normalizeReferences(value.evidence)),
