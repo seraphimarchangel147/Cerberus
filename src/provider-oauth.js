@@ -389,8 +389,9 @@ export async function fetchAccountModels({ lane, accessToken, dataDir = resolveD
   if (lane !== "openai" || !accessToken) return null;
   const attempts = [
     // The codex backend requires client + client_version and gates the list
-    // on the version; send a modern one so the full entitlement comes back.
-    "https://chatgpt.com/backend-api/codex/models?client=codex_cli&client_version=0.99.0",
+    // on the version; 1.2.0 unlocks the gpt-6/5.6 families (astra, sol,
+    // terra, luna, reserve, daybreak). Bump when new families 400 out.
+    "https://chatgpt.com/backend-api/codex/models?client=codex_cli&client_version=1.2.0",
     "https://api.openai.com/v1/models"
   ];
   for (const url of attempts) {
@@ -410,15 +411,35 @@ export async function fetchAccountModels({ lane, accessToken, dataDir = resolveD
         raw.map((m) => String(m?.slug ?? m?.id ?? m?.model ?? "").trim()).filter(Boolean)
       )];
       if (!ids.length) continue;
+      // Keep the capability metadata alongside bare ids: reasoning levels and
+      // speed tiers drive the dashboard's per-model pickers.
+      const details = {};
+      for (const m of raw) {
+        const id = String(m?.slug ?? m?.id ?? m?.model ?? "").trim();
+        if (!id || typeof m !== "object") continue;
+        const levels = Array.isArray(m.supported_reasoning_levels)
+          ? m.supported_reasoning_levels.map((l) => String(l?.effort ?? l ?? "").trim()).filter(Boolean)
+          : [];
+        const entry = {};
+        if (levels.length) entry.reasoningLevels = levels;
+        if (m.default_reasoning_level) entry.defaultReasoningLevel = String(m.default_reasoning_level);
+        if (Array.isArray(m.additional_speed_tiers) && m.additional_speed_tiers.length) {
+          entry.speedTiers = m.additional_speed_tiers.map((t) => String(t?.tier ?? t ?? "").trim()).filter(Boolean);
+        }
+        if (m.display_name) entry.displayName = String(m.display_name);
+        if (m.description) entry.description = String(m.description);
+        if (Number.isFinite(m.context_window)) entry.contextWindow = m.context_window;
+        if (Object.keys(entry).length) details[id] = entry;
+      }
       const file = path.join(dataDir, "provider-account-models.json");
       let doc = {};
       try { doc = JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* fresh */ }
       if (!doc || typeof doc !== "object" || Array.isArray(doc)) doc = {};
-      doc[lane] = { models: ids, source: url, syncedAt: new Date().toISOString() };
+      doc[lane] = { models: ids, details, source: url, syncedAt: new Date().toISOString() };
       const tmp = `${file}.tmp-${process.pid}`;
       fs.writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
       fs.renameSync(tmp, file);
-      return { models: ids, source: url };
+      return { models: ids, details, source: url };
     } catch { /* try next */ }
   }
   return null;
@@ -430,6 +451,17 @@ export function loadAccountModels(lane, { dataDir = resolveDataDir() } = {}) {
     const doc = JSON.parse(fs.readFileSync(path.join(dataDir, "provider-account-models.json"), "utf8"));
     const entry = doc?.[String(lane ?? "").trim().toLowerCase()];
     return Array.isArray(entry?.models) && entry.models.length ? entry.models : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read synced per-model capability metadata (reasoning levels, speed tiers). */
+export function loadAccountModelDetails(lane, { dataDir = resolveDataDir() } = {}) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(dataDir, "provider-account-models.json"), "utf8"));
+    const entry = doc?.[String(lane ?? "").trim().toLowerCase()];
+    return entry?.details && typeof entry.details === "object" ? entry.details : null;
   } catch {
     return null;
   }

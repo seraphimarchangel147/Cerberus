@@ -70,7 +70,7 @@ async function captureAnthropic(options = {}) {
 test("reasoning effort resolves the canonical union and omits invalid values", () => {
   assert.deepEqual(
     REASONING_EFFORTS,
-    ["minimal", "low", "medium", "high", "xhigh", "max"]
+    ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
   );
   for (const effort of REASONING_EFFORTS) {
     assert.equal(
@@ -87,7 +87,7 @@ test("reasoning effort resolves the canonical union and omits invalid values", (
   );
   assert.equal(resolveReasoningEffort({}, {}), null);
   assert.equal(
-    resolveReasoningEffort({}, { OPENAGI_REASONING_EFFORT: "ultra" }),
+    resolveReasoningEffort({}, { OPENAGI_REASONING_EFFORT: "turbo" }),
     null
   );
 });
@@ -125,7 +125,8 @@ test("every canonical tier reaches both supported request wire formats", async (
     3510,
     4681,
     5851,
-    7021
+    7021,
+    7021 // ultra is OpenAI-only; Anthropic clamps it to the max-tier budget
   ];
 
   for (const [index, effort] of REASONING_EFFORTS.entries()) {

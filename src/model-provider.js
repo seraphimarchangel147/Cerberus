@@ -111,7 +111,8 @@ export const REASONING_EFFORTS = Object.freeze([
   "medium",
   "high",
   "xhigh",
-  "max"
+  "max",
+  "ultra"
 ]);
 const REASONING_EFFORT_SET = new Set(REASONING_EFFORTS);
 const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 8000;
@@ -631,7 +632,23 @@ function noteReasoningOmission(provider, key, message) {
 
 function openAIModelSupportsReasoning(model) {
   const normalized = String(model ?? "").trim().toLowerCase();
-  return /^(?:gpt-5(?:[.-]|$)|o(?:1|3|4)(?:[.-]|$))/u.test(normalized);
+  return /^(?:gpt-[56](?:[.-]|$)|gpt-reserve(?:[.-]|$)|gpt-daybreak(?:[.-]|$)|codex-(?:auto-review|mini)(?:[.-]|$)|o(?:1|3|4)(?:[.-]|$))/u.test(normalized);
+}
+
+/**
+ * Speed mode for OpenAI-format requests: OPENAGI_SPEED_MODE=fast maps to
+ * service_tier "priority" (what Codex CLI's Fast mode sends). Absent or
+ * unrecognized values add nothing — exact pre-feature behavior.
+ */
+function openAISpeedFields(provider) {
+  try {
+    const raw = String(provider?.env?.OPENAGI_SPEED_MODE ?? "").trim().toLowerCase();
+    if (raw === "fast" || raw === "priority") return { service_tier: "priority" };
+    if (raw === "flex") return { service_tier: "flex" };
+    return {};
+  } catch {
+    return {};
+  }
 }
 
 function anthropicModelSupportsThinking(model) {
@@ -641,7 +658,11 @@ function anthropicModelSupportsThinking(model) {
 }
 
 function anthropicReasoningBudget(effort, maxTokens) {
-  const rank = REASONING_EFFORTS.indexOf(effort);
+  // Fixed 6-tier scale (minimal..max): budgets for existing tiers must not
+  // shift as OpenAI-only tiers (ultra) join REASONING_EFFORTS. Ultra clamps
+  // to the max-tier budget on the Anthropic wire format.
+  const SCALE = 6;
+  const rank = Math.min(REASONING_EFFORTS.indexOf(effort), SCALE - 1);
   const outputTokens = Math.floor(Number(maxTokens));
   if (rank < 0 || !Number.isFinite(outputTokens) || outputTokens <= 1024) {
     return null;
@@ -651,7 +672,7 @@ function anthropicReasoningBudget(effort, maxTokens) {
     Math.max(
       1024,
       Math.floor(
-        outputTokens * (rank + 1) / (REASONING_EFFORTS.length + 1)
+        outputTokens * (rank + 1) / (SCALE + 1)
       )
     )
   );
@@ -664,14 +685,14 @@ function reasoningRequestFields(provider, {
 }) {
   try {
     const effort = provider?.reasoningEffort;
-    if (!effort) return {};
+    if (!effort) return format === "openai" ? openAISpeedFields(provider) : {};
     if (!REASONING_EFFORT_SET.has(effort)) {
       noteReasoningOmission(
         provider,
         `invalid-runtime:${String(effort)}`,
         `[reasoning-effort] Omitted unsupported effort "${String(effort)}".`
       );
-      return {};
+      return format === "openai" ? openAISpeedFields(provider) : {};
     }
     if (format === "openai") {
       if (!openAIModelSupportsReasoning(model)) {
@@ -680,9 +701,9 @@ function reasoningRequestFields(provider, {
           `openai:${String(model)}:${effort}`,
           `[reasoning-effort] Omitted "${effort}" for unsupported OpenAI model "${String(model)}".`
         );
-        return {};
+        return openAISpeedFields(provider);
       }
-      return { reasoning: { effort } };
+      return { reasoning: { effort }, ...openAISpeedFields(provider) };
     }
     if (format === "anthropic") {
       const budgetTokens = anthropicReasoningBudget(effort, maxTokens);

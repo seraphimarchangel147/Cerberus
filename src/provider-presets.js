@@ -56,8 +56,8 @@ const PRESET_LIST = Object.freeze([
     lane: "openai",
     baseUrl: "https://chatgpt.com/backend-api/codex",
     keyEnv: "OPENAI_OAUTH_TOKEN",
-    defaultModel: "gpt-5.3-codex",
-    models: ["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5"],
+    defaultModel: "gpt-5.6-sol",
+    models: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-reserve", "gpt-daybreak-blue-latest", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
     keyUrl: "https://chatgpt.com",
     oauth: true,
     note: "ChatGPT subscription via OAuth (Codex backend) — no API key needed. Use 'Sign in with ChatGPT' below; billing rides the ChatGPT plan."

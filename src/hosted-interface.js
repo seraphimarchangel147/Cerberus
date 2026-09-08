@@ -4278,14 +4278,18 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         // Account-synced models (from an OAuth sign-in) extend the static
         // preset catalog so the picker mirrors the real entitlement.
         let accountModels = null;
+        let accountDetails = null;
         try {
-          const { loadAccountModels } = await import("./provider-oauth.js");
+          const { loadAccountModels, loadAccountModelDetails } = await import("./provider-oauth.js");
           accountModels = { openai: loadAccountModels("openai", { dataDir: runtime.secrets?.dataDir }) };
+          accountDetails = { openai: loadAccountModelDetails("openai", { dataDir: runtime.secrets?.dataDir }) };
         } catch { /* static catalog only */ }
         return sendJson(res, 200, {
           active,
           lane: String(process.env.OPENAGI_PROVIDER ?? "auto"),
           liveModel: provider?.model ?? null,
+          reasoningEffort: String(process.env.OPENAGI_REASONING_EFFORT ?? "").trim() || null,
+          speedMode: String(process.env.OPENAGI_SPEED_MODE ?? "").trim() || null,
           presets: listProviderPresets().map((preset) => {
             const synced = accountModels?.[preset.lane];
             const models = Array.isArray(synced) && synced.length
@@ -4294,6 +4298,7 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             return {
               ...preset,
               models,
+              modelDetails: accountDetails?.[preset.lane] ?? null,
               accountSynced: Boolean(Array.isArray(synced) && synced.length),
               configured: presetIsConfigured(preset.id),
               keyPreview: maskSecretPreview(process.env[preset.keyEnv]),
@@ -4325,6 +4330,66 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             ok: true,
             id: preset.id,
             keyPreview: maskSecretPreview(process.env[preset.keyEnv])
+          });
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      // Runtime tuning: reasoning effort + speed mode. Persisted via saveEnv
+      // and applied to process.env immediately so the next turn uses them
+      // (reasoningRequestFields reads provider.env at request time).
+      if (method === "POST" && pathname === "/providers/tuning") {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Provider administration is default-project only" });
+        }
+        try {
+          const values = {};
+          if (body.reasoningEffort !== undefined) {
+            const effort = String(body.reasoningEffort ?? "").trim().toLowerCase();
+            const allowed = ["", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+            if (!allowed.includes(effort)) {
+              return sendJson(res, 400, { error: `Unknown reasoning effort: ${effort}` });
+            }
+            values.OPENAGI_REASONING_EFFORT = effort;
+            process.env.OPENAGI_REASONING_EFFORT = effort;
+          }
+          if (body.speedMode !== undefined) {
+            const mode = String(body.speedMode ?? "").trim().toLowerCase();
+            const allowed = ["", "fast", "priority", "flex"];
+            if (!allowed.includes(mode)) {
+              return sendJson(res, 400, { error: `Unknown speed mode: ${mode}` });
+            }
+            values.OPENAGI_SPEED_MODE = mode;
+            process.env.OPENAGI_SPEED_MODE = mode;
+          }
+          if (!Object.keys(values).length) {
+            return sendJson(res, 400, { error: "Nothing to set — pass reasoningEffort and/or speedMode." });
+          }
+          saveEnv({
+            dataDir: runtime.secrets?.dataDir,
+            store: runtime.secrets,
+            values,
+            decidedBy: "dashboard:providers-tuning"
+          });
+          // Rebuild the live provider so reasoningEffort re-resolves now.
+          if (runtime.agentHost?.modelProvider) {
+            try {
+              const { createModelProvider } = await import("./model-provider.js");
+              const next = createModelProvider({
+                budgetGuard: runtime.budget ?? null,
+                secrets: runtime.secrets,
+                dataDir: runtime.secrets?.dataDir
+              });
+              if (next.isConfigured?.()) runtime.agentHost.modelProvider = next;
+            } catch { /* env vars still apply on next natural rebuild */ }
+          }
+          events.emit("providers", { op: "tuning", ...values });
+          return sendJson(res, 200, {
+            ok: true,
+            reasoningEffort: process.env.OPENAGI_REASONING_EFFORT || null,
+            speedMode: process.env.OPENAGI_SPEED_MODE || null
           });
         } catch (error) {
           return sendJson(res, 400, { error: error.message });
@@ -9322,6 +9387,31 @@ async function renderModels() {
       + "</div>";
   }).join("");
 
+  // Runtime tuning strip: reasoning effort + speed mode (applies to the live
+  // lane immediately; synced per-model levels shown when known).
+  const activePreset = presets.find((p) => p.active) ?? null;
+  const liveDetails = activePreset?.modelDetails?.[String(data.liveModel ?? "")] ?? null;
+  const effortLevels = (liveDetails?.reasoningLevels && liveDetails.reasoningLevels.length)
+    ? liveDetails.reasoningLevels
+    : ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const currentEffort = String(data.reasoningEffort ?? "");
+  const effortOptions = ['<option value=""' + (currentEffort === "" ? " selected" : "") + ">model default</option>"]
+    .concat(effortLevels.map((l) => '<option value="' + escapeHtml(l) + '"' + (l === currentEffort ? " selected" : "") + ">" + escapeHtml(l) + "</option>"))
+    .join("");
+  const currentSpeed = String(data.speedMode ?? "");
+  const speedOptions = [["", "standard"], ["fast", "fast (priority tier)"], ["flex", "flex (cheaper, slower)"]]
+    .map(([v, label]) => '<option value="' + v + '"' + (v === currentSpeed ? " selected" : "") + ">" + escapeHtml(label) + "</option>")
+    .join("");
+  const tuningCard = '<div class="card" id="tuningCard">'
+    + '<div class="row between"><span class="name">Reasoning &amp; speed</span>'
+    + '<span class="badge">' + escapeHtml(String(data.liveModel || "no model")) + "</span></div>"
+    + '<div class="desc sub">Reasoning effort maps to the Responses API reasoning.effort field; speed mode sends service_tier (what Codex Fast mode uses). Both persist and apply to the next turn.</div>'
+    + '<div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap;">'
+    + '<label style="flex:1;min-width:160px;">Reasoning <select id="tuneEffort" style="width:100%;">' + effortOptions + "</select></label>"
+    + '<label style="flex:1;min-width:160px;">Speed <select id="tuneSpeed" style="width:100%;">' + speedOptions + "</select></label>"
+    + '<button id="tuneApply" style="align-self:flex-end;">Apply</button></div>'
+    + '<div class="desc" id="tuneResult"></div></div>';
+
   const upd = gateway.update ?? {};
   const updateLine = gateway.error
     ? "Gateway status unavailable: " + escapeHtml(gateway.error)
@@ -9341,6 +9431,8 @@ async function renderModels() {
     + " · model: <code>" + escapeHtml(String(data.liveModel || "?")) + "</code></div>"
     + '<div class="desc sub">Keys are stored in the secrets vault and never sent back to this page — only a masked preview. Saving a key does not switch providers; press <em>Make active</em> to point the live lane at it.</div>'
     + '<div class="grid" id="providerGrid" style="margin-top:12px;">' + cards + "</div>"
+    + "<h3>Runtime tuning</h3>"
+    + tuningCard
     + "<h3>Gateway</h3>"
     + '<div class="card"><div class="row between"><span class="name">openAGI daemon</span>'
     + '<span class="badge">pid ' + escapeHtml(String(gateway.pid ?? "?")) + "</span></div>"
@@ -9428,6 +9520,18 @@ async function renderModels() {
   });
 
   const gwResult = document.getElementById("gwResult");
+  document.getElementById("tuneApply").addEventListener("click", async () => {
+    const out = document.getElementById("tuneResult");
+    try {
+      const r = await postJson("/providers/tuning", {
+        reasoningEffort: document.getElementById("tuneEffort").value,
+        speedMode: document.getElementById("tuneSpeed").value
+      }, { projectScoped: false });
+      out.textContent = "Applied \u2713 reasoning=" + (r.reasoningEffort || "default") + " speed=" + (r.speedMode || "standard");
+    } catch (e) {
+      out.textContent = "Failed: " + e.message;
+    }
+  });
   document.getElementById("gwUpdate").addEventListener("click", async () => {
     gwResult.textContent = "Pulling…";
     try {
