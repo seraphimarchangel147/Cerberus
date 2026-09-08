@@ -23,6 +23,7 @@
 
 import { randomBytes, createHash } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { resolveDataDir } from "./data-dir.js";
 
@@ -289,6 +290,126 @@ export async function providerOAuthRefresh({ provider, refreshToken } = {}) {
  * shape matches loadCredentialPoolConfig: { version, providers: { [lane]:
  * { strategy, credentials: [{ id, type, secretName, refreshTokenSecretName? }] } } }.
  */
+/**
+ * Loopback callback capture — the fix for the "localhost refused to connect"
+ * dead-end. OpenAI's flow redirects to http://localhost:1455/auth/callback
+ * (Codex CLI's registered redirect URI, unchangeable on our side). Instead of
+ * asking the user to copy a failed URL out of the address bar, we bind
+ * 127.0.0.1:1455 for the lifetime of the flow and capture the code directly:
+ * the browser lands on a friendly "you're signed in" page and the dashboard
+ * polls /providers/oauth/status until the exchange finishes server-side.
+ * If the port is taken (real Codex CLI login running), startOAuthFlow still
+ * works — the paste path remains as fallback.
+ */
+const loopbackServers = new Map(); // flowId -> { server, result }
+
+export function startLoopbackCapture(flowId, { port = 1455, onCode = null } = {}) {
+  return new Promise((resolve) => {
+    const entry = { server: null, result: { status: "waiting" } };
+    const server = http.createServer((req, res) => {
+      const u = new URL(req.url, `http://localhost:${port}`);
+      if (u.pathname !== "/auth/callback") {
+        res.writeHead(404).end("not found");
+        return;
+      }
+      const code = u.searchParams.get("code");
+      const state = u.searchParams.get("state");
+      const error = u.searchParams.get("error");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      if (error || !code) {
+        res.end("<h2>Sign-in was not completed</h2><p>You can close this tab and try again from the dashboard.</p>");
+        entry.result = { status: "error", error: error || "no code in callback" };
+      } else {
+        res.end("<h2>&#10003; Signed in</h2><p>You can close this tab — the dashboard is finishing up.</p>");
+        entry.result = { status: "captured", code, state };
+        if (typeof onCode === "function") {
+          // Fire-and-forget: token exchange happens outside the request cycle.
+          Promise.resolve(onCode({ code, state })).then(
+            (r) => { entry.result = { status: "done", ...r }; },
+            (e) => { entry.result = { status: "error", error: e?.message ?? String(e) }; }
+          );
+        }
+      }
+      // One callback is all a flow gets; close soon after.
+      setTimeout(() => stopLoopbackCapture(flowId), 2000);
+    });
+    server.once("error", () => {
+      loopbackServers.delete(flowId);
+      resolve({ listening: false });
+    });
+    server.listen(port, "127.0.0.1", () => {
+      entry.server = server;
+      loopbackServers.set(flowId, entry);
+      // Auto-expire with the flow TTL so an abandoned login can't squat the port.
+      setTimeout(() => stopLoopbackCapture(flowId), FLOW_TTL_MS).unref?.();
+      resolve({ listening: true, port });
+    });
+  });
+}
+
+export function loopbackCaptureStatus(flowId) {
+  const entry = loopbackServers.get(flowId);
+  return entry ? entry.result : null;
+}
+
+export function stopLoopbackCapture(flowId) {
+  const entry = loopbackServers.get(flowId);
+  if (!entry) return;
+  try { entry.server?.close(); } catch { /* already closed */ }
+  if (entry.result?.status === "waiting") entry.result = { status: "closed" };
+  loopbackServers.delete(flowId);
+}
+
+/**
+ * Best-effort account model sync: after a ChatGPT-plan sign-in, ask the
+ * backend which models this account can actually run and persist them so the
+ * dashboard picker reflects the real entitlement instead of a hardcoded list.
+ * Every failure path returns null — sync is a bonus, never a blocker.
+ */
+export async function fetchAccountModels({ lane, accessToken, dataDir = resolveDataDir() } = {}) {
+  if (lane !== "openai" || !accessToken) return null;
+  const attempts = [
+    "https://chatgpt.com/backend-api/codex/models?client=codex_cli",
+    "https://api.openai.com/v1/models"
+  ];
+  for (const url of attempts) {
+    try {
+      const res = await fetch(url, {
+        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" }
+      });
+      if (!res.ok) continue;
+      const body = await res.json().catch(() => null);
+      const raw = Array.isArray(body?.models) ? body.models : Array.isArray(body?.data) ? body.data : null;
+      if (!raw) continue;
+      const ids = [...new Set(
+        raw.map((m) => String(m?.slug ?? m?.id ?? m?.model ?? "").trim()).filter(Boolean)
+      )];
+      if (!ids.length) continue;
+      const file = path.join(dataDir, "provider-account-models.json");
+      let doc = {};
+      try { doc = JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* fresh */ }
+      if (!doc || typeof doc !== "object" || Array.isArray(doc)) doc = {};
+      doc[lane] = { models: ids, source: url, syncedAt: new Date().toISOString() };
+      const tmp = `${file}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
+      fs.renameSync(tmp, file);
+      return { models: ids, source: url };
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
+/** Read synced account models (dashboard merges these into preset pickers). */
+export function loadAccountModels(lane, { dataDir = resolveDataDir() } = {}) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(dataDir, "provider-account-models.json"), "utf8"));
+    const entry = doc?.[String(lane ?? "").trim().toLowerCase()];
+    return Array.isArray(entry?.models) && entry.models.length ? entry.models : null;
+  } catch {
+    return null;
+  }
+}
+
 export function upsertOAuthPoolEntry({
   dataDir = resolveDataDir(),
   lane,

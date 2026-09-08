@@ -56,6 +56,29 @@ const HTTP_JOB_STATUSES = new Set([
 ]);
 const HTTP_JOB_KINDS = new Set(["tool", "direct-tool", "subagent"]);
 
+/**
+ * Persist a completed OAuth exchange: tokens into the secrets vault (never
+ * echoed) and an oauth Bearer lease into the credential pool with the env
+ * API key kept as fallback. Shared by the loopback and paste completions.
+ */
+function persistOAuthResult(runtime, oauthMod, result) {
+  const values = { [result.tokenSecret]: result.accessToken };
+  if (result.refreshToken) values[result.refreshSecret] = result.refreshToken;
+  saveEnv({
+    dataDir: runtime.secrets?.dataDir,
+    store: runtime.secrets,
+    values,
+    decidedBy: "dashboard:providers-oauth"
+  });
+  oauthMod.upsertOAuthPoolEntry({
+    dataDir: runtime.secrets?.dataDir,
+    lane: result.lane,
+    tokenSecret: result.tokenSecret,
+    refreshSecret: result.refreshToken ? result.refreshSecret : null,
+    envKeyFallback: result.lane === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
+  });
+}
+
 function isHostedMoaProvider(provider) {
   const id = String(provider?.provider ?? provider?.name ?? "").trim().toLowerCase();
   return id === "moa" || provider?.constructor?.name === "MoaProvider";
@@ -4252,16 +4275,31 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
         const active = activeProviderPreset();
         const provider = runtime.agentHost?.modelProvider ?? null;
+        // Account-synced models (from an OAuth sign-in) extend the static
+        // preset catalog so the picker mirrors the real entitlement.
+        let accountModels = null;
+        try {
+          const { loadAccountModels } = await import("./provider-oauth.js");
+          accountModels = { openai: loadAccountModels("openai", { dataDir: runtime.secrets?.dataDir }) };
+        } catch { /* static catalog only */ }
         return sendJson(res, 200, {
           active,
           lane: String(process.env.OPENAGI_PROVIDER ?? "auto"),
           liveModel: provider?.model ?? null,
-          presets: listProviderPresets().map((preset) => ({
-            ...preset,
-            configured: presetIsConfigured(preset.id),
-            keyPreview: maskSecretPreview(process.env[preset.keyEnv]),
-            active: preset.id === active
-          }))
+          presets: listProviderPresets().map((preset) => {
+            const synced = accountModels?.[preset.lane];
+            const models = Array.isArray(synced) && synced.length
+              ? [...new Set([...synced, ...preset.models])]
+              : preset.models;
+            return {
+              ...preset,
+              models,
+              accountSynced: Boolean(Array.isArray(synced) && synced.length),
+              configured: presetIsConfigured(preset.id),
+              keyPreview: maskSecretPreview(process.env[preset.keyEnv]),
+              active: preset.id === active
+            };
+          })
         });
       }
       // Store a vendor API key under its own env name. Kept separate from
@@ -4352,7 +4390,8 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendJson(res, 403, { error: "Provider administration is default-project only" });
         }
         try {
-          const { startOAuthFlow, isOAuthProviderId } = await import("./provider-oauth.js");
+          const oauthMod = await import("./provider-oauth.js");
+          const { startOAuthFlow, isOAuthProviderId } = oauthMod;
           // Preset ids and OAuth flow ids differ (e.g. preset "openai-chatgpt"
           // uses the "openai" flow). Map through the preset's lane when the id
           // isn't itself a flow id.
@@ -4361,11 +4400,46 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             try { flowProvider = getProviderPreset(body.id).lane; } catch { /* keep as-is */ }
           }
           const flow = startOAuthFlow(flowProvider);
+          // Bind the loopback callback port so the vendor redirect lands on a
+          // real listener: the code is captured and exchanged server-side and
+          // the dashboard just polls for completion. Falls back to paste-the-
+          // URL when the port is busy (e.g. a real Codex CLI login).
+          const capture = await oauthMod.startLoopbackCapture(flow.flowId, {
+            onCode: async ({ code, state }) => {
+              const result = await oauthMod.completeOAuthFlow(
+                flow.flowId,
+                `http://localhost:1455/auth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state ?? "")}`
+              );
+              persistOAuthResult(runtime, oauthMod, result);
+              const synced = await oauthMod.fetchAccountModels({
+                lane: result.lane,
+                accessToken: result.accessToken,
+                dataDir: runtime.secrets?.dataDir
+              }).catch(() => null);
+              events.emit("providers", { op: "oauth-complete", provider: result.provider });
+              return {
+                provider: result.provider,
+                lane: result.lane,
+                hasRefreshToken: Boolean(result.refreshToken),
+                accountModels: synced?.models?.length ?? 0
+              };
+            }
+          });
           events.emit("providers", { op: "oauth-start", provider: flow.provider });
-          return sendJson(res, 200, flow);
+          return sendJson(res, 200, { ...flow, loopback: capture.listening === true });
         } catch (error) {
           return sendJson(res, 400, { error: error.message });
         }
+      }
+      // Poll the loopback capture: waiting | captured | done | error | closed.
+      if (method === "GET" && pathname === "/providers/oauth/status") {
+        const project = requireRequestProject(runtime, req, url);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Provider administration is default-project only" });
+        }
+        const { loopbackCaptureStatus } = await import("./provider-oauth.js");
+        const flowId = String(url.searchParams.get("flowId") ?? "");
+        return sendJson(res, 200, loopbackCaptureStatus(flowId) ?? { status: "unknown" });
       }
       if (method === "POST" && pathname === "/providers/oauth/complete") {
         const body = await readJson(req).catch(() => ({}));
@@ -4374,30 +4448,22 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           return sendJson(res, 403, { error: "Provider administration is default-project only" });
         }
         try {
-          const { completeOAuthFlow, upsertOAuthPoolEntry } = await import("./provider-oauth.js");
-          const result = await completeOAuthFlow(body.flowId, body.pasted);
-          const values = { [result.tokenSecret]: result.accessToken };
-          if (result.refreshToken) values[result.refreshSecret] = result.refreshToken;
-          saveEnv({
-            dataDir: runtime.secrets?.dataDir,
-            store: runtime.secrets,
-            values,
-            decidedBy: "dashboard:providers-oauth"
-          });
-          upsertOAuthPoolEntry({
-            dataDir: runtime.secrets?.dataDir,
+          const oauthMod = await import("./provider-oauth.js");
+          const result = await oauthMod.completeOAuthFlow(body.flowId, body.pasted);
+          persistOAuthResult(runtime, oauthMod, result);
+          const synced = await oauthMod.fetchAccountModels({
             lane: result.lane,
-            tokenSecret: result.tokenSecret,
-            refreshSecret: result.refreshToken ? result.refreshSecret : null,
-            envKeyFallback: result.lane === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
-          });
+            accessToken: result.accessToken,
+            dataDir: runtime.secrets?.dataDir
+          }).catch(() => null);
           events.emit("providers", { op: "oauth-complete", provider: result.provider });
           return sendJson(res, 200, {
             ok: true,
             provider: result.provider,
             lane: result.lane,
             tokenPreview: maskSecretPreview(result.accessToken),
-            hasRefreshToken: Boolean(result.refreshToken)
+            hasRefreshToken: Boolean(result.refreshToken),
+            accountModels: synced?.models?.length ?? 0
           });
         } catch (error) {
           return sendJson(res, 400, { error: error.message });
@@ -9315,6 +9381,29 @@ async function renderModels() {
       try {
         const flow = await postJson("/providers/oauth/start", { id });
         window.open(flow.authorizeUrl, "_blank", "noopener");
+        if (flow.loopback) {
+          // Loopback capture is armed: just sign in, we poll until done.
+          oauthBtn.disabled = true;
+          oauthBtn.textContent = "Waiting for sign-in\u2026";
+          const deadline = Date.now() + (flow.expiresInSec || 600) * 1000;
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const st = await fetch("/providers/oauth/status?flowId=" + encodeURIComponent(flow.flowId), { headers: projectHeaders({}, true) }).then((r) => r.json()).catch(() => null);
+            if (!st) continue;
+            if (st.status === "done") {
+              oauthBtn.textContent = "Signed in \u2713";
+              await renderModels();
+              alert("Signed in to " + (st.provider || id)
+                + (st.hasRefreshToken ? " (auto-refresh enabled)" : "")
+                + (st.accountModels ? " \u2014 synced " + st.accountModels + " models from your account" : "")
+                + ". Press 'Make active' to switch the live lane.");
+              return;
+            }
+            if (st.status === "error") throw new Error(st.error || "sign-in failed");
+            if (st.status === "closed" || st.status === "unknown") break;
+          }
+          throw new Error("Sign-in window expired \u2014 try again.");
+        }
         const pasted = prompt(
           (flow.instructions || "Complete the sign-in, then paste the code/URL here.")
           + "\\n\\n(A sign-in tab just opened. This prompt waits for your paste.)"
@@ -9322,11 +9411,15 @@ async function renderModels() {
         if (!pasted) return;
         const done = await postJson("/providers/oauth/complete", { flowId: flow.flowId, pasted });
         await renderModels();
-        alert("Signed in to " + done.provider + " — token " + (done.tokenPreview || "stored")
+        alert("Signed in to " + done.provider + " \u2014 token " + (done.tokenPreview || "stored")
           + (done.hasRefreshToken ? " (auto-refresh enabled)" : "")
+          + (done.accountModels ? " \u2014 synced " + done.accountModels + " account models" : "")
           + ". Press 'Make active' to switch the live lane.");
       } catch (e) {
         alert("OAuth sign-in failed: " + e.message);
+      } finally {
+        oauthBtn.disabled = false;
+        if (oauthBtn.textContent.indexOf("\u2713") === -1) oauthBtn.textContent = "Sign in (OAuth \u2014 no API key)";
       }
     });
   });
