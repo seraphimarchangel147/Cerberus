@@ -2236,6 +2236,15 @@ export async function readOpenAIEventStream(response, {
       }
       const { part, state, index } = ensureMessagePart(event, type);
       if (state.completedParts.has(index)) {
+        // The ChatGPT/Codex backend emits output_text.done (which completes
+        // the part) BEFORE content_part.done. A done event that confirms the
+        // already-final value is a benign duplicate, not a mutation.
+        const value = type === "refusal" ? event.part?.refusal : event.part?.text;
+        const current = type === "refusal" ? part.refusal : part.text;
+        if (event.type === "response.content_part.done"
+          && (value === undefined || value === current)) {
+          return true;
+        }
         throw openAIStreamProtocolError("OpenAI stream mutated a content part after completion.");
       }
       const value = type === "refusal" ? event.part?.refusal : event.part?.text;
@@ -5891,7 +5900,13 @@ export class OpenAIResponsesProvider {
             },
             transform: async (response) => {
               const contentType = response.headers?.get?.("content-type") ?? "";
-              const streamResponse = streaming && /text\/event-stream/i.test(contentType);
+              // The ChatGPT/Codex backend serves SSE with no content-type
+              // header (proxy-stripped). When the header is absent, stream
+              // only if the response actually has a readable byte stream —
+              // header-less JSON mocks/proxies still take the .json() path.
+              const streamResponse = streaming
+                && (/text\/event-stream/i.test(contentType)
+                  || (contentType === "" && Boolean(response.body)));
               if (streamResponse) armStallTimeout();
               const parsed = streamResponse
                 ? await readOpenAIEventStream(response, {
