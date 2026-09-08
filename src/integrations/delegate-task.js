@@ -76,8 +76,13 @@ function normalizeTask(task, index) {
 }
 
 function normalizeRequest(args) {
-  const hasGoal = args?.goal !== undefined;
-  const hasTasks = args?.tasks !== undefined;
+  // Some models (observed: gpt-5.6-sol on the Codex lane) emit explicit
+  // `null` for optional params they are not using. JSON-schema treats null
+  // and absent identically here, so the exclusivity gate must too —
+  // otherwise every single-goal call arrives as {goal, tasks: null} and is
+  // rejected with "Provide exactly one of goal or tasks."
+  const hasGoal = args?.goal !== undefined && args?.goal !== null;
+  const hasTasks = args?.tasks !== undefined && args?.tasks !== null;
   if (hasGoal === hasTasks) return { error: "Provide exactly one of goal or tasks." };
 
   if (hasGoal) {
