@@ -3468,8 +3468,13 @@ function openAIContinuationLineage({ messages, input, context }) {
 
 function responseContinuationEnabled(provider, context) {
   const store = provider?.responsesContinuationStore;
+  // The ChatGPT/Codex backend is stateless: it 400s with "Store must be set
+  // to false" on store:true and rejects previous_response_id. Every hop must
+  // replay the full conversation, so continuation is permanently off there.
+  const codexBackend = /chatgpt\.com\/backend-api/i.test(String(provider?.baseUrl ?? ""));
   return Boolean(
     store
+    && !codexBackend
     && store.mode !== "off"
     && provider.zeroDataRetention !== true
     && provider.providerRouting?.data_collection !== "deny"
@@ -5815,6 +5820,17 @@ export class OpenAIResponsesProvider {
   }
 
   async postResponses(body, context = {}, options = {}) {
+    // The ChatGPT/Codex backend rejects stateful/tuning fields outright
+    // ("Store must be set to false", 400 on max_output_tokens and
+    // previous_response_id). Sanitize centrally so every caller —
+    // main loop, goal judge, forced answer — stays compatible.
+    if (/chatgpt\.com\/backend-api/i.test(String(this.baseUrl ?? ""))) {
+      const incompatible = ["max_output_tokens", "previous_response_id"];
+      if (body.store !== false || incompatible.some((k) => body[k] !== undefined)) {
+        body = { ...body, store: false };
+        for (const k of incompatible) delete body[k];
+      }
+    }
     if (
       options.turnBudget
       && normalizedBudgetLimit(options.turnBudget.limitUsd) !== null
