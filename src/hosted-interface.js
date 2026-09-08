@@ -4406,8 +4406,11 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
           // URL when the port is busy (e.g. a real Codex CLI login).
           const capture = await oauthMod.startLoopbackCapture(flow.flowId, {
             onCode: async ({ code, state }) => {
+              // Resolve by state: the port listener may outlive its own flow
+              // and receive a later flow's callback (user restarted sign-in).
+              const flowId = oauthMod.findPendingFlowByState(state) ?? flow.flowId;
               const result = await oauthMod.completeOAuthFlow(
-                flow.flowId,
+                flowId,
                 `http://localhost:1455/auth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state ?? "")}`
               );
               persistOAuthResult(runtime, oauthMod, result);

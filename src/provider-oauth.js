@@ -105,6 +105,17 @@ export function getOAuthFlowConfig(id, env = process.env) {
   return { ...flow, clientId };
 }
 
+/** Find a pending flow's id by its OAuth state (loopback callbacks carry
+ * state but arrive on whichever listener holds the port). */
+export function findPendingFlowByState(state) {
+  const wanted = String(state ?? "");
+  if (!wanted) return null;
+  for (const [id, flow] of pendingFlows) {
+    if (flow.state === wanted) return id;
+  }
+  return null;
+}
+
 /** Secret names a completed flow writes, so routes/UI never hard-code them. */
 export function oauthSecretNames(id) {
   const flow = OAUTH_FLOWS[String(id ?? "").trim().toLowerCase()];
