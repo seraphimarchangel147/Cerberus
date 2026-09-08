@@ -347,8 +347,10 @@ export function startLoopbackCapture(flowId, { port = 1455, onCode = null } = {}
           );
         }
       }
-      // One callback is all a flow gets; close soon after.
-      setTimeout(() => stopLoopbackCapture(flowId), 2000);
+      // One callback is all a flow gets: free the port quickly, but keep the
+      // terminal result around long enough for the dashboard's poll loop.
+      setTimeout(() => { try { entry.server?.close(); } catch { /* closed */ } }, 2000).unref?.();
+      setTimeout(() => stopLoopbackCapture(flowId), 120_000).unref?.();
     });
     server.once("error", () => {
       loopbackServers.delete(flowId);
@@ -386,13 +388,19 @@ export function stopLoopbackCapture(flowId) {
 export async function fetchAccountModels({ lane, accessToken, dataDir = resolveDataDir() } = {}) {
   if (lane !== "openai" || !accessToken) return null;
   const attempts = [
-    "https://chatgpt.com/backend-api/codex/models?client=codex_cli",
+    // The codex backend requires client + client_version and gates the list
+    // on the version; send a modern one so the full entitlement comes back.
+    "https://chatgpt.com/backend-api/codex/models?client=codex_cli&client_version=0.99.0",
     "https://api.openai.com/v1/models"
   ];
   for (const url of attempts) {
     try {
       const res = await fetch(url, {
-        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" }
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          originator: "codex_cli_rs",
+          "content-type": "application/json"
+        }
       });
       if (!res.ok) continue;
       const body = await res.json().catch(() => null);
