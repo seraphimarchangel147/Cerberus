@@ -57,7 +57,7 @@ const OAUTH_FLOWS = Object.freeze({
     clientIdEnv: "OPENAGI_OPENAI_OAUTH_CLIENT_ID",
     defaultClientId: "app_EMoamEEZ73f0CkXaXp7hrann",
     redirectUri: "http://localhost:1455/auth/callback",
-    scope: "openid profile email offline_access",
+    scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
     tokenStyle: "form",
     extraAuthorizeParams: {
       id_token_add_organizations: "true",
@@ -142,7 +142,9 @@ export function startOAuthFlow(id, { env = process.env, now = Date.now } = {}) {
     flowId,
     provider: flow.id,
     label: flow.label,
-    authorizeUrl: `${flow.authorizeUrl}?${params.toString()}`,
+    // Codex CLI percent-encodes (%20 for spaces); URLSearchParams would emit
+    // '+', which auth.openai.com's validator rejects for the scope param.
+    authorizeUrl: `${flow.authorizeUrl}?${params.toString().replace(/\+/g, "%20")}`,
     instructions: flow.instructions,
     expiresInSec: Math.floor(FLOW_TTL_MS / 1000)
   };
