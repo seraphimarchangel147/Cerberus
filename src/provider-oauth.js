@@ -61,7 +61,11 @@ const OAUTH_FLOWS = Object.freeze({
     tokenStyle: "form",
     extraAuthorizeParams: {
       id_token_add_organizations: "true",
-      codex_cli_simplified_flow: "true"
+      codex_cli_simplified_flow: "true",
+      // auth.openai.com validates `originator` against a whitelist tied to
+      // the Codex CLI client_id; omitting it (or sending a non-whitelisted
+      // value) fails with a misleading `missing_required_parameter`.
+      originator: "codex_cli_rs"
     },
     tokenSecret: "OPENAI_OAUTH_TOKEN",
     refreshSecret: "OPENAI_OAUTH_REFRESH_TOKEN",

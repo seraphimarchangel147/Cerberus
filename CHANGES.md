@@ -2905,3 +2905,11 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-03T22:24:02.575Z · **azazel** · edit `test/lss-adapter.test.js` — placeholder
 - 2026-09-03T22:24:59.211Z · **azazel** · edit `test/lss-adapter.test.js` — Revert stray inserted line; rewrite S4 to assert openAGI's self-heal perms enforcement (documented deviation from reference refuse-to-open)
 - 2026-09-03T22:25:49.756Z · **azazel** · create `test/lss-provider-wiring.test.js` — O2b tests: provider constructors resolve via LSS under flag, fail closed on denied destination/missing key, env behavior unchanged with flag off
+- 2026-09-08T00:43:59.953Z · **azazel** · edit `src/tool-registry.js` — mutation_lease_conflict outcomes now report retryable:true (message already said transient/retry)
+- 2026-09-08T00:44:13.222Z · **azazel** · edit `src/tool-contract.js` — not-allowed-property validation errors now list allowed keys (capped at 12)
+- 2026-09-08T00:44:38.236Z · **azazel** · edit `src/agent-host.js` — fast-lane notice now points at tool_search for internal deferred tools (searcmcp_tools is MCP-only)
+- 2026-09-08T00:45:29.656Z · **azazel** · edit `test/chat-fastlane.test.js` — pin new fast-lane guidance: tool_search is the internal bridge, searcmcp_tools MCP-only
+- 2026-09-08T00:48:16.870Z · **azazel** · edit `test/tool-outcome-registry.test.js` — regression: lease-conflict envelope forces retryable:true even when the thrown error lost the flag
+- 2026-09-08T00:48:38.311Z · **azazel** · edit `test/tool-contract-v2.test.js` — pin allowed-keys hint on not-allowed-property rejections
+- 2026-09-08T00:50:02.385Z · **azazel** · edit `src/tool-registry.js` — revert: single-site fix moves to normalizeOutcome (the idempotency clamp lives downstream)
+- 2026-09-08T00:50:54.784Z · **azazel** · edit `src/tool-outcome.js` — exempt mutation_lease_conflict from the idempotency clamp on retryable (conflict is pre-dispatch, retry always safe)
