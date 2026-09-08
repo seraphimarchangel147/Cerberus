@@ -12,6 +12,7 @@ import { BudgetGuard } from "../src/budget-guard.js";
 import { registerCodeTools } from "../src/code-tools.js";
 import { LiveStatus } from "../src/discord-channel.js";
 import { MemorySystem } from "../src/memory-system.js";
+import { OpenAIResponsesProvider } from "../src/model-provider.js";
 import {
   registerDelegateTaskTool,
   resolveSubagentConfig,
@@ -192,6 +193,56 @@ test("single delegate_task returns only the summary and keeps child turns out of
   assert.equal(seen.request.context.__spawnDepth, 1);
   assert.match(seen.request.context.__memoryScope, /^subagent:/);
   assert.ok(!seen.request.tools.some((tool) => ["delegate_task", "delegate_subtask", "send_message", "schedule_message"].includes(tool.name)));
+});
+
+
+test("AgentHost parent consumes child findings, continues work, and synthesizes the final reply", async () => {
+  const provider = new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 8, maxTurnSeconds: 60 });
+  let rootRequests = 0;
+  provider.postResponses = async (body) => {
+    const wire = JSON.stringify(body);
+    if (wire.includes("[delegated_task]")) {
+      return { id: "child_summary", output_text: "CHILD-FINDING", output: [] };
+    }
+    rootRequests += 1;
+    if (rootRequests === 1) {
+      return {
+        id: "parent_delegate",
+        output: [{ type: "function_call", call_id: "delegate_call", name: "delegate_task", arguments: JSON.stringify({ goal: "Reply with exactly CHILD-FINDING", kind: "extract" }) }]
+      };
+    }
+    if (rootRequests === 2) {
+      assert.match(wire, /CHILD-FINDING/, "the parent receives the child's exact summary");
+      return {
+        id: "parent_continue",
+        output: [{ type: "function_call", call_id: "continue_call", name: "probe_continue", arguments: "{}" }]
+      };
+    }
+    assert.match(wire, /CHILD-FINDING/, "child findings survive the post-delegation tool step");
+    assert.match(wire, /continued/, "the parent receives evidence from work done after delegation");
+    return { id: "parent_final", output_text: "Final synthesis: CHILD-FINDING; parent continued work.", output: [] };
+  };
+
+  const { host, tools } = makeHarness(provider);
+  tools.register({
+    name: "probe_continue",
+    description: "Prove the parent can continue after delegation.",
+    parameters: { type: "object", additionalProperties: false },
+    sideEffects: false,
+    handler: async () => ({ continued: true })
+  });
+
+  const result = await host.handleMessage({
+    channel: "local",
+    from: "creator",
+    sessionId: "delegate-parent-synthesis",
+    text: "Delegate the lookup, continue working, then give me the findings.",
+    backgroundReview: false
+  });
+
+  assert.equal(rootRequests, 3);
+  assert.equal(result.reply, "Final synthesis: CHILD-FINDING; parent continued work.");
+  assert.equal(result.model.stopReason, "completed");
 });
 
 test("subagent memory scope reaches remember, recall, and correction tools", async () => {
@@ -485,7 +536,12 @@ test("subagent configuration validates defaults, overrides, batch caps, and wiza
   assert.equal(waved.results.length, 3);
   assert.equal(waved.waves, 2);
   assert.match((await delegateHandler(tools)({}, {})).error, /exactly one/);
-  assert.match((await delegateHandler(tools)({ goal: "one", tasks: [{ goal: "two" }] }, {})).error, /exactly one/);
+  const strictSchemaMerged = await delegateHandler(tools)({
+    goal: "one",
+    tasks: [{ goal: "two" }]
+  }, {});
+  assert.equal(strictSchemaMerged.error, undefined);
+  assert.deepEqual(strictSchemaMerged.results.map((result) => result.goal), ["two", "one"]);
 
   const values = {
     OPENAGI_MAX_CHILDREN: "4",

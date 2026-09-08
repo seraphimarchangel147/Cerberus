@@ -783,7 +783,8 @@ for (const spec of [
 
     const childContexts = Array.from({ length: 3 }, () => ({
       __budgetEnvelope: parentContext.__budgetEnvelope,
-      __remainingIterations: parentContext.__remainingIterations
+      __remainingIterations: parentContext.__remainingIterations,
+      __spawnDepth: 1
     }));
     const results = await Promise.all(childContexts.map((context, index) => (
       provider.generate({
@@ -811,6 +812,100 @@ for (const spec of [
     );
   });
 }
+
+for (const spec of [
+  {
+    name: "OpenAI",
+    make: () => new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 8 }),
+    stub(provider, state) {
+      provider.postResponses = async (body) => {
+        if (state.seeding) return { id: "seed", output_text: "seeded", output: [] };
+        if (!body.tools) {
+          state.forcedRequests += 1;
+          return { id: `summary_${state.forcedRequests}`, output_text: "wrapped", output: [] };
+        }
+        state.toolRequests += 1;
+        return {
+          id: `step_${state.toolRequests}`,
+          output: [{ type: "function_call", call_id: `call_${state.toolRequests}`, name: "step", arguments: "{}" }]
+        };
+      };
+    },
+    registry: openAIToolRegistry
+  },
+  {
+    name: "Anthropic",
+    make: () => new AnthropicProvider({ apiKey: "test-key", maxIterations: 8 }),
+    stub(provider, state) {
+      provider.postMessages = async (body) => {
+        if (state.seeding) return { id: "seed", stop_reason: "end_turn", content: [{ type: "text", text: "seeded" }] };
+        if (!body.tools) {
+          state.forcedRequests += 1;
+          return { id: `summary_${state.forcedRequests}`, stop_reason: "end_turn", content: [{ type: "text", text: "wrapped" }] };
+        }
+        state.toolRequests += 1;
+        return {
+          id: `step_${state.toolRequests}`,
+          stop_reason: "tool_use",
+          content: [{ type: "tool_use", id: `tool_${state.toolRequests}`, name: "step", input: {} }]
+        };
+      };
+    },
+    registry: anthropicToolRegistry
+  }
+]) {
+  test(`${spec.name} delegated local caps do not collapse the parent's aggregate remainder`, async () => {
+    const provider = spec.make();
+    const state = { seeding: true, toolRequests: 0, forcedRequests: 0 };
+    spec.stub(provider, state);
+    const parentContext = {};
+
+    const seed = await provider.generate({
+      input: "seed parent envelope",
+      agent,
+      toolRegistry: spec.registry(),
+      context: parentContext,
+      maxIterations: 8
+    });
+    assert.equal(seed.iterations, 1);
+    assert.equal(parentContext.__remainingIterations, 7);
+
+    state.seeding = false;
+    const childContext = {
+      __budgetEnvelope: parentContext.__budgetEnvelope,
+      __remainingIterations: parentContext.__remainingIterations,
+      __spawnDepth: 1
+    };
+    const child = await provider.generate({
+      input: "bounded child",
+      agent,
+      toolRegistry: spec.registry(),
+      context: childContext,
+      maxIterations: 2
+    });
+    assert.equal(child.iterations, 2);
+    assert.equal(child.stopReason, "iteration-cap");
+    assert.equal(childContext.__remainingIterations, 5);
+
+    const rootContext = {
+      __budgetEnvelope: parentContext.__budgetEnvelope,
+      __remainingIterations: childContext.__remainingIterations,
+      __spawnDepth: 0
+    };
+    const root = await provider.generate({
+      input: "continue parent",
+      agent,
+      toolRegistry: spec.registry(),
+      context: rootContext,
+      maxIterations: 2
+    });
+    assert.equal(root.iterations, 2);
+    assert.equal(root.stopReason, "iteration-cap");
+    assert.equal(rootContext.__remainingIterations, 3);
+    assert.equal(state.forcedRequests, 2, "child and root each retain one wrap-up request");
+  });
+}
+
 
 for (const spec of [
   {

@@ -2918,3 +2918,8 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-08T09:56:05.898Z · **azazel** · edit `node_modules/.qa/openagi-codex-qa/src/model-provider.js` — Restore attribution sanitizer after negative regression proof
 - 2026-09-08T14:10:26.951Z · **azazel** · rewrite `drafts/goal-mode-e2e-verification-checklist.md` — Replace stale checklist with comprehensive provider-auth, dashboard-state, goal-transition, failure, and evidence matrix
 - 2026-09-08T14:12:28.443Z · **azazel** · rewrite `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Replace stale report skeleton with comprehensive implementation, evidence, gap, operations, and next-step outline
+- 2026-09-08T19:21:32.369Z · **azazel** · edit `src/model-provider.js` — Preserve parent iteration budget across delegates and reserve root wrap-up output
+- 2026-09-08T19:22:09.198Z · **azazel** · edit `test/model-provider-iterations.test.js` — Add regression coverage for delegate budget isolation and parent wrap-up
+- 2026-09-08T19:23:13.704Z · **azazel** · edit `test/model-provider-iterations.test.js` — Correct regression setup to seed a larger shared parent envelope
+- 2026-09-08T19:28:20.695Z · **azazel** · edit `test/model-provider-iterations.test.js` — Mark concurrent delegated budget contexts as children in regression test
+- 2026-09-08T19:42:27.712Z · **azazel** · edit `test/delegate-task.test.js` — Cover full parent-child-parent synthesis and intentional strict-schema merging.

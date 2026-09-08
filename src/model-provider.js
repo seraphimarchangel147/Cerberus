@@ -1040,13 +1040,11 @@ function resolveTurnBudget(context, configuredLimit, maxIterations) {
       inherited.limitUsd,
       configuredLimit
     );
-    const state = TRUSTED_TURN_BUDGET_STATE.get(inherited);
-    if (state) {
-      state.remainingIterations = Math.min(
-        state.remainingIterations,
-        inheritedIterationLimit(context, maxIterations)
-      );
-    }
+    // The inherited envelope already carries the parent's aggregate remainder.
+    // Do not clamp that shared pool to a child's LOCAL maxIterations: doing so
+    // lets a 30-step delegate collapse a 333-step parent to 30 total steps.
+    // Each provider loop still enforces its own local max; atomic claims below
+    // enforce the aggregate parent ceiling across concurrent children.
     return inherited;
   }
   const budget = {
@@ -1056,7 +1054,10 @@ function resolveTurnBudget(context, configuredLimit, maxIterations) {
   TRUSTED_TURN_BUDGETS.add(budget);
   TRUSTED_TURN_BUDGET_STATE.set(budget, {
     remainingIterations: inheritedIterationLimit(context, maxIterations),
-    forcedAnswerClaimed: false,
+    // Root and delegated turns each need a bounded wrap-up opportunity. A
+    // child claiming the only slot must never suppress the parent's final
+    // answer; concurrent children still share one child slot.
+    forcedAnswerClaims: new Set(),
     requestTail: Promise.resolve()
   });
   try { context.__budgetEnvelope = budget; } catch { /* optional inheritance */ }
@@ -1302,11 +1303,16 @@ function claimTurnIteration(turnBudget) {
   return true;
 }
 
-function claimTurnForcedAnswer(turnBudget) {
+function claimTurnForcedAnswer(turnBudget, context) {
   const state = TRUSTED_TURN_BUDGET_STATE.get(turnBudget);
   if (!state) return true;
-  if (state.forcedAnswerClaimed) return false;
-  state.forcedAnswerClaimed = true;
+  const spawnDepth = Number(context?.__spawnDepth);
+  const scope = Number.isInteger(spawnDepth) && spawnDepth > 0 ? "child" : "root";
+  if (!(state.forcedAnswerClaims instanceof Set)) {
+    state.forcedAnswerClaims = new Set(state.forcedAnswerClaimed ? ["root"] : []);
+  }
+  if (state.forcedAnswerClaims.has(scope)) return false;
+  state.forcedAnswerClaims.add(scope);
   return true;
 }
 
@@ -5599,7 +5605,7 @@ export class OpenAIResponsesProvider {
     if (
       FORCE_ANSWER_REASONS.has(stopReason)
       && !continuationMustStop
-      && claimTurnForcedAnswer(turnBudget)
+      && claimTurnForcedAnswer(turnBudget, context)
     ) {
       continuationUsedForcedAnswer = true;
       reconcileOrphanedToolCalls(conversationInput, "openai");
@@ -6595,7 +6601,7 @@ export class AnthropicProvider {
     const FORCE_ANSWER_REASONS = new Set(["iteration-cap", "stalled", "request-timeout", "turn-timeout", "provider-error"]);
     if (
       FORCE_ANSWER_REASONS.has(stopReason)
-      && claimTurnForcedAnswer(turnBudget)
+      && claimTurnForcedAnswer(turnBudget, context)
     ) {
       reconcileOrphanedToolCalls(convo, "anthropic");
       appendAnthropicUserText(
