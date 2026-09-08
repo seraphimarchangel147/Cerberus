@@ -81,9 +81,21 @@ function normalizeRequest(args) {
   // and absent identically here, so the exclusivity gate must too —
   // otherwise every single-goal call arrives as {goal, tasks: null} and is
   // rejected with "Provide exactly one of goal or tasks."
-  const hasGoal = args?.goal !== undefined && args?.goal !== null;
-  const hasTasks = args?.tasks !== undefined && args?.tasks !== null;
-  if (hasGoal === hasTasks) return { error: "Provide exactly one of goal or tasks." };
+  const hasGoal = args?.goal !== undefined && args?.goal !== null && String(args?.goal).trim() !== "";
+  const hasTasks = args?.tasks !== undefined && args?.tasks !== null
+    && !(Array.isArray(args?.tasks) && args.tasks.length === 0);
+  if (hasGoal && hasTasks) {
+    // Strict-schema models may populate both. Prefer the batch form (it is
+    // the superset) and fold the stray goal in only when it differs.
+    const goalText = String(args.goal).trim();
+    const list = Array.isArray(args.tasks) ? args.tasks : [];
+    const dup = list.some((t) => String(t?.goal ?? "").trim() === goalText);
+    args = { ...args, goal: undefined, tasks: dup ? list : [...list, { goal: goalText, context: args.context, role: args.role, kind: args.kind, verify: args.verify }] };
+    return normalizeRequest(args);
+  }
+  if (!hasGoal && !hasTasks) {
+    return { error: `Provide exactly one of goal or tasks. (received goal=${JSON.stringify(args?.goal)}, tasks=${Array.isArray(args?.tasks) ? `array[${args.tasks.length}]` : JSON.stringify(args?.tasks)})` };
+  }
 
   if (hasGoal) {
     const normalized = normalizeTask(

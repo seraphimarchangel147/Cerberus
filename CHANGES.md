@@ -2913,3 +2913,8 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-08T00:48:38.311Z · **azazel** · edit `test/tool-contract-v2.test.js` — pin allowed-keys hint on not-allowed-property rejections
 - 2026-09-08T00:50:02.385Z · **azazel** · edit `src/tool-registry.js` — revert: single-site fix moves to normalizeOutcome (the idempotency clamp lives downstream)
 - 2026-09-08T00:50:54.784Z · **azazel** · edit `src/tool-outcome.js` — exempt mutation_lease_conflict from the idempotency clamp on retryable (conflict is pre-dispatch, retry always safe)
+- 2026-09-08T09:55:10.816Z · **azazel** · create `node_modules/.qa/openagi-codex-qa/test/codex-backend-compat.test.js` — Add executable Codex backend compatibility regression probes
+- 2026-09-08T09:55:50.235Z · **azazel** · edit `node_modules/.qa/openagi-codex-qa/src/model-provider.js` — Temporarily revert attribution sanitizer for negative regression proof
+- 2026-09-08T09:56:05.898Z · **azazel** · edit `node_modules/.qa/openagi-codex-qa/src/model-provider.js` — Restore attribution sanitizer after negative regression proof
+- 2026-09-08T14:10:26.951Z · **azazel** · rewrite `drafts/goal-mode-e2e-verification-checklist.md` — Replace stale checklist with comprehensive provider-auth, dashboard-state, goal-transition, failure, and evidence matrix
+- 2026-09-08T14:12:28.443Z · **azazel** · rewrite `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Replace stale report skeleton with comprehensive implementation, evidence, gap, operations, and next-step outline
