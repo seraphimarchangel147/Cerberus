@@ -4346,14 +4346,20 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
         try {
           const values = {};
+          const clear = [];
           if (body.reasoningEffort !== undefined) {
             const effort = String(body.reasoningEffort ?? "").trim().toLowerCase();
             const allowed = ["", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
             if (!allowed.includes(effort)) {
               return sendJson(res, 400, { error: `Unknown reasoning effort: ${effort}` });
             }
-            values.OPENAGI_REASONING_EFFORT = effort;
-            process.env.OPENAGI_REASONING_EFFORT = effort;
+            if (effort) {
+              values.OPENAGI_REASONING_EFFORT = effort;
+              process.env.OPENAGI_REASONING_EFFORT = effort;
+            } else {
+              clear.push("OPENAGI_REASONING_EFFORT");
+              delete process.env.OPENAGI_REASONING_EFFORT;
+            }
           }
           if (body.speedMode !== undefined) {
             const mode = String(body.speedMode ?? "").trim().toLowerCase();
@@ -4361,16 +4367,22 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
             if (!allowed.includes(mode)) {
               return sendJson(res, 400, { error: `Unknown speed mode: ${mode}` });
             }
-            values.OPENAGI_SPEED_MODE = mode;
-            process.env.OPENAGI_SPEED_MODE = mode;
+            if (mode) {
+              values.OPENAGI_SPEED_MODE = mode;
+              process.env.OPENAGI_SPEED_MODE = mode;
+            } else {
+              clear.push("OPENAGI_SPEED_MODE");
+              delete process.env.OPENAGI_SPEED_MODE;
+            }
           }
-          if (!Object.keys(values).length) {
+          if (!Object.keys(values).length && !clear.length) {
             return sendJson(res, 400, { error: "Nothing to set — pass reasoningEffort and/or speedMode." });
           }
           saveEnv({
             dataDir: runtime.secrets?.dataDir,
             store: runtime.secrets,
             values,
+            clear,
             decidedBy: "dashboard:providers-tuning"
           });
           // Rebuild the live provider so reasoningEffort re-resolves now.
