@@ -1372,6 +1372,11 @@ function normalizedBudgetLimit(value) {
 const PROVIDER_USAGE_MAX_DEPTH = 6;
 const PROVIDER_USAGE_MAX_KEYS = 128;
 const FORBIDDEN_USAGE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+// ChatGPT/Codex backend usage carries an `attribution` map keyed by unique
+// per-message/request ids — unbounded distinct paths that blow the 128-key
+// strict cap and killed every turn ("Provider usage exceeded the key limit").
+// It's billing detail, not usage totals; skip it entirely.
+const SKIPPED_USAGE_KEYS = new Set(["attribution"]);
 
 function usageLimitError(message) {
   return new ProviderError(message, { providerCode: "invalid_usage_payload" });
@@ -1413,6 +1418,7 @@ function mergeSafeProviderUsage(target, source, {
 
   for (const [key, descriptor] of Object.entries(descriptors)) {
     if (FORBIDDEN_USAGE_KEYS.has(key)) continue;
+    if (SKIPPED_USAGE_KEYS.has(key)) continue;
     if (!Object.hasOwn(descriptor, "value")) {
       if (strict) throw usageLimitError("Provider usage contained an accessor.");
       continue;
