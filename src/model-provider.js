@@ -296,6 +296,9 @@ function isRetryableNetworkError(error) {
 async function responseProviderError(response, options = {}) {
   const body = await response.json().catch(() => ({}));
   const detail = body?.error && typeof body.error === "object" ? body.error : {};
+  // ChatGPT/Codex backend errors use {"detail": "..."} instead of OpenAI's
+  // {"error": {...}} — surface it so 400s aren't opaque.
+  const detailText = typeof body?.detail === "string" && body.detail ? body.detail : null;
   const classification = classifyProviderOutcome({
     status: response.status,
     body,
@@ -304,7 +307,7 @@ async function responseProviderError(response, options = {}) {
     env: options.env
   });
   return new ProviderError(
-    detail.message ?? `Provider request failed with ${response.status}`,
+    detail.message ?? detailText ?? `Provider request failed with ${response.status}`,
     {
       status: response.status,
       retryAfterMs: classification?.retryAfterMs ?? retryAfterMs(response),
