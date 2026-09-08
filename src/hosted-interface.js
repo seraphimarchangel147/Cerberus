@@ -4339,6 +4339,71 @@ export function createHostedInterface(runtime = createDefaultRuntime(), options 
         }
       }
 
+      // MARK: — Provider OAuth (subscription sign-in, dashboard-driven)
+      //
+      // POST /providers/oauth/start    {id} -> {flowId, authorizeUrl, instructions}
+      // POST /providers/oauth/complete {flowId, pasted} -> exchanges the code,
+      // persists tokens via saveEnv (secrets vault), registers an oauth
+      // credential-pool entry so the lane sends Bearer, and reports status.
+      if (method === "POST" && pathname === "/providers/oauth/start") {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Provider administration is default-project only" });
+        }
+        try {
+          const { startOAuthFlow, isOAuthProviderId } = await import("./provider-oauth.js");
+          // Preset ids and OAuth flow ids differ (e.g. preset "openai-chatgpt"
+          // uses the "openai" flow). Map through the preset's lane when the id
+          // isn't itself a flow id.
+          let flowProvider = String(body.id ?? "").trim().toLowerCase();
+          if (!isOAuthProviderId(flowProvider)) {
+            try { flowProvider = getProviderPreset(body.id).lane; } catch { /* keep as-is */ }
+          }
+          const flow = startOAuthFlow(flowProvider);
+          events.emit("providers", { op: "oauth-start", provider: flow.provider });
+          return sendJson(res, 200, flow);
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+      if (method === "POST" && pathname === "/providers/oauth/complete") {
+        const body = await readJson(req).catch(() => ({}));
+        const project = requireRequestProject(runtime, req, url, body);
+        if (project.id !== "default") {
+          return sendJson(res, 403, { error: "Provider administration is default-project only" });
+        }
+        try {
+          const { completeOAuthFlow, upsertOAuthPoolEntry } = await import("./provider-oauth.js");
+          const result = await completeOAuthFlow(body.flowId, body.pasted);
+          const values = { [result.tokenSecret]: result.accessToken };
+          if (result.refreshToken) values[result.refreshSecret] = result.refreshToken;
+          saveEnv({
+            dataDir: runtime.secrets?.dataDir,
+            store: runtime.secrets,
+            values,
+            decidedBy: "dashboard:providers-oauth"
+          });
+          upsertOAuthPoolEntry({
+            dataDir: runtime.secrets?.dataDir,
+            lane: result.lane,
+            tokenSecret: result.tokenSecret,
+            refreshSecret: result.refreshToken ? result.refreshSecret : null,
+            envKeyFallback: result.lane === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
+          });
+          events.emit("providers", { op: "oauth-complete", provider: result.provider });
+          return sendJson(res, 200, {
+            ok: true,
+            provider: result.provider,
+            lane: result.lane,
+            tokenPreview: maskSecretPreview(result.accessToken),
+            hasRefreshToken: Boolean(result.refreshToken)
+          });
+        } catch (error) {
+          return sendJson(res, 400, { error: error.message });
+        }
+      }
+
       // MARK: — Gateway control (update / restart)
       //
       // Restart depends on a process supervisor (systemd Restart=always here):
@@ -9171,7 +9236,7 @@ async function renderModels() {
       : '<span class="badge warn">no key</span>';
     const activeBadge = p.active ? '<span class="badge ok">LIVE</span>' : "";
     const oauthNote = p.oauth
-      ? '<a href="' + escapeHtml(p.keyUrl) + '" target="_blank" rel="noopener">Sign in / get key ↗</a>'
+      ? '<button class="prov-oauth secondary">Sign in (OAuth — no API key)</button> <a href="' + escapeHtml(p.keyUrl) + '" target="_blank" rel="noopener">or get a key ↗</a>'
       : '<a href="' + escapeHtml(p.keyUrl) + '" target="_blank" rel="noopener">Get API key ↗</a> <span class="sub">(API key only — no OAuth)</span>';
     return '<div class="card" data-provider="' + escapeHtml(p.id) + '">'
       + '<div class="row between"><span class="name">' + escapeHtml(p.label) + "</span>"
@@ -9243,6 +9308,25 @@ async function renderModels() {
         alert("Now running " + result.active + " on " + (result.model || "?"));
       } catch (e) {
         alert("Could not activate: " + e.message);
+      }
+    });
+    const oauthBtn = card.querySelector(".prov-oauth");
+    if (oauthBtn) oauthBtn.addEventListener("click", async () => {
+      try {
+        const flow = await postJson("/providers/oauth/start", { id });
+        window.open(flow.authorizeUrl, "_blank", "noopener");
+        const pasted = prompt(
+          (flow.instructions || "Complete the sign-in, then paste the code/URL here.")
+          + "\\n\\n(A sign-in tab just opened. This prompt waits for your paste.)"
+        );
+        if (!pasted) return;
+        const done = await postJson("/providers/oauth/complete", { flowId: flow.flowId, pasted });
+        await renderModels();
+        alert("Signed in to " + done.provider + " — token " + (done.tokenPreview || "stored")
+          + (done.hasRefreshToken ? " (auto-refresh enabled)" : "")
+          + ". Press 'Make active' to switch the live lane.");
+      } catch (e) {
+        alert("OAuth sign-in failed: " + e.message);
       }
     });
   });

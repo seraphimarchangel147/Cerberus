@@ -6794,9 +6794,22 @@ function credentialPoolsForOptions(options = {}) {
     secretsStore: options.secretsStore ?? options.secrets ?? null,
     ...(options.credentialPoolNow === undefined ? {} : { now: options.credentialPoolNow }),
     ...(options.credentialPoolRandom === undefined ? {} : { random: options.credentialPoolRandom }),
-    refreshOAuth: options.refreshOAuth ?? null,
+    refreshOAuth: options.refreshOAuth ?? defaultProviderOAuthRefresh,
     onEvent: options.onCredentialPoolEvent ?? null
   });
+}
+
+// Default oauth refresh hook: trade a stale subscription token's refresh
+// token for a fresh access token via provider-oauth.js. Lazy import keeps
+// model-provider free of a hard dependency; any failure returns null so the
+// pool takes its normal failure path (never throws into the request).
+async function defaultProviderOAuthRefresh(lease) {
+  try {
+    const { providerOAuthRefresh } = await import("./provider-oauth.js");
+    return await providerOAuthRefresh(lease);
+  } catch {
+    return null;
+  }
 }
 
 function providerRoutedBody(body, baseUrl, routing) {

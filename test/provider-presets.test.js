@@ -22,7 +22,10 @@ test("every preset targets a real native lane", () => {
     );
     assert.match(preset.baseUrl, /^https:\/\//u, `${preset.id} baseUrl must be https`);
     assert.ok(preset.models.includes(preset.defaultModel), `${preset.id} default model must be listed`);
-    assert.ok(preset.keyEnv.endsWith("_API_KEY"), `${preset.id} keyEnv should name an API key`);
+    assert.ok(
+      preset.keyEnv.endsWith("_API_KEY") || preset.keyEnv.endsWith("_OAUTH_TOKEN"),
+      `${preset.id} keyEnv should name an API key or OAuth token`
+    );
   }
 });
 

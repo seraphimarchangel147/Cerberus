@@ -32,8 +32,8 @@ const PRESET_LIST = Object.freeze([
     lane: "anthropic",
     baseUrl: "https://api.anthropic.com/v1",
     keyEnv: "ANTHROPIC_API_KEY",
-    defaultModel: "claude-sonnet-4-5",
-    models: ["claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5"],
+    defaultModel: "claude-opus-5",
+    models: ["claude-fable-5-1", "claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-opus-4-8", "claude-sonnet-4-6", "claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5"],
     keyUrl: "https://console.anthropic.com/settings/keys",
     oauth: true,
     note: "Native Messages API lane. Prompt caching and the cache_control marker only work here."
@@ -44,11 +44,23 @@ const PRESET_LIST = Object.freeze([
     lane: "openai",
     baseUrl: "https://api.openai.com/v1",
     keyEnv: "OPENAI_API_KEY",
-    defaultModel: "gpt-5",
-    models: ["gpt-5", "gpt-5-mini", "gpt-5-nano"],
+    defaultModel: "gpt-5.4",
+    models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4o"],
     keyUrl: "https://platform.openai.com/api-keys",
     oauth: true,
     note: "Native Responses API lane, including reasoning-item continuation."
+  },
+  {
+    id: "openai-chatgpt",
+    label: "OpenAI (ChatGPT plan)",
+    lane: "openai",
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+    keyEnv: "OPENAI_OAUTH_TOKEN",
+    defaultModel: "gpt-5.3-codex",
+    models: ["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5"],
+    keyUrl: "https://chatgpt.com",
+    oauth: true,
+    note: "ChatGPT subscription via OAuth (Codex backend) — no API key needed. Use 'Sign in with ChatGPT' below; billing rides the ChatGPT plan."
   },
   {
     id: "xai",
