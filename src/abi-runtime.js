@@ -511,7 +511,7 @@ export class AbiRuntime {
     this.hooks = options.hooks
       ?? options.tools?.hooks
       ?? new HookRegistry({ dataDir: options.dataDir, ...(options.hookOptions ?? {}) });
-    this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks });
+    this.tools = options.tools ?? new ToolRegistry({ hooks: this.hooks, dataDir: this.dataDir });
     // Outbound webhooks subscribe to the hook registry like any other observer,
     // so every existing notify() emission becomes deliverable with no call-site
     // change. Null when nothing is configured in <dataDir>/webhooks.json.
