@@ -59,6 +59,9 @@ export function classifyAbortCause(error) {
   return "provider-error";
 }
 import path from "node:path";
+import fs from "node:fs";
+import { resolveDataDir } from "./data-dir.js";
+import { writeJsonAtomic } from "./file-utils.js";
 import { types as utilTypes } from "node:util";
 import { InMemoryAgentStore, legacyDiscordKey } from "./agent-store.js";
 import { createModelProvider } from "./model-provider.js";
@@ -154,6 +157,23 @@ const DEFAULT_BACKGROUND_REVIEW_SNAPSHOT_WAIT_MS = 5000;
 const DEFAULT_BACKGROUND_REVIEW_FLUSH_MS = 60_000;
 const BACKGROUND_REVIEW_WATERMARK_KEY = "backgroundReviewV1";
 const RESPONSES_CONTINUATION_METADATA_KEY = "responsesContinuationV1";
+const MAX_PENDING_REPLY_BYTES = 64 * 1024;
+const PENDING_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function pendingReplyFilename(sessionId, turnId) {
+  return `${encodeURIComponent(sessionId)}-${encodeURIComponent(turnId)}.json`;
+}
+
+function validPendingReply(marker) {
+  return marker && typeof marker === "object"
+    && typeof marker.sessionId === "string" && marker.sessionId.length > 0
+    && ["discord", "telegram"].includes(marker.channel)
+    && typeof marker.replyText === "string" && marker.replyText.trim().length > 0
+    && Buffer.byteLength(marker.replyText, "utf8") <= MAX_PENDING_REPLY_BYTES
+    && typeof marker.createdAt === "string" && Number.isFinite(Date.parse(marker.createdAt))
+    && typeof marker.deliveryTarget === "string"
+    && marker.deliveryTarget.length > 0 && marker.deliveryTarget.length <= 1024;
+}
 
 // This intentionally errs toward the full lane. It recognizes concrete work
 // verbs, including polite request wrappers, without trying to infer intent
@@ -464,6 +484,9 @@ export class AgentHost {
     // the RunInspector, which already fsyncs to run-inspector/events.jsonl.
     this.log = options.log ?? createInspectorLogger(this.runtime.runInspector) ?? null;
     this.store = options.store ?? new InMemoryAgentStore(options.storeOptions);
+    this.pendingRepliesDir = path.join(options.dataDir ?? this.runtime.dataDir ?? resolveDataDir(), "agent-host", "pending-replies");
+    this.pendingReplyNow = options.now ?? Date.now;
+    this.pendingReplyRecovery = null;
     const modelProviderOptions = {
       ...(options.modelProviderOptions ?? {}),
       secrets: options.modelProviderOptions?.secrets ?? this.runtime.secrets,
@@ -496,6 +519,95 @@ export class AgentHost {
       options.backgroundReviewFlushMs,
       DEFAULT_BACKGROUND_REVIEW_FLUSH_MS
     );
+  }
+
+  persistPendingReply({ sessionId, turnId, channel, replyText, deliveryTarget }) {
+    try {
+      if (!sessionId || !turnId || !["discord", "telegram"].includes(channel)) return;
+      // Streaming decode holds an incomplete final UTF-8 character instead of
+      // replacing it with bytes that could exceed the 64KB cap.
+      const text = new TextDecoder().decode(
+        Buffer.from(String(replyText ?? ""), "utf8").subarray(0, MAX_PENDING_REPLY_BYTES),
+        { stream: true }
+      );
+      const marker = {
+        sessionId,
+        channel,
+        replyText: text,
+        createdAt: new Date(this.pendingReplyNow()).toISOString(),
+        deliveryTarget: String(deliveryTarget ?? "")
+      };
+      if (!validPendingReply(marker) || text === "(no text)") return;
+      writeJsonAtomic(path.join(this.pendingRepliesDir, pendingReplyFilename(sessionId, turnId)), marker);
+    } catch { /* advisory: marker persistence must never break a live turn */ }
+  }
+
+  confirmReplyDelivery(result, delivery) {
+    try {
+      if (delivery?.delivered !== true || !result?.session?.id || !result?.id) return;
+      const markerPath = path.join(this.pendingRepliesDir, pendingReplyFilename(result.session.id, result.id));
+      // A leftover confirmed receipt must never be replayed if cleanup fails.
+      fs.renameSync(markerPath, `${markerPath}.delivered`);
+      fs.unlinkSync(`${markerPath}.delivered`);
+    } catch { /* advisory: marker cleanup must never turn a delivered reply into a failed turn */ }
+  }
+
+  recoverPendingReplies(channels = this.runtime.channels) {
+    if (!this.pendingReplyRecovery) {
+      this.pendingReplyRecovery = this._recoverPendingReplies(channels);
+    }
+    return this.pendingReplyRecovery;
+  }
+
+  async _recoverPendingReplies(channels) {
+    try {
+      const entries = fs.readdirSync(this.pendingRepliesDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const markerPath = path.join(this.pendingRepliesDir, entry.name);
+        if (/\.json\.(?:recovering|delivered)$/u.test(entry.name)) {
+          try { fs.unlinkSync(markerPath); } catch { /* advisory cleanup */ }
+          continue;
+        }
+        if (!entry.name.endsWith(".json")) continue;
+        let marker;
+        try {
+          if (fs.statSync(markerPath).size > MAX_PENDING_REPLY_BYTES * 8) {
+            throw new SyntaxError("Pending reply marker is too large.");
+          }
+          marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+          if (!validPendingReply(marker)) throw new SyntaxError("Invalid pending reply marker.");
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            try { fs.renameSync(markerPath, `${markerPath}.bad`); } catch { /* advisory quarantine */ }
+          }
+          continue;
+        }
+        const age = this.pendingReplyNow() - Date.parse(marker.createdAt);
+        if (age < 0 || age >= PENDING_REPLY_MAX_AGE_MS) {
+          try { fs.unlinkSync(markerPath); } catch { /* advisory cleanup */ }
+          continue;
+        }
+        if (typeof channels?.deliver !== "function") continue;
+        const claimedPath = `${markerPath}.recovering`;
+        try {
+          // Claim before sending: concurrent scans and a crash during recovery
+          // must not retry the same reply on every boot.
+          fs.renameSync(markerPath, claimedPath);
+        } catch { continue; /* advisory: another scan may already own it */ }
+        try {
+          await channels.deliver({
+            sessionId: marker.sessionId,
+            channel: marker.channel,
+            target: marker.deliveryTarget,
+            text: `(recovered after restart)\n${marker.replyText}`
+          });
+        } catch { /* advisory: recovery is a single best-effort delivery attempt */ }
+        finally {
+          try { fs.unlinkSync(claimedPath); } catch { /* advisory cleanup */ }
+        }
+      }
+    } catch { /* advisory: unreadable markers must never prevent boot */ }
   }
 
   async handleMessage(input) {
@@ -1615,6 +1727,15 @@ export class AgentHost {
       }
     }) ?? null;
 
+    if (!ephemeral && input.origin !== "cron") {
+      this.persistPendingReply({
+        sessionId,
+        turnId,
+        channel,
+        replyText: modelResult.text,
+        deliveryTarget: input.deliveryTarget ?? input.metadata?.channelId ?? (channel === "telegram" ? from : null)
+      });
+    }
     const continuationCandidate = modelResult.__responsesContinuationCandidate ?? null;
     let sessionAfter;
     try {

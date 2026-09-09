@@ -1734,11 +1734,22 @@ export class AbiRuntime {
       result.deliverySuppressed = "silent-output";
     } else if (this.channels && input.channel && input.target) {
       try {
-        await this.channels.deliver({
+        // Silent scheduled output never becomes a recoverable outbound reply.
+        this.agentHost.persistPendingReply?.({
+          sessionId: result.session?.id,
+          turnId: result.id,
+          channel: input.channel,
+          replyText: result.reply,
+          deliveryTarget: input.target
+        });
+        const delivery = await this.channels.deliver({
           channel: input.channel,
           target: input.target,
-          text: result.reply
+          text: result.reply,
+          sessionId: result.session?.id,
+          projectId
         });
+        this.agentHost.confirmReplyDelivery?.(result, delivery);
         result.delivered = { channel: input.channel, target: input.target };
       } catch (error) {
         result.deliveryError = error.message;

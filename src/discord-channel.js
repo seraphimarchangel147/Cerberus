@@ -523,7 +523,7 @@ export class DiscordChannel {
       await status.finish(result);
       const replyText = String(result?.reply ?? "").trim();
       if (replyText && replyText !== "(no text)") {
-        await this.deliverAgentReply(message.channel_id, replyText, {
+        const delivery = await this.deliverAgentReply(message.channel_id, replyText, {
           replyToId: message.id,
           replyStream,
           deliveryContext: {
@@ -531,6 +531,7 @@ export class DiscordChannel {
             projectId: result.project?.id ?? null
           }
         });
+        this.agentHost.confirmReplyDelivery?.(result, delivery);
       } else {
         // Never end a pinged turn in silence — surface the actual stop reason.
         await replyStream.stop();
