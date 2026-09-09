@@ -4776,7 +4776,7 @@ function shortStopGuidance(reason, iterations, maxIterations, wallClock) {
   }
   if (reason === "context-too-large") {
     return {
-      blocked: "Recent verbatim context could not fit below the provider safety threshold.",
+      blocked: "The turn stopped before sending an oversized model request because recent verbatim context could not fit below the provider safety threshold.",
       next: "Start a fresh session, reduce large attachments or tool outputs, or set OPENAGI_CONTEXT_WINDOW_TOKENS to a verified limit."
     };
   }
@@ -5739,16 +5739,7 @@ export class OpenAIResponsesProvider {
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractResponseText(response);
-          if (forced) {
-            text = structuredShortStopReport({
-              reason: stopReason,
-              iterations,
-              maxIterations,
-              toolCalls,
-              modelText: forced,
-              wallClock: wallClockStopSnapshot(wallClockCheckpointState)
-            });
-          }
+          if (forced) text = forced;
         }
       } catch (error) {
         // Best-effort: if the forced answer also fails, fall through to the
@@ -6741,16 +6732,7 @@ export class AnthropicProvider {
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractAnthropicText(response);
-          if (forced) {
-            text = structuredShortStopReport({
-              reason: stopReason,
-              iterations,
-              maxIterations,
-              toolCalls,
-              modelText: forced,
-              wallClock: wallClockStopSnapshot(wallClockCheckpointState)
-            });
-          }
+          if (forced) text = forced;
         }
       } catch (error) {
         // The forced answer is best-effort. If IT also times out/stalls or the

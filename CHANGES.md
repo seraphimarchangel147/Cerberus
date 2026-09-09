@@ -2955,3 +2955,4 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-09T12:29:29.432Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Refresh evidence report structure metadata for the current draft-only planner task.
 - 2026-09-09T17:13:29.096Z · **azazel** · edit `src/model-provider.js` — Preserve actionable wall-clock diagnostics in structured short-stop reports.
 - 2026-09-09T17:17:10.565Z · **azazel** · edit `src/model-provider.js` — Keep legacy went-idle wording in actionable structured stall reports.
+- 2026-09-09: Harness hardening Fix 1 preserves non-empty forced answers unchanged for both providers, retains structured empty-answer fallbacks, and restores oversized-request diagnostics. Targeted regression suite: 158 pass / 0 fail (Ubuntu WSL).
