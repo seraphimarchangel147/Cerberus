@@ -7,8 +7,100 @@ import {
 } from "../src/model-provider.js";
 import { SETUP_FIELDS } from "../src/setup-wizard.js";
 import { ToolRegistry } from "../src/tool-registry.js";
+import { turnInspectorMetadata } from "../src/run-inspector.js";
 
 const agent = { id: "main", name: "Main Agent" };
+
+async function checkpointWave(Provider, { advances, strikes = 2, progress = false, frozen = false }) {
+  let now = 0;
+  let requests = 0;
+  const events = [];
+  const provider = new Provider({
+    apiKey: "test",
+    env: {},
+    maxIterations: advances.length,
+    maxTurnSeconds: 0.001,
+    wallClockIdleStrikes: strikes,
+    stallTimeoutMs: 0,
+    now: () => now
+  });
+  const registry = new ToolRegistry({ env: { OPENAGI_REPEATED_SUCCESS_LIMIT: "100" } });
+  registerProgressTool(registry, () => {
+    now += advances[requests - 1];
+    return { revision: requests };
+  });
+  const respond = async (body) => {
+    if (!body.tools?.length) return Provider === OpenAIResponsesProvider
+      ? { output: [] }
+      : { content: [], stop_reason: "end_turn" };
+    if (!progress) now += advances[requests];
+    requests += 1;
+    return Provider === OpenAIResponsesProvider ? toolResponse(requests) : {
+      id: `message-${requests}`,
+      stop_reason: "tool_use",
+      content: [{ type: "tool_use", id: `use-${requests}`, name: "poll_progress", input: { target: "job-a" } }]
+    };
+  };
+  provider.postResponses = respond;
+  provider.postMessages = respond;
+  const context = { __onToolEvent: (event) => events.push(event) };
+  const result = await provider.generate({
+    input: "check progress",
+    agent,
+    toolRegistry: registry,
+    context: frozen ? Object.freeze(context) : context
+  });
+  return { result, checkpoints: events.filter((event) => event.phase === "wall-clock-checkpoint") };
+}
+
+for (const Provider of [OpenAIResponsesProvider, AnthropicProvider]) {
+  test(`${Provider.name} resolves a positive idle-strike interval`, () => {
+    for (const invalid of [undefined, "0", "-1", "1.5", "invalid"]) {
+      const provider = new Provider({ apiKey: "test", env: { OPENAGI_IDLE_STRIKE_MIN_INTERVAL_MS: invalid } });
+      assert.equal(provider.idleStrikeMinIntervalMs, 5000);
+    }
+    assert.equal(new Provider({ apiKey: "test", env: { OPENAGI_IDLE_STRIKE_MIN_INTERVAL_MS: "37" } }).idleStrikeMinIntervalMs, 37);
+  });
+
+  test(`${Provider.name} back-to-back idle checkpoints spend one strike`, async () => {
+    const { checkpoints } = await checkpointWave(Provider, { advances: [1, 1] });
+    assert.deepEqual(checkpoints.map((event) => event.extensionKind), ["idle", "idle-debounced"]);
+    assert.deepEqual(checkpoints.map((event) => event.idleStrikesLeft), [1, 1]);
+  });
+
+  test(`${Provider.name} spends the next strike exactly when the interval expires`, async () => {
+    const { checkpoints } = await checkpointWave(Provider, { advances: [1, 4999, 1] });
+    assert.deepEqual(checkpoints.map((event) => event.extensionKind), ["idle", "idle-debounced", "idle"]);
+    assert.deepEqual(checkpoints.map((event) => event.idleStrikesLeft), [1, 1, 0]);
+  });
+
+  test(`${Provider.name} rapid progress checkpoints still extend free`, async () => {
+    const { checkpoints, result } = await checkpointWave(Provider, { advances: [1, 1, 1, 1], progress: true });
+    assert.ok(checkpoints.length >= 3);
+    assert.ok(checkpoints.every((event) => event.extensionKind === "progress"));
+    assert.ok(checkpoints.every((event) => event.idleStrikesLeft === 2));
+    assert.equal(result.stopReason, "iteration-cap");
+  });
+
+  test(`${Provider.name} debounces exhaustion until a spaced idle check`, async () => {
+    const { checkpoints, result } = await checkpointWave(Provider, { advances: [1, 1, 4999], strikes: 1 });
+    assert.deepEqual(checkpoints.map((event) => event.extensionKind), ["idle", "idle-debounced"]);
+    assert.ok(checkpoints.every((event) => event.idleStrikesLeft === 0));
+    assert.equal(result.stopReason, "turn-timeout");
+  });
+
+  test(`${Provider.name} unreadable progress also debounces idle spending`, async () => {
+    const { checkpoints } = await checkpointWave(Provider, { advances: [1, 1], frozen: true });
+    assert.deepEqual(checkpoints.map((event) => event.extensionKind), ["idle", "idle-debounced"]);
+    assert.ok(checkpoints.every((event) => event.progressSinceLastCheckpoint === null));
+  });
+}
+
+test("checkpoint observers preserve the idle-debounced decision", () => {
+  const event = { phase: "wall-clock-checkpoint", extensionKind: "idle-debounced", idleStrikesLeft: 1, progressSinceLastCheckpoint: false };
+  assert.match(formatWallClockCheckpointActivity(event), /without spending an allowance \(1 left\)/);
+  assert.equal(turnInspectorMetadata(event).metadata.extensionKind, "idle-debounced");
+});
 
 function registerProgressTool(registry, handler) {
   registry.register({
@@ -109,6 +201,7 @@ test("no progress spends bounded idle strikes then stops as stalled", async () =
     maxIterations: 20,
     maxTurnSeconds: 1,
     wallClockIdleStrikes: 2,
+    idleStrikeMinIntervalMs: 1000,
     now: () => now,
     stallTimeoutMs: 0
   });
@@ -162,6 +255,7 @@ test("unavailable progress accounting fails closed onto bounded idle strikes", a
     maxIterations: 20,
     maxTurnSeconds: 1,
     wallClockIdleStrikes: 1,
+    idleStrikeMinIntervalMs: 1000,
     now: () => now,
     stallTimeoutMs: 0
   });
@@ -347,6 +441,7 @@ test("Anthropic consumes the same bounded idle signal", async () => {
     maxIterations: 20,
     maxTurnSeconds: 1,
     wallClockIdleStrikes: 2,
+    idleStrikeMinIntervalMs: 1000,
     now: () => now,
     stallTimeoutMs: 0
   });
@@ -552,6 +647,7 @@ test("a generous idle budget lets a quiet-but-alive turn finish (Creator tuning)
     maxTurnSeconds: 1,
     maxTurnHardSeconds: 100,
     wallClockIdleStrikes: 12,
+    idleStrikeMinIntervalMs: 1000,
     now: () => now,
     stallTimeoutMs: 0
   });

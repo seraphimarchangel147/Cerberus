@@ -1315,7 +1315,8 @@ test("checkpoint budget exhaustion still hard-stops with turn-timeout", async ()
     apiKey: "test-key",
     maxIterations: 5,
     maxTurnSeconds: 0.01,
-    wallClockCheckpoints: 1
+    wallClockCheckpoints: 1,
+    idleStrikeMinIntervalMs: 1
   });
   provider.postResponses = async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1335,7 +1336,8 @@ test("idle exhaustion summary names the consumed allowances and blames idleness,
     apiKey: "test-key",
     maxIterations: 5,
     maxTurnSeconds: 0.01,
-    wallClockCheckpoints: 1
+    wallClockCheckpoints: 1,
+    idleStrikeMinIntervalMs: 1
   });
   let calls = 0;
   provider.postResponses = async () => {

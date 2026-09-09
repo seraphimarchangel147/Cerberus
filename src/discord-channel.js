@@ -75,6 +75,9 @@ export function formatWallClockCheckpointActivity(event = {}) {
   const verdict = event?.progressSinceLastCheckpoint === false
     ? "no new output"
     : "progress unreadable; idle fail-safe";
+  if (event?.extensionKind === "idle-debounced") {
+    return `Idle checkpoint - ${verdict}; extended without spending an allowance (${idleLeft} left)`;
+  }
   return `Idle checkpoint - ${verdict} (${idleLeft} idle allowance${idleLeft === 1 ? "" : "s"} left before the turn is stopped as stalled)`;
 }
 

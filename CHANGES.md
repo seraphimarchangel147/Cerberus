@@ -2956,3 +2956,5 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-09T17:13:29.096Z · **azazel** · edit `src/model-provider.js` — Preserve actionable wall-clock diagnostics in structured short-stop reports.
 - 2026-09-09T17:17:10.565Z · **azazel** · edit `src/model-provider.js` — Keep legacy went-idle wording in actionable structured stall reports.
 - 2026-09-09: Harness hardening Fix 1 preserves non-empty forced answers unchanged for both providers, retains structured empty-answer fallbacks, and restores oversized-request diagnostics. Targeted regression suite: 158 pass / 0 fail (Ubuntu WSL).
+
+- 2026-09-09: Harness hardening Fix 2 debounces idle-strike spending with OPENAGI_IDLE_STRIKE_MIN_INTERVAL_MS (positive integer, default 5000ms). Rapid idle checks extend without spending, progress extensions remain free, and checkpoint observers retain idle-debounced receipts. Targeted tests: 72 pass / 0 fail.
