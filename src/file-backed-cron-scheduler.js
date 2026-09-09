@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CronScheduler } from "./cron-scheduler.js";
-import { ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
+import { appendJsonLine, ensureDir, readJsonFile, writeJsonAtomic } from "./file-utils.js";
 import { nowIso } from "./utils.js";
 import { resolveDataDir } from "./data-dir.js";
 
@@ -19,6 +19,8 @@ export class FileBackedCronScheduler extends CronScheduler {
   constructor(options = {}) {
     super(options);
     this.storePath = options.storePath ?? path.join(resolveDataDir(), "cron", "jobs.json");
+    this.quarantinePath = path.join(path.dirname(this.storePath), "quarantine.jsonl");
+    this.quarantineLog = options.log ?? ((message) => console.warn(message));
     ensureDir(path.dirname(this.storePath));
     // { runningJobId, startedAt } while a job handler is executing; persisted
     // into the store so a mid-run daemon death leaves a visible marker.
@@ -36,10 +38,36 @@ export class FileBackedCronScheduler extends CronScheduler {
     const storedJobs = store?.version === 1 && Array.isArray(store.jobs)
       ? store.jobs.slice(0, MAX_PERSISTED_CRON_JOBS)
       : [];
+    const retainedRows = [];
+    let quarantined = 0;
     for (const raw of storedJobs) {
-      const job = normalizeStoredJob(raw);
-      if (!job || this.jobs.has(job.id)) continue;
-      this.jobs.set(job.id, job);
+      try {
+        const job = normalizeStoredJob(raw);
+        if (this.jobs.has(job.id)) throw new TypeError("Duplicate cron job id.");
+        this.jobs.set(job.id, job);
+        retainedRows.push(raw);
+      } catch (error) {
+        const reason = error?.message ?? "Invalid cron job.";
+        try {
+          appendJsonLine(this.quarantinePath, { row: raw, reason, timestamp: nowIso() });
+          quarantined += 1;
+          try { this.quarantineLog(`[cron] quarantined row: ${reason}`); } catch { /* advisory logging */ }
+        } catch {
+          // Skip bad data in memory, but retain it on disk if the quarantine
+          // could not be written. A later boot can recover the original row.
+          retainedRows.push(raw);
+          try { this.quarantineLog(`[cron] quarantine write failed; row skipped: ${reason}`); } catch { /* advisory logging */ }
+        }
+      }
+    }
+    if (quarantined > 0) {
+      try {
+        writeJsonAtomic(this.storePath, {
+          ...store,
+          updatedAt: nowIso(),
+          jobs: [...retainedRows, ...store.jobs.slice(MAX_PERSISTED_CRON_JOBS)]
+        });
+      } catch { /* advisory: valid jobs can still boot if cleanup cannot be persisted */ }
     }
     // A persisted running marker means the previous process died while this
     // job's handler was executing. Stash it for consumeInterruption().
@@ -138,37 +166,40 @@ function readCronStore(storePath) {
 }
 
 function normalizeStoredJob(value) {
-  if (!isPlainRecord(value)) return null;
+  if (!isPlainRecord(value)) throw new TypeError("Cron row must be an object.");
   const id = boundedIdentifier(value.id, JOB_ID_RE);
   const task = boundedIdentifier(value.task, TASK_ID_RE);
-  if (!id || !task) return null;
+  if (!id) throw new TypeError("Cron row has a missing or invalid id.");
+  if (!task) throw new TypeError("Cron row has a missing or invalid task.");
   if (
     (value.name !== undefined && boundedText(value.name, 512) === null)
     || (value.enabled !== undefined && typeof value.enabled !== "boolean")
     || (value.input !== undefined && !isPlainRecord(value.input))
   ) {
-    return null;
+    throw new TypeError("Invalid cron name, enabled flag, or input type.");
   }
   const input = boundedJsonObject(value.input ?? {});
-  if (!input) return null;
+  if (!input) throw new TypeError("Cron input exceeds bounded JSON limits.");
   const enabled = value.enabled ?? true;
   const intervalMs = value.intervalMs == null
     ? null
     : positiveSafeInteger(value.intervalMs);
-  if (value.intervalMs != null && intervalMs === null) return null;
+  if (value.intervalMs != null && intervalMs === null) throw new TypeError("Cron intervalMs must be a positive safe integer.");
   const dailyAt = value.dailyAt == null ? null : boundedText(value.dailyAt, 5);
-  if (dailyAt !== null && !DAILY_AT_RE.test(dailyAt)) return null;
+  if (value.dailyAt != null && (dailyAt === null || !DAILY_AT_RE.test(dailyAt))) {
+    throw new TypeError("Cron dailyAt must be a valid HH:MM time.");
+  }
   const nextRunAt = value.nextRunAt == null && !enabled
     ? null
     : validIso(value.nextRunAt);
-  if (enabled && !nextRunAt) return null;
-  if (!enabled && value.nextRunAt != null && !nextRunAt) return null;
+  if (enabled && !nextRunAt) throw new TypeError("Enabled cron job requires a valid nextRunAt.");
+  if (!enabled && value.nextRunAt != null && !nextRunAt) throw new TypeError("Invalid cron nextRunAt.");
   const createdAt = value.createdAt == null
     ? "1970-01-01T00:00:00.000Z"
     : validIso(value.createdAt);
-  if (!createdAt) return null;
+  if (!createdAt) throw new TypeError("Invalid cron createdAt.");
   const lastRunAt = value.lastRunAt == null ? null : validIso(value.lastRunAt);
-  if (value.lastRunAt != null && !lastRunAt) return null;
+  if (value.lastRunAt != null && !lastRunAt) throw new TypeError("Invalid cron lastRunAt.");
   const pinnedProvider = value.pinnedProvider == null
     ? null
     : boundedText(value.pinnedProvider, 256);
@@ -179,7 +210,7 @@ function normalizeStoredJob(value) {
     (value.pinnedProvider != null && !pinnedProvider)
     || (value.pinnedModel != null && !pinnedModel)
   ) {
-    return null;
+    throw new TypeError("Invalid cron model pin.");
   }
   return {
     id,

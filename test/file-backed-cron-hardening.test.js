@@ -97,9 +97,71 @@ test("file-backed cron caps candidate processing deterministically", (t) => {
     ]
   });
   assert.deepEqual(
-    new FileBackedCronScheduler({ storePath }).listJobs(),
+    new FileBackedCronScheduler({ storePath, log: () => {} }).listJobs(),
     []
   );
+});
+
+for (const [label, invalid, reason] of [
+  ["bad JSON type", "not a job", /must be an object/],
+  ["missing id", { ...validJob(), id: undefined }, /missing or invalid id/],
+  ["negative interval", { ...validJob(), intervalMs: -10 }, /intervalMs/],
+  ["invalid daily time type", { ...validJob(), dailyAt: 123 }, /dailyAt/]
+]) {
+  test(`cron boot quarantines ${label} and loads valid neighbors`, (t) => {
+    const storePath = tempStore(t);
+    const rows = [validJob("first"), invalid, validJob("last")];
+    writeStore(storePath, { version: 1, jobs: rows });
+    const logs = [];
+    const cron = new FileBackedCronScheduler({ storePath, log: (message) => logs.push(message) });
+    assert.deepEqual(cron.listJobs().map((job) => job.id), ["first", "last"]);
+    const receipts = fs.readFileSync(cron.quarantinePath, "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(receipts.length, 1);
+    assert.deepEqual(receipts[0].row, JSON.parse(JSON.stringify(invalid)));
+    assert.match(receipts[0].reason, reason);
+    assert.ok(Number.isFinite(Date.parse(receipts[0].timestamp)));
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], reason);
+    assert.deepEqual(JSON.parse(fs.readFileSync(storePath, "utf8")).jobs.map((job) => job.id), ["first", "last"]);
+  });
+}
+
+test("cron quarantine grows append-only and cleaned rows are not quarantined again", (t) => {
+  const storePath = tempStore(t);
+  writeStore(storePath, { version: 1, jobs: [null, validJob()] });
+  const cron = new FileBackedCronScheduler({ storePath, log: () => {} });
+  const first = fs.readFileSync(cron.quarantinePath, "utf8");
+  cron.load();
+  assert.equal(fs.readFileSync(cron.quarantinePath, "utf8"), first);
+  writeStore(storePath, { version: 1, jobs: [validJob(), { id: "missing-task" }] });
+  cron.load();
+  const second = fs.readFileSync(cron.quarantinePath, "utf8");
+  assert.ok(second.startsWith(first));
+  assert.equal(second.trim().split("\n").length, 2);
+});
+
+test("cron quarantine failure preserves bad rows on disk while valid jobs boot", (t) => {
+  const storePath = tempStore(t);
+  writeStore(storePath, { version: 1, jobs: [null, validJob()] });
+  fs.mkdirSync(path.join(path.dirname(storePath), "quarantine.jsonl"));
+  const logs = [];
+  const cron = new FileBackedCronScheduler({ storePath, log: (message) => logs.push(message) });
+  assert.equal(cron.listJobs().length, 1);
+  assert.equal(JSON.parse(fs.readFileSync(storePath, "utf8")).jobs.length, 2);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /quarantine write failed/);
+});
+
+test("throwing quarantine logging cannot prevent valid jobs or interruption recovery", (t) => {
+  const storePath = tempStore(t);
+  writeStore(storePath, {
+    version: 1, jobs: [false, validJob()],
+    running: { runningJobId: "valid-job", startedAt: "2026-09-09T00:00:00.000Z" }
+  });
+  new FileBackedCronScheduler({ storePath, log: () => { throw new Error("broken logger"); } });
+  const reloaded = new FileBackedCronScheduler({ storePath });
+  assert.equal(reloaded.listJobs().length, 1);
+  assert.equal(reloaded.consumeInterruption().runningJobId, "valid-job");
 });
 
 test("disabled jobs with null nextRunAt remain sortable and survive reload", (t) => {

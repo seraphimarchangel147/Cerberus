@@ -860,7 +860,9 @@ export class DiscordCommands {
         ? await this.channel.enqueueSessionTask(sessionId, runTurn)
         : await runTurn();
       const reply = String(result?.reply ?? "").trim() || "MoA turn completed without text.";
-      return this.followUp(interaction, { content: reply.slice(0, 1900) });
+      const delivery = await this.followUp(interaction, { content: reply.slice(0, 1900) });
+      host.confirmReplyDelivery?.(result, { delivered: Boolean(delivery?.id) });
+      return delivery;
     } catch (error) {
       return this.followUp(interaction, {
         content: `MoA turn failed: ${error?.message ?? String(error)}`.slice(0, 1900)
@@ -1397,9 +1399,11 @@ export class DiscordCommands {
           ? await this.channel.enqueueSessionTask(sessionId, runContinuation)
           : await runContinuation();
         const reply = String(result?.reply ?? "").trim();
-        return this.followUp(interaction, {
+        const delivery = await this.followUp(interaction, {
           content: (reply || "Persistent goal resumed.").slice(0, 1900)
         });
+        this.channel.agentHost.confirmReplyDelivery?.(result, { delivered: Boolean(delivery?.id) });
+        return delivery;
       } catch (error) {
         return this.followUp(interaction, { content: `Goal resume failed: ${error?.message ?? String(error)}`.slice(0, 1900) });
       }

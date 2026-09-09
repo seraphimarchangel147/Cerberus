@@ -2958,3 +2958,16 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-09T17:23:40.195Z · **azazel** · create `src/update-rehearsal.js` — Add isolated fail-closed update rehearsal before live activation.
 - 2026-09-09T17:24:05.385Z · **azazel** · edit `src/self-update.js` — Require successful isolated candidate rehearsal before self-update activation.
 - 2026-09-09T20:27:26.548Z · **azazel** · create `melee-web-work/test-stage-results.js` — Add focused stage/results behavior regression tests
+- 2026-09-09: Harness hardening Fix 1 preserves non-empty forced answers unchanged for both providers, retains structured empty-answer fallbacks, and restores oversized-request diagnostics. Targeted regression suite: 158 pass / 0 fail (Ubuntu WSL).
+
+- 2026-09-09: Harness hardening Fix 2 debounces idle-strike spending with OPENAGI_IDLE_STRIKE_MIN_INTERVAL_MS (positive integer, default 5000ms). Rapid idle checks extend without spending, progress extensions remain free, and checkpoint observers retain idle-debounced receipts. Targeted tests: 72 pass / 0 fail.
+
+- 2026-09-09: Harness hardening Fix 3 stores final outbound replies under agent-host/pending-replies before delivery, capped at 64KB of UTF-8 text, and removes them after transport confirmation. Channel boot attempts recent unconfirmed replies once with the recovery prefix; stale markers are dropped, corrupt markers become .bad, and recovery claims prevent repeated replay across restarts. Marker failures are advisory. Discord, Telegram, scheduled replies, and Discord command replies confirm delivery; silent scheduled output is excluded. Targeted tests: 87 pass / 0 fail.
+
+- 2026-09-09: Harness hardening Fix 4 moves invalid or duplicate persisted cron rows into cron/quarantine.jsonl with the original row, validation reason, and timestamp, logging one line per row. Valid jobs continue booting, cleaned rows are removed from jobs.json, interruption markers survive cleanup, and quarantine/logging failures are advisory. Targeted tests: 23 pass / 0 fail.
+
+- 2026-09-09: Harness hardening Fix 5 adds permissionTier metadata: read_only, standard, sensitive, or manual_only. Unspecified tools default to standard; tools declaring sideEffects: false default to read_only. Creating ~/.openagi/KILLSWITCH (or KILLSWITCH in the configured data directory) refuses every non-read_only invocation with the typed killswitch_active error naming that file. Checks occur before tool callbacks and before dispatch, including after asynchronous waits; approvals, caller flags, and mutable metadata cannot override the switch. Remove the file externally to restore invocation immediately. Tier labels otherwise retain existing approval policy. Targeted tests: 36 pass / 0 fail.
+
+- 2026-09-09: Final full-suite validation with npm test in Ubuntu WSL: 2,517 pass / 1 fail / 24 skipped (2,542 tests). The sole failure is the pre-existing memtree test: unmerged slots are re-queued for merge, never served as data. This host's Ubuntu baseline was 2,453 pass / 9 fail / 24 skipped; Windows additionally failed seven POSIX-permission checks. All eight planned regressions are repaired; the memtree failure remains untouched.
+
+HARNESS HARDENING PHASE 1 COMPLETE

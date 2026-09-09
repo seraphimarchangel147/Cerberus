@@ -97,10 +97,12 @@ export class ChannelManager {
   }
 
   start() {
+    const recovery = this.agentHost?.recoverPendingReplies?.(this);
     if (process.env.TELEGRAM_POLLING === "1") {
       this.telegram.startPolling();
     }
     this.discord.start();
+    return recovery;
   }
 
   stop() {
@@ -194,10 +196,11 @@ export class TelegramChannel {
     });
 
     if (this.token) {
-      await this.deliverAgentReply(chatId, result.reply, {
+      const delivery = await this.deliverAgentReply(chatId, result.reply, {
         sessionId: result.session?.id ?? null,
         projectId: result.project?.id ?? null
       });
+      this.agentHost.confirmReplyDelivery?.(result, delivery);
     }
 
     return result;
@@ -263,7 +266,8 @@ export class TelegramChannel {
       // into false tool failures.
       candidates: summarizeDeliverables(candidates),
       successfulCandidates: summarizeDeliverables(successfulCandidates),
-      message
+      message,
+      delivered: message?.ok === true && message?.result?.message_id != null
     };
   }
 

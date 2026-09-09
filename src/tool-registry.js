@@ -4,6 +4,9 @@
 // progress detection for repeated tool calls.
 
 import { createId, nowIso, tokenOverlapScore } from "./utils.js";
+import fs from "node:fs";
+import path from "node:path";
+import { resolveDataDir } from "./data-dir.js";
 import { HookRegistry } from "./hook-registry.js";
 // job-manager does not import this module, so this direction is acyclic.
 import {
@@ -76,6 +79,31 @@ const EXACT_MANUAL_APPROVAL = Symbol("exact-manual-approval");
 const SEMANTIC_OUTCOME_TRACKED = Symbol("semantic-outcome-tracked");
 const EXECUTION_RECEIPT_STATE = Symbol("execution-receipt-state");
 const REGISTRY_FAILURE_STATE = new WeakMap();
+const REGISTRY_KILLSWITCH_PATH = new WeakMap();
+export const TOOL_PERMISSION_TIERS = Object.freeze(["read_only", "standard", "sensitive", "manual_only"]);
+
+export class ToolKillswitchError extends Error {
+  constructor(tool, killswitchPath) {
+    super(`Tool ${tool.name} (${tool.permissionTier}) is refused while ${killswitchPath} exists.`);
+    this.name = "ToolKillswitchError";
+    this.code = "killswitch_active";
+    this.killswitchPath = killswitchPath;
+  }
+}
+
+function toolKillswitchRefusal(registry, tool, receiptState) {
+  if (!tool || tool.permissionTier === "read_only") return null;
+  const killswitchPath = REGISTRY_KILLSWITCH_PATH.get(registry);
+  if (!fs.existsSync(killswitchPath)) return null;
+  const error = new ToolKillswitchError(tool, killswitchPath);
+  markExecutionDecision(receiptState, "execution", "blocked");
+  return semanticToolError(tool, error.message, {
+    code: error.code,
+    status: "blocked",
+    changed: false
+  });
+}
+
 const EXTERNAL_MEMORY_TIMEOUT_MS = 5000;
 const EXTERNAL_MEMORY_MAX_TIMEOUT_MS = 30000;
 const MAX_TURN_FAILURE_SCOPES = 256;
@@ -202,6 +230,9 @@ export class ToolRegistry {
   constructor(options = {}) {
     this.tools = new Map();
     this.env = options.env ?? process.env;
+    // Pin the operator's path at construction; invocation context, approval
+    // flags, and later environment changes cannot redirect the killswitch.
+    REGISTRY_KILLSWITCH_PATH.set(this, path.resolve(options.dataDir ?? resolveDataDir(), "KILLSWITCH"));
     // Hermes's "always" choice is intentionally bounded to one live session.
     // Keeping it in memory guarantees a daemon restart clears every allowance.
     this.sessionAllows = new Set();
@@ -239,6 +270,12 @@ export class ToolRegistry {
       );
     }
     const sideEffects = tool.sideEffects !== false;
+    const permissionTier = tool.permissionTier === undefined
+      ? (sideEffects ? "standard" : "read_only")
+      : tool.permissionTier;
+    if (!TOOL_PERMISSION_TIERS.includes(permissionTier)) {
+      throw new TypeError(`Tool ${tool.name} permissionTier must be one of ${TOOL_PERMISSION_TIERS.join(", ")}.`);
+    }
     const forwardInvocation = typeof tool.forwardInvocation === "function"
       ? tool.forwardInvocation
       : typeof metadata.forwardInvocation === "function"
@@ -318,6 +355,7 @@ export class ToolRegistry {
         needsConfirmation
       })
     };
+    Object.defineProperty(normalized, "permissionTier", { value: permissionTier, enumerable: true });
     this.tools.set(normalized.name, normalized);
     return normalized;
   }
@@ -398,6 +436,7 @@ export class ToolRegistry {
       source: tool.source,
       parameters: tool.parameters,
       sideEffects: tool.sideEffects,
+      permissionTier: tool.permissionTier,
       needsConfirmation: tool.needsConfirmation,
       manualApproval: tool.manualApproval,
       capability: tool.capability,
@@ -639,6 +678,8 @@ export class ToolRegistry {
       [EXECUTION_RECEIPT_STATE]: receiptState
     });
     const tool = this.tools.get(name);
+    const refusal = toolKillswitchRefusal(this, tool, receiptState);
+    if (refusal) return this._finalizeInvocation(tool, name, null, context, refusal);
     try {
       const safeArgs = snapshotToolValue(args ?? {});
       if (!safeArgs || typeof safeArgs !== "object" || Array.isArray(safeArgs)) {
@@ -1083,6 +1124,12 @@ export class ToolRegistry {
 
   _recordOutcome(tracking, envelope) {
     const { scope, fingerprint } = tracking;
+    if (envelope?.outcome?.code === "killswitch_active") {
+      // No dispatch occurred. Removing the file must restore this invocation
+      // immediately, without a cached failure keeping it blocked.
+      scope.entries.delete(fingerprint);
+      return null;
+    }
     // A PENDING outcome means a long-running call is still executing (a build,
     // a full test suite, a deploy). That is liveness, not stagnation -- but the
     // success branch below explicitly excludes pending, and the failure branch
@@ -1484,6 +1531,8 @@ export class ToolRegistry {
       return { ok: false, error: `Unknown tool: ${name}` };
     }
     markExecutionDecision(receiptState, "tool_lookup", "passed");
+    const refusal = toolKillswitchRefusal(this, tool, receiptState);
+    if (refusal) return refusal;
     if (invocationWasAborted(context)) {
       markExecutionDecision(receiptState, "cancellation", "cancelled");
       return cancelledToolEnvelope(tool, { dispatched: false });
@@ -1812,6 +1861,8 @@ export class ToolRegistry {
           changed: false
         });
       }
+      const beforeCheckpointRefusal = toolKillswitchRefusal(this, tool, receiptState);
+      if (beforeCheckpointRefusal) return beforeCheckpointRefusal;
       if (this.checkpoints?.beforeToolCall) {
         try {
           checkpointCapture = await this.checkpoints.beforeToolCall({
@@ -1906,6 +1957,8 @@ export class ToolRegistry {
       } else {
         markExecutionDecision(receiptState, "resource_lease", "not_required");
       }
+      const beforeDispatchRefusal = toolKillswitchRefusal(this, tool, receiptState);
+      if (beforeDispatchRefusal) return beforeDispatchRefusal;
       dispatched = true;
       if (receiptState) receiptState.dispatched = true;
       markExecutionDecision(receiptState, "dispatch", "dispatched");

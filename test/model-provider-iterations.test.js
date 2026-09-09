@@ -463,13 +463,28 @@ for (const spec of [
     assert.equal(result.stopReason, "iteration-cap");
     assert.equal(sent.length, 2);
     assert.deepEqual(result.usage, spec.expectedUsage);
-    assert.match(result.text, new RegExp(`${spec.name} forced answer\\.`));
+    assert.equal(result.text, `${spec.name} forced answer.`);
     for (const heading of ["## Done", "## Remaining", "## Blocked", "## Next"]) {
-      assert.match(result.text, new RegExp(heading), `${spec.name} short stop includes ${heading}`);
+      assert.ok(JSON.stringify(sent.at(-1)).includes(heading), `${spec.name} requests ${heading}`);
     }
     if (spec.name === "OpenAI") {
       assert.ok(sent.every((body) => body.store === false), "main and force-answer requests are explicitly stateless");
     }
+  });
+
+  test(`${spec.name} synthesizes a structured summary only when the forced answer is empty`, async () => {
+    const provider = spec.make();
+    if (spec.name === "OpenAI") {
+      provider.postResponses = async () => ({ id: "empty", status: "incomplete", output: [] });
+    } else {
+      provider.postMessages = async () => ({ id: "empty", stop_reason: "max_tokens", content: [] });
+    }
+    const result = await provider.generate({ input: "finish the work", agent });
+    assert.equal(result.stopReason, "iteration-cap");
+    for (const heading of ["## Done", "## Remaining", "## Blocked", "## Next"]) {
+      assert.ok(result.text.includes(heading));
+    }
+    assert.match(result.text, /No tool calls completed/);
   });
 }
 
@@ -1300,7 +1315,8 @@ test("checkpoint budget exhaustion still hard-stops with turn-timeout", async ()
     apiKey: "test-key",
     maxIterations: 5,
     maxTurnSeconds: 0.01,
-    wallClockCheckpoints: 1
+    wallClockCheckpoints: 1,
+    idleStrikeMinIntervalMs: 1
   });
   provider.postResponses = async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1320,7 +1336,8 @@ test("idle exhaustion summary names the consumed allowances and blames idleness,
     apiKey: "test-key",
     maxIterations: 5,
     maxTurnSeconds: 0.01,
-    wallClockCheckpoints: 1
+    wallClockCheckpoints: 1,
+    idleStrikeMinIntervalMs: 1
   });
   let calls = 0;
   provider.postResponses = async () => {

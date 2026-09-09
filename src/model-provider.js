@@ -548,6 +548,10 @@ function applyIterationSettings(provider, options) {
     process.env.OPENAGI_WALL_CLOCK_IDLE_STRIKES,
     process.env.OPENAGI_WALL_CLOCK_CHECKPOINTS
   );
+  provider.idleStrikeMinIntervalMs = positiveInteger(
+    options.idleStrikeMinIntervalMs ?? provider.env?.OPENAGI_IDLE_STRIKE_MIN_INTERVAL_MS,
+    5000
+  );
   provider.maxTurnUsd = optionalPositiveNumber(
     options.maxTurnUsd ?? process.env.OPENAGI_MAX_TURN_USD
   );
@@ -1100,6 +1104,7 @@ function createWallClockCheckpointState(provider, context) {
     left: provider.wallClockIdleStrikes,
     progressCounter,
     lastProgressCount: progressCount,
+    lastIdleSpendAt: null,
     progressExtensions: 0,
     stoppedWhileMakingProgress: null,
     startedAt: safeProviderNow(provider),
@@ -1108,8 +1113,19 @@ function createWallClockCheckpointState(provider, context) {
   };
 }
 
-// An idle (or progress-unreadable) checkpoint: spend a strike, or stop.
-function idleWallClockDecision(state, progressSinceLastCheckpoint = null) {
+// Rapid idle checkpoints extend for free, including after the last strike,
+// until the next spaced idle check may spend a strike or stop the turn.
+function idleWallClockDecision(provider, state, progressSinceLastCheckpoint = null) {
+  const now = safeProviderNow(provider);
+  if (state) state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
+  if (
+    Number.isSafeInteger(state?.left)
+    && state.lastIdleSpendAt !== null
+    && now !== null
+    && now - state.lastIdleSpendAt < provider.idleStrikeMinIntervalMs
+  ) {
+    return { extend: true, extensionKind: "idle-debounced", progressSinceLastCheckpoint };
+  }
   if (!state || !Number.isSafeInteger(state.left) || state.left <= 0) {
     if (state) {
       state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
@@ -1121,6 +1137,7 @@ function idleWallClockDecision(state, progressSinceLastCheckpoint = null) {
     };
   }
   state.left -= 1;
+  state.lastIdleSpendAt = now;
   state.stoppedWhileMakingProgress = progressSinceLastCheckpoint;
   return {
     extend: true,
@@ -1129,7 +1146,7 @@ function idleWallClockDecision(state, progressSinceLastCheckpoint = null) {
   };
 }
 
-function evaluateWallClockCheckpoint(state) {
+function evaluateWallClockCheckpoint(provider, state) {
   try {
     const currentProgressCount = readTurnProgressCount(
       state?.progressCounter
@@ -1139,7 +1156,7 @@ function evaluateWallClockCheckpoint(state) {
       || !Number.isSafeInteger(state?.lastProgressCount)
       || state.lastProgressCount < 0
     ) {
-      return idleWallClockDecision(state);
+      return idleWallClockDecision(provider, state);
     }
     const progressSinceLastCheckpoint = currentProgressCount
       > state.lastProgressCount;
@@ -1157,11 +1174,11 @@ function evaluateWallClockCheckpoint(state) {
         progressSinceLastCheckpoint
       };
     }
-    return idleWallClockDecision(state, progressSinceLastCheckpoint);
+    return idleWallClockDecision(provider, state, progressSinceLastCheckpoint);
   } catch {
     // If progress accounting is ever unreadable, spend a bounded idle strike
     // rather than running unbounded on an unverifiable signal.
-    return idleWallClockDecision(state);
+    return idleWallClockDecision(provider, state);
   }
 }
 
@@ -1255,7 +1272,10 @@ function wallClockCheckpointPrompt(state, decision, maxTurnSeconds) {
   const verdict = decision.progressSinceLastCheckpoint === false
     ? "No new output-aware progress was observed since the last check"
     : "Progress could not be read, so this was treated as an idle check";
-  return `[system] Idle checkpoint: ${verdict}, so this consumed one of a bounded number of idle allowances `
+  const allowance = decision.extensionKind === "idle-debounced"
+    ? "this check arrived too soon to consume another idle allowance"
+    : "this consumed one of a bounded number of idle allowances";
+  return `[system] Idle checkpoint: ${verdict}; ${allowance} `
     + `and extended the turn by ~${Math.round(maxTurnSeconds)}s. `
     + `${state.left} idle allowance${state.left === 1 ? "" : "s"} remain before the turn is stopped as stalled. `
     + "Status check: if the user's request is already answered, give the final answer now. "
@@ -1276,7 +1296,7 @@ function maybeWallClockCheckpoint(provider, context, conversation, format, state
     emitWallClockStopped(context, state, "hard-ceiling", wallClockStopReceipt(context));
     return null;
   }
-  const decision = evaluateWallClockCheckpoint(state);
+  const decision = evaluateWallClockCheckpoint(provider, state);
   if (!decision.extend) {
     emitWallClockStopped(context, state, "stalled", wallClockStopReceipt(context));
     return null;
@@ -4776,7 +4796,7 @@ function shortStopGuidance(reason, iterations, maxIterations, wallClock) {
   }
   if (reason === "context-too-large") {
     return {
-      blocked: "Recent verbatim context could not fit below the provider safety threshold.",
+      blocked: "The turn stopped before sending an oversized model request because recent verbatim context could not fit below the provider safety threshold.",
       next: "Start a fresh session, reduce large attachments or tool outputs, or set OPENAGI_CONTEXT_WINDOW_TOKENS to a verified limit."
     };
   }
@@ -5739,16 +5759,7 @@ export class OpenAIResponsesProvider {
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractResponseText(response);
-          if (forced) {
-            text = structuredShortStopReport({
-              reason: stopReason,
-              iterations,
-              maxIterations,
-              toolCalls,
-              modelText: forced,
-              wallClock: wallClockStopSnapshot(wallClockCheckpointState)
-            });
-          }
+          if (forced) text = forced;
         }
       } catch (error) {
         // Best-effort: if the forced answer also fails, fall through to the
@@ -6741,16 +6752,7 @@ export class AnthropicProvider {
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractAnthropicText(response);
-          if (forced) {
-            text = structuredShortStopReport({
-              reason: stopReason,
-              iterations,
-              maxIterations,
-              toolCalls,
-              modelText: forced,
-              wallClock: wallClockStopSnapshot(wallClockCheckpointState)
-            });
-          }
+          if (forced) text = forced;
         }
       } catch (error) {
         // The forced answer is best-effort. If IT also times out/stalls or the
