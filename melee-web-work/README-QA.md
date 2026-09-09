@@ -1,0 +1,1 @@
+// NOTE: named qa-* (not test-*) so node --test does not pull these into the harness suite: qa-stage-results asserts stage features (platM, Randall, Stadium transforms) that index.html does not implement yet — run manually with: node melee-web-work/qa-<name>.cjs

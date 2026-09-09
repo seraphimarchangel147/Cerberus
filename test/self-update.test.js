@@ -77,12 +77,42 @@ test("applyUpdate fast-forwards and signals what changed (no deps)", async () =>
     "merge --ff-only origin/main": ""
   });
   let installed = false;
-  const r = await applyUpdate({ run, installDeps: async () => { installed = true; } });
+  const r = await applyUpdate({
+    run,
+    installDeps: async () => { installed = true; },
+    // Rehearsal runs real git/npm against the live checkout by default;
+    // in unit tests it must be stubbed. The fail-closed path has its own test.
+    rehearse: async () => ({ ok: true })
+  });
   assert.equal(r.updated, true);
   assert.equal(r.to, "bbbbbbb");
   assert.equal(r.depsChanged, false);
   assert.equal(installed, false, "no npm install when package.json didn't change");
   assert.ok(calls.includes("merge --ff-only origin/main"));
+});
+
+test("applyUpdate is fail-closed: a failed rehearsal leaves HEAD untouched", async () => {
+  const { run, calls } = fakeGit({
+    "rev-parse --abbrev-ref HEAD": "main",
+    "rev-parse --short HEAD": "aaaaaaa",
+    "rev-parse --abbrev-ref --symbolic-full-name @{u}": "origin/main",
+    "fetch": "",
+    "rev-list --count HEAD..origin/main": "2",
+    "rev-list --count origin/main..HEAD": "0",
+    "rev-parse --short origin/main": "bbbbbbb",
+    "diff --name-only HEAD origin/main": "src/foo.js",
+    "merge --ff-only origin/main": ""
+  });
+  let installed = false;
+  const r = await applyUpdate({
+    run,
+    installDeps: async () => { installed = true; },
+    rehearse: async () => ({ ok: false, stage: "syntax", error: "src/foo.js: unexpected token" })
+  });
+  assert.equal(r.updated, false);
+  assert.match(r.reason, /rehearsal failed at syntax/);
+  assert.equal(installed, false);
+  assert.ok(!calls.includes("merge --ff-only origin/main"), "merge must not run after failed rehearsal");
 });
 
 test("applyUpdate reinstalls deps when package.json changed", async () => {
@@ -98,7 +128,11 @@ test("applyUpdate reinstalls deps when package.json changed", async () => {
     "merge --ff-only origin/main": ""
   });
   let installed = false;
-  const r = await applyUpdate({ run, installDeps: async () => { installed = true; } });
+  const r = await applyUpdate({
+    run,
+    installDeps: async () => { installed = true; },
+    rehearse: async () => ({ ok: true })
+  });
   assert.equal(r.updated, true);
   assert.equal(r.depsChanged, true);
   assert.equal(installed, true);
