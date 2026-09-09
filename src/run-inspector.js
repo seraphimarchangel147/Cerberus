@@ -736,6 +736,24 @@ export function turnInspectorMetadata(event) {
       }
     };
   }
+  if (phase === "wall-clock-checkpoint" || phase === "wall-clock-stopped") {
+    // Persist the stall-guard's actual verdict. Without this branch these
+    // events fell to the generic arm with EMPTY metadata, so a post-mortem
+    // could not tell real idleness from unreadable progress accounting.
+    return {
+      phase: phase === "wall-clock-stopped" ? "wall_clock_stopped" : "wall_clock_checkpoint",
+      status: "running",
+      metadata: {
+        idleStrikesLeft: Number.isSafeInteger(event?.idleStrikesLeft) ? event.idleStrikesLeft : null,
+        progressExtensions: Number.isSafeInteger(event?.progressExtensions) ? event.progressExtensions : null,
+        progressSinceLastCheckpoint: typeof event?.progressSinceLastCheckpoint === "boolean" ? event.progressSinceLastCheckpoint : null,
+        extensionKind: typeof event?.extensionKind === "string" ? event.extensionKind.slice(0, 32) : null,
+        reason: typeof event?.reason === "string" ? event.reason.slice(0, 64) : null,
+        trackedOutputs: Number.isSafeInteger(event?.trackedOutputs) ? event.trackedOutputs : null,
+        nonProgressiveOutputs: Number.isSafeInteger(event?.nonProgressiveOutputs) ? event.nonProgressiveOutputs : null
+      }
+    };
+  }
   return {
     phase: safePhase(phase || "progress"),
     status: "running",
