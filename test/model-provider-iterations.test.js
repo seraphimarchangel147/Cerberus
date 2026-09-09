@@ -463,11 +463,40 @@ for (const spec of [
     assert.equal(result.stopReason, "iteration-cap");
     assert.equal(sent.length, 2);
     assert.deepEqual(result.usage, spec.expectedUsage);
+    assert.match(result.text, new RegExp(`${spec.name} forced answer\\.`));
+    for (const heading of ["## Done", "## Remaining", "## Blocked", "## Next"]) {
+      assert.match(result.text, new RegExp(heading), `${spec.name} short stop includes ${heading}`);
+    }
     if (spec.name === "OpenAI") {
       assert.ok(sent.every((body) => body.store === false), "main and force-answer requests are explicitly stateless");
     }
   });
 }
+
+test("an already structured OpenAI force-answer report is preserved without double wrapping", async () => {
+  const structured = [
+    "## Done", "Evidence captured.", "", "## Remaining", "—", "",
+    "## Blocked", "—", "", "## Next", "—"
+  ].join("\n");
+  const provider = new OpenAIResponsesProvider({ apiKey: "test-key", maxIterations: 1 });
+  provider.postResponses = async (body) => body.tools
+    ? {
+        id: "tool",
+        output: [{ type: "function_call", call_id: "call", name: "step", arguments: "{}" }]
+      }
+    : { id: "forced", output_text: structured, output: [] };
+
+  const result = await provider.generate({
+    input: "run then report",
+    agent,
+    toolRegistry: openAIToolRegistry()
+  });
+
+  assert.equal(result.stopReason, "iteration-cap");
+  assert.equal(result.text, structured);
+  assert.equal(result.text.match(/## Done/gu)?.length, 1);
+});
+
 
 test("Anthropic never exposes thinking-only content in its fallback reply", async () => {
   const secretThinking = "private chain of thought sentinel";

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { readJsonFile, writeJsonAtomic } from "../file-utils.js";
 import {
   DELEGATE_KINDS,
   DELEGATE_KIND_GUIDANCE,
@@ -175,34 +177,143 @@ function chunk(items, size) {
 // is no window to steer or stop them. Async mode (`async: true`) registers the
 // batch here and returns a delegationId immediately; delegate_status,
 // delegate_steer and delegate_cancel operate on the record while it runs.
-// In-memory by design: a daemon restart kills the children too, so persisting
-// handles would only mint zombie records. Fractal (plasma-ai) tracks the same
-// lifecycle as "signals" in SQLite; the states here mirror that model.
-const ASYNC_DELEGATIONS = new Map();
+//
+// Completed records are persisted under the runtime data dir. A daemon restart
+// cannot resurrect in-flight model calls, so queued/running entries are marked
+// failed on load instead of becoming silent zombies; already-recorded child
+// findings remain collectable after reload.
+function serializeDelegation(record) {
+  return {
+    id: record.id,
+    projectId: record.projectId,
+    parentSessionId: record.parentSessionId,
+    status: record.status,
+    createdAt: record.createdAt,
+    finishedAt: record.finishedAt,
+    consumedAt: record.consumedAt ?? null,
+    consumedBySessionId: record.consumedBySessionId ?? null,
+    synthesisDeliveredAt: record.synthesisDeliveredAt ?? null,
+    synthesisMessageId: record.synthesisMessageId ?? null,
+    tasks: record.tasks.map((entry) => ({
+      spec: entry.spec,
+      state: entry.state,
+      result: entry.result,
+      error: entry.error,
+      steerNotes: entry.steerNotes,
+      steerCount: entry.steerCount
+    }))
+  };
+}
 
-function pruneAsyncDelegations() {
-  const now = Date.now();
-  for (const [id, record] of ASYNC_DELEGATIONS) {
-    if (record.status !== "running" && now - record.finishedAt > FINISHED_RETENTION_MS) {
-      ASYNC_DELEGATIONS.delete(id);
+function hydrateDelegation(raw, now = Date.now()) {
+  if (!raw || typeof raw !== "object" || !raw.id || !Array.isArray(raw.tasks)) return null;
+  let interrupted = false;
+  const tasks = raw.tasks.map((entry) => {
+    let state = String(entry?.state ?? "failed");
+    let error = entry?.error ?? null;
+    if (state === "queued" || state === "running") {
+      state = "failed";
+      error = "interrupted by daemon restart before the child result was recorded";
+      interrupted = true;
+    }
+    return {
+      spec: entry?.spec ?? { goal: "unknown", context: "", role: "leaf", kind: null, verify: null },
+      state,
+      controller: null,
+      result: entry?.result ?? null,
+      error,
+      steerNotes: Array.isArray(entry?.steerNotes) ? entry.steerNotes : [],
+      steerCount: nonNegativeInteger(entry?.steerCount, 0),
+      steerRequested: false,
+      cancelRequested: false
+    };
+  });
+  const running = tasks.some((entry) => entry.state === "queued" || entry.state === "running");
+  return {
+    record: {
+      id: String(raw.id),
+      projectId: String(raw.projectId ?? "default"),
+      parentSessionId: String(raw.parentSessionId ?? "unknown"),
+      status: running ? "running" : "done",
+      createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : now,
+      finishedAt: running ? null : (Number.isFinite(Number(raw.finishedAt)) ? Number(raw.finishedAt) : now),
+      consumedAt: Number.isFinite(Number(raw.consumedAt)) ? Number(raw.consumedAt) : null,
+      consumedBySessionId: raw.consumedBySessionId ? String(raw.consumedBySessionId) : null,
+      synthesisDeliveredAt: Number.isFinite(Number(raw.synthesisDeliveredAt)) ? Number(raw.synthesisDeliveredAt) : null,
+      synthesisMessageId: raw.synthesisMessageId ? String(raw.synthesisMessageId) : null,
+      tasks
+    },
+    interrupted
+  };
+}
+
+function createAsyncDelegationRegistry(runtime) {
+  const records = new Map();
+  const filePath = runtime?.dataDir
+    ? path.join(runtime.dataDir, "delegations", "async.json")
+    : null;
+  let repaired = false;
+  if (filePath) {
+    const stored = readJsonFile(filePath, { version: 1, records: [] });
+    for (const raw of stored?.records ?? []) {
+      const hydrated = hydrateDelegation(raw);
+      if (!hydrated) continue;
+      records.set(hydrated.record.id, hydrated.record);
+      repaired ||= hydrated.interrupted;
     }
   }
-  while (ASYNC_DELEGATIONS.size > MAX_ASYNC_DELEGATIONS) {
-    const oldestFinished = [...ASYNC_DELEGATIONS.entries()]
+  const persist = () => {
+    if (!filePath) return;
+    writeJsonAtomic(filePath, {
+      version: 1,
+      records: [...records.values()].map(serializeDelegation)
+    });
+  };
+  if (repaired) persist();
+  return { records, persist };
+}
+
+function pruneAsyncDelegations(records, persist = null) {
+  const now = Date.now();
+  let changed = false;
+  for (const [id, record] of records) {
+    if (record.status !== "running" && now - record.finishedAt > FINISHED_RETENTION_MS) {
+      records.delete(id);
+      changed = true;
+    }
+  }
+  while (records.size > MAX_ASYNC_DELEGATIONS) {
+    const oldestFinished = [...records.entries()]
       .filter(([, record]) => record.status !== "running")
       .sort((a, b) => a[1].finishedAt - b[1].finishedAt)[0];
     if (!oldestFinished) break; // everything is running; never evict live work
-    ASYNC_DELEGATIONS.delete(oldestFinished[0]);
+    records.delete(oldestFinished[0]);
+    changed = true;
   }
+  if (changed) persist?.();
 }
 
 function snapshotDelegation(record) {
+  const resultsRecorded = record.tasks.filter((entry) => entry.result !== null).length;
   return {
     id: record.id,
+    projectId: record.projectId,
+    parentSessionId: record.parentSessionId,
     status: record.status,
     createdAt: new Date(record.createdAt).toISOString(),
     finishedAt: record.finishedAt ? new Date(record.finishedAt).toISOString() : null,
     durationMs: record.finishedAt ? record.finishedAt - record.createdAt : Date.now() - record.createdAt,
+    lifecycle: {
+      childExecutionComplete: record.status === "done",
+      resultsRecorded,
+      totalChildren: record.tasks.length,
+      parentConsumed: Boolean(record.consumedAt),
+      consumedAt: record.consumedAt ? new Date(record.consumedAt).toISOString() : null,
+      consumedBySessionId: record.consumedBySessionId ?? null,
+      parentSynthesisDelivered: Boolean(record.synthesisDeliveredAt),
+      synthesisDeliveredAt: record.synthesisDeliveredAt ? new Date(record.synthesisDeliveredAt).toISOString() : null,
+      synthesisMessageId: record.synthesisMessageId ?? null
+    },
     tasks: record.tasks.map((entry, index) => ({
       index,
       goal: entry.spec.goal,
@@ -211,6 +322,7 @@ function snapshotDelegation(record) {
       state: entry.state,
       steerCount: entry.steerCount,
       steerNotes: entry.steerNotes.length ? [...entry.steerNotes] : undefined,
+      childSessionId: entry.result?.childSessionId ?? null,
       iterations: entry.result?.iterations ?? null,
       durationMs: entry.result?.durationMs ?? null,
       model: entry.result?.model ?? null,
@@ -227,7 +339,33 @@ function refreshRecordStatus(record) {
   if (record.status === "done" && !record.finishedAt) record.finishedAt = Date.now();
 }
 
+function projectIdFor(context) {
+  return String(context?.__projectId ?? "default");
+}
+
+function scopedRecord(records, id, context) {
+  const record = records.get(String(id ?? ""));
+  return record?.projectId === projectIdFor(context) ? record : null;
+}
+
 export function registerDelegateTaskTool(runtime) {
+  const asyncRegistry = createAsyncDelegationRegistry(runtime);
+  const ASYNC_DELEGATIONS = asyncRegistry.records;
+  const persistAsyncDelegations = asyncRegistry.persist;
+  runtime.markDelegationSynthesisDelivered = ({ ids = [], sessionId, messageId }) => {
+    let changed = false;
+    for (const id of ids) {
+      const record = ASYNC_DELEGATIONS.get(String(id));
+      if (!record || record.consumedBySessionId !== String(sessionId ?? "")) continue;
+      if (!record.synthesisDeliveredAt) {
+        record.synthesisDeliveredAt = Date.now();
+        record.synthesisMessageId = messageId ? String(messageId) : null;
+        changed = true;
+      }
+    }
+    if (changed) persistAsyncDelegations();
+    return changed;
+  };
   async function runChild({ context, config, parentDepth, task, index, total, controller, steeringNote }) {
     const host = runtime.agentHost;
     const childDepth = parentDepth + 1;
@@ -295,6 +433,7 @@ export function registerDelegateTaskTool(runtime) {
       return {
         goal: task.goal,
         ok: true,
+        childSessionId: sessionId,
         summary: String(result?.reply ?? "").slice(0, MAX_SUMMARY_CHARS),
         iterations: result?.model?.iterations ?? null,
         stopReason: result?.model?.stopReason ?? "completed",
@@ -396,7 +535,8 @@ export function registerDelegateTaskTool(runtime) {
       await Promise.all(wave.map((entry) => runAsyncTask(record, entry, runArgs)));
     }
     refreshRecordStatus(record);
-    pruneAsyncDelegations();
+    persistAsyncDelegations();
+    pruneAsyncDelegations(ASYNC_DELEGATIONS, persistAsyncDelegations);
     notify(runArgs.context, {
       phase: "subagent",
       state: "delegation-complete",
@@ -487,15 +627,21 @@ export function registerDelegateTaskTool(runtime) {
       }
 
       if (args.async === true) {
-        pruneAsyncDelegations();
+        pruneAsyncDelegations(ASYNC_DELEGATIONS, persistAsyncDelegations);
         if (ASYNC_DELEGATIONS.size >= MAX_ASYNC_DELEGATIONS) {
           return { error: `async delegation registry is full (${MAX_ASYNC_DELEGATIONS}); wait for running delegations to finish` };
         }
         const record = {
           id: randomUUID(),
+          projectId: projectIdFor(context),
+          parentSessionId: String(context.sessionId ?? "unknown"),
           status: "running",
           createdAt: Date.now(),
           finishedAt: null,
+          consumedAt: null,
+          consumedBySessionId: null,
+          synthesisDeliveredAt: null,
+          synthesisMessageId: null,
           tasks: normalized.tasks.map((spec) => ({
             spec,
             state: "queued",
@@ -509,6 +655,7 @@ export function registerDelegateTaskTool(runtime) {
           }))
         };
         ASYNC_DELEGATIONS.set(record.id, record);
+        persistAsyncDelegations();
         const runArgs = { context, config, parentDepth, total: record.tasks.length };
         // Detached by design: async children are deliberately NOT tied to the
         // parent's abort signal — the point of async mode is outliving the
@@ -522,6 +669,7 @@ export function registerDelegateTaskTool(runtime) {
           }
           record.status = "done";
           record.finishedAt = Date.now();
+          persistAsyncDelegations();
         });
         return {
           delegationId: record.id,
@@ -552,29 +700,72 @@ export function registerDelegateTaskTool(runtime) {
   runtime.tools.register({
     name: "delegate_status",
     sideEffects: false,
-    description: "Inspect async delegations started with delegate_task(async:true). With an id, returns the full record: per-task state (queued/running/completed/failed/cancelled), model, iterations, durationMs, steer history, and summaries. Without an id, lists every live and recently finished delegation.",
+    description: "Inspect project-scoped async delegations started with delegate_task(async:true). Completion, result recording, and parent consumption are reported separately. With an id, returns per-task child session IDs, state, model, metrics, and summaries. Without an id, lists live and recently finished delegations.",
     parameters: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Delegation id returned by delegate_task. Omit to list all." }
+        id: { type: "string", description: "Delegation id returned by delegate_task. Omit to list all in this project." }
       },
       additionalProperties: false
     },
-    handler: async (args) => {
-      pruneAsyncDelegations();
+    handler: async (args, context = {}) => {
+      pruneAsyncDelegations(ASYNC_DELEGATIONS, persistAsyncDelegations);
       if (args?.id) {
-        const record = ASYNC_DELEGATIONS.get(String(args.id));
-        if (!record) return { error: "unknown delegation id (finished delegations are retained for 1h)" };
+        const record = scopedRecord(ASYNC_DELEGATIONS, args.id, context);
+        if (!record) return { error: "unknown delegation id (or outside this project; finished delegations are retained for 1h)" };
         return snapshotDelegation(record);
       }
+      const projectId = projectIdFor(context);
       return {
-        delegations: [...ASYNC_DELEGATIONS.values()].map((record) => ({
-          id: record.id,
-          status: record.status,
-          tasks: record.tasks.length,
-          completed: record.tasks.filter((entry) => entry.state === "completed").length,
-          createdAt: new Date(record.createdAt).toISOString()
-        }))
+        delegations: [...ASYNC_DELEGATIONS.values()]
+          .filter((record) => record.projectId === projectId)
+          .map((record) => ({
+            id: record.id,
+            status: record.status,
+            tasks: record.tasks.length,
+            completed: record.tasks.filter((entry) => entry.state === "completed").length,
+            resultsRecorded: record.tasks.filter((entry) => entry.result !== null).length,
+            parentConsumed: Boolean(record.consumedAt),
+            createdAt: new Date(record.createdAt).toISOString()
+          }))
+      };
+    }
+  });
+
+  runtime.tools.register({
+    name: "delegate_collect",
+    sideEffects: true,
+    description: "Collect one completed async delegation for parent synthesis. Durably records which parent session consumed the child results. Child completion alone does not prove a final parent answer was delivered.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Completed delegation id returned by delegate_task." }
+      },
+      required: ["id"],
+      additionalProperties: false
+    },
+    handler: async (args, context = {}) => {
+      const record = scopedRecord(ASYNC_DELEGATIONS, args?.id, context);
+      if (!record) return { error: "unknown delegation id (or outside this project)" };
+      if (record.status !== "done") return { error: "delegation is still running; inspect it with delegate_status" };
+      const consumer = String(context.sessionId ?? "unknown");
+      if (record.consumedAt && record.consumedBySessionId !== consumer) {
+        return { error: "delegation results were already consumed by another parent session" };
+      }
+      if (!record.consumedAt) {
+        record.consumedAt = Date.now();
+        record.consumedBySessionId = consumer;
+        persistAsyncDelegations();
+        if (!Array.isArray(context.__collectedDelegationIds)) context.__collectedDelegationIds = [];
+        if (!context.__collectedDelegationIds.includes(record.id)) context.__collectedDelegationIds.push(record.id);
+        notify(context, { phase: "subagent", state: "results-consumed", delegationId: record.id });
+      }
+      return {
+        delegationId: record.id,
+        status: record.status,
+        parentConsumed: true,
+        consumedAt: new Date(record.consumedAt).toISOString(),
+        results: record.tasks.map((entry) => entry.result ?? failureResult(entry.spec, entry.error ?? "subagent did not produce a result"))
       };
     }
   });
@@ -594,8 +785,8 @@ export function registerDelegateTaskTool(runtime) {
       additionalProperties: false
     },
     handler: async (args, context = {}) => {
-      const record = ASYNC_DELEGATIONS.get(String(args?.id ?? ""));
-      if (!record) return { error: "unknown delegation id" };
+      const record = scopedRecord(ASYNC_DELEGATIONS, args?.id, context);
+      if (!record) return { error: "unknown delegation id (or outside this project)" };
       const note = String(args?.note ?? "").trim();
       if (!note) return { error: "note is required" };
       const targets = args?.taskIndex === undefined
@@ -629,10 +820,14 @@ export function registerDelegateTaskTool(runtime) {
             parentDepth: nonNegativeInteger(context.__spawnDepth, 0),
             total: record.tasks.length
           };
-          void runAsyncTask(record, entry, runArgs).then(() => refreshRecordStatus(record));
+          void runAsyncTask(record, entry, runArgs).then(() => {
+            refreshRecordStatus(record);
+            persistAsyncDelegations();
+          });
           steered.push({ index, action: "re-running as refinement with steering note" });
         }
       }
+      persistAsyncDelegations();
       notify(context, { phase: "subagent", state: "steered", delegationId: record.id, steered: steered.length });
       return { delegationId: record.id, steered };
     }
@@ -652,8 +847,8 @@ export function registerDelegateTaskTool(runtime) {
       additionalProperties: false
     },
     handler: async (args, context = {}) => {
-      const record = ASYNC_DELEGATIONS.get(String(args?.id ?? ""));
-      if (!record) return { error: "unknown delegation id" };
+      const record = scopedRecord(ASYNC_DELEGATIONS, args?.id, context);
+      if (!record) return { error: "unknown delegation id (or outside this project)" };
       const targets = args?.taskIndex === undefined
         ? record.tasks
         : [record.tasks[Number(args.taskIndex)]];
@@ -674,6 +869,7 @@ export function registerDelegateTaskTool(runtime) {
         }
       }
       refreshRecordStatus(record);
+      persistAsyncDelegations();
       notify(context, { phase: "subagent", state: "cancelled", delegationId: record.id, cancelled: cancelled.length });
       return { delegationId: record.id, status: record.status, cancelled };
     }

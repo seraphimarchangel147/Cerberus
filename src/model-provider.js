@@ -4704,7 +4704,7 @@ function wallClockConsumptionText(wallClock) {
 }
 
 function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
-  const base = "[system] Stop here and answer the user now. Do NOT call any tools. Using the conversation and any tool results above, produce a wrap-up report with exactly these sections: '## Done' (what was completed, with concrete evidence), '## Remaining' (work left undone), '## Blocked' (what is blocking progress, if anything), and '## Next' (the single next action). Keep it under 400 words. If the user's request was already fully answered, answer it directly and mark the remaining sections '—'.";
+  const base = "[system] Stop here and answer the user now. Do NOT call any tools. Using the conversation and any tool results above, produce a wrap-up report with exactly these sections: '## Done' (what was completed, with concrete evidence), '## Remaining' (work left undone), '## Blocked' (what is blocking progress, if anything), and '## Next' (the single next action). Keep it under 400 words. If the user's request was already fully answered, answer it under Done and mark the remaining sections '—'.";
   if (reason === "iteration-cap") {
     return `${base} The turn reached its iteration limit after ${iterations}/${maxIterations} steps; if work remains, say briefly what's left and note OPENAGI_MAX_ITERATIONS can be raised.`;
   }
@@ -4717,39 +4717,118 @@ function forceAnswerPrompt(reason, iterations, maxIterations, wallClock) {
   if (reason === "provider-error") {
     return `${base} The provider stayed unavailable after bounded retries; summarise completed work and give your best current answer.`;
   }
-  // turn-timeout
   return `${base} ${wallClockStopProgressText(wallClock)} Be concise, and if work remains say what is blocking it (OPENAGI_WALL_CLOCK_IDLE_STRIKES tunes how many idle checks are tolerated).`;
 }
 
-function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText, wallClock }) {
-  const completed = toolCalls.length;
-  const recent = toolCalls.slice(-5).map((call) => call.name).join(", ");
-  const detail = completed > 0
-    ? `${completed} tool call${completed === 1 ? "" : "s"} completed${recent ? ` (most recent: ${recent})` : ""}.`
-    : "No tool calls completed.";
-  const prior = lastText ? `\n\nPartial model output:\n${lastText.slice(0, 1500)}` : "";
+const WRAP_UP_HEADINGS = Object.freeze([
+  "## Done",
+  "## Remaining",
+  "## Blocked",
+  "## Next"
+]);
+
+function hasStructuredWrapUp(text) {
+  const value = String(text ?? "");
+  return WRAP_UP_HEADINGS.every((heading) => value.includes(heading));
+}
+
+function shortStopGuidance(reason, iterations, maxIterations, wallClock) {
+  if (reason === "iteration-cap") {
+    return {
+      blocked: `The turn reached its iteration cap after ${iterations}/${maxIterations} iterations.`,
+      next: "Resume from the evidence above; raise OPENAGI_MAX_ITERATIONS only if this task genuinely needs a larger bounded turn."
+    };
+  }
   if (reason === "turn-timeout") {
-    if (wallClock?.hardCeiling === true) {
-      return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because it reached its absolute hard-time ceiling — even a productive turn stops there.${wallClockConsumptionText(wallClock)} ${detail} Long agentic turns are NOT stopped for elapsed time below the ceiling; raise OPENAGI_MAX_TURN_HARD_SECONDS (default 8h) only for genuinely longer missions.${prior}`;
-    }
-    return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because it went idle — no new output-aware progress across every idle allowance.${wallClockConsumptionText(wallClock)} ${wallClockStopProgressText(wallClock)} ${detail} Long-running turns are NOT stopped for elapsed time; raise OPENAGI_WALL_CLOCK_IDLE_STRIKES to tolerate more quiet checks, or OPENAGI_MAX_TURN_SECONDS to check less often.${prior}`;
+    const hard = wallClock?.hardCeiling === true;
+    return {
+      blocked: hard
+        ? `The absolute hard-time ceiling stopped the turn.${wallClockConsumptionText(wallClock)}`
+        : `The output-aware watchdog stopped the turn as STALLED because it went idle. This turn was NOT stopped for elapsed time.${wallClockConsumptionText(wallClock)} ${wallClockStopProgressText(wallClock)}`,
+      next: hard
+        ? "Resume in a new bounded turn; raise OPENAGI_MAX_TURN_HARD_SECONDS only for a genuinely longer mission."
+        : "Resume from the last verified result with a different concrete action; OPENAGI_MAX_TURN_SECONDS controls each checkpoint interval and OPENAGI_WALL_CLOCK_IDLE_STRIKES controls tolerated idle checks."
+    };
   }
   if (reason === "stalled") {
-    return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model went silent (no output for the stall window) and could not be revived. ${detail} This usually means a transient provider hiccup — retry the request. OPENAGI_STALL_TIMEOUT_MS tunes how long silence is tolerated.${prior}`;
+    return {
+      blocked: "The model produced no output for the configured stall window and could not be revived.",
+      next: "Retry from the last verified result; tune OPENAGI_STALL_TIMEOUT_MS only for a consistently slow streaming provider."
+    };
   }
   if (reason === "request-timeout") {
-    return `Turn stopped after ${iterations} iteration${iterations === 1 ? "" : "s"} because a single model request exceeded the per-request timeout (the model took too long on one step). ${detail} Raise OPENAGI_REQUEST_TIMEOUT_MS, or break the task into smaller asks.${prior}`;
+    return {
+      blocked: "One model or tool step exceeded the per-request timeout.",
+      next: "Retry the failed step in a smaller unit, or raise OPENAGI_REQUEST_TIMEOUT_MS when the operation is expected to run longer."
+    };
   }
   if (reason === "budget-cap") {
-    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because a budget cap was reached. ${detail} Raise OPENAGI_MAX_TURN_USD for a larger per-turn budget, or OPENAGI_DAILY_USD_LIMIT for the daily budget.${prior}`;
+    return {
+      blocked: "The configured turn or daily budget cap was reached.",
+      next: "Resume after capacity returns, or deliberately raise OPENAGI_MAX_TURN_USD / OPENAGI_DAILY_USD_LIMIT."
+    };
   }
   if (reason === "provider-error") {
-    return `Turn stopped gracefully after ${iterations} iteration${iterations === 1 ? "" : "s"} because the model provider remained unavailable after bounded retries. ${detail} Retry the turn when the provider recovers.${prior}`;
+    return {
+      blocked: "The model provider remained unavailable after bounded retries.",
+      next: "Retry the turn when the provider recovers."
+    };
   }
   if (reason === "context-too-large") {
-    return `Turn stopped before sending an oversized model request because the recent verbatim context could not fit below the safety threshold. ${detail} Start a fresh session, reduce large attachments or tool outputs, or set OPENAGI_CONTEXT_WINDOW_TOKENS to the provider's verified limit.${prior}`;
+    return {
+      blocked: "Recent verbatim context could not fit below the provider safety threshold.",
+      next: "Start a fresh session, reduce large attachments or tool outputs, or set OPENAGI_CONTEXT_WINDOW_TOKENS to a verified limit."
+    };
   }
-  return `Turn reached the iteration cap after ${iterations}/${maxIterations} iterations. ${detail} Raise OPENAGI_MAX_ITERATIONS if this task needs more steps.${prior}`;
+  return {
+    blocked: `The turn stopped with reason ${String(reason ?? "unknown")}.`,
+    next: "Resume from the last verified result."
+  };
+}
+
+function structuredShortStopReport({
+  reason,
+  iterations,
+  maxIterations,
+  toolCalls = [],
+  modelText = "",
+  wallClock
+}) {
+  const candidate = String(modelText ?? "").trim();
+  if (hasStructuredWrapUp(candidate)) return candidate;
+  const completed = toolCalls.length;
+  const recent = toolCalls.slice(-5).map((call) => call.name).filter(Boolean).join(", ");
+  const evidence = completed > 0
+    ? `${completed} tool call${completed === 1 ? "" : "s"} completed${recent ? `; most recent: ${recent}` : ""}.`
+    : "No tool calls completed.";
+  const done = candidate
+    ? `${candidate.slice(0, 1500)}\n\nEvidence: ${evidence}`
+    : evidence;
+  const guidance = shortStopGuidance(reason, iterations, maxIterations, wallClock);
+  return [
+    "## Done",
+    done,
+    "",
+    "## Remaining",
+    "The original request may be incomplete; no unverified completion claim is being made.",
+    "",
+    "## Blocked",
+    guidance.blocked,
+    "",
+    "## Next",
+    guidance.next
+  ].join("\n");
+}
+
+function localPartialSummary({ reason, iterations, maxIterations, toolCalls, lastText, wallClock }) {
+  return structuredShortStopReport({
+    reason,
+    iterations,
+    maxIterations,
+    toolCalls,
+    modelText: lastText,
+    wallClock
+  });
 }
 
 export class DeterministicModelProvider {
@@ -5660,7 +5739,16 @@ export class OpenAIResponsesProvider {
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractResponseText(response);
-          if (forced) text = forced;
+          if (forced) {
+            text = structuredShortStopReport({
+              reason: stopReason,
+              iterations,
+              maxIterations,
+              toolCalls,
+              modelText: forced,
+              wallClock: wallClockStopSnapshot(wallClockCheckpointState)
+            });
+          }
         }
       } catch (error) {
         // Best-effort: if the forced answer also fails, fall through to the
@@ -6653,7 +6741,16 @@ export class AnthropicProvider {
           });
           addProviderUsage(usageAccumulator, response?.usage);
           const forced = extractAnthropicText(response);
-          if (forced) text = forced;
+          if (forced) {
+            text = structuredShortStopReport({
+              reason: stopReason,
+              iterations,
+              maxIterations,
+              toolCalls,
+              modelText: forced,
+              wallClock: wallClockStopSnapshot(wallClockCheckpointState)
+            });
+          }
         }
       } catch (error) {
         // The forced answer is best-effort. If IT also times out/stalls or the

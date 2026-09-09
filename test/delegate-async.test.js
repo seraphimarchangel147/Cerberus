@@ -3,6 +3,9 @@
 // runtime (same pattern as delegate-task.test.js's direct-handler tests).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { registerDelegateTaskTool } from "../src/integrations/delegate-task.js";
 import { ToolRegistry } from "../src/tool-registry.js";
 
@@ -21,13 +24,15 @@ process.on("exit", () => {
   }
 });
 
-function makeRuntime(handleMessage) {
+function makeRuntime(handleMessage, options = {}) {
   const tools = new ToolRegistry();
   const runtime = {
     tools,
+    dataDir: options.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "delegate-async-")),
     agentHost: { handleMessage }
   };
   registerDelegateTaskTool(runtime);
+  options.captureRuntime?.(runtime);
   return tools;
 }
 
@@ -104,6 +109,121 @@ test("async mode detaches, status tracks completion with summaries and metrics",
   assert.equal(done.tasks[0].summary, "async child done");
   assert.equal(typeof done.tasks[0].durationMs, "number");
   assert.equal(done.tasks[1].kind, "extract");
+  assert.deepEqual(done.lifecycle, {
+    childExecutionComplete: true,
+    resultsRecorded: 2,
+    totalChildren: 2,
+    parentConsumed: false,
+    consumedAt: null,
+    consumedBySessionId: null,
+    parentSynthesisDelivered: false,
+    synthesisDeliveredAt: null,
+    synthesisMessageId: null
+  });
+
+  const collected = await tools.get("delegate_collect").handler(
+    { id: spawn.delegationId },
+    { sessionId: "parent-a" }
+  );
+  assert.equal(collected.parentConsumed, true);
+  assert.equal(collected.results.length, 2);
+  const consumed = await statusHandler({ id: spawn.delegationId });
+  assert.equal(consumed.lifecycle.parentConsumed, true);
+  assert.equal(consumed.lifecycle.consumedBySessionId, "parent-a");
+  assert.equal(consumed.lifecycle.parentSynthesisDelivered, false);
+});
+
+test("async records survive registry reload and remain project scoped", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-async-reload-"));
+  const first = makeRuntime(async () => okResult("durable child result"), { dataDir });
+  const spawn = await first.get("delegate_task").handler(
+    { async: true, goal: "persist me" },
+    { sessionId: "parent-persist", __projectId: "alpha" }
+  );
+  await waitFor(async () => {
+    const snapshot = await first.get("delegate_status").handler(
+      { id: spawn.delegationId },
+      { __projectId: "alpha" }
+    );
+    return snapshot.status === "done" ? snapshot : null;
+  });
+
+  const second = makeRuntime(async () => okResult("unused"), { dataDir });
+  const restored = await second.get("delegate_status").handler(
+    { id: spawn.delegationId },
+    { __projectId: "alpha" }
+  );
+  assert.equal(restored.tasks[0].summary, "durable child result");
+  assert.equal(restored.parentSessionId, "parent-persist");
+  assert.equal(restored.lifecycle.resultsRecorded, 1);
+  const denied = await second.get("delegate_status").handler(
+    { id: spawn.delegationId },
+    { __projectId: "beta" }
+  );
+  assert.match(denied.error, /unknown delegation id|outside this project/);
+});
+
+test("collect is idempotent for one parent and fails closed across parents", async () => {
+  const tools = makeRuntime(async () => okResult("collectable"));
+  const spawn = await tools.get("delegate_task").handler(
+    { async: true, goal: "collect me" },
+    { sessionId: "owner", __projectId: "alpha" }
+  );
+  await waitFor(async () => {
+    const snapshot = await tools.get("delegate_status").handler(
+      { id: spawn.delegationId },
+      { __projectId: "alpha" }
+    );
+    return snapshot.status === "done";
+  });
+  const collect = tools.get("delegate_collect").handler;
+  const first = await collect(
+    { id: spawn.delegationId },
+    { sessionId: "parent-one", __projectId: "alpha" }
+  );
+  const replay = await collect(
+    { id: spawn.delegationId },
+    { sessionId: "parent-one", __projectId: "alpha" }
+  );
+  assert.equal(first.consumedAt, replay.consumedAt);
+  const stolen = await collect(
+    { id: spawn.delegationId },
+    { sessionId: "parent-two", __projectId: "alpha" }
+  );
+  assert.match(stolen.error, /already consumed/);
+  const crossProject = await collect(
+    { id: spawn.delegationId },
+    { sessionId: "parent-one", __projectId: "beta" }
+  );
+  assert.match(crossProject.error, /unknown delegation id|outside this project/);
+});
+
+test("final synthesis delivery is a distinct durable lifecycle transition", async () => {
+  let runtime;
+  const tools = makeRuntime(async () => okResult("ready for synthesis"), {
+    captureRuntime(value) { runtime = value; }
+  });
+  const project = { __projectId: "alpha" };
+  const spawn = await tools.get("delegate_task").handler(
+    { async: true, goal: "produce evidence" },
+    { ...project, sessionId: "origin" }
+  );
+  await waitFor(async () => {
+    const status = await tools.get("delegate_status").handler({ id: spawn.delegationId }, project);
+    return status.status === "done";
+  });
+  const collectContext = { ...project, sessionId: "parent-final" };
+  await tools.get("delegate_collect").handler({ id: spawn.delegationId }, collectContext);
+  assert.deepEqual(collectContext.__collectedDelegationIds, [spawn.delegationId]);
+  runtime.markDelegationSynthesisDelivered({
+    ids: collectContext.__collectedDelegationIds,
+    sessionId: "parent-final",
+    messageId: "assistant-message-1"
+  });
+  const delivered = await tools.get("delegate_status").handler({ id: spawn.delegationId }, project);
+  assert.equal(delivered.lifecycle.parentSynthesisDelivered, true);
+  assert.equal(delivered.lifecycle.synthesisMessageId, "assistant-message-1");
+  assert.ok(delivered.lifecycle.synthesisDeliveredAt);
 });
 
 test("delegate_steer interrupts a running child and respawns it with the note", async () => {

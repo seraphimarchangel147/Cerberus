@@ -161,6 +161,7 @@ test("single delegate_task returns only the summary and keeps child turns out of
   assert.deepEqual(outcome.result.results[0], {
     goal: "Inspect the three fixture files",
     ok: true,
+    childSessionId: outcome.result.results[0].childSessionId,
     summary: "Reviewed three files; all checks passed.",
     iterations: 2,
     stopReason: "completed",

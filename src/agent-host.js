@@ -1319,6 +1319,14 @@ export class AgentHost {
           state: event?.state ?? null,
           total: event?.total ?? null,
           extensionsLeft: event?.extensionsLeft ?? null,
+          // Wall-clock checkpoint fields. Without these the Discord feed's
+          // formatter sees undefined and renders every checkpoint as
+          // "progress unreadable; idle fail-safe (? idle allowances left)" —
+          // making real stalls indistinguishable from display loss.
+          idleStrikesLeft: Number.isSafeInteger(event?.idleStrikesLeft) ? event.idleStrikesLeft : null,
+          progressExtensions: Number.isSafeInteger(event?.progressExtensions) ? event.progressExtensions : null,
+          progressSinceLastCheckpoint: typeof event?.progressSinceLastCheckpoint === "boolean" ? event.progressSinceLastCheckpoint : null,
+          extensionKind: typeof event?.extensionKind === "string" ? event.extensionKind : null,
           // Goal-loop lifecycle fields (continue/completed/stagnated/stopped)
           // so bus consumers (Discord feed, dashboard) can render goal
           // progress and escalations instead of dropping them silently.
@@ -1698,6 +1706,19 @@ export class AgentHost {
     }
 
     if (outcomeRecord) outcomeRecord.refId = sessionAfter.messages.at(-1)?.id ?? null;
+    if (Array.isArray(modelContext.__collectedDelegationIds) && modelContext.__collectedDelegationIds.length > 0) {
+      try {
+        this.runtime.markDelegationSynthesisDelivered?.({
+          ids: modelContext.__collectedDelegationIds,
+          sessionId,
+          messageId: sessionAfter.messages.at(-1)?.id ?? null
+        });
+      } catch {
+        // The assistant reply is already durable. Delegation telemetry must not
+        // turn a delivered answer into a failed turn; status remains consumed
+        // but undelivered so the discrepancy is visible and retryable.
+      }
+    }
 
     if (!ephemeral && this.runtime.sessionIndex) {
       this.runtime.sessionIndex.indexMessage(sessionId, agentId, sessionAfter.messages.at(-1)).catch(() => {});

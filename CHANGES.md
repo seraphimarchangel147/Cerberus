@@ -2,6 +2,19 @@
 
 Every Legion agent modifying this harness: append an entry here.
 
+## 2026-09-08 — OpenClaw v2026.9.3 delegation completion contract (Azazel)
+
+Ported the highest-value reliability idea from the latest OpenClaw release after auditing the existing OpenAGI paths to avoid duplicating already-landed spill, session repair, failover, memory, and tool-call protections.
+
+- **Four distinct durable stages.** Async delegation now distinguishes child execution completion, child result recording, parent consumption (`delegate_collect`), and durable parent synthesis delivery. A finished child no longer implies that the user received the parent report.
+- **Restart continuity.** Async records persist atomically under `<dataDir>/delegations/async.json`. Completed findings survive daemon reload; queued/running records reload fail-closed as interrupted rather than becoming zombie work.
+- **Queryable child lineage.** Results and status expose each `childSessionId`, the originating parent session, project, model, iterations, and lifecycle receipts.
+- **Isolation and replay safety.** Status/collect/steer/cancel are project-scoped. Collection is idempotent for the consuming parent and fails closed for another parent or project.
+- **Delivery receipt.** `AgentHost` marks synthesis delivered only after the parent assistant message is durably appended; telemetry failure cannot invalidate an already-stored reply.
+- **Evidence.** 9 targeted syntax/test gates passed, including 10 async delegation tests, 14 end-to-end delegation tests, provider iteration/budget coverage, run inspector, routing, and durable jobs.
+- **Source basis.** OpenClaw `v2026.9.3` release notes and comparison (`v2026.9.2...v2026.9.3`), especially the parent/subagent completion and persistent spawned-session work. Official release URL: `https://github.com/openclaw/openclaw/releases/tag/v2026.9.3`.
+
+
 ## 2026-08-10 — PageIndex doc-tree lane: vectorless retrieval over long docs (Azazel)
 
 Self-hosted VectifyAI PageIndex integrated as a workspace lane at `~/.openagi/workspace/doc-index/`.
@@ -2923,3 +2936,22 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-08T19:23:13.704Z · **azazel** · edit `test/model-provider-iterations.test.js` — Correct regression setup to seed a larger shared parent envelope
 - 2026-09-08T19:28:20.695Z · **azazel** · edit `test/model-provider-iterations.test.js` — Mark concurrent delegated budget contexts as children in regression test
 - 2026-09-08T19:42:27.712Z · **azazel** · edit `test/delegate-task.test.js` — Cover full parent-child-parent synthesis and intentional strict-schema merging.
+- 2026-09-08T20:43:02.542Z · **azazel** · edit `src/integrations/delegate-task.js` — Add durable, project-scoped async delegation registry and explicit lifecycle snapshots
+- 2026-09-08T20:44:24.045Z · **azazel** · edit `src/integrations/delegate-task.js` — Initialize durable async delegation registry and expose child session IDs
+- 2026-09-08T20:44:59.937Z · **azazel** · edit `src/integrations/delegate-task.js` — Persist async delegation creation and completion lifecycle
+- 2026-09-08T20:45:51.503Z · **azazel** · edit `src/integrations/delegate-task.js` — Add project-scoped status and durable collect-once parent consumption for async delegations
+- 2026-09-08T20:46:17.245Z · **azazel** · edit `test/delegate-task.test.js` — Update synchronous delegation contract test for exposed child session IDs
+- 2026-09-08T20:46:31.295Z · **azazel** · edit `test/delegate-async.test.js` — Isolate async delegation persistence in temporary test data directories
+- 2026-09-08T20:48:00.424Z · **azazel** · edit `test/delegate-async.test.js` — Add regression coverage for lifecycle visibility, durable reload, collection, and project isolation
+- 2026-09-08T20:50:13.607Z · **azazel** · edit `src/integrations/delegate-task.js` — Persist and expose parent synthesis delivery fields in delegation records
+- 2026-09-08T20:50:46.316Z · **azazel** · edit `src/integrations/delegate-task.js` — Mark collected delegation results for final parent synthesis delivery tracking
+- 2026-09-08T20:50:58.850Z · **azazel** · edit `src/agent-host.js` — Mark parent synthesis delivered only after the assistant reply is durably stored
+- 2026-09-08T20:51:08.263Z · **azazel** · edit `test/delegate-async.test.js` — Assert four-stage delegation lifecycle including final synthesis delivery
+- 2026-09-08T20:53:10.322Z · **azazel** · edit `test/delegate-async.test.js` — Test explicit consumed-versus-delivered delegation lifecycle transitions
+- 2026-09-08T20:54:26.315Z · **azazel** · edit `CHANGES.md` — Document OpenClaw delegation completion contract port and verification
+- 2026-09-08T22:06:14.894Z · **azazel** · edit `src/model-provider.js` — Guarantee deterministic four-section wrap-ups for every short-stop path.
+- 2026-09-08T22:07:02.597Z · **azazel** · edit `test/model-provider-iterations.test.js` — Pin forced-answer normalization and structured-report preservation for both providers.
+- 2026-09-09T12:28:49.786Z · **azazel** · edit `drafts/goal-mode-e2e-verification-checklist.md` — Refresh verification checklist metadata for the current draft-only planner task.
+- 2026-09-09T12:29:29.432Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Refresh evidence report structure metadata for the current draft-only planner task.
+- 2026-09-09T17:13:29.096Z · **azazel** · edit `src/model-provider.js` — Preserve actionable wall-clock diagnostics in structured short-stop reports.
+- 2026-09-09T17:17:10.565Z · **azazel** · edit `src/model-provider.js` — Keep legacy went-idle wording in actionable structured stall reports.
