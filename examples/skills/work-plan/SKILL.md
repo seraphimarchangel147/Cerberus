@@ -12,7 +12,7 @@ Use this skill when the user asks for a plan, when a build spans several compone
    - the exact file path or subsystem;
    - the concrete change and why it belongs there;
    - dependencies on earlier steps;
-   - one focused verification command or behavioral check.
+   - one focused, repository-native verification command or behavioral check; label commands unverified if they could not be confirmed from project configuration.
 4. Call out compatibility, migration, security, and rollback risks where they materially apply.
 5. End with a compact validation section covering targeted tests, the full suite, and any manual proof that cannot be automated.
 

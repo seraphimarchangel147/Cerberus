@@ -1,6 +1,6 @@
 # Provider Auth + Goal-Mode End-to-End Verification Checklist (DRAFT)
 
-Prepared for daily-planner task `task_d1e65ba72be244ab` on 2026-09-08. Draft only: no tests have been executed and no external action has been taken.
+Prepared for daily-planner task `task_c9949b2ca673441d` on 2026-09-09; this supersedes the equivalent 2026-09-08 draft issue. Draft only: no tests have been executed and no external action has been taken.
 
 ## Test record
 

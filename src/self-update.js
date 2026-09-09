@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { rehearseUpdateCandidate } from "./update-rehearsal.js";
 
 // Self-update: the daemon can check for and apply updates to its own git
 // checkout, then exit(0) so the service manager (systemd Restart=always /
@@ -63,7 +64,12 @@ export async function checkForUpdate({ run = gitRun } = {}) {
 // Apply an available update (fast-forward), reinstalling deps if package.json
 // changed. Returns { updated, ... }. Does NOT restart — the caller decides
 // (the endpoint/cron schedule a process exit so the supervisor respawns).
-export async function applyUpdate({ run = gitRun, installDeps = defaultInstallDeps } = {}) {
+export async function applyUpdate({
+  run = gitRun,
+  installDeps = defaultInstallDeps,
+  rehearse = rehearseUpdateCandidate,
+  repoRoot = REPO_ROOT
+} = {}) {
   const status = await checkForUpdate({ run });
   if (!status.ok) return { updated: false, ...status };
   if (!status.updateAvailable) return { updated: false, reason: "already up to date", ...status };
@@ -88,9 +94,29 @@ export async function applyUpdate({ run = gitRun, installDeps = defaultInstallDe
     return { updated: false, reason: `local commits / divergence (ahead ${status.ahead}) — not fast-forwardable; resolve manually`, ...status };
   }
 
-  // Which files change — decide whether deps need reinstalling.
+  // Rehearse the exact candidate before mutating the live checkout. This is
+  // fail-closed: dependency or syntax failure leaves HEAD untouched.
   const changedFiles = await run(["diff", "--name-only", "HEAD", status.upstream]).catch(() => "");
   const depsChanged = /(^|\n)(package\.json|package-lock\.json)\b/.test(changedFiles);
+  let rehearsal;
+  try {
+    rehearsal = await rehearse({
+      repoRoot,
+      upstream: status.upstream,
+      changedFiles,
+      depsChanged
+    });
+  } catch (error) {
+    rehearsal = { ok: false, stage: "rehearsal", error: error?.message ?? String(error) };
+  }
+  if (!rehearsal?.ok) {
+    return {
+      updated: false,
+      reason: `candidate rehearsal failed at ${rehearsal?.stage ?? "unknown"}: ${rehearsal?.error ?? rehearsal?.cleanupError ?? "unknown error"}`,
+      rehearsal,
+      ...status
+    };
+  }
 
   await run(["merge", "--ff-only", status.upstream]);
   if (depsChanged) {
@@ -98,5 +124,14 @@ export async function applyUpdate({ run = gitRun, installDeps = defaultInstallDe
     catch (error) { return { updated: true, from: status.current, to: status.latest, depsChanged: true, depsInstalled: false, depsError: error.message, branch: status.branch, behind: status.behind }; }
   }
   const to = await run(["rev-parse", "--short", "HEAD"]);
-  return { updated: true, from: status.current, to, behind: status.behind, depsChanged, depsInstalled: depsChanged ? true : undefined, branch: status.branch };
+  return {
+    updated: true,
+    from: status.current,
+    to,
+    behind: status.behind,
+    depsChanged,
+    depsInstalled: depsChanged ? true : undefined,
+    branch: status.branch,
+    rehearsal
+  };
 }

@@ -2955,3 +2955,6 @@ SPRITE TOGGLE AND DEV MENU COMPLETE
 - 2026-09-09T12:29:29.432Z · **azazel** · edit `drafts/goal-loop-dashboard-integration-report-skeleton.md` — Refresh evidence report structure metadata for the current draft-only planner task.
 - 2026-09-09T17:13:29.096Z · **azazel** · edit `src/model-provider.js` — Preserve actionable wall-clock diagnostics in structured short-stop reports.
 - 2026-09-09T17:17:10.565Z · **azazel** · edit `src/model-provider.js` — Keep legacy went-idle wording in actionable structured stall reports.
+- 2026-09-09T17:23:40.195Z · **azazel** · create `src/update-rehearsal.js` — Add isolated fail-closed update rehearsal before live activation.
+- 2026-09-09T17:24:05.385Z · **azazel** · edit `src/self-update.js` — Require successful isolated candidate rehearsal before self-update activation.
+- 2026-09-09T20:27:26.548Z · **azazel** · create `melee-web-work/test-stage-results.js` — Add focused stage/results behavior regression tests

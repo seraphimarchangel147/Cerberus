@@ -1,6 +1,6 @@
 # Provider Auth Dashboard ↔ Goal-Mode Integration Report (DRAFT)
 
-Prepared for daily-planner task `task_70c9e3d1aa9d434c` on 2026-09-08. This is an unpopulated review artifact—not evidence that implementation or verification is complete.
+Prepared for daily-planner task `task_1e5bac6f02a44ba3` on 2026-09-09; this supersedes the equivalent 2026-09-08 draft issue. This is an unpopulated review artifact—not evidence that implementation or verification is complete.
 
 ## Document control
 

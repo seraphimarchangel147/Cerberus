@@ -1,0 +1,3078 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Melee Web — Platform Fighter</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e0e0e0;
+    overflow: hidden;
+  }
+  #gameContainer {
+    position: relative;
+    border: 2px solid #333;
+    border-radius: 4px;
+    box-shadow: 0 0 40px rgba(0, 100, 255, 0.15);
+  }
+  canvas { display: block; background: #1a1a2e; }
+  #hud {
+    display: none; /* Canvas-rendered HUD now */
+  }
+  .player-hud {
+    background: rgba(0,0,0,0.7);
+    padding: 6px 14px;
+    border-radius: 6px;
+    min-width: 180px;
+  }
+  .player-hud.left { border-left: 3px solid #4a9eff; }
+  .player-hud.right { border-right: 3px solid #ff4a4a; text-align: right; }
+  .player-name { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.7; }
+  .damage-display { font-size: 28px; font-weight: 700; font-family: 'Courier New', monospace; }
+  .stocks { font-size: 16px; margin-top: 2px; }
+  .player-hud.left .damage-display { color: #4a9eff; }
+  .player-hud.right .damage-display { color: #ff4a4a; }
+  #debugOverlay {
+    position: absolute;
+    bottom: 4px; left: 8px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.4);
+    pointer-events: none;
+    font-family: monospace;
+  }
+  #controls {
+    margin-top: 12px;
+    display: flex;
+    gap: 24px;
+    font-size: 11px;
+    color: #666;
+  }
+  .control-group { text-align: center; }
+  .control-group h4 { color: #888; margin-bottom: 4px; font-size: 12px; }
+  kbd {
+    background: #222;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+    color: #aaa;
+  }
+  #title {
+    font-size: 14px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: #555;
+    margin-bottom: 8px;
+  }
+
+  /* ── Character Creator Modal (HTML overlay on canvas CSS) ──── */
+  #creatorModal {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.85); z-index: 100;
+    justify-content: center; align-items: center;
+  }
+  #creatorModal.visible { display: flex; }
+  #creatorModal .creator-box {
+    background: #111; border: 2px solid #4a9eff; border-radius: 12px;
+    padding: 24px; width: 480px; max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 0 40px rgba(74,158,255,0.3);
+  }
+  #creatorModal h2 { color: #e0e8f0; margin: 0 0 16px; font-size: 20px; text-align: center; }
+  .creator-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .creator-row label { color: #8899aa; font-size: 12px; width: 100px; text-align: right; flex-shrink: 0; }
+  .creator-row input[type=range] { flex: 1; accent-color: #4a9eff; }
+  .creator-row .val { color: #4a9eff; font-size: 12px; width: 50px; font-family: monospace; }
+  .creator-row input[type=text] { flex: 1; background: #1a1a2e; border: 1px solid #334; color: #e0e8f0; padding: 6px 10px; border-radius: 6px; font-size: 14px; }
+  .creator-row input[type=color] { width: 40px; height: 30px; border: none; background: none; cursor: pointer; }
+  .presets { display: flex; gap: 6px; margin: 12px 0; flex-wrap: wrap; justify-content: center; }
+  .presets button { background: #1a2030; border: 1px solid #3a4a5a; color: #8899aa; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+  .presets button:hover { background: #2a3a4a; color: #c8d8e8; border-color: #4a9eff; }
+  .creator-actions { display: flex; gap: 10px; margin-top: 16px; justify-content: center; }
+  .creator-actions button { padding: 10px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  #btnSave { background: #4a9eff; color: #fff; }
+  #btnSave:hover { background: #3a8eef; transform: translateY(-1px); }
+  #btnDelete { background: #ff4a4a; color: #fff; }
+  #btnDelete:hover { background: #ee3a3a; }
+  #btnCancel { background: #2a2a3e; color: #8899aa; border: 1px solid #3a3a5a !important; }
+  #btnCancel:hover { background: #3a3a4e; color: #c8d8e8; }
+</style>
+</head>
+<body>
+<!-- Title rendered on canvas -->
+<div id="gameContainer">
+  <canvas id="game" width="960" height="600"></canvas>
+  <div id="hud">
+    <div class="player-hud left">
+      <div class="player-name">Player 1 — Fox</div>
+      <div class="damage-display" id="p1-dmg">0</div>
+      <div class="stocks" id="p1-stocks">★★★</div>
+    </div>
+    <div class="player-hud right">
+      <div class="player-name">Player 2 — Falco</div>
+      <div class="damage-display" id="p2-dmg">0</div>
+      <div class="stocks" id="p2-stocks">★★★</div>
+    </div>
+  </div>
+  <div id="debugOverlay"></div>
+</div>
+<div id="controls">
+  <div class="control-group">
+    <h4>Player 1 (Blue)</h4>
+    <kbd>WASD</kbd> Move &amp; Jump · <kbd>J</kbd> Attack · <kbd>K</kbd> Special · <kbd>L</kbd> Shield<br>
+    <kbd>W</kbd> Jump · <kbd>S</kbd> Crouch · <kbd>Shift</kbd> Grab · Double-tap <kbd>A/D</kbd> Dash
+  </div>
+  <div class="control-group">
+    <h4>Player 2 (Red)</h4>
+    <kbd>Arrows</kbd> Move &amp; Jump · <kbd>Numpad 1</kbd> Attack · <kbd>Numpad 2</kbd> Special · <kbd>Numpad 3</kbd> Shield<br>
+    <kbd>↑</kbd> Jump · <kbd>↓</kbd> Crouch · <kbd>Numpad 0</kbd> Grab · Double-tap <kbd>←/→</kbd> Dash
+  </div>
+</div>
+
+
+<!-- Character Creator Modal -->
+<div id="creatorModal">
+  <div class="creator-box">
+    <h2 id="creatorTitle">Create Character</h2>
+    <div class="creator-row">
+      <label>Name</label>
+      <input type="text" id="c_name" placeholder="Fighter" maxlength="16">
+      <input type="color" id="c_color" value="#66ff66" title="Character color">
+    </div>
+    <div class="creator-row"><label>Weight</label><input type="range" id="c_weight" min="60" max="140" value="90"><span class="val" id="v_weight">90</span></div>
+    <div class="creator-row"><label>Gravity</label><input type="range" id="c_gravity" min="80" max="200" value="170"><span class="val" id="v_gravity">0.170</span></div>
+    <div class="creator-row"><label>Fall Speed</label><input type="range" id="c_fallSpeed" min="150" max="300" value="250"><span class="val" id="v_fallSpeed">2.50</span></div>
+    <div class="creator-row"><label>Air Speed</label><input type="range" id="c_airSpeed" min="60" max="120" value="85"><span class="val" id="v_airSpeed">0.85</span></div>
+    <div class="creator-row"><label>Run Speed</label><input type="range" id="c_runSpeed" min="140" max="250" value="200"><span class="val" id="v_runSpeed">2.00</span></div>
+    <div class="creator-row"><label>Jump V</label><input type="range" id="c_jumpV" min="300" max="450" value="370"><span class="val" id="v_jumpV">3.70</span></div>
+    <div class="creator-row"><label>Traction</label><input type="range" id="c_traction" min="40" max="120" value="80"><span class="val" id="v_traction">0.080</span></div>
+    <div class="creator-row"><label>Jab DMG</label><input type="range" id="c_jabDmg" min="2" max="8" value="4"><span class="val" id="v_jabDmg">4</span></div>
+    <div class="creator-row"><label>Smash DMG</label><input type="range" id="c_smashDmg" min="8" max="22" value="14"><span class="val" id="v_smashDmg">14</span></div>
+    <div class="creator-row"><label>Aerial DMG</label><input type="range" id="c_aerialDmg" min="6" max="16" value="10"><span class="val" id="v_aerialDmg">10</span></div>
+    <div class="creator-row"><label>Special DMG</label><input type="range" id="c_specialDmg" min="4" max="14" value="8"><span class="val" id="v_specialDmg">8</span></div>
+    <div class="creator-row"><label>Hitbox W</label><input type="range" id="c_width" min="8" max="20" value="12"><span class="val" id="v_width">12</span></div>
+    <div class="creator-row"><label>Hitbox H</label><input type="range" id="c_height" min="12" max="26" value="18"><span class="val" id="v_height">18</span></div>
+    <div class="presets">
+      <button onclick="applyPreset('speedy')">Speedy</button>
+      <button onclick="applyPreset('tank')">Tank</button>
+      <button onclick="applyPreset('glass_cannon')">Glass Cannon</button>
+      <button onclick="applyPreset('brawler')">Brawler</button>
+    </div>
+    <div class="creator-actions">
+      <button id="btnSave" onclick="saveCharacter()">Save</button>
+      <button id="btnDelete" onclick="deleteCustom()" style="display:none">Delete</button>
+      <button id="btnCancel" onclick="closeCreator()">Cancel</button>
+    </div>
+  </div>
+</div>
+<script>
+// ============================================================
+// MELEE WEB — A browser platform fighter with Melee mechanics
+// ============================================================
+// Core physics, knockback formulas, and menu systems derived
+// from the doldecomp/melee decompilation (GPL-compatible, open
+// source). Built from scratch as a browser-native implementation.
+// CSS (Character Select Screen) matches Melee's 3×9 grid layout,
+// cursor-based selection, and port door system.
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+// ── Melee Physics Constants ──────────────────────────────────
+const PHYSICS = {
+  gravity: 0.095,
+  maxFallSpeed: 1.8,
+  fastFallSpeed: 2.56,
+  airSpeed: 0.85,
+  airAccel: 0.04,
+  airFriction: 0.01,
+  groundFriction: 0.08,
+  dashSpeed: 2.2,
+  runSpeed: 1.8,
+  walkSpeed: 0.85,
+  jumpSquatFrames: 4,      // Fox/Falco jsquat
+  jumpVInitial: 3.2,
+  jumpVHold: 2.8,
+  airDodgeSpeed: 3.5,      // wavedash velocity
+  airDodgeAngle: 0.7297,    // ~41.8 degrees — optimal wavedash angle
+  shieldSize: 44,
+  shieldDecay: 0.28,
+  shieldRegen: 0.07,
+  lCancelWindow: 4,         // frames before landing (decomp: ftCo_0E4)
+  lCancelMultiplier: 0.5,   // landing lag halved
+  techWindow: 20,           // frames to tech before landing
+  techCooldown: 40,
+  techInvuln: 20,
+  diMaxAngle: Math.PI / 10, // ~18 degrees max DI
+  crouchCancelKB: 0.6667,   // 2/3 knockback when crouching
+  hitstunMultiplier: 0.4,
+  hitstunMin: 5,
+  hitlagBase: 3,
+  hitlagMultiplier: 0.333,  // decomp: ftColl_80078A2C
+  staleQueueSize: 10,  // decomp: gm_8016B194 queue depth = 10
+};
+
+// ── Blast Zones (Battlefield-style) ─────────────────────────
+// ── Stage Definitions (decomp: gr/types.h, grGdScript) ────────
+const STAGES = {
+  battlefield: {
+    name: 'Battlefield',
+    main: { x: -58, y: 0, w: 116, h: 5 },
+    platL: { x: -130, y: 55, w: 44, h: 4 },
+    platR: { x: 86, y: 55, w: 44, h: 4 },
+    ledgeL: { x: -58, y: 0, dir: 1 },
+    ledgeR: { x: 58, y: 0, dir: -1 },
+    blastLeft: -224, blastRight: 224, blastTop: 200, blastBottom: -110,
+    bgGradient: [{stop:0,color:'#0d1117'},{stop:0.5,color:'#161b22'},{stop:1,color:'#0a0e14'}],
+    platformColor: '#3a3a5e', platformEdge: '#6a6a9e',
+  },
+  finalDestination: {
+    name: 'Final Destination',
+    main: { x: -90, y: 0, w: 180, h: 5 },
+    platL: null, platR: null,
+    ledgeL: { x: -90, y: 0, dir: 1 },
+    ledgeR: { x: 90, y: 0, dir: -1 },
+    blastLeft: -230, blastRight: 230, blastTop: 200, blastBottom: -110,
+    bgGradient: [{stop:0,color:'#0a0020'},{stop:0.4,color:'#1a0040'},{stop:0.7,color:'#0d0030'},{stop:1,color:'#050015'}],
+    platformColor: '#4a3a6e', platformEdge: '#8a6abe',
+  },
+  dreamLand: {
+    name: 'Dream Land',
+    main: { x: -127, y: 0, w: 255, h: 5 },
+    platL: { x: -175, y: 80, w: 50, h: 4 },
+    platR: { x: 125, y: 80, w: 50, h: 4 },
+    ledgeL: { x: -127, y: 0, dir: 1 },
+    ledgeR: { x: 127, y: 0, dir: -1 },
+    blastLeft: -255, blastRight: 255, blastTop: 250, blastBottom: -123,
+    bgGradient: [{stop:0,color:'#1a3a2a'},{stop:0.5,color:'#0d2818'},{stop:1,color:'#061a0d'}],
+    platformColor: '#3a5e3a', platformEdge: '#6a9e6a',
+  },
+  yoshisStory: {
+    name: "Yoshi's Story",
+    main: { x: -70, y: 0, w: 140, h: 5 },
+    platL: { x: -105, y: 42, w: 35, h: 4 },
+    platR: { x: 70, y: 42, w: 35, h: 4 },
+    ledgeL: { x: -70, y: 0, dir: 1 },
+    ledgeR: { x: 70, y: 0, dir: -1 },
+    blastLeft: -200, blastRight: 200, blastTop: 180, blastBottom: -110,
+    bgGradient: [{stop:0,color:'#2a4a1a'},{stop:0.5,color:'#1a3510'},{stop:1,color:'#0d1f08'}],
+    platformColor: '#5a6e3a', platformEdge: '#8a9e5a',
+    hasRandall: true,
+  },
+  fountainOfDreams: {
+    name: 'Fountain of Dreams',
+    main: { x: -60, y: 0, w: 120, h: 5 },
+    platL: { x: -95, y: 45, w: 35, h: 4 },
+    platR: { x: 60, y: 45, w: 35, h: 4 },
+    ledgeL: { x: -60, y: 0, dir: 1 },
+    ledgeR: { x: 60, y: 0, dir: -1 },
+    blastLeft: -220, blastRight: 220, blastTop: 200, blastBottom: -110,
+    bgGradient: [{stop:0,color:'#1a1040'},{stop:0.5,color:'#2a1860'},{stop:1,color:'#0d0820'}],
+    platformColor: '#4a3a7e', platformEdge: '#7a5aae',
+    hasFountain: true,
+  },
+  pokemonStadium: {
+    name: 'Pokémon Stadium',
+    main: { x: -80, y: 0, w: 160, h: 5 },
+    platL: { x: -110, y: 40, w: 40, h: 4 },
+    platR: { x: 70, y: 40, w: 40, h: 4 },
+    ledgeL: { x: -80, y: 0, dir: 1 },
+    ledgeR: { x: 80, y: 0, dir: -1 },
+    blastLeft: -230, blastRight: 230, blastTop: 190, blastBottom: -110,
+    bgGradient: [{stop:0,color:'#0a2a1a'},{stop:0.5,color:'#1a4030'},{stop:1,color:'#061a0d'}],
+    platformColor: '#3a6a5a', platformEdge: '#5a9a7a',
+  },
+};
+const BLAST = { ...STAGES.battlefield };  // compat alias
+const STAGE_KEYS = Object.keys(STAGES);
+let currentStageKey = 'battlefield';
+let currentStage = STAGES[currentStageKey];
+
+// Camera
+const CAMERA = { x: 0, y: -10, scale: 2.5 };
+
+// ── Character Archetypes ─────────────────────────────────────
+const CHARACTERS = {
+  fox: {
+    name: 'Fox',
+    weight: 85,            // decomp: ftCoData.x110 = 85
+    gravity: 0.23,         // decomp: ftCoData.xA8 = 0.23
+    maxFallSpeed: 2.8,     // decomp: ftCoData.xB0 = 2.8
+    fastFallSpeed: 3.5,    // decomp: ftCoData.xB4 = 3.5
+    airSpeed: 0.85,        // decomp: ftCoData.x9C = 0.85
+    airAccel: 0.06,        // decomp: ftCoData.x98
+    runSpeed: 2.2,         // decomp: ftCoData.x8C
+    dashSpeed: 2.0,        // decomp: ftCoData.x88
+    walkSpeed: 0.85,       // decomp: ftCoData.x80
+    jumpVInitial: 3.7,     // decomp: ftCoData.xBC
+    jumpVHold: 2.8,        // decomp: ftCoData.xC0
+    traction: 0.08,        // decomp: ftCoData.x94
+    color: '#4a9eff',
+    width: 12,
+    height: 18,
+    moves: {
+      jab1: {
+        hitbox: { x: 8, y: 0, w: 14, h: 10, angle: 0, baseKB: 3, kbScale: 0.1, damage: 3 },
+        startup: 2, active: 2, endlag: 5, totalFrames: 12,
+      },
+      jab2: {
+        hitbox: { x: 8, y: -2, w: 14, h: 10, angle: 0, baseKB: 4, kbScale: 0.15, damage: 3 },
+        startup: 2, active: 2, endlag: 5, totalFrames: 12,
+      },
+      ftilt: {
+        hitbox: { x: 10, y: 0, w: 16, h: 12, angle: 0.4, baseKB: 6, kbScale: 0.5, damage: 8 },
+        startup: 5, active: 3, endlag: 10, totalFrames: 22,
+      },
+      utilt: {
+        hitbox: { x: 4, y: -16, w: 14, h: 14, angle: Math.PI / 2.5, baseKB: 5, kbScale: 0.4, damage: 7 },
+        startup: 4, active: 4, endlag: 8, totalFrames: 20,
+      },
+      dtilt: {
+        hitbox: { x: 10, y: 4, w: 16, h: 8, angle: -0.3, baseKB: 5, kbScale: 0.3, damage: 6 },
+        startup: 5, active: 3, endlag: 8, totalFrames: 19,
+      },
+      fSmash: {
+        hitbox: { x: 12, y: -4, w: 18, h: 14, angle: 0.5, baseKB: 10, kbScale: 1.1, damage: 15 },
+        startup: 7, active: 3, endlag: 25, totalFrames: 39,
+      },
+      uSmash: {
+        hitbox: { x: 4, y: -20, w: 16, h: 18, angle: Math.PI / 2.2, baseKB: 12, kbScale: 1.0, damage: 14 },
+        startup: 6, active: 4, endlag: 25, totalFrames: 39,
+      },
+      dSmash: {
+        hitbox: { x: 8, y: 4, w: 18, h: 10, angle: -0.2, baseKB: 10, kbScale: 0.9, damage: 12 },
+        startup: 5, active: 3, endlag: 22, totalFrames: 34,
+      },
+      nair: {
+        hitbox: { x: 0, y: 0, w: 20, h: 20, angle: 0.5, baseKB: 4, kbScale: 0.4, damage: 9 },
+        startup: 4, active: 5, endlag: 7, landingLag: 7, totalFrames: 30,
+      },
+      fair: {
+        hitbox: { x: 10, y: -2, w: 16, h: 12, angle: 0.6, baseKB: 5, kbScale: 0.6, damage: 11 },
+        startup: 6, active: 3, endlag: 12, landingLag: 10, totalFrames: 33,
+      },
+      bair: {
+        hitbox: { x: -12, y: 0, w: 14, h: 12, angle: 2.7, baseKB: 6, kbScale: 0.7, damage: 12 },
+        startup: 5, active: 3, endlag: 10, landingLag: 8, totalFrames: 28,
+      },
+      uair: {
+        hitbox: { x: 0, y: -14, w: 16, h: 14, angle: Math.PI / 2.3, baseKB: 4, kbScale: 0.5, damage: 8 },
+        startup: 5, active: 4, endlag: 10, landingLag: 7, totalFrames: 29,
+      },
+      dair: {
+        hitbox: { x: 0, y: 10, w: 12, h: 14, angle: -Math.PI / 2.2, baseKB: 5, kbScale: 0.6, damage: 10 },
+        startup: 6, active: 5, endlag: 14, landingLag: 11, totalFrames: 35,
+      },
+      upB: {
+        hitbox: { x: 0, y: 0, w: 22, h: 22, angle: Math.PI / 2, baseKB: 8, kbScale: 0.5, damage: 5 },
+        startup: 3, active: 8, endlag: 20, totalFrames: 40, special: 'upB',
+      },
+      sideB: {
+        hitbox: { x: 16, y: 0, w: 12, h: 10, angle: 0.4, baseKB: 6, kbScale: 0.4, damage: 6 },
+        startup: 8, active: 3, endlag: 15, totalFrames: 30, special: 'sideB',
+      },
+      downB: {
+        hitbox: { x: 0, y: 0, w: 16, h: 16, angle: Math.PI / 2, baseKB: 3, kbScale: 0.2, damage: 3 },
+        startup: 1, active: 2, endlag: 3, totalFrames: 6, special: 'downB',  // shine/reflector hitbox
+      },
+      neutralB: {
+        hitbox: { x: 0, y: 0, w: 6, h: 4, angle: 0, baseKB: 2, kbScale: 0.05, damage: 3 },
+        startup: 4, active: 2, endlag: 12, totalFrames: 23, special: 'neutralB',
+        projectile: { speed: 7.5, life: 90, color: '#69b7ff' },  // Fox Blaster: fast, low hitstun
+      },
+      // ── Grab & Throws (decomp: ftCoData grab/throw tables) ──
+      grab: {
+        hitbox: { x: 10, y: 0, w: 14, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 },
+        startup: 7, active: 1, endlag: 30, totalFrames: 38, special: 'grab',
+      },
+      dashGrab: {
+        hitbox: { x: 14, y: 0, w: 16, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 },
+        startup: 8, active: 1, endlag: 35, totalFrames: 44, special: 'grab',
+      },
+      pummel: {
+        hitbox: { x: 0, y: 0, w: 10, h: 10, angle: 0, baseKB: 0, kbScale: 0, damage: 3 },
+        startup: 1, active: 1, endlag: 4, totalFrames: 6,
+      },
+      fthrow: {
+        hitbox: { x: 12, y: 0, w: 14, h: 12, angle: 0.44, baseKB: 10, kbScale: 0.7, damage: 11 },
+        startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw',
+      },
+      bthrow: {
+        hitbox: { x: -12, y: 0, w: 14, h: 12, angle: 2.7, baseKB: 12, kbScale: 0.8, damage: 11 },
+        startup: 1, active: 1, endlag: 25, totalFrames: 27, special: 'throw',
+      },
+      uthrow: {
+        hitbox: { x: 0, y: -14, w: 12, h: 14, angle: Math.PI / 2, baseKB: 8, kbScale: 0.6, damage: 7 },
+        startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw',
+      },
+      dthrow: {
+        hitbox: { x: 0, y: 6, w: 14, h: 10, angle: 1.4, baseKB: 4, kbScale: 0.3, damage: 6 },
+        startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw',
+      },
+    },
+  },
+  falco: {
+    name: 'Falco',
+    weight: 80,            // decomp: ftCoData.x110 = 80
+    gravity: 0.17,         // decomp: ftCoData.xA8 = 0.17 (floatier than Fox)
+    maxFallSpeed: 3.1,     // decomp: ftCoData.xB0 = 3.1
+    fastFallSpeed: 3.7,    // decomp: ftCoData.xB4 = 3.7
+    airSpeed: 0.83,        // decomp: ftCoData.x9C = 0.83
+    airAccel: 0.07,        // decomp: ftCoData.x98
+    runSpeed: 1.85,        // decomp: ftCoData.x8C
+    dashSpeed: 1.6,        // decomp: ftCoData.x88
+    walkSpeed: 0.8,        // decomp: ftCoData.x80
+    jumpVInitial: 5.0,     // decomp: ftCoData.xBC = 5.0 (highest in cast)
+    jumpVHold: 3.2,        // decomp: ftCoData.xC0
+    traction: 0.08,        // decomp: ftCoData.x94
+    color: '#ff4a6a',
+    width: 13,
+    height: 19,
+    moves: {
+      jab1: {
+        hitbox: { x: 8, y: 0, w: 14, h: 10, angle: 0, baseKB: 3, kbScale: 0.1, damage: 3 },
+        startup: 2, active: 2, endlag: 5, totalFrames: 12,
+      },
+      jab2: {
+        hitbox: { x: 8, y: -2, w: 14, h: 10, angle: 0, baseKB: 4, kbScale: 0.15, damage: 3 },
+        startup: 2, active: 2, endlag: 5, totalFrames: 12,
+      },
+      ftilt: {
+        hitbox: { x: 10, y: 0, w: 16, h: 12, angle: 0.4, baseKB: 6, kbScale: 0.5, damage: 9 },
+        startup: 5, active: 3, endlag: 10, totalFrames: 22,
+      },
+      utilt: {
+        hitbox: { x: 4, y: -18, w: 14, h: 16, angle: Math.PI / 2.5, baseKB: 5, kbScale: 0.45, damage: 8 },
+        startup: 5, active: 4, endlag: 9, totalFrames: 22,
+      },
+      dtilt: {
+        hitbox: { x: 10, y: 4, w: 16, h: 8, angle: -0.3, baseKB: 5, kbScale: 0.3, damage: 7 },
+        startup: 6, active: 3, endlag: 8, totalFrames: 20,
+      },
+      fSmash: {
+        hitbox: { x: 12, y: -4, w: 18, h: 14, angle: 0.5, baseKB: 10, kbScale: 1.1, damage: 16 },
+        startup: 8, active: 3, endlag: 25, totalFrames: 40,
+      },
+      uSmash: {
+        hitbox: { x: 4, y: -22, w: 16, h: 18, angle: Math.PI / 2.2, baseKB: 12, kbScale: 1.0, damage: 15 },
+        startup: 7, active: 4, endlag: 25, totalFrames: 40,
+      },
+      dSmash: {
+        hitbox: { x: 8, y: 4, w: 18, h: 10, angle: -0.2, baseKB: 10, kbScale: 0.9, damage: 13 },
+        startup: 6, active: 3, endlag: 22, totalFrames: 35,
+      },
+      nair: {
+        hitbox: { x: 0, y: 0, w: 20, h: 20, angle: 0.5, baseKB: 4, kbScale: 0.4, damage: 10 },
+        startup: 4, active: 5, endlag: 7, landingLag: 7, totalFrames: 30,
+      },
+      fair: {
+        hitbox: { x: 10, y: -2, w: 16, h: 12, angle: 0.6, baseKB: 5, kbScale: 0.6, damage: 12 },
+        startup: 7, active: 3, endlag: 12, landingLag: 10, totalFrames: 34,
+      },
+      bair: {
+        hitbox: { x: -12, y: 0, w: 14, h: 12, angle: 2.7, baseKB: 6, kbScale: 0.7, damage: 13 },
+        startup: 6, active: 3, endlag: 10, landingLag: 8, totalFrames: 29,
+      },
+      uair: {
+        hitbox: { x: 0, y: -16, w: 16, h: 16, angle: Math.PI / 2.3, baseKB: 4, kbScale: 0.5, damage: 9 },
+        startup: 5, active: 4, endlag: 10, landingLag: 7, totalFrames: 29,
+      },
+      dair: {
+        hitbox: { x: 0, y: 10, w: 14, h: 16, angle: -Math.PI / 2, baseKB: 6, kbScale: 0.7, damage: 12 },
+        startup: 7, active: 5, endlag: 14, landingLag: 11, totalFrames: 36,
+      },
+      upB: {
+        hitbox: { x: 0, y: 0, w: 22, h: 22, angle: Math.PI / 2, baseKB: 8, kbScale: 0.5, damage: 6 },
+        startup: 4, active: 8, endlag: 20, totalFrames: 40, special: 'upB',
+      },
+      sideB: {
+        hitbox: { x: 16, y: 0, w: 14, h: 12, angle: 0.3, baseKB: 7, kbScale: 0.5, damage: 8 },
+        startup: 10, active: 3, endlag: 18, totalFrames: 35, special: 'sideB',
+      },
+      downB: {
+        hitbox: { x: 0, y: 0, w: 16, h: 16, angle: Math.PI / 2, baseKB: 3, kbScale: 0.2, damage: 3 },
+        startup: 1, active: 2, endlag: 3, totalFrames: 6, special: 'downB',  // shine/reflector hitbox
+      },
+      neutralB: {
+        hitbox: { x: 0, y: 0, w: 7, h: 5, angle: 0, baseKB: 4, kbScale: 0.1, damage: 5 },
+        startup: 10, active: 2, endlag: 20, totalFrames: 38, special: 'neutralB',
+        projectile: { speed: 5.2, life: 110, color: '#ff657f' },  // Falco Blaster: slower, stronger
+      },
+      // ── Grab & Throws (decomp: ftCoData grab/throw tables) ──
+      grab: {
+        hitbox: { x: 10, y: 0, w: 14, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 },
+        startup: 7, active: 1, endlag: 30, totalFrames: 38, special: 'grab',
+      },
+      dashGrab: {
+        hitbox: { x: 14, y: 0, w: 16, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 },
+        startup: 8, active: 1, endlag: 35, totalFrames: 44, special: 'grab',
+      },
+      pummel: {
+        hitbox: { x: 0, y: 0, w: 10, h: 10, angle: 0, baseKB: 0, kbScale: 0, damage: 3 },
+        startup: 1, active: 1, endlag: 4, totalFrames: 6,
+      },
+      fthrow: {
+        hitbox: { x: 12, y: 0, w: 14, h: 12, angle: 0.44, baseKB: 10, kbScale: 0.7, damage: 11 },
+        startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw',
+      },
+      bthrow: {
+        hitbox: { x: -12, y: 0, w: 14, h: 12, angle: 2.7, baseKB: 12, kbScale: 0.8, damage: 11 },
+        startup: 1, active: 1, endlag: 25, totalFrames: 27, special: 'throw',
+      },
+      uthrow: {
+        hitbox: { x: 0, y: -14, w: 12, h: 14, angle: Math.PI / 2, baseKB: 8, kbScale: 0.6, damage: 7 },
+        startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw',
+      },
+      dthrow: {
+        hitbox: { x: 0, y: 6, w: 14, h: 10, angle: 1.4, baseKB: 4, kbScale: 0.3, damage: 6 },
+        startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw',
+      },
+    },
+  },
+  marth: {
+    name: 'Marth',
+    weight: 87,
+    gravity: 0.085,
+    maxFallSpeed: 1.7,
+    fastFallSpeed: 2.72,
+    airSpeed: 0.9,
+    airAccel: 0.05,
+    runSpeed: 1.8,
+    dashSpeed: 1.5,
+    walkSpeed: 0.6,
+    jumpVInitial: 3.4,
+    jumpVHold: 2.2,
+    traction: 0.06,
+    color: '#4488ff',
+    width: 12,
+    height: 23,
+    moves: {
+      jab1: { hitbox: { x: 10, y: -6, w: 23, h: 12, angle: 361, baseKB: 12, kbScale: 0.2, damage: 6 }, startup: 4, active: 3, endlag: 22, totalFrames: 29 },
+      jab2: { hitbox: { x: 12, y: -5, w: 24, h: 12, angle: 361, baseKB: 14, kbScale: 0.25, damage: 6 }, startup: 5, active: 3, endlag: 21, totalFrames: 29 },
+      ftilt: { hitbox: { x: 11, y: -7, w: 29, h: 14, angle: 0.35, baseKB: 25, kbScale: 0.7, damage: 13, sweetspotMult: 1.3, sweetspotStart: 0.7 }, startup: 7, active: 4, endlag: 28, totalFrames: 39 },
+      utilt: { hitbox: { x: 2, y: -19, w: 27, h: 20, angle: 1.45, baseKB: 25, kbScale: 0.7, damage: 12 }, startup: 6, active: 5, endlag: 28, totalFrames: 39 },
+      dtilt: { hitbox: { x: 12, y: 2, w: 27, h: 9, angle: 0.25, baseKB: 20, kbScale: 0.55, damage: 10 }, startup: 7, active: 3, endlag: 39, totalFrames: 49 },
+      fSmash: { hitbox: { x: 13, y: -8, w: 34, h: 14, angle: 0.42, baseKB: 35, kbScale: 1, damage: 20, sweetspotMult: 1.4, sweetspotStart: 0.7 }, startup: 10, active: 4, endlag: 35, totalFrames: 49 },
+      uSmash: { hitbox: { x: 2, y: -23, w: 26, h: 22, angle: 1.45, baseKB: 35, kbScale: 0.9, damage: 18 }, startup: 13, active: 5, endlag: 41, totalFrames: 59 },
+      dSmash: { hitbox: { x: 9, y: 2, w: 29, h: 11, angle: 0.3, baseKB: 30, kbScale: 0.85, damage: 16 }, startup: 6, active: 7, endlag: 51, totalFrames: 64 },
+      nair: { hitbox: { x: 0, y: -8, w: 27, h: 24, angle: 361, baseKB: 20, kbScale: 0.65, damage: 13 }, startup: 6, active: 12, endlag: 31, landingLag: 15, totalFrames: 49 },
+      fair: { hitbox: { x: 13, y: -9, w: 31, h: 14, angle: 0.42, baseKB: 22, kbScale: 0.7, damage: 13, sweetspotMult: 1.35, sweetspotStart: 0.72 }, startup: 4, active: 4, endlag: 25, landingLag: 15, totalFrames: 33 },
+      bair: { hitbox: { x: -42, y: -8, w: 30, h: 14, angle: 2.72, baseKB: 25, kbScale: 0.75, damage: 13, sweetspotMult: 1.3, sweetspotStart: 0.7 }, startup: 7, active: 4, endlag: 28, landingLag: 15, totalFrames: 39 },
+      uair: { hitbox: { x: 0, y: -22, w: 30, h: 18, angle: 1.5, baseKB: 24, kbScale: 0.7, damage: 13, sweetspotMult: 1.3, sweetspotStart: 0.7 }, startup: 5, active: 5, endlag: 35, landingLag: 15, totalFrames: 45 },
+      dair: { hitbox: { x: 2, y: 2, w: 28, h: 22, angle: -1.57, baseKB: 30, kbScale: 0.75, damage: 13, sweetspotMult: 1.35, sweetspotStart: 0.72 }, startup: 6, active: 5, endlag: 48, landingLag: 15, totalFrames: 59 },
+      upB: { hitbox: { x: 0, y: -12, w: 24, h: 27, angle: 1.57, baseKB: 35, kbScale: 0.8, damage: 13 }, startup: 5, active: 5, endlag: 30, totalFrames: 40, special: 'upB' },
+      sideB: { hitbox: { x: 13, y: -7, w: 24, h: 13, angle: 0.45, baseKB: 18, kbScale: 0.35, damage: 4 }, startup: 6, active: 3, endlag: 21, totalFrames: 30, special: 'sideB' },
+      downB: { hitbox: { x: 0, y: -7, w: 25, h: 21, angle: 1.57, baseKB: 20, kbScale: 0.55, damage: 8 }, startup: 4, active: 8, endlag: 30, totalFrames: 42, special: 'downB' },
+      neutralB: { hitbox: { x: 15, y: -8, w: 29, h: 15, angle: 0.35, baseKB: 35, kbScale: 0.8, damage: 14 }, startup: 16, active: 6, endlag: 23, totalFrames: 45, special: 'neutralB' },
+      grab: { hitbox: { x: 11, y: -5, w: 18, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 7, active: 2, endlag: 21, totalFrames: 30, special: 'grab' },
+      dashGrab: { hitbox: { x: 15, y: -5, w: 20, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 10, active: 2, endlag: 28, totalFrames: 40, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -8, w: 14, h: 13, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 14, y: -7, w: 16, h: 14, angle: 0.35, baseKB: 40, kbScale: 0.6, damage: 4 }, startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw' },
+      bthrow: { hitbox: { x: -30, y: -7, w: 16, h: 14, angle: 2.7, baseKB: 45, kbScale: 0.6, damage: 4 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -20, w: 16, h: 16, angle: 1.57, baseKB: 45, kbScale: 0.65, damage: 4 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 18, h: 11, angle: 1.35, baseKB: 30, kbScale: 0.5, damage: 5 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+    },
+  },
+  falcon: {
+    name: 'Captain Falcon',
+    weight: 104,
+    gravity: 0.13,
+    maxFallSpeed: 2.3,
+    fastFallSpeed: 2.9,
+    airSpeed: 0.92,
+    airAccel: 0.06,
+    runSpeed: 2.55,
+    dashSpeed: 2.05,
+    walkSpeed: 0.85,
+    jumpVInitial: 3.6,
+    jumpVHold: 2.5,
+    traction: 0.08,
+    color: '#ff4444',
+    width: 14,
+    height: 23,
+    moves: {
+      jab1: { hitbox: { x: 10, y: -6, w: 18, h: 12, angle: 361, baseKB: 10, kbScale: 0.2, damage: 2 }, startup: 3, active: 2, endlag: 13, totalFrames: 18 },
+      jab2: { hitbox: { x: 11, y: -6, w: 19, h: 12, angle: 361, baseKB: 12, kbScale: 0.2, damage: 3 }, startup: 3, active: 2, endlag: 15, totalFrames: 20 },
+      ftilt: { hitbox: { x: 11, y: -6, w: 25, h: 14, angle: 0.35, baseKB: 25, kbScale: 0.65, damage: 11 }, startup: 9, active: 4, endlag: 22, totalFrames: 35 },
+      utilt: { hitbox: { x: 3, y: -21, w: 24, h: 20, angle: 1.45, baseKB: 30, kbScale: 0.75, damage: 13 }, startup: 17, active: 5, endlag: 17, totalFrames: 39 },
+      dtilt: { hitbox: { x: 12, y: 2, w: 25, h: 10, angle: 0.3, baseKB: 25, kbScale: 0.7, damage: 12 }, startup: 11, active: 4, endlag: 19, totalFrames: 34 },
+      fSmash: { hitbox: { x: 13, y: -9, w: 29, h: 17, angle: 0.45, baseKB: 40, kbScale: 1.05, damage: 20 }, startup: 19, active: 4, endlag: 36, totalFrames: 59 },
+      uSmash: { hitbox: { x: 2, y: -24, w: 27, h: 23, angle: 1.48, baseKB: 35, kbScale: 1, damage: 21 }, startup: 22, active: 6, endlag: 21, totalFrames: 49 },
+      dSmash: { hitbox: { x: 9, y: 1, w: 29, h: 12, angle: 0.3, baseKB: 35, kbScale: 0.95, damage: 18 }, startup: 19, active: 6, endlag: 24, totalFrames: 49 },
+      nair: { hitbox: { x: 1, y: -10, w: 28, h: 24, angle: 361, baseKB: 20, kbScale: 0.65, damage: 13 }, startup: 7, active: 14, endlag: 28, landingLag: 22, totalFrames: 49 },
+      fair: { hitbox: { x: 15, y: -9, w: 27, h: 18, angle: 0.56, baseKB: 40, kbScale: 1, damage: 18, sweetspotMult: 1.35, sweetspotStart: 0.72 }, startup: 14, active: 3, endlag: 27, landingLag: 30, totalFrames: 44 },
+      bair: { hitbox: { x: -37, y: -8, w: 26, h: 18, angle: 2.7, baseKB: 30, kbScale: 0.85, damage: 14 }, startup: 10, active: 5, endlag: 24, landingLag: 20, totalFrames: 39 },
+      uair: { hitbox: { x: 2, y: -22, w: 30, h: 18, angle: 1.42, baseKB: 25, kbScale: 0.75, damage: 13 }, startup: 6, active: 9, endlag: 18, landingLag: 18, totalFrames: 33 },
+      dair: { hitbox: { x: 4, y: 2, w: 27, h: 23, angle: -1.57, baseKB: 40, kbScale: 1, damage: 16 }, startup: 16, active: 5, endlag: 23, landingLag: 24, totalFrames: 44 },
+      upB: { hitbox: { x: 0, y: -9, w: 28, h: 27, angle: 1.57, baseKB: 35, kbScale: 0.75, damage: 15 }, startup: 13, active: 8, endlag: 29, totalFrames: 50, special: 'upB' },
+      sideB: { hitbox: { x: 13, y: -7, w: 28, h: 18, angle: 1.35, baseKB: 30, kbScale: 0.65, damage: 8 }, startup: 15, active: 5, endlag: 25, totalFrames: 45, special: 'sideB' },
+      downB: { hitbox: { x: 13, y: -6, w: 30, h: 17, angle: 0.25, baseKB: 35, kbScale: 0.8, damage: 15 }, startup: 15, active: 6, endlag: 29, totalFrames: 50, special: 'downB' },
+      neutralB: { hitbox: { x: 15, y: -10, w: 32, h: 22, angle: 0.35, baseKB: 55, kbScale: 1.1, damage: 27 }, startup: 52, active: 5, endlag: 42, totalFrames: 99, special: 'neutralB' },
+      grab: { hitbox: { x: 11, y: -6, w: 18, h: 16, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 6, active: 2, endlag: 22, totalFrames: 30, special: 'grab' },
+      dashGrab: { hitbox: { x: 15, y: -6, w: 20, h: 16, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 10, active: 2, endlag: 29, totalFrames: 41, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -8, w: 14, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 14, y: -6, w: 18, h: 15, angle: 0.4, baseKB: 45, kbScale: 0.65, damage: 9 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      bthrow: { hitbox: { x: -32, y: -6, w: 18, h: 15, angle: 2.7, baseKB: 50, kbScale: 0.7, damage: 9 }, startup: 1, active: 1, endlag: 24, totalFrames: 26, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -21, w: 18, h: 18, angle: 1.57, baseKB: 50, kbScale: 0.7, damage: 7 }, startup: 1, active: 1, endlag: 23, totalFrames: 25, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 20, h: 12, angle: 1.35, baseKB: 35, kbScale: 0.55, damage: 7 }, startup: 1, active: 1, endlag: 23, totalFrames: 25, special: 'throw' },
+    },
+  },
+  sheik: {
+    name: 'Sheik',
+    weight: 90,
+    gravity: 0.12,
+    maxFallSpeed: 2.1,
+    fastFallSpeed: 3.0,
+    airSpeed: 0.8,
+    airAccel: 0.06,
+    runSpeed: 2.0,
+    dashSpeed: 1.7,
+    walkSpeed: 0.8,
+    jumpVInitial: 4.0,
+    jumpVHold: 2.8,
+    traction: 0.08,
+    color: '#8844aa',
+    width: 12,
+    height: 20,
+    moves: {
+      jab1: { hitbox: { x: 9, y: -6, w: 18, h: 11, angle: 361, baseKB: 10, kbScale: 0.18, damage: 4 }, startup: 2, active: 2, endlag: 13, totalFrames: 17 },
+      jab2: { hitbox: { x: 10, y: -6, w: 19, h: 11, angle: 361, baseKB: 12, kbScale: 0.2, damage: 3 }, startup: 3, active: 2, endlag: 14, totalFrames: 19 },
+      ftilt: { hitbox: { x: 10, y: -8, w: 24, h: 13, angle: 1.29, baseKB: 20, kbScale: 0.65, damage: 7 }, startup: 5, active: 4, endlag: 20, totalFrames: 29 },
+      utilt: { hitbox: { x: 2, y: -19, w: 23, h: 19, angle: 1.4, baseKB: 22, kbScale: 0.6, damage: 8 }, startup: 5, active: 5, endlag: 23, totalFrames: 33 },
+      dtilt: { hitbox: { x: 11, y: 1, w: 23, h: 9, angle: 0.35, baseKB: 20, kbScale: 0.55, damage: 8 }, startup: 5, active: 3, endlag: 19, totalFrames: 27 },
+      fSmash: { hitbox: { x: 12, y: -7, w: 27, h: 15, angle: 0.4, baseKB: 30, kbScale: 0.85, damage: 14 }, startup: 12, active: 6, endlag: 31, totalFrames: 49 },
+      uSmash: { hitbox: { x: 2, y: -22, w: 24, h: 21, angle: 1.5, baseKB: 35, kbScale: 1, damage: 17 }, startup: 8, active: 5, endlag: 26, totalFrames: 39 },
+      dSmash: { hitbox: { x: 8, y: 1, w: 26, h: 11, angle: 0.3, baseKB: 30, kbScale: 0.8, damage: 13 }, startup: 11, active: 7, endlag: 31, totalFrames: 49 },
+      nair: { hitbox: { x: 0, y: -9, w: 25, h: 23, angle: 361, baseKB: 20, kbScale: 0.65, damage: 14 }, startup: 3, active: 8, endlag: 38, landingLag: 15, totalFrames: 49 },
+      fair: { hitbox: { x: 13, y: -10, w: 27, h: 14, angle: 361, baseKB: 28, kbScale: 0.85, damage: 13 }, startup: 5, active: 4, endlag: 30, landingLag: 18, totalFrames: 39 },
+      bair: { hitbox: { x: -36, y: -8, w: 25, h: 16, angle: 2.75, baseKB: 25, kbScale: 0.7, damage: 11 }, startup: 4, active: 5, endlag: 30, landingLag: 18, totalFrames: 39 },
+      uair: { hitbox: { x: 0, y: -21, w: 25, h: 19, angle: 1.4, baseKB: 22, kbScale: 0.65, damage: 12 }, startup: 5, active: 6, endlag: 28, landingLag: 18, totalFrames: 39 },
+      dair: { hitbox: { x: 1, y: 2, w: 23, h: 21, angle: -1.4, baseKB: 25, kbScale: 0.75, damage: 12 }, startup: 15, active: 6, endlag: 28, landingLag: 24, totalFrames: 49 },
+      upB: { hitbox: { x: 0, y: -8, w: 29, h: 26, angle: 1.57, baseKB: 40, kbScale: 0.8, damage: 12 }, startup: 18, active: 5, endlag: 32, totalFrames: 55, special: 'upB' },
+      sideB: { hitbox: { x: 13, y: -6, w: 24, h: 13, angle: 0.4, baseKB: 18, kbScale: 0.35, damage: 6 }, startup: 12, active: 8, endlag: 28, totalFrames: 48, special: 'sideB' },
+      downB: { hitbox: { x: 0, y: -8, w: 22, h: 21, angle: 1.57, baseKB: 10, kbScale: 0.2, damage: 0 }, startup: 10, active: 8, endlag: 42, totalFrames: 60, special: 'downB' },
+      neutralB: { hitbox: { x: 0, y: -6, w: 7, h: 5, angle: 0, baseKB: 6, kbScale: 0.1, damage: 3 }, startup: 8, active: 2, endlag: 24, totalFrames: 34, special: 'neutralB', projectile: { speed: 8, life: 100, color: '#d8b9ff' } },
+      grab: { hitbox: { x: 10, y: -6, w: 17, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 7, active: 2, endlag: 21, totalFrames: 30, special: 'grab' },
+      dashGrab: { hitbox: { x: 14, y: -6, w: 19, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 8, active: 2, endlag: 28, totalFrames: 38, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -8, w: 13, h: 13, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 13, y: -6, w: 16, h: 14, angle: 0.4, baseKB: 35, kbScale: 0.5, damage: 5 }, startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw' },
+      bthrow: { hitbox: { x: -29, y: -6, w: 16, h: 14, angle: 2.7, baseKB: 40, kbScale: 0.55, damage: 5 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -19, w: 16, h: 16, angle: 1.57, baseKB: 35, kbScale: 0.5, damage: 5 }, startup: 1, active: 1, endlag: 21, totalFrames: 23, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 17, h: 11, angle: 1.3, baseKB: 18, kbScale: 0.25, damage: 5 }, startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw' },
+    },
+  },
+  jigglypuff: {
+    name: 'Jigglypuff',
+    weight: 60,
+    gravity: 0.06,
+    maxFallSpeed: 1.3,
+    fastFallSpeed: 1.6,
+    airSpeed: 1.05,
+    airAccel: 0.09,
+    runSpeed: 1.1,
+    dashSpeed: 1.3,
+    walkSpeed: 0.7,
+    jumpVInitial: 3.8,
+    jumpVHold: 2.4,
+    traction: 0.09,
+    color: '#ff88cc',
+    width: 16,
+    height: 16,
+    moves: {
+      jab1: { hitbox: { x: 10, y: -6, w: 18, h: 12, angle: 361, baseKB: 10, kbScale: 0.15, damage: 3 }, startup: 5, active: 2, endlag: 9, totalFrames: 16 },
+      jab2: { hitbox: { x: 11, y: -6, w: 19, h: 12, angle: 361, baseKB: 12, kbScale: 0.2, damage: 3 }, startup: 5, active: 2, endlag: 11, totalFrames: 18 },
+      ftilt: { hitbox: { x: 11, y: -6, w: 22, h: 14, angle: 0.35, baseKB: 20, kbScale: 0.55, damage: 10 }, startup: 7, active: 4, endlag: 19, totalFrames: 30 },
+      utilt: { hitbox: { x: 0, y: -17, w: 22, h: 19, angle: 1.45, baseKB: 24, kbScale: 0.7, damage: 9 }, startup: 9, active: 5, endlag: 16, totalFrames: 30 },
+      dtilt: { hitbox: { x: 11, y: 1, w: 22, h: 9, angle: 0.3, baseKB: 20, kbScale: 0.55, damage: 10 }, startup: 10, active: 4, endlag: 16, totalFrames: 30 },
+      fSmash: { hitbox: { x: 12, y: -7, w: 25, h: 15, angle: 0.4, baseKB: 35, kbScale: 0.9, damage: 17 }, startup: 12, active: 4, endlag: 32, totalFrames: 48 },
+      uSmash: { hitbox: { x: 1, y: -19, w: 23, h: 21, angle: 1.5, baseKB: 35, kbScale: 0.9, damage: 14 }, startup: 8, active: 5, endlag: 32, totalFrames: 45 },
+      dSmash: { hitbox: { x: 8, y: 1, w: 25, h: 11, angle: 0.25, baseKB: 30, kbScale: 0.8, damage: 12 }, startup: 9, active: 6, endlag: 30, totalFrames: 45 },
+      nair: { hitbox: { x: 0, y: -7, w: 24, h: 23, angle: 361, baseKB: 24, kbScale: 0.75, damage: 12 }, startup: 6, active: 10, endlag: 24, landingLag: 18, totalFrames: 40 },
+      fair: { hitbox: { x: 12, y: -7, w: 24, h: 16, angle: 361, baseKB: 20, kbScale: 0.65, damage: 12 }, startup: 8, active: 5, endlag: 22, landingLag: 20, totalFrames: 35 },
+      bair: { hitbox: { x: -34, y: -6, w: 23, h: 17, angle: 2.8, baseKB: 28, kbScale: 0.8, damage: 12 }, startup: 9, active: 5, endlag: 21, landingLag: 20, totalFrames: 35 },
+      uair: { hitbox: { x: 0, y: -19, w: 23, h: 18, angle: 1.55, baseKB: 25, kbScale: 0.75, damage: 12 }, startup: 9, active: 5, endlag: 21, landingLag: 18, totalFrames: 35 },
+      dair: { hitbox: { x: 0, y: 1, w: 23, h: 22, angle: -1.45, baseKB: 18, kbScale: 0.5, damage: 14 }, startup: 5, active: 12, endlag: 23, landingLag: 24, totalFrames: 40 },
+      upB: { hitbox: { x: 0, y: -7, w: 28, h: 24, angle: 1.57, baseKB: 0, kbScale: 0, damage: 0 }, startup: 10, active: 28, endlag: 32, totalFrames: 70, special: 'upB' },
+      sideB: { hitbox: { x: 12, y: -6, w: 26, h: 16, angle: 0.3, baseKB: 25, kbScale: 0.75, damage: 13 }, startup: 13, active: 6, endlag: 26, totalFrames: 45, special: 'sideB' },
+      downB: { hitbox: { x: 0, y: -8, w: 22, h: 23, angle: 1.54, baseKB: 70, kbScale: 1.2, damage: 28 }, startup: 1, active: 2, endlag: 246, totalFrames: 249, special: 'downB' },
+      neutralB: { hitbox: { x: 0, y: -7, w: 27, h: 24, angle: 1.57, baseKB: 0, kbScale: 0, damage: 0 }, startup: 27, active: 30, endlag: 33, totalFrames: 90, special: 'neutralB' },
+      grab: { hitbox: { x: 10, y: -5, w: 17, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 6, active: 2, endlag: 22, totalFrames: 30, special: 'grab' },
+      dashGrab: { hitbox: { x: 14, y: -5, w: 19, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 9, active: 2, endlag: 29, totalFrames: 40, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -7, w: 13, h: 13, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 13, y: -5, w: 16, h: 14, angle: 0.4, baseKB: 35, kbScale: 0.5, damage: 5 }, startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw' },
+      bthrow: { hitbox: { x: -29, y: -5, w: 16, h: 14, angle: 2.7, baseKB: 40, kbScale: 0.55, damage: 5 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -18, w: 16, h: 16, angle: 1.57, baseKB: 40, kbScale: 0.55, damage: 5 }, startup: 1, active: 1, endlag: 21, totalFrames: 23, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 17, h: 11, angle: 1.35, baseKB: 30, kbScale: 0.4, damage: 5 }, startup: 1, active: 1, endlag: 21, totalFrames: 23, special: 'throw' },
+    },
+  },
+  peach: {
+    name: 'Peach',
+    weight: 90,
+    gravity: 0.08,
+    maxFallSpeed: 1.5,
+    fastFallSpeed: 2.0,
+    airSpeed: 0.96,
+    airAccel: 0.07,
+    runSpeed: 1.5,
+    dashSpeed: 1.5,
+    walkSpeed: 0.85,
+    jumpVInitial: 3.0,
+    jumpVHold: 2.1,
+    traction: 0.08,
+    color: '#ffaaee',
+    width: 14,
+    height: 21,
+    moves: {
+      jab1: { hitbox: { x: 9, y: -7, w: 18, h: 12, angle: 361, baseKB: 10, kbScale: 0.15, damage: 3 }, startup: 2, active: 2, endlag: 11, totalFrames: 15 },
+      jab2: { hitbox: { x: 10, y: -7, w: 19, h: 12, angle: 361, baseKB: 12, kbScale: 0.2, damage: 3 }, startup: 3, active: 2, endlag: 13, totalFrames: 18 },
+      ftilt: { hitbox: { x: 10, y: -8, w: 23, h: 15, angle: 0.4, baseKB: 22, kbScale: 0.6, damage: 11 }, startup: 7, active: 4, endlag: 25, totalFrames: 36 },
+      utilt: { hitbox: { x: 1, y: -20, w: 23, h: 20, angle: 1.45, baseKB: 28, kbScale: 0.75, damage: 12 }, startup: 9, active: 5, endlag: 26, totalFrames: 40 },
+      dtilt: { hitbox: { x: 11, y: 1, w: 24, h: 10, angle: 0.35, baseKB: 20, kbScale: 0.6, damage: 12 }, startup: 12, active: 4, endlag: 19, totalFrames: 35 },
+      fSmash: { hitbox: { x: 12, y: -8, w: 28, h: 16, angle: 0.4, baseKB: 35, kbScale: 0.95, damage: 18 }, startup: 15, active: 5, endlag: 29, totalFrames: 49 },
+      uSmash: { hitbox: { x: 1, y: -23, w: 25, h: 22, angle: 1.5, baseKB: 38, kbScale: 1, damage: 19 }, startup: 14, active: 5, endlag: 30, totalFrames: 49 },
+      dSmash: { hitbox: { x: 8, y: 1, w: 29, h: 12, angle: 0.2, baseKB: 26, kbScale: 0.85, damage: 16 }, startup: 6, active: 12, endlag: 31, totalFrames: 49 },
+      nair: { hitbox: { x: 0, y: -9, w: 27, h: 25, angle: 361, baseKB: 25, kbScale: 0.75, damage: 14 }, startup: 3, active: 12, endlag: 34, landingLag: 15, totalFrames: 49 },
+      fair: { hitbox: { x: 12, y: -11, w: 29, h: 18, angle: 0.55, baseKB: 32, kbScale: 0.9, damage: 15 }, startup: 16, active: 4, endlag: 29, landingLag: 20, totalFrames: 49 },
+      bair: { hitbox: { x: -38, y: -8, w: 27, h: 18, angle: 2.75, baseKB: 28, kbScale: 0.8, damage: 14 }, startup: 6, active: 5, endlag: 28, landingLag: 18, totalFrames: 39 },
+      uair: { hitbox: { x: 0, y: -22, w: 27, h: 20, angle: 1.48, baseKB: 25, kbScale: 0.7, damage: 13 }, startup: 8, active: 5, endlag: 26, landingLag: 18, totalFrames: 39 },
+      dair: { hitbox: { x: 0, y: 2, w: 25, h: 23, angle: -1.35, baseKB: 20, kbScale: 0.55, damage: 12 }, startup: 12, active: 12, endlag: 25, landingLag: 24, totalFrames: 49 },
+      upB: { hitbox: { x: 0, y: -10, w: 27, h: 28, angle: 1.57, baseKB: 35, kbScale: 0.75, damage: 12 }, startup: 7, active: 9, endlag: 39, totalFrames: 55, special: 'upB' },
+      sideB: { hitbox: { x: 13, y: -7, w: 27, h: 17, angle: 0.45, baseKB: 32, kbScale: 0.75, damage: 12 }, startup: 13, active: 5, endlag: 27, totalFrames: 45, special: 'sideB' },
+      downB: { hitbox: { x: 0, y: -7, w: 20, h: 18, angle: 1.57, baseKB: 0, kbScale: 0, damage: 0 }, startup: 20, active: 2, endlag: 23, totalFrames: 45, special: 'downB' },
+      neutralB: { hitbox: { x: 0, y: -5, w: 9, h: 8, angle: 0.35, baseKB: 25, kbScale: 0.5, damage: 8 }, startup: 15, active: 2, endlag: 23, totalFrames: 40, special: 'neutralB', projectile: { speed: 4.2, life: 150, color: '#ff99cc', vy: -0.15 } },
+      grab: { hitbox: { x: 10, y: -6, w: 18, h: 15, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 7, active: 2, endlag: 21, totalFrames: 30, special: 'grab' },
+      dashGrab: { hitbox: { x: 14, y: -6, w: 20, h: 15, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 9, active: 2, endlag: 29, totalFrames: 40, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -8, w: 14, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 14, y: -6, w: 17, h: 15, angle: 0.4, baseKB: 40, kbScale: 0.6, damage: 10 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      bthrow: { hitbox: { x: -31, y: -6, w: 17, h: 15, angle: 2.7, baseKB: 45, kbScale: 0.65, damage: 11 }, startup: 1, active: 1, endlag: 24, totalFrames: 26, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -21, w: 17, h: 17, angle: 1.57, baseKB: 42, kbScale: 0.6, damage: 8 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 18, h: 12, angle: 1.3, baseKB: 25, kbScale: 0.35, damage: 7 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+    },
+  },
+  luigi: {
+    name: 'Luigi',
+    weight: 100,
+    gravity: 0.065,
+    maxFallSpeed: 1.6,
+    fastFallSpeed: 2.0,
+    airSpeed: 0.68,
+    airAccel: 0.06,
+    runSpeed: 1.6,
+    dashSpeed: 1.34,
+    walkSpeed: 0.65,
+    jumpVInitial: 4.2,
+    jumpVHold: 2.8,
+    traction: 0.025,
+    color: '#44cc44',
+    width: 13,
+    height: 21,
+    moves: {
+      jab1: { hitbox: { x: 9, y: -7, w: 18, h: 12, angle: 361, baseKB: 10, kbScale: 0.15, damage: 3 }, startup: 2, active: 2, endlag: 12, totalFrames: 16 },
+      jab2: { hitbox: { x: 10, y: -7, w: 19, h: 12, angle: 361, baseKB: 12, kbScale: 0.2, damage: 2 }, startup: 3, active: 2, endlag: 13, totalFrames: 18 },
+      ftilt: { hitbox: { x: 10, y: -8, w: 23, h: 14, angle: 0.4, baseKB: 22, kbScale: 0.6, damage: 10 }, startup: 5, active: 4, endlag: 23, totalFrames: 32 },
+      utilt: { hitbox: { x: 1, y: -20, w: 23, h: 20, angle: 1.45, baseKB: 26, kbScale: 0.7, damage: 9 }, startup: 5, active: 5, endlag: 20, totalFrames: 30 },
+      dtilt: { hitbox: { x: 11, y: 1, w: 23, h: 9, angle: 0.3, baseKB: 20, kbScale: 0.55, damage: 9 }, startup: 5, active: 3, endlag: 27, totalFrames: 35 },
+      fSmash: { hitbox: { x: 12, y: -8, w: 27, h: 16, angle: 0.42, baseKB: 38, kbScale: 1, damage: 15 }, startup: 12, active: 4, endlag: 31, totalFrames: 47 },
+      uSmash: { hitbox: { x: 1, y: -22, w: 24, h: 21, angle: 1.5, baseKB: 35, kbScale: 0.95, damage: 17 }, startup: 9, active: 5, endlag: 25, totalFrames: 39 },
+      dSmash: { hitbox: { x: 8, y: 1, w: 27, h: 11, angle: 0.25, baseKB: 32, kbScale: 0.85, damage: 16 }, startup: 9, active: 7, endlag: 29, totalFrames: 45 },
+      nair: { hitbox: { x: 0, y: -9, w: 26, h: 24, angle: 361, baseKB: 30, kbScale: 0.85, damage: 15 }, startup: 3, active: 8, endlag: 34, landingLag: 15, totalFrames: 45 },
+      fair: { hitbox: { x: 12, y: -9, w: 26, h: 16, angle: 0.4, baseKB: 24, kbScale: 0.7, damage: 10 }, startup: 7, active: 5, endlag: 23, landingLag: 18, totalFrames: 35 },
+      bair: { hitbox: { x: -36, y: -8, w: 25, h: 17, angle: 2.75, baseKB: 28, kbScale: 0.8, damage: 12 }, startup: 6, active: 5, endlag: 24, landingLag: 18, totalFrames: 35 },
+      uair: { hitbox: { x: 0, y: -21, w: 25, h: 19, angle: 1.48, baseKB: 24, kbScale: 0.7, damage: 11 }, startup: 5, active: 6, endlag: 24, landingLag: 18, totalFrames: 35 },
+      dair: { hitbox: { x: 0, y: 2, w: 24, h: 22, angle: -1.45, baseKB: 28, kbScale: 0.8, damage: 16 }, startup: 10, active: 5, endlag: 30, landingLag: 24, totalFrames: 45 },
+      upB: { hitbox: { x: 0, y: -14, w: 23, h: 30, angle: 1.57, baseKB: 60, kbScale: 1.15, damage: 25 }, startup: 8, active: 3, endlag: 39, totalFrames: 50, special: 'upB' },
+      sideB: { hitbox: { x: 13, y: -7, w: 27, h: 17, angle: 0.35, baseKB: 30, kbScale: 0.65, damage: 10 }, startup: 22, active: 5, endlag: 38, totalFrames: 65, special: 'sideB' },
+      downB: { hitbox: { x: 0, y: -8, w: 28, h: 25, angle: 1.57, baseKB: 25, kbScale: 0.55, damage: 8 }, startup: 10, active: 15, endlag: 30, totalFrames: 55, special: 'downB' },
+      neutralB: { hitbox: { x: 0, y: -5, w: 8, h: 7, angle: 0.35, baseKB: 20, kbScale: 0.45, damage: 6 }, startup: 17, active: 2, endlag: 26, totalFrames: 45, special: 'neutralB', projectile: { speed: 4.5, life: 120, color: '#55ff66', vy: -0.05 } },
+      grab: { hitbox: { x: 10, y: -6, w: 18, h: 15, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 6, active: 2, endlag: 22, totalFrames: 30, special: 'grab' },
+      dashGrab: { hitbox: { x: 14, y: -6, w: 20, h: 15, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 9, active: 2, endlag: 29, totalFrames: 40, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -8, w: 14, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 14, y: -6, w: 17, h: 15, angle: 0.4, baseKB: 40, kbScale: 0.6, damage: 9 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      bthrow: { hitbox: { x: -31, y: -6, w: 17, h: 15, angle: 2.7, baseKB: 45, kbScale: 0.65, damage: 12 }, startup: 1, active: 1, endlag: 24, totalFrames: 26, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -21, w: 17, h: 17, angle: 1.57, baseKB: 42, kbScale: 0.6, damage: 8 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 18, h: 12, angle: 1.3, baseKB: 25, kbScale: 0.35, damage: 7 }, startup: 1, active: 1, endlag: 22, totalFrames: 24, special: 'throw' },
+    },
+  },
+  ics: {
+    name: 'Ice Climbers',
+    weight: 88,
+    gravity: 0.1,
+    maxFallSpeed: 1.9,
+    fastFallSpeed: 2.4,
+    airSpeed: 0.85,
+    airAccel: 0.06,
+    runSpeed: 1.7,
+    dashSpeed: 1.4,
+    walkSpeed: 0.65,
+    jumpVInitial: 3.5,
+    jumpVHold: 2.3,
+    traction: 0.06,
+    color: '#66bbff',
+    width: 13,
+    height: 19,
+    moves: {
+      jab1: { hitbox: { x: 9, y: -6, w: 18, h: 12, angle: 361, baseKB: 10, kbScale: 0.15, damage: 2 }, startup: 4, active: 2, endlag: 12, totalFrames: 18 },
+      jab2: { hitbox: { x: 10, y: -6, w: 19, h: 12, angle: 361, baseKB: 12, kbScale: 0.2, damage: 2 }, startup: 4, active: 2, endlag: 14, totalFrames: 20 },
+      ftilt: { hitbox: { x: 10, y: -7, w: 24, h: 14, angle: 0.4, baseKB: 22, kbScale: 0.6, damage: 9 }, startup: 8, active: 4, endlag: 23, totalFrames: 35 },
+      utilt: { hitbox: { x: 1, y: -19, w: 23, h: 20, angle: 1.45, baseKB: 25, kbScale: 0.7, damage: 10 }, startup: 8, active: 5, endlag: 22, totalFrames: 35 },
+      dtilt: { hitbox: { x: 11, y: 1, w: 24, h: 10, angle: 0.3, baseKB: 20, kbScale: 0.55, damage: 9 }, startup: 8, active: 4, endlag: 23, totalFrames: 35 },
+      fSmash: { hitbox: { x: 12, y: -8, w: 29, h: 16, angle: 0.42, baseKB: 38, kbScale: 1, damage: 14 }, startup: 12, active: 4, endlag: 33, totalFrames: 49 },
+      uSmash: { hitbox: { x: 1, y: -22, w: 25, h: 22, angle: 1.5, baseKB: 35, kbScale: 0.95, damage: 16 }, startup: 12, active: 5, endlag: 32, totalFrames: 49 },
+      dSmash: { hitbox: { x: 8, y: 1, w: 28, h: 12, angle: 0.25, baseKB: 32, kbScale: 0.85, damage: 13 }, startup: 10, active: 7, endlag: 30, totalFrames: 47 },
+      nair: { hitbox: { x: 0, y: -8, w: 26, h: 24, angle: 361, baseKB: 22, kbScale: 0.65, damage: 10 }, startup: 6, active: 10, endlag: 26, landingLag: 18, totalFrames: 42 },
+      fair: { hitbox: { x: 12, y: -9, w: 28, h: 17, angle: 0.45, baseKB: 25, kbScale: 0.75, damage: 12 }, startup: 7, active: 5, endlag: 28, landingLag: 20, totalFrames: 40 },
+      bair: { hitbox: { x: -37, y: -7, w: 26, h: 17, angle: 2.75, baseKB: 28, kbScale: 0.8, damage: 11 }, startup: 8, active: 5, endlag: 27, landingLag: 20, totalFrames: 40 },
+      uair: { hitbox: { x: 0, y: -21, w: 26, h: 19, angle: 1.48, baseKB: 25, kbScale: 0.7, damage: 10 }, startup: 7, active: 6, endlag: 25, landingLag: 18, totalFrames: 38 },
+      dair: { hitbox: { x: 0, y: 2, w: 25, h: 22, angle: -1.45, baseKB: 25, kbScale: 0.7, damage: 10 }, startup: 8, active: 8, endlag: 26, landingLag: 24, totalFrames: 42 },
+      upB: { hitbox: { x: 0, y: -11, w: 25, h: 29, angle: 1.57, baseKB: 30, kbScale: 0.65, damage: 8 }, startup: 10, active: 10, endlag: 35, totalFrames: 55, special: 'upB' },
+      sideB: { hitbox: { x: 0, y: -6, w: 8, h: 7, angle: 0.35, baseKB: 22, kbScale: 0.5, damage: 5 }, startup: 16, active: 2, endlag: 27, totalFrames: 45, special: 'sideB' },
+      downB: { hitbox: { x: 11, y: -7, w: 25, h: 17, angle: 0.35, baseKB: 20, kbScale: 0.45, damage: 6 }, startup: 12, active: 12, endlag: 24, totalFrames: 48, special: 'downB' },
+      neutralB: { hitbox: { x: 11, y: -7, w: 24, h: 17, angle: 0.35, baseKB: 18, kbScale: 0.4, damage: 5 }, startup: 10, active: 12, endlag: 20, totalFrames: 42, special: 'neutralB', projectile: { speed: 4.3, life: 130, color: '#99eeff', vy: -0.05 } },
+      grab: { hitbox: { x: 10, y: -6, w: 18, h: 15, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 7, active: 2, endlag: 21, totalFrames: 30, special: 'grab' },
+      dashGrab: { hitbox: { x: 14, y: -6, w: 20, h: 15, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 9, active: 2, endlag: 29, totalFrames: 40, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -8, w: 14, h: 14, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 14, y: -6, w: 17, h: 15, angle: 0.4, baseKB: 35, kbScale: 0.5, damage: 6 }, startup: 1, active: 1, endlag: 21, totalFrames: 23, special: 'throw' },
+      bthrow: { hitbox: { x: -31, y: -6, w: 17, h: 15, angle: 2.7, baseKB: 40, kbScale: 0.55, damage: 7 }, startup: 1, active: 1, endlag: 23, totalFrames: 25, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -21, w: 17, h: 17, angle: 1.57, baseKB: 35, kbScale: 0.5, damage: 6 }, startup: 1, active: 1, endlag: 21, totalFrames: 23, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 18, h: 12, angle: 1.3, baseKB: 18, kbScale: 0.25, damage: 6 }, startup: 1, active: 1, endlag: 20, totalFrames: 22, special: 'throw' },
+    },
+  },
+  ganon: {
+    name: 'Ganondorf',
+    weight: 109,
+    gravity: 0.13,
+    maxFallSpeed: 2.3,
+    fastFallSpeed: 2.8,
+    airSpeed: 0.78,
+    airAccel: 0.04,
+    runSpeed: 1.5,
+    dashSpeed: 1.3,
+    walkSpeed: 0.65,
+    jumpVInitial: 3.0,
+    jumpVHold: 2.0,
+    traction: 0.07,
+    color: '#8844cc',
+    width: 16,
+    height: 24,
+    moves: {
+      jab1: { hitbox: { x: 10, y: -7, w: 20, h: 13, angle: 361, baseKB: 20, kbScale: 0.45, damage: 7 }, startup: 3, active: 3, endlag: 19, totalFrames: 25 },
+      jab2: { hitbox: { x: 11, y: -7, w: 21, h: 13, angle: 361, baseKB: 22, kbScale: 0.5, damage: 7 }, startup: 5, active: 3, endlag: 20, totalFrames: 28 },
+      ftilt: { hitbox: { x: 11, y: -8, w: 27, h: 16, angle: 0.4, baseKB: 35, kbScale: 0.85, damage: 13 }, startup: 10, active: 5, endlag: 24, totalFrames: 39 },
+      utilt: { hitbox: { x: 2, y: -23, w: 28, h: 22, angle: 1.45, baseKB: 35, kbScale: 0.85, damage: 18 }, startup: 19, active: 5, endlag: 33, totalFrames: 57 },
+      dtilt: { hitbox: { x: 12, y: 1, w: 27, h: 11, angle: 0.3, baseKB: 35, kbScale: 0.8, damage: 14 }, startup: 10, active: 4, endlag: 21, totalFrames: 35 },
+      fSmash: { hitbox: { x: 13, y: -10, w: 32, h: 19, angle: 0.42, baseKB: 50, kbScale: 1.1, damage: 24 }, startup: 29, active: 5, endlag: 35, totalFrames: 69 },
+      uSmash: { hitbox: { x: 2, y: -25, w: 29, h: 24, angle: 1.5, baseKB: 48, kbScale: 1.05, damage: 22 }, startup: 21, active: 6, endlag: 32, totalFrames: 59 },
+      dSmash: { hitbox: { x: 9, y: 1, w: 31, h: 13, angle: 0.25, baseKB: 45, kbScale: 1, damage: 20 }, startup: 15, active: 7, endlag: 33, totalFrames: 55 },
+      nair: { hitbox: { x: 0, y: -10, w: 30, h: 27, angle: 361, baseKB: 30, kbScale: 0.8, damage: 17 }, startup: 7, active: 14, endlag: 28, landingLag: 22, totalFrames: 49 },
+      fair: { hitbox: { x: 14, y: -11, w: 31, h: 20, angle: 0.5, baseKB: 45, kbScale: 1, damage: 17 }, startup: 14, active: 5, endlag: 26, landingLag: 30, totalFrames: 45 },
+      bair: { hitbox: { x: -42, y: -9, w: 29, h: 20, angle: 2.75, baseKB: 42, kbScale: 0.95, damage: 16 }, startup: 10, active: 5, endlag: 27, landingLag: 20, totalFrames: 42 },
+      uair: { hitbox: { x: 1, y: -24, w: 30, h: 22, angle: 1.45, baseKB: 38, kbScale: 0.9, damage: 14 }, startup: 8, active: 7, endlag: 24, landingLag: 18, totalFrames: 39 },
+      dair: { hitbox: { x: 3, y: 2, w: 29, h: 25, angle: -1.57, baseKB: 50, kbScale: 1.1, damage: 22 }, startup: 16, active: 5, endlag: 28, landingLag: 30, totalFrames: 49 },
+      upB: { hitbox: { x: 0, y: -10, w: 31, h: 30, angle: 1.57, baseKB: 45, kbScale: 0.85, damage: 12 }, startup: 14, active: 8, endlag: 33, totalFrames: 55, special: 'upB' },
+      sideB: { hitbox: { x: 13, y: -8, w: 31, h: 20, angle: 0.4, baseKB: 40, kbScale: 0.8, damage: 12 }, startup: 16, active: 6, endlag: 28, totalFrames: 50, special: 'sideB' },
+      downB: { hitbox: { x: 14, y: -7, w: 34, h: 19, angle: 0.25, baseKB: 45, kbScale: 1, damage: 16 }, startup: 16, active: 8, endlag: 31, totalFrames: 55, special: 'downB' },
+      neutralB: { hitbox: { x: 16, y: -11, w: 36, h: 25, angle: 0.35, baseKB: 70, kbScale: 1.2, damage: 32 }, startup: 70, active: 5, endlag: 45, totalFrames: 120, special: 'neutralB' },
+      grab: { hitbox: { x: 11, y: -7, w: 19, h: 17, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 7, active: 2, endlag: 23, totalFrames: 32, special: 'grab' },
+      dashGrab: { hitbox: { x: 15, y: -7, w: 21, h: 17, angle: 0, baseKB: 0, kbScale: 0, damage: 0 }, startup: 11, active: 2, endlag: 31, totalFrames: 44, special: 'grab' },
+      pummel: { hitbox: { x: 0, y: -9, w: 15, h: 15, angle: 0, baseKB: 0, kbScale: 0, damage: 3 }, startup: 1, active: 1, endlag: 4, totalFrames: 6 },
+      fthrow: { hitbox: { x: 15, y: -7, w: 18, h: 16, angle: 0.4, baseKB: 50, kbScale: 0.7, damage: 13 }, startup: 1, active: 1, endlag: 24, totalFrames: 26, special: 'throw' },
+      bthrow: { hitbox: { x: -34, y: -7, w: 18, h: 16, angle: 2.7, baseKB: 55, kbScale: 0.75, damage: 10 }, startup: 1, active: 1, endlag: 26, totalFrames: 28, special: 'throw' },
+      uthrow: { hitbox: { x: 0, y: -23, w: 18, h: 18, angle: 1.57, baseKB: 50, kbScale: 0.7, damage: 7 }, startup: 1, active: 1, endlag: 24, totalFrames: 26, special: 'throw' },
+      dthrow: { hitbox: { x: 0, y: 1, w: 20, h: 13, angle: 1.3, baseKB: 35, kbScale: 0.5, damage: 7 }, startup: 1, active: 1, endlag: 24, totalFrames: 26, special: 'throw' },
+    },
+  },
+};
+
+// ── Custom Character System ──────────────────────────────────
+// localStorage-backed character creator with Melee-style moveset generation
+// decomp ref: ftData character struct, ftCoData moveset tables
+
+const CUSTOM_STORAGE_KEY = 'melee-web-custom-chars';
+let editingId = null;
+
+// Melee decomp presets — stats from actual character data
+const CHAR_PRESETS = {
+  speedy: { name: 'Speedy', color: '#66ffcc', weight: 70, gravity: 140, fallSpeed: 200, airSpeed: 100,
+            runSpeed: 240, jumpV: 420, traction: 60, jabDmg: 3, smashDmg: 11, aerialDmg: 9, specialDmg: 7, width: 10, height: 16 },
+  tank: { name: 'Tank', color: '#8888ff', weight: 130, gravity: 200, fallSpeed: 280, airSpeed: 65,
+          runSpeed: 150, jumpV: 310, traction: 100, jabDmg: 5, smashDmg: 18, aerialDmg: 12, specialDmg: 10, width: 16, height: 22 },
+  glass_cannon: { name: 'Glass Cannon', color: '#ff66ff', weight: 65, gravity: 160, fallSpeed: 240, airSpeed: 85,
+                  runSpeed: 190, jumpV: 380, traction: 70, jabDmg: 5, smashDmg: 20, aerialDmg: 14, specialDmg: 12, width: 11, height: 17 },
+  brawler: { name: 'Brawler', color: '#ffaa44', weight: 105, gravity: 180, fallSpeed: 260, airSpeed: 78,
+             runSpeed: 180, jumpV: 350, traction: 90, jabDmg: 6, smashDmg: 16, aerialDmg: 13, specialDmg: 11, width: 14, height: 20 },
+};
+
+function loadCustomCharacters() {
+  try { return JSON.parse(localStorage.getItem(CUSTOM_STORAGE_KEY) || '[]'); }
+  catch { return []; }
+}
+function saveCustomCharacters(arr) { localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(arr)); }
+
+function customToCharacter(def) {
+  // Auto-generate moveset from damage sliders (Melee: ftData moveset table structure)
+  const j = def.jabDmg, s = def.smashDmg, a = def.aerialDmg, sp = def.specialDmg;
+  return {
+    name: def.name, color: def.color, weight: def.weight,
+    gravity: def.gravity / 1000, fallSpeed: def.fallSpeed / 100,
+    airSpeed: def.airSpeed / 100, runSpeed: def.runSpeed / 100,
+    jumpV: def.jumpV / 100, traction: def.traction / 1000,
+    width: def.width, height: def.height,
+    moves: {
+      jab1: { startup: 2, active: 2, endlag: 4, totalFrames: 8, damage: j, kbGrowth: 0, baseKB: 10, angle: 80, hitboxW: def.width * 0.9, hitboxH: def.height * 0.4 },
+      jab2: { startup: 2, active: 2, endlag: 5, totalFrames: 9, damage: j + 1, kbGrowth: 0, baseKB: 12, angle: 80, hitboxW: def.width * 0.9, hitboxH: def.height * 0.4 },
+      jab3: { startup: 3, active: 3, endlag: 8, totalFrames: 14, damage: j + 2, kbGrowth: 20, baseKB: 25, angle: 50, hitboxW: def.width, hitboxH: def.height * 0.5 },
+      fTilt: { startup: 5, active: 3, endlag: 12, totalFrames: 20, damage: j + 3, kbGrowth: 35, baseKB: 20, angle: 35, hitboxW: def.width * 1.2, hitboxH: def.height * 0.5 },
+      uTilt: { startup: 4, active: 3, endlag: 10, totalFrames: 17, damage: j + 2, kbGrowth: 30, baseKB: 18, angle: 95, hitboxW: def.width, hitboxH: def.height * 0.8 },
+      dTilt: { startup: 4, active: 2, endlag: 10, totalFrames: 16, damage: j + 2, kbGrowth: 25, baseKB: 15, angle: 75, hitboxW: def.width * 1.1, hitboxH: def.height * 0.3 },
+      dashAttack: { startup: 5, active: 4, endlag: 18, totalFrames: 27, damage: j + 4, kbGrowth: 40, baseKB: 30, angle: 40, hitboxW: def.width * 1.3, hitboxH: def.height * 0.6 },
+      fSmash: { startup: 10, active: 3, endlag: 25, totalFrames: 38, damage: s, kbGrowth: 80, baseKB: 30, angle: 35, hitboxW: def.width * 1.3, hitboxH: def.height * 0.7 },
+      uSmash: { startup: 8, active: 4, endlag: 22, totalFrames: 34, damage: s - 1, kbGrowth: 82, baseKB: 28, angle: 90, hitboxW: def.width * 1.1, hitboxH: def.height * 0.9 },
+      dSmash: { startup: 6, active: 2, endlag: 22, totalFrames: 30, damage: s - 2, kbGrowth: 85, baseKB: 32, angle: 20, hitboxW: def.width * 1.4, hitboxH: def.height * 0.4 },
+      nair: { startup: 4, active: 3, endlag: 15, totalFrames: 22, damage: a, kbGrowth: 30, baseKB: 20, angle: 55, hitboxW: def.width * 1.1, hitboxH: def.height * 0.7, landingLag: 7 },
+      fair: { startup: 5, active: 3, endlag: 14, totalFrames: 22, damage: a + 1, kbGrowth: 45, baseKB: 22, angle: 40, hitboxW: def.width * 1.0, hitboxH: def.height * 0.6, landingLag: 8 },
+      bair: { startup: 6, active: 2, endlag: 16, totalFrames: 24, damage: a + 2, kbGrowth: 50, baseKB: 25, angle: 361, hitboxW: def.width * 0.9, hitboxH: def.height * 0.6, landingLag: 9 },
+      uair: { startup: 4, active: 4, endlag: 12, totalFrames: 20, damage: a, kbGrowth: 40, baseKB: 20, angle: 85, hitboxW: def.width * 0.8, hitboxH: def.height * 0.9, landingLag: 7 },
+      dair: { startup: 6, active: 3, endlag: 18, totalFrames: 27, damage: a + 2, kbGrowth: 55, baseKB: 20, angle: 270, hitboxW: def.width * 0.8, hitboxH: def.height * 0.5, landingLag: 10 },
+      neutralB: { startup: 6, active: 4, endlag: 15, totalFrames: 25, damage: sp, kbGrowth: 30, baseKB: 25, angle: 45, hitboxW: def.width * 0.9, hitboxH: def.height * 0.5 },
+      sideB: { startup: 8, active: 3, endlag: 18, totalFrames: 29, damage: sp + 2, kbGrowth: 50, baseKB: 28, angle: 40, hitboxW: def.width * 1.2, hitboxH: def.height * 0.6 },
+      upB: { startup: 5, active: 4, endlag: 20, totalFrames: 29, damage: sp, kbGrowth: 55, baseKB: 35, angle: 80, hitboxW: def.width, hitboxH: def.height * 0.8 },
+      downB: { startup: 4, active: 2, endlag: 14, totalFrames: 20, damage: sp - 2, kbGrowth: 20, baseKB: 30, angle: 361, hitboxW: def.width * 0.7, hitboxH: def.height * 0.7, isReflector: true },
+      grab: { startup: 6, active: 2, endlag: 15, totalFrames: 23, damage: 0, kbGrowth: 0, baseKB: 0, angle: 0, hitboxW: def.width * 0.8, hitboxH: def.height * 0.5, isGrab: true },
+      fThrow: { startup: 4, active: 2, endlag: 12, totalFrames: 18, damage: sp - 2, kbGrowth: 50, baseKB: 30, angle: 35, hitboxW: 0, hitboxH: 0 },
+      bThrow: { startup: 6, active: 2, endlag: 14, totalFrames: 22, damage: sp - 1, kbGrowth: 55, baseKB: 32, angle: 140, hitboxW: 0, hitboxH: 0 },
+      uThrow: { startup: 5, active: 2, endlag: 12, totalFrames: 19, damage: sp - 2, kbGrowth: 45, baseKB: 35, angle: 90, hitboxW: 0, hitboxH: 0 },
+      dThrow: { startup: 4, active: 3, endlag: 14, totalFrames: 21, damage: sp - 1, kbGrowth: 40, baseKB: 25, angle: 75, hitboxW: 0, hitboxH: 0 },
+    }
+  };
+}
+
+function openCreator(id) {
+  editingId = id || null;
+  const modal = document.getElementById('creatorModal');
+  document.getElementById('creatorTitle').textContent = id ? 'Edit Character' : 'Create Character';
+  document.getElementById('btnDelete').style.display = id ? 'inline-block' : 'none';
+  if (id) {
+    const customs = loadCustomCharacters();
+    const def = customs.find(c => c.id === id);
+    if (def) populateCreator(def);
+  } else {
+    populateCreator({ name: '', color: '#66ff66', weight: 90, gravity: 170, fallSpeed: 250, airSpeed: 85,
+                      runSpeed: 200, jumpV: 370, traction: 80, jabDmg: 4, smashDmg: 14, aerialDmg: 10, specialDmg: 8, width: 12, height: 18 });
+  }
+  modal.classList.add('visible');
+}
+
+function closeCreator() {
+  document.getElementById('creatorModal').classList.remove('visible');
+  editingId = null;
+}
+
+function populateCreator(def) {
+  document.getElementById('c_name').value = def.name || '';
+  document.getElementById('c_color').value = def.color || '#66ff66';
+  document.getElementById('c_weight').value = def.weight || 90;
+  document.getElementById('c_gravity').value = def.gravity || 170;
+  document.getElementById('c_fallSpeed').value = def.fallSpeed || 250;
+  document.getElementById('c_airSpeed').value = def.airSpeed || 85;
+  document.getElementById('c_runSpeed').value = def.runSpeed || 200;
+  document.getElementById('c_jumpV').value = def.jumpV || 370;
+  document.getElementById('c_traction').value = def.traction || 80;
+  document.getElementById('c_jabDmg').value = def.jabDmg || 4;
+  document.getElementById('c_smashDmg').value = def.smashDmg || 14;
+  document.getElementById('c_aerialDmg').value = def.aerialDmg || 10;
+  document.getElementById('c_specialDmg').value = def.specialDmg || 8;
+  document.getElementById('c_width').value = def.width || 12;
+  document.getElementById('c_height').value = def.height || 18;
+  updateCreatorVals();
+}
+
+function updateCreatorVals() {
+  const v = (id) => parseInt(document.getElementById('c_' + id).value);
+  document.getElementById('v_weight').textContent = v('weight');
+  document.getElementById('v_gravity').textContent = (v('gravity') / 1000).toFixed(3);
+  document.getElementById('v_fallSpeed').textContent = (v('fallSpeed') / 100).toFixed(2);
+  document.getElementById('v_airSpeed').textContent = (v('airSpeed') / 100).toFixed(2);
+  document.getElementById('v_runSpeed').textContent = (v('runSpeed') / 100).toFixed(2);
+  document.getElementById('v_jumpV').textContent = (v('jumpV') / 100).toFixed(2);
+  document.getElementById('v_traction').textContent = (v('traction') / 1000).toFixed(3);
+  document.getElementById('v_jabDmg').textContent = v('jabDmg');
+  document.getElementById('v_smashDmg').textContent = v('smashDmg');
+  document.getElementById('v_aerialDmg').textContent = v('aerialDmg');
+  document.getElementById('v_specialDmg').textContent = v('specialDmg');
+  document.getElementById('v_width').textContent = v('width');
+  document.getElementById('v_height').textContent = v('height');
+}
+
+function saveCharacter() {
+  const v = (id) => parseInt(document.getElementById('c_' + id).value);
+  const name = document.getElementById('c_name').value.trim() || 'Fighter';
+  const def = {
+    id: editingId || ('c' + Date.now().toString(36)),
+    name, color: document.getElementById('c_color').value,
+    weight: v('weight'), gravity: v('gravity'), fallSpeed: v('fallSpeed'),
+    airSpeed: v('airSpeed'), runSpeed: v('runSpeed'), jumpV: v('jumpV'),
+    traction: v('traction'), jabDmg: v('jabDmg'), smashDmg: v('smashDmg'),
+    aerialDmg: v('aerialDmg'), specialDmg: v('specialDmg'),
+    width: v('width'), height: v('height'),
+  };
+  let customs = loadCustomCharacters();
+  if (editingId) { const idx = customs.findIndex(c => c.id === editingId); if (idx >= 0) customs[idx] = def; else customs.push(def); }
+  else customs.push(def);
+  saveCustomCharacters(customs);
+  CHARACTERS['custom_' + def.id] = customToCharacter(def);
+  closeCreator();
+  // Auto-select the new custom character
+  const newId = 'custom_' + def.id;
+  if (!cssConfirmed[1]) { selectedP1 = newId; cssConfirmed[1] = true; }
+  else if (!cssConfirmed[2]) { selectedP2 = newId; cssConfirmed[2] = true; }
+  if (cssConfirmed[1] && cssConfirmed[2]) cssReadyToStart = true;
+}
+
+function deleteCustom() {
+  if (!editingId) return;
+  let customs = loadCustomCharacters();
+  customs = customs.filter(c => c.id !== editingId);
+  saveCustomCharacters(customs);
+  delete CHARACTERS['custom_' + editingId];
+  if (selectedP1 === 'custom_' + editingId) { selectedP1 = null; cssConfirmed[1] = false; }
+  if (selectedP2 === 'custom_' + editingId) { selectedP2 = null; cssConfirmed[2] = false; }
+  closeCreator();
+}
+
+function applyPreset(name) {
+  const p = CHAR_PRESETS[name];
+  if (!p) return;
+  document.getElementById('c_name').value = p.name;
+  document.getElementById('c_color').value = p.color;
+  document.getElementById('c_weight').value = p.weight;
+  document.getElementById('c_gravity').value = p.gravity;
+  document.getElementById('c_fallSpeed').value = p.fallSpeed;
+  document.getElementById('c_airSpeed').value = p.airSpeed;
+  document.getElementById('c_runSpeed').value = p.runSpeed;
+  document.getElementById('c_jumpV').value = p.jumpV;
+  document.getElementById('c_traction').value = p.traction;
+  document.getElementById('c_jabDmg').value = p.jabDmg;
+  document.getElementById('c_smashDmg').value = p.smashDmg;
+  document.getElementById('c_aerialDmg').value = p.aerialDmg;
+  document.getElementById('c_specialDmg').value = p.specialDmg;
+  document.getElementById('c_width').value = p.width;
+  document.getElementById('c_height').value = p.height;
+  updateCreatorVals();
+}
+
+function getCharName(id) {
+  if (CHARACTERS[id]) return CHARACTERS[id].name;
+  const customs = loadCustomCharacters();
+  const c = customs.find(d => 'custom_' + d.id === id);
+  if (c) return c.name;
+  // decomp character names (roster expansion placeholders)
+  const names = { drmario:'Dr.Mario', mario:'Mario', luigi:'Luigi', bowser:'Bowser',
+    peach:'Peach', yoshi:'Yoshi', dk:'DK', falcon:'Falcon', ganon:'Ganondorf',
+    falco:'Falco', ness:'Ness', ics:'Ice Climbers', kirby:'Kirby', samus:'Samus',
+    zelda:'Zelda', link:'Link', ylink:'Y.Link', pichu:'Pichu', pikachu:'Pikachu',
+    jigglypuff:'Jigglypuff', mewtwo:'Mewtwo', gnw:'G&W', marth:'Marth', roy:'Roy',
+    sheik:'Sheik', doc:'Dr.Mario' };
+  return names[id] || id;
+}
+
+// Load saved customs into CHARACTERS on startup
+(function loadSavedCustoms() {
+  const customs = loadCustomCharacters();
+  for (const def of customs) { CHARACTERS['custom_' + def.id] = customToCharacter(def); }
+})();
+
+// Wire sliders to live-update values
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.creator-row input[type=range]').forEach(el => {
+    el.addEventListener('input', updateCreatorVals);
+  });
+});
+
+// ── Melee CSS (Character Select Screen) ─────────────────────
+// Canvas-based implementation matching doldecomp/melee CSS layout
+// decomp ref: mnCharSel_CSSIcons[25], icon bounds, cursor movement
+
+let selectedP1 = null, selectedP2 = null;
+let cssCursors = { 1: { row: 1, col: 0, cooldown: 0 }, 2: { row: 1, col: 1, cooldown: 0 } };
+let cssConfirmed = { 1: false, 2: false };
+let cssReadyToStart = false;
+let cssFrameCount = 0;
+let cssFlashTimers = { 1: 0, 2: 0 }; // decomp: 0x0C = 12 frames icon select flash
+
+// Melee decomp CSS grid: 3 rows × 9 columns
+// decomp ref: mnCharSel_CSSIcons[] with exact icon positions from grKJ_8042E998
+const CSS_GRID = [
+  // decomp mnCharSel_CSSIcons[] layout: 3 rows × 9 cols
+  { id: 'drmario', row: 0, col: 0 },   { id: 'mario', row: 0, col: 1 },    { id: 'luigi', row: 0, col: 2 },
+  { id: 'bowser', row: 0, col: 3 },    { id: 'peach', row: 0, col: 4 },    { id: 'yoshi', row: 0, col: 5 },
+  { id: 'dk', row: 0, col: 6 },        { id: 'falcon', row: 0, col: 7 },   { id: 'ganon', row: 0, col: 8 },
+  { id: 'falco', row: 1, col: 0 },     { id: 'fox', row: 1, col: 1 },      { id: 'ness', row: 1, col: 2 },
+  { id: 'ics', row: 1, col: 3 },       { id: 'kirby', row: 1, col: 4 },    { id: 'samus', row: 1, col: 5 },
+  { id: 'zelda', row: 1, col: 6 },     { id: 'link', row: 1, col: 7 },     { id: 'ylink', row: 1, col: 8 },
+  { id: 'pichu', row: 2, col: 0 },     { id: 'pikachu', row: 2, col: 1 },  { id: 'jigglypuff', row: 2, col: 2 },
+  { id: 'mewtwo', row: 2, col: 3 },    { id: 'gnw', row: 2, col: 4 },      { id: 'marth', row: 2, col: 5 },
+  { id: 'roy', row: 2, col: 6 },       { id: '__empty', row: 2, col: 7 },   { id: '__custom', row: 2, col: 8 },
+];
+const CSS_CELL_W = 80, CSS_CELL_H = 100;
+const CSS_GRID_X = 280, CSS_GRID_Y = 60;
+// decomp: column x-positions from grKJ_8042E998 (col widths: 5.6, 7×7.0, 5.8 game units)
+const CSS_COL_X = Array.from({length:9}, (_,i) => CSS_GRID_X + i * CSS_CELL_W);
+const CSS_ROW_Y = Array.from({length:3}, (_,i) => CSS_GRID_Y + i * CSS_CELL_H);
+
+function cssGetGridEntry(row, col) { return CSS_GRID.find(e => e.row === row && e.col === col); }
+function cssGetCharColor(id) {
+  if (id === '__custom') return '#334';
+  if (CHARACTERS[id]) return CHARACTERS[id].color;
+  return '#444';
+}
+function cssGetCharName(id) {
+  if (id === '__custom') return 'Create';
+  if (id === '__empty') return '';
+  return getCharName(id);
+}
+
+function updateMeleeCSS() {
+  // Handle cursor movement for both ports (decomp: mnCharSel_8025B3D4)
+  for (let port = 1; port <= 2; port++) {
+    const c = cssCursors[port];
+    const inp = (port === 1) ? {
+      left: keys['KeyA'], right: keys['KeyD'], up: keys['KeyW'], down: keys['KeyS'],
+      confirm: keys['KeyJ'], cancel: keys['KeyK'],
+    } : {
+      left: keys['ArrowLeft'], right: keys['ArrowRight'], up: keys['ArrowUp'], down: keys['ArrowDown'],
+      confirm: keys['Numpad1'], cancel: keys['Numpad2'],
+    };
+    if (c.cooldown > 0) { c.cooldown--; continue; }
+    // B to cancel (Melee: HSD_BUTTON_B)
+    if (inp.cancel && cssConfirmed[port]) {
+      cssConfirmed[port] = false; cssReadyToStart = false;
+      if (port === 1) selectedP1 = null; else selectedP2 = null;
+      c.cooldown = 10; continue;
+    }
+    // Cursor movement (decomp: direction-based icon selection with magnitude > 200)
+    let moved = false;
+    if (inp.left && c.col > 0) { c.col--; moved = true; }
+    else if (inp.right && c.col < 8) { c.col++; moved = true; }
+    if (inp.up && c.row > 0) { c.row--; moved = true; }
+    else if (inp.down && c.row < 2) { c.row++; moved = true; }
+    if (moved) { c.cooldown = 8; continue; }
+    // A to confirm (Melee: HSD_BUTTON_A)
+    if (inp.confirm && !cssConfirmed[port]) {
+      const entry = cssGetGridEntry(c.row, c.col);
+      if (entry) {
+        if (entry.id === '__custom') { openCreator(); c.cooldown = 15; continue; }
+        if (entry.id === '__empty') { c.cooldown = 8; continue; } // empty slot, skip
+        if (CHARACTERS[entry.id]) {
+          if (port === 1) { selectedP1 = entry.id; cssConfirmed[1] = true; }
+          else { selectedP2 = entry.id; cssConfirmed[2] = true; }
+          c.cooldown = 10;
+          cssFlashTimers[port] = 12; // decomp: 0x0C frames flash
+          if (cssConfirmed[1] && cssConfirmed[2]) cssReadyToStart = true;
+        }
+      }
+      continue;
+    }
+  }
+  // Auto-start when both confirmed (decomp: mnCharSel_8025A410 OnFrame)
+  // START shortcut (decomp: GM_Start button) — confirm both if chars selected
+  if (keys['Enter'] && (selectedP1 || selectedP2)) {
+    if (selectedP1 && !cssConfirmed[1]) { cssConfirmed[1] = true; }
+    if (selectedP2 && !cssConfirmed[2]) { cssConfirmed[2] = true; }
+    if (cssConfirmed[1] && cssConfirmed[2]) cssReadyToStart = true;
+  }
+  if (cssReadyToStart) { cssReadyToStart = false; enterStageSelect(); }
+}
+
+function drawMeleeCSS() {
+  // Background — Melee's iconic dark blue gradient (decomp: gobj_GXLink_8025A9A0)
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#0a1628'); bgGrad.addColorStop(0.4, '#0a1420'); bgGrad.addColorStop(1, '#0a0a14');
+  ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
+  // Animated grid lines (subtle, matching Melee's background texture)
+  ctx.strokeStyle = 'rgba(30, 60, 100, 0.08)'; ctx.lineWidth = 1;
+  const phase = (cssFrameCount * 0.3) % 40;
+  for (let x = -40 + phase; x < W + 40; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = -40 + phase; y < H + 40; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  // Title (decomp: HSD_SisLib text rendering)
+  ctx.fillStyle = '#c8d8e8'; ctx.font = 'bold 18px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.fillText('CHARACTER SELECT', W / 2, 32);
+  // Character Grid (decomp: mnCharSel_803F0894 icon grid renderer)
+  for (const entry of CSS_GRID) {
+    const x = CSS_GRID_X + entry.col * CSS_CELL_W, y = CSS_GRID_Y + entry.row * CSS_CELL_H;
+    const color = cssGetCharColor(entry.id);
+    ctx.fillStyle = '#0d1520'; ctx.fillRect(x, y, CSS_CELL_W - 4, CSS_CELL_H - 4);
+    const padX = 8, padY = 6, pW = CSS_CELL_W - 4 - padX * 2, pH = CSS_CELL_H - 4 - padY * 2 - 22;
+    if (entry.id === '__custom') {
+      ctx.fillStyle = '#1a2030'; ctx.fillRect(x + padX, y + padY, pW, pH);
+      ctx.strokeStyle = '#4a6a8a'; ctx.lineWidth = 2; ctx.setLineDash([4, 4]);
+      ctx.strokeRect(x + padX + 2, y + padY + 2, pW - 4, pH - 4); ctx.setLineDash([]);
+      ctx.fillStyle = '#6a8aaa'; ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('+', x + CSS_CELL_W / 2 - 2, y + padY + pH / 2 + 8);
+    } else {
+      // Character portrait (decomp: HSD_JObjLoad character model)
+      const chGrad = ctx.createLinearGradient(x + padX, y + padY, x + padX, y + padY + pH);
+      chGrad.addColorStop(0, color + '88'); chGrad.addColorStop(0.5, color + 'cc'); chGrad.addColorStop(1, color + '44');
+      ctx.fillStyle = chGrad; ctx.fillRect(x + padX, y + padY, pW, pH);
+      // Silhouette (decomp: character model render)
+      const cx = x + CSS_CELL_W / 2 - 2, cy = y + padY + pH / 2;
+      ctx.fillStyle = color; ctx.globalAlpha = 0.4;
+      ctx.beginPath(); ctx.arc(cx, cy - pH * 0.25, pW * 0.22, 0, Math.PI * 2); ctx.fill();
+      ctx.fillRect(cx - pW * 0.25, cy - pH * 0.1, pW * 0.5, pH * 0.45);
+      ctx.globalAlpha = 1.0;
+      // Selected highlight (decomp: token placement on icon)
+      if (selectedP1 === entry.id) {
+        ctx.fillStyle = 'rgba(50,140,255,0.35)'; ctx.fillRect(x, y, CSS_CELL_W - 4, CSS_CELL_H - 4);
+        ctx.strokeStyle = '#4a9eff'; ctx.lineWidth = 2.5; ctx.strokeRect(x, y, CSS_CELL_W - 4, CSS_CELL_H - 4);
+      }
+      if (selectedP2 === entry.id) {
+        ctx.fillStyle = 'rgba(255,80,80,0.35)'; ctx.fillRect(x, y, CSS_CELL_W - 4, CSS_CELL_H - 4);
+        ctx.strokeStyle = '#ff4a4a'; ctx.lineWidth = 2.5; ctx.strokeRect(x, y, CSS_CELL_W - 4, CSS_CELL_H - 4);
+      }
+    }
+    // Name label (decomp: HSD_SisLib text below icon)
+    ctx.fillStyle = entry.id === '__custom' ? '#4a6a8a' : '#b8c8d8';
+    ctx.font = '10px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(cssGetCharName(entry.id), x + CSS_CELL_W / 2 - 2, y + CSS_CELL_H - 18);
+  }
+  // Cursors (decomp: mnCharSel_803F0DFC master hand cursor per port)
+  for (let port = 1; port <= 2; port++) {
+    const c = cssCursors[port];
+    const ex = CSS_GRID_X + c.col * CSS_CELL_W + CSS_CELL_W / 2 - 2;
+    const ey = CSS_GRID_Y + c.row * CSS_CELL_H + CSS_CELL_H / 2;
+    const col = port === 1 ? '#4a9eff' : '#ff4a4a';
+    const wobble = Math.sin(cssFrameCount * 0.08 + port) * 2;
+    ctx.save(); ctx.translate(ex + wobble, ey);
+    ctx.fillStyle = col; ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.ellipse(0, 4, 14, 10, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-3, -6); ctx.lineTo(3, -6); ctx.lineTo(5, -18); ctx.lineTo(-5, -18); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1.0;
+    ctx.shadowColor = col; ctx.shadowBlur = 15; ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(0, 4, 15, 11, 0, 0, Math.PI * 2); ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.restore();
+    ctx.fillStyle = col; ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('P' + port, ex + wobble, ey + 28);
+  }
+  // Player Doors (decomp: port selection areas at bottom)
+  const doorY = H - 100, doorW = 200, doorH = 80;
+  const doorX1 = W / 2 - doorW - 30, doorX2 = W / 2 + 30;
+  // P1 door
+  const dg1 = ctx.createLinearGradient(doorX1, doorY, doorX1, doorY + doorH);
+  dg1.addColorStop(0, 'rgba(30,60,120,0.7)'); dg1.addColorStop(1, 'rgba(20,40,80,0.7)');
+  ctx.fillStyle = dg1; ctx.fillRect(doorX1, doorY, doorW, doorH);
+  ctx.strokeStyle = cssConfirmed[1] ? '#4a9eff' : 'rgba(74,158,255,0.3)';
+  ctx.lineWidth = cssConfirmed[1] ? 3 : 1.5; ctx.strokeRect(doorX1, doorY, doorW, doorH);
+  ctx.fillStyle = '#4a9eff'; ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('PLAYER 1', doorX1 + doorW / 2, doorY + 16);
+  if (selectedP1 && CHARACTERS[selectedP1]) {
+    ctx.fillStyle = CHARACTERS[selectedP1].color; ctx.fillRect(doorX1 + 10, doorY + 26, 50, 40);
+    ctx.fillStyle = '#e0e8f0'; ctx.font = 'bold 16px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText(getCharName(selectedP1), doorX1 + 70, doorY + 42);
+    ctx.fillStyle = cssConfirmed[1] ? '#4a9eff' : '#667788'; ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(cssConfirmed[1] ? 'CONFIRMED' : 'SELECTED', doorX1 + 70, doorY + 58);
+  } else {
+    ctx.fillStyle = '#445566'; ctx.font = '12px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('WASD + J to select', doorX1 + doorW / 2, doorY + 48);
+  }
+  // P2 door
+  const dg2 = ctx.createLinearGradient(doorX2, doorY, doorX2, doorY + doorH);
+  dg2.addColorStop(0, 'rgba(120,30,30,0.7)'); dg2.addColorStop(1, 'rgba(80,20,20,0.7)');
+  ctx.fillStyle = dg2; ctx.fillRect(doorX2, doorY, doorW, doorH);
+  ctx.strokeStyle = cssConfirmed[2] ? '#ff4a4a' : 'rgba(255,74,74,0.3)';
+  ctx.lineWidth = cssConfirmed[2] ? 3 : 1.5; ctx.strokeRect(doorX2, doorY, doorW, doorH);
+  ctx.fillStyle = '#ff4a4a'; ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('PLAYER 2', doorX2 + doorW / 2, doorY + 16);
+  if (selectedP2 && CHARACTERS[selectedP2]) {
+    ctx.fillStyle = CHARACTERS[selectedP2].color; ctx.fillRect(doorX2 + 10, doorY + 26, 50, 40);
+    ctx.fillStyle = '#e0e8f0'; ctx.font = 'bold 16px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText(getCharName(selectedP2), doorX2 + 70, doorY + 42);
+    ctx.fillStyle = cssConfirmed[2] ? '#ff4a4a' : '#667788'; ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(cssConfirmed[2] ? 'CONFIRMED' : 'SELECTED', doorX2 + 70, doorY + 58);
+  } else {
+    ctx.fillStyle = '#664444'; ctx.font = '12px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('Arrows + Numpad1 to select', doorX2 + doorW / 2, doorY + 48);
+  }
+  // Stage preview (decomp: STAGE.battlefield silhouette)
+  ctx.fillStyle = '#0d1a28';
+  const stgW = 220, stgH = 8, stgX = W / 2 - stgW / 2, stgY = doorY - 25;
+  ctx.fillRect(stgX, stgY, stgW, stgH);
+  ctx.fillRect(stgX + 20, stgY - 30, 50, 5); ctx.fillRect(stgX + stgW - 70, stgY - 30, 50, 5);
+  // Selection flash effect (decomp: 12-frame 0x0C icon flash)
+  for (let port = 1; port <= 2; port++) {
+    if (cssFlashTimers[port] > 0) {
+      cssFlashTimers[port]--;
+      const charId = port === 1 ? selectedP1 : selectedP2;
+      if (charId) {
+        const gi = CSS_GRID.findIndex(e => e.id === charId);
+        if (gi >= 0) {
+          const g = CSS_GRID[gi];
+          const fx = CSS_GRID_X + g.col * CSS_CELL_W;
+          const fy = CSS_GRID_Y + g.row * CSS_CELL_H;
+          const alpha = cssFlashTimers[port] / 12;
+          ctx.fillStyle = `rgba(255,255,255,${(alpha * 0.6).toFixed(2)})`;
+          ctx.fillRect(fx, fy, CSS_CELL_W, CSS_CELL_H);
+        }
+      }
+    }
+  }
+  // VS text when both confirmed
+  if (cssConfirmed[1] && cssConfirmed[2]) {
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 28px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.shadowColor = '#fff'; ctx.shadowBlur = 20;
+    ctx.fillText('VS', W / 2, doorY + doorH / 2 + 10); ctx.shadowBlur = 0;
+  }
+  // Controls hint
+  ctx.fillStyle = '#3a4a5a'; ctx.font = '10px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('P1: WASD + J/K     P2: Arrows + Numpad1/2     (P to pause, R to restart)', W / 2, H - 12);
+}
+
+function startGameFromCSS() {
+  if (!selectedP1 || !selectedP2) return;
+  players = [createPlayer(selectedP1, -30, true), createPlayer(selectedP2, 30, false)];
+  gameState = 'playing';
+  resetGame.players = [selectedP1, selectedP2];
+  cssConfirmed = { 1: false, 2: false }; cssReadyToStart = false;
+}
+
+// ── Game State ───────────────────────────────────────────────
+let gameState = 'select'; // select | stageSelect | playing | paused | gameover
+let frameCount = 0;
+let showHitboxes = false;
+let showDebug = true;
+
+// ── Player State ─────────────────────────────────────────────
+function createPlayer(charId, startX, facingRight) {
+  // Accept both builtin and custom characters (decomp: ftCreate_80068240)
+  let char = CHARACTERS[charId];
+  if (!char && charId && charId.startsWith('custom_')) {
+    // Try loading from localStorage
+    const customs = loadCustomCharacters();
+    const def = customs.find(d => 'custom_' + d.id === charId);
+    if (def) { char = customToCharacter(def); CHARACTERS[charId] = char; }
+  }
+  if (!char) char = CHARACTERS['fox']; // fallback
+  return {
+    char: charId,
+    x: startX,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    facing: facingRight ? 1 : -1,
+    state: 'idle',         // idle, walk, dash, run, crouch, jump, fall, airdodge,
+                           // attack, hitstun, knockback, tech, ledge, dead, respawn
+    stateFrame: 0,
+    damage: 0,
+    stocks: 3,
+    onGround: true,
+    onPlatform: null,
+    jumpsRemaining: 2,
+    fastFalling: false,
+    // Attack state
+    currentMove: null,
+    attackFrame: 0,
+    hasHit: false,         // prevent multi-hit on same move
+    jabCombo: 0,           // jab1 -> jab2 -> jab3
+    // Shield
+    shieldHP: 60,
+    shielding: false,
+    shieldStun: 0,
+    // L-cancel
+    lCancelAttempt: false,
+    // Tech
+    techCooldown: 0,
+    teching: false,
+    techDirection: 0,      // -1 left, 0 neutral, 1 right
+    // DI
+    diX: 0,
+    diY: 0,
+    // Stale queue
+    staleQueue: [],
+    // Hitlag (both attacker and defender freeze)
+    hitlag: 0,
+    // Invulnerability
+    invulnerable: 0,
+    // Direction
+    inputX: 0,
+    inputY: 0,
+    // Dash
+    dashFrame: 0,
+    wasDashInput: false,
+    // Wavedash
+    airDodgeAngle: null,
+    airDodgeTimer: 0,
+    // Grab/throw state
+    grabbedBy: null,        // player holding this one (victim)
+    grabTimer: 0,           // frames until mash-out (grabbed player)
+    grabMashCount: 0,       // mash inputs by grabbed player to escape
+    grabHoldTimer: 0,       // frames grabber has held (auto-throw after max)
+    grabState: null,        // 'startup' | 'holding' | 'endlag' | null
+    // Visual
+    flashTimer: 0,
+    trailPositions: [],
+    // Ledge
+    ledgeTimer: 0,
+    // Death
+    deathPause: 0,
+    // Input buffer
+    inputBuffer: [],
+    // Previous inputs for dash detection
+    prevLeftStick: { x: 0, y: 0 },
+    dashInputWindow: 0,
+  };
+}
+
+let players = [
+  createPlayer('fox', -30, true),
+  createPlayer('falco', 30, false),
+];
+let projectiles = [];
+
+// ── Input Handling ───────────────────────────────────────────
+const keys = {};
+const KEY_MAP_P1 = {
+  left: 'KeyA', right: 'KeyD', up: 'KeyW', down: 'KeyS',
+  attack: 'KeyJ', special: 'KeyK', shield: 'KeyL', grab: 'ShiftLeft',
+  jump: 'KeyW',
+};
+const KEY_MAP_P2 = {
+  left: 'ArrowLeft', right: 'ArrowRight', up: 'ArrowUp', down: 'ArrowDown',
+  attack: 'Numpad1', special: 'Numpad2', shield: 'Numpad3', grab: 'Numpad0',
+  jump: 'ArrowUp',
+};
+
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
+    e.preventDefault();
+  }
+  if (e.code === 'KeyH') showHitboxes = !showHitboxes;
+  if (e.code === 'KeyP') gameState = gameState === 'paused' ? 'playing' : 'paused';
+  if (e.code === 'KeyR') resetGame();
+  if (e.code === 'KeyT' && gameState === 'gameover') { enterStageSelect(); }
+  if (e.code === 'Escape' && gameState === 'gameover') { gameState = 'select'; cssConfirmed = { 1: false, 2: false }; cssReadyToStart = false; }
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+function getInput(keyMap) {
+  return {
+    left: !!keys[keyMap.left],
+    right: !!keys[keyMap.right],
+    up: !!keys[keyMap.up],
+    down: !!keys[keyMap.down],
+    attack: !!keys[keyMap.attack],
+    special: !!keys[keyMap.special],
+    shield: !!keys[keyMap.shield],
+    grab: !!keys[keyMap.grab],
+    jump: !!keys[keyMap.jump],
+  };
+}
+
+function getStickInput(inp) {
+  let x = 0, y = 0;
+  if (inp.left) x -= 1;
+  if (inp.right) x += 1;
+  if (inp.up) y += 1;
+  if (inp.down) y -= 1;
+  return { x, y };
+}
+
+// ── Knockback Formula (Melee decomp: ftColl_8007B028) ────────
+// KB = ((damage * 0.1) * kbGrowth + baseKB) * weightMod * stale * crouch * stage
+// Weight: 200 / (weight + 100) — lighter chars fly farther
+// Max knockback: 2500 (decomp cap)
+function computeKnockback(hitbox, defender, attackerDamage) {
+  const d = hitbox.damage;
+  const weightFactor = 200 / (defender.char.weight + 100);
+  // decomp: percent scaling = 1 + (defender_percent * move_damage * 0.0005)
+  // Higher defender % = more knockback (core Melee mechanic)
+  const percentScale = 1 + (defender.damage * d * 0.0005);
+  const rawKB = (d * 0.1 * hitbox.kbScale + hitbox.baseKB) * weightFactor * percentScale;
+  return Math.min(rawKB, 2500);  // decomp cap
+}
+
+function applyKnockback(defender, hitbox, attacker) {
+  // Break any active grab when hit
+  if (defender.grabbedBy) {
+    defender.grabbedBy.grabState = null;
+    defender.grabbedBy.currentMove = null;
+    defender.grabbedBy.state = 'idle';
+    defender.grabbedBy = null;
+    defender.grabTimer = 0;
+    defender.grabMashCount = 0;
+  }
+  // Release grabbed player if grabber gets hit
+  if (typeof players !== 'undefined') {
+    for (const p of players) {
+      if (p.grabbedBy === defender) {
+        p.grabbedBy = null;
+        p.grabTimer = 0;
+        p.grabMashCount = 0;
+        p.state = 'hitstun';
+        p.stateFrame = 8;
+      }
+    }
+  }
+  let kb = computeKnockback(hitbox, defender, attacker.damage);
+  // Crouch cancel
+  if (defender.onGround && defender.state === 'crouch') {
+    kb *= PHYSICS.crouchCancelKB;
+  }
+  // Stale
+  const staleMod = computeStaleMultiplier(attacker, hitbox);
+  kb *= staleMod;
+  if (kb < 1) return; // too weak to flinch
+  // Angle — resolve Sakurai angle (361°) per decomp
+  let angle = hitbox.angle;
+  if (angle === 361) {
+    // Decomp: if airborne → 30°; if grounded & kb<threshold → 0°; else interpolate
+    const sakAngle = Math.PI / 6;  // 30° in radians
+    if (!defender.onGround) {
+      angle = -sakAngle;  // negative = up in screen coords
+    } else {
+      angle = 0;  // horizontal for grounded weak hits
+    }
+  }
+  // DI: shift angle up to 18 degrees based on defender input
+  if (defender.diX !== 0 || defender.diY !== 0) {
+    const diAngle = Math.atan2(defender.diY, defender.diX);
+    const angleDiff = diAngle - angle;
+    const clampedDiff = Math.max(-PHYSICS.diMaxAngle, Math.min(PHYSICS.diMaxAngle, angleDiff));
+    angle += clampedDiff;
+  }
+  // Reverse hit if hitting from behind
+  const hitCenterX = attacker.x + hitbox.x * attacker.facing;
+  if ((hitCenterX > defender.x && attacker.facing < 0) ||
+      (hitCenterX < defender.x && attacker.facing > 0)) {
+    // Don't reverse vertical moves
+    if (Math.abs(Math.cos(angle)) > 0.1) {
+      angle = Math.PI - angle;
+    }
+  }
+  // Apply velocity
+  defender.vx = Math.cos(angle) * kb * 0.4;
+  defender.vy = Math.sin(angle) * kb * 0.4;
+  // Hitstun
+  const hitstun = Math.max(4, Math.min(34, Math.floor(kb * 0.4)));  // decomp: hitstun = kb*0.4, range [4,34]
+  defender.state = 'hitstun';
+  defender.stateFrame = hitstun;
+  defender.onGround = false;
+  // Damage
+  defender.damage += hitbox.damage * staleMod;  // decomp: stale affects damage too
+  // Hitlag
+  const hitlag = Math.floor(PHYSICS.hitlagBase + hitbox.damage * PHYSICS.hitlagMultiplier);
+  defender.hitlag = hitlag;
+  attacker.hitlag = Math.floor(hitlag * 0.667);  // crouch cancel: attacker reduced
+  // Flash
+  defender.flashTimer = 8;
+  // Update stale queue
+  addToStaleQueue(attacker, hitbox);
+  attacker.hasHit = true;
+}
+
+// ── Stale Moves ──────────────────────────────────────────────
+function addToStaleQueue(attacker, hitbox) {
+  attacker.staleQueue.push({
+    damage: hitbox.damage,
+    angle: hitbox.angle,
+    frame: frameCount,
+  });
+  if (attacker.staleQueue.length > PHYSICS.staleQueueSize) {
+    attacker.staleQueue.shift();
+  }
+}
+
+function computeStaleMultiplier(attacker, hitbox) {
+  // Melee decomp: position-weighted staleness
+  // Entry 0 (newest) = 1/9 reduction, entry 9 (oldest) = 10/9 reduction
+  // Capped at min damage multiplier 0.0 (no negative damage)
+  let staleness = 0;
+  const queue = attacker.staleQueue;
+  for (let i = 0; i < queue.length; i++) {
+    const entry = queue[i];
+    if (entry.damage === hitbox.damage && Math.abs(entry.angle - hitbox.angle) < 0.1) {
+      staleness += (queue.length - i) / 9;  // newest = 1/9, oldest = 10/9
+    }
+  }
+  return Math.max(0, 1 - staleness);
+}
+
+// ── Collision Detection ──────────────────────────────────────
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+function worldHitbox(player, hitbox) {
+  // Hitbox in world coordinates
+  const f = player.facing;
+  return {
+    x: player.x + hitbox.x * f - (f < 0 ? hitbox.w : 0),
+    y: player.y + hitbox.y - hitbox.h / 2,
+    w: hitbox.w,
+    h: hitbox.h,
+  };
+}
+
+function hurtbox(player) {
+  const char = CHARACTERS[player.char];
+  return {
+    x: player.x - char.width / 2,
+    y: player.y - char.height,
+    w: char.width,
+    h: char.height,
+  };
+}
+
+// ── Platform Collision ───────────────────────────────────────
+function getPlatforms() {
+  const plats = [currentStage.main];
+  if (currentStage.platL) plats.push(currentStage.platL);
+  if (currentStage.platR) plats.push(currentStage.platR);
+  return plats;
+}
+
+function checkPlatformLanding(player) {
+  const char = CHARACTERS[player.char];
+  const feetY = player.y;
+  const prevFeetY = feetY - player.vy;
+  for (const plat of getPlatforms()) {
+    const platTop = plat.y;
+    // Only land from above
+    if (prevFeetY >= platTop && feetY <= platTop + 2 &&
+        player.x >= plat.x && player.x <= plat.x + plat.w &&
+        player.vy <= 0) {
+      return plat;
+    }
+  }
+  return null;
+}
+
+// ── State Machine ────────────────────────────────────────────
+function updatePlayer(player, input, opponent) {
+  const char = CHARACTERS[player.char];
+  const stick = getStickInput(input);
+  const prevStick = player.prevStick || { x: 0, y: 0 };
+  player.prevStick = { x: stick.x, y: stick.y };
+  player.diX = stick.x;
+  player.diY = stick.y;
+  player.stateFrame++;
+  // Decrease timers
+  if (player.hitlag > 0) { player.hitlag--; return; }
+  if (player.invulnerable > 0) player.invulnerable--;
+  if (player.techCooldown > 0) player.techCooldown--;
+  if (player.flashTimer > 0) player.flashTimer--;
+  if (player.shieldStun > 0) player.shieldStun--;
+  if (player.deathPause > 0) { player.deathPause--; return; }
+  // Store trail
+  if (Math.abs(player.vx) > 1 || Math.abs(player.vy) > 1) {
+    player.trailPositions.push({ x: player.x, y: player.y, frame: frameCount });
+    if (player.trailPositions.length > 12) player.trailPositions.shift();
+  }
+  switch (player.state) {
+    case 'idle': updateIdle(player, input, stick, prevStick); break;
+    case 'walk': updateWalk(player, input, stick); break;
+    case 'dash': updateDash(player, input, stick); break;
+    case 'run': updateRun(player, input, stick); break;
+    case 'crouch': updateCrouch(player, input, stick); break;
+    case 'jump': updateJump(player, input, stick); break;
+    case 'fall': updateFall(player, input, stick); break;
+    case 'airdodge': updateAirdodge(player, input, stick); break;
+    case 'attack': updateAttack(player, input, opponent); break;
+    case 'grabbing': updateGrabbing(player, input, opponent); break;
+    case 'grabbed': updateGrabbed(player, input); break;
+    case 'hitstun': updateHitstun(player, input); break;
+    case 'tech': updateTech(player); break;
+    case 'ledge': updateLedge(player, input); break;
+    case 'dead': updateDead(player); break;
+    case 'respawn': updateRespawn(player); break;
+  }
+  // Apply gravity (not during hitlag)
+  if (!player.onGround && player.state !== 'airdodge' && player.state !== 'dead' && player.state !== 'respawn' && player.state !== 'grabbed') {
+    const grav = char.gravity || PHYSICS.gravity;
+    player.vy -= grav;
+    const maxFall = player.fastFalling ? (char.fastFallSpeed || PHYSICS.fastFallSpeed) : (char.maxFallSpeed || PHYSICS.maxFallSpeed);
+    if (player.vy < -maxFall) player.vy = -maxFall;
+  }
+  // Apply velocity (grabbed players are positioned by grabber)
+  if (player.state !== 'grabbed') {
+    player.x += player.vx;
+    player.y += player.vy;
+  }
+  // Platform collision
+  if (player.vy <= 0) {
+    const plat = checkPlatformLanding(player);
+    if (plat && player.state !== 'dead' && player.state !== 'respawn') {
+      player.y = plat.y;
+      player.vy = 0;
+      player.onGround = true;
+      player.onPlatform = plat;
+      player.fastFalling = false;
+      player.jumpsRemaining = 2;
+      player.airDodgeAngle = null;
+          player.airDodgeTimer = 0;
+          player.waveLanded = false;
+      // L-cancel check
+      if (player.currentMove && player.currentMove.landingLag) {
+        if (player.lCancelAttempt) {
+          // Successful L-cancel: half landing lag
+          const lag = Math.floor(player.currentMove.landingLag * PHYSICS.lCancelMultiplier);
+          player.state = 'attack';
+          player.attackFrame = -lag;
+          player.currentMove = null;
+        } else {
+          // Missed L-cancel: full landing lag
+          player.state = 'attack';
+          player.attackFrame = -player.currentMove.landingLag;
+          player.currentMove = null;
+        }
+      } else if (player.state === 'fall' || player.state === 'airdodge') {
+        player.state = 'idle';
+        player.stateFrame = 0;
+      }
+    }
+  }
+  // Wall/ceiling collision
+  if (player.x < currentStage.main.x - 5) { player.x = currentStage.main.x - 5; player.vx = 0; }
+      if (player.x > currentStage.main.x + currentStage.main.w + 5) { player.x = currentStage.main.x + currentStage.main.w + 5; player.vx = 0; }
+  // Blast zone check
+  if (player.state !== 'dead' && player.state !== 'respawn') {
+    if (player.x < currentStage.blastLeft || player.x > currentStage.blastRight ||
+        player.y < currentStage.blastBottom || player.y > currentStage.blastTop + 30) {
+      killPlayer(player);
+    }
+  }
+  // Ground friction
+  if (player.onGround && player.state !== 'walk' && player.state !== 'dash' && player.state !== 'run' && player.state !== 'attack') {
+    const friction = char.traction || PHYSICS.groundFriction;
+    player.vx *= (1 - friction);
+    if (Math.abs(player.vx) < 0.05) player.vx = 0;
+  }
+  // Air friction
+  if (!player.onGround && player.state !== 'airdodge') {
+    player.vx *= (1 - PHYSICS.airFriction);
+  }
+}
+
+function updateIdle(player, input, stick, prevStick) {
+  player.vx *= 0.85;
+  if (input.down) {
+    player.state = 'crouch';
+    player.stateFrame = 0;
+    return;
+  }
+  if (input.shield) {
+    player.shielding = true;
+    return;
+  }
+  player.shielding = false;
+  // Dash detection (smash input)
+  if (input.right && !player.wasDashInput && stick.x === 1) {
+    if (player.dashInputWindow > 0 && player.facing === -1) {
+      // Smash turn -> dash
+      player.facing = 1;
+      player.state = 'dash';
+      player.stateFrame = 0;
+      player.facing = 1;
+      player.dashInputWindow = 0;
+      return;
+    }
+    player.dashInputWindow = 6;
+  }
+  if (input.left && !player.wasDashInput && stick.x === -1) {
+    if (player.dashInputWindow > 0 && player.facing === 1) {
+      player.facing = -1;
+      player.state = 'dash';
+      player.stateFrame = 0;
+      player.facing = -1;
+      player.dashInputWindow = 0;
+      return;
+    }
+    player.dashInputWindow = 6;
+  }
+  player.wasDashInput = input.right || input.left;
+  if (player.dashInputWindow > 0) player.dashInputWindow--;
+  // Walk
+  if (input.right) {
+    player.facing = 1;
+    player.state = 'walk';
+    player.stateFrame = 0;
+  } else if (input.left) {
+    player.facing = -1;
+    player.state = 'walk';
+    player.stateFrame = 0;
+  }
+  // Jump
+  if (input.jump && player.onGround) {
+    player.state = 'jump';
+    player.stateFrame = 0;
+    player.onGround = false;
+  }
+  // Attacks
+  if (input.attack) {
+    if (stick.y > 0.5) startAttack(player, 'utilt');
+    else if (stick.y < -0.5) startAttack(player, 'dtilt');
+    else if (stick.x !== 0) startAttack(player, 'ftilt');
+    else startAttack(player, 'jab1');
+  }
+  if (input.special) {
+    if (stick.y > 0.5) startAttack(player, 'upB');
+    else if (stick.y < -0.5) startAttack(player, 'downB');
+    else if (stick.x !== 0) startAttack(player, 'sideB');
+    else startAttack(player, 'neutralB');
+  }
+  // Smash attacks (shield + attack)
+  if (input.shield && input.attack) {
+    if (stick.y > 0.5) startAttack(player, 'uSmash');
+    else if (stick.y < -0.5) startAttack(player, 'dSmash');
+    else if (stick.x !== 0) startAttack(player, 'fSmash');
+  }
+  // Grab (grounded only)
+  if (input.grab && player.onGround) {
+    if (player.state === 'dash' || player.state === 'run') {
+      startAttack(player, 'dashGrab');
+    } else {
+      startGrab(player);
+    }
+  }
+}
+
+function updateWalk(player, input, stick) {
+  const char = CHARACTERS[player.char];
+  const speed = char.walkSpeed || PHYSICS.walkSpeed;
+  if (input.right) {
+    player.vx = speed;
+    player.facing = 1;
+  } else if (input.left) {
+    player.vx = -speed;
+    player.facing = -1;
+  } else {
+    player.state = 'idle';
+    player.stateFrame = 0;
+    return;
+  }
+  if (input.jump && player.onGround) {
+    player.state = 'jump';
+    player.stateFrame = 0;
+    player.onGround = false;
+  }
+  if (input.down) {
+    player.state = 'crouch';
+    player.stateFrame = 0;
+  }
+  if (input.attack) {
+    if (stick.y > 0.5) startAttack(player, 'utilt');
+    else if (stick.y < -0.5) startAttack(player, 'dtilt');
+    else startAttack(player, 'ftilt');
+  }
+  if (input.special) {
+    if (stick.y > 0.5) startAttack(player, 'upB');
+    else if (stick.y < -0.5) startAttack(player, 'downB');
+    else if (stick.x !== 0) startAttack(player, 'sideB');
+    else startAttack(player, 'neutralB');
+  }
+  // Dash detection
+  if (stick.x === player.facing && player.stateFrame > 2) {
+    const charSpeed = char.dashSpeed || PHYSICS.dashSpeed;
+    player.vx = charSpeed * player.facing;
+    player.state = 'dash';
+    player.stateFrame = 0;
+  }
+}
+
+function updateDash(player, input, stick) {
+  const char = CHARACTERS[player.char];
+  const speed = char.dashSpeed || PHYSICS.dashSpeed;
+  player.vx = speed * player.facing;
+  if (player.stateFrame > 12) {
+    player.state = 'run';
+    player.stateFrame = 0;
+  }
+  // Dash dance: if input reverses, dash the other way
+  if ((input.left && player.facing === 1) || (input.right && player.facing === -1)) {
+    player.facing *= -1;
+    player.state = 'dash';
+    player.stateFrame = 0;
+    return;
+  }
+  if (input.jump && player.onGround) {
+    player.state = 'jump';
+    player.stateFrame = 0;
+    player.onGround = false;
+  }
+  if (input.attack) {
+    if (stick.x !== 0) startAttack(player, 'ftilt');
+    else startAttack(player, 'jab1');
+  }
+  if (input.special) {
+    if (stick.y > 0.5) startAttack(player, 'upB');
+    else if (stick.y < -0.5) startAttack(player, 'downB');
+    else if (stick.x !== 0) startAttack(player, 'sideB');
+    else startAttack(player, 'neutralB');
+  }
+  if (!input.left && !input.right) {
+    player.state = 'idle';
+    player.stateFrame = 0;
+  }
+}
+
+function updateRun(player, input, stick) {
+  const char = CHARACTERS[player.char];
+  const speed = char.runSpeed || PHYSICS.runSpeed;
+  player.vx = speed * player.facing;
+  if (input.jump && player.onGround) {
+    player.state = 'jump';
+    player.stateFrame = 0;
+    player.onGround = false;
+  }
+  if (input.attack) {
+    startAttack(player, 'ftilt');
+  }
+  if (input.special) {
+    if (stick.y > 0.5) startAttack(player, 'upB');
+    else if (stick.y < -0.5) startAttack(player, 'downB');
+    else if (stick.x !== 0) startAttack(player, 'sideB');
+    else startAttack(player, 'neutralB');
+  }
+  // Run cancel (opposite direction or crouch)
+  if ((input.left && player.facing === 1) || (input.right && player.facing === -1) || input.down) {
+    player.state = input.down ? 'crouch' : 'idle';
+    player.stateFrame = 0;
+  }
+  if (!input.left && !input.right) {
+    player.state = 'idle';
+    player.stateFrame = 0;
+  }
+}
+
+function updateCrouch(player, input, stick) {
+  player.vx *= 0.9;
+  if (!input.down) {
+    player.state = 'idle';
+    player.stateFrame = 0;
+    return;
+  }
+  if (input.attack) {
+    startAttack(player, 'dtilt');
+  }
+  if (input.jump && player.onGround) {
+    player.state = 'jump';
+    player.stateFrame = 0;
+    player.onGround = false;
+  }
+}
+
+function updateJump(player, input, stick) {
+  const char = CHARACTERS[player.char];
+  if (player.stateFrame <= (PHYSICS.jumpSquatFrames)) {
+    // Jump squat — still on ground
+    player.vx *= 0.9;
+    return;
+  }
+  if (player.stateFrame === PHYSICS.jumpSquatFrames + 1) {
+    // Launch
+    player.vy = char.jumpVInitial || PHYSICS.jumpVInitial;
+    player.onGround = false;
+    if (input.jump) {
+      // Full hop (hold jump)
+      player.vy = char.jumpVInitial || PHYSICS.jumpVInitial;
+    }
+    // Horizontal momentum from stick
+    const airSpeed = char.airSpeed || PHYSICS.airSpeed;
+    if (stick.x !== 0) {
+      player.vx = stick.x * airSpeed;
+      player.facing = stick.x;
+    }
+  }
+  if (player.stateFrame > PHYSICS.jumpSquatFrames + 2) {
+    // Transition to fall
+    player.state = 'fall';
+    player.stateFrame = 0;
+  }
+}
+
+function updateFall(player, input, stick) {
+  const char = CHARACTERS[player.char];
+  const airSpeed = char.airSpeed || PHYSICS.airSpeed;
+  const airAccel = char.airAccel || PHYSICS.airAccel;
+  // Aerial drift
+  if (stick.x !== 0) {
+    const targetVx = stick.x * airSpeed;
+    player.vx += (targetVx - player.vx) * airAccel * 5;
+    player.facing = stick.x;
+  }
+  // Fast fall
+  if (stick.y < -0.5 && player.vy < 0 && !player.fastFalling) {
+    player.fastFalling = true;
+    player.vy = -(char.fastFallSpeed || PHYSICS.fastFallSpeed);
+  }
+  // Double jump
+  if (input.jump && player.jumpsRemaining > 0) {
+    player.vy = char.jumpVInitial || PHYSICS.jumpVInitial;
+    player.jumpsRemaining--;
+    player.fastFalling = false;
+    player.stateFrame = 0;
+  }
+  // Air dodge (for wavedashing)
+  if (input.shield && !player.shielding) {
+    player.state = 'airdodge';
+    player.stateFrame = 0;
+    player.shielding = true;
+    // Set air dodge direction
+    if (stick.x !== 0 || stick.y !== 0) {
+      const angle = Math.atan2(stick.y, stick.x);
+      player.airDodgeAngle = angle;
+      const speed = PHYSICS.airDodgeSpeed;
+      player.vx = Math.cos(angle) * speed;
+      player.vy = Math.sin(angle) * speed;
+    } else {
+      player.airDodgeAngle = 0;
+      player.vx = 0;
+      player.vy = 0;
+    }
+    return;
+  }
+  if (!input.shield) player.shielding = false;
+  // Aerial attacks
+  if (input.attack) {
+    if (stick.y > 0.5) startAttack(player, 'uair');
+    else if (stick.y < -0.5) startAttack(player, 'dair');
+    else if (stick.x * player.facing > 0) startAttack(player, 'fair');
+    else if (stick.x * player.facing < 0) startAttack(player, 'bair');
+    else startAttack(player, 'nair');
+  }
+  if (input.special) {
+    if (stick.y > 0.5) startAttack(player, 'upB');
+    else if (stick.y < -0.5) startAttack(player, 'downB');
+    else if (stick.x !== 0) startAttack(player, 'sideB');
+    else startAttack(player, 'neutralB');
+  }
+  // L-cancel input tracking
+  player.lCancelAttempt = input.shield;
+}
+
+function updateAirdodge(player, input, stick) {
+  player.stateFrame++;
+  if (player.stateFrame > 30) {
+    // End airdodge — enter special fall (can't act)
+    player.state = 'fall';
+    player.stateFrame = 0;
+    player.airDodgeAngle = null;
+  }
+  // Wavedash landing — decomp: 7 frames landing lag
+  if (player.onGround) {
+    // Enter landing lag if just landed
+    if (!player.waveLanded) {
+      player.waveLanded = true;
+      player.landingLag = 7;  // decomp: airdodge landing lag = 7
+    }
+    // Slide with friction
+    const friction = CHARACTERS[player.char].traction || PHYSICS.groundFriction;
+    player.vx *= (1 - friction * 0.5);
+    // Wait out landing lag before acting
+    if (player.landingLag > 0) {
+      player.landingLag--;
+    } else if (Math.abs(player.vx) < 0.3) {
+      player.state = 'idle';
+      player.stateFrame = 0;
+      player.airDodgeAngle = null;
+      player.waveLanded = false;
+    }
+  }
+}
+
+function updateAttack(player, input, opponent) {
+  player.attackFrame++;
+  const move = player.currentMove;
+  if (!move) {
+    player.state = 'idle';
+    player.stateFrame = 0;
+    return;
+  }
+  const totalFrames = move.totalFrames;
+  // Startup, active, endlag phases
+  if (player.attackFrame < 0) {
+    // Landing lag (negative frames)
+    return;
+  }
+  if (player.attackFrame < move.startup) {
+    // Startup — no hitbox yet
+    return;
+  }
+  if (player.attackFrame < move.startup + move.active) {
+    // Active frames — projectile specials spawn once; melee moves test their attached hitbox.
+    if (!player.hasHit) {
+      if (move.projectile) {
+        spawnProjectile(player, move);
+        player.hasHit = true;
+      } else {
+        checkHit(player, opponent, move);
+      }
+    }
+  }
+  if (player.attackFrame >= totalFrames) {
+    // Move finished
+    player.currentMove = null;
+    player.hasHit = false;
+    player.attackFrame = 0;
+    if (player.onGround) {
+      player.state = 'idle';
+    } else {
+      player.state = 'fall';
+    }
+    player.stateFrame = 0;
+  }
+  // Can act out of aerials after endlag
+  if (!player.onGround && player.attackFrame >= move.startup + move.active + move.endlag) {
+    player.currentMove = null;
+    player.hasHit = false;
+    player.state = 'fall';
+    player.stateFrame = 0;
+  }
+}
+
+function updateHitstun(player, input) {
+  player.stateFrame--;
+  if (player.stateFrame <= 0) {
+    player.state = player.onGround ? 'idle' : 'fall';
+    player.stateFrame = 0;
+    // Can act out of hitstun
+    if (input.shield && !player.onGround) {
+      // DI/SDI already handled in knockback
+    }
+  }
+}
+
+function updateTech(player) {
+  player.stateFrame--;
+  if (player.stateFrame <= 0) {
+    player.state = 'idle';
+    player.stateFrame = 0;
+    player.teching = false;
+  }
+  if (player.teching && player.techDirection !== 0) {
+    player.vx = player.techDirection * 3;
+  }
+}
+
+function updateLedge(player, input) {
+  player.ledgeTimer++;
+  // Can act from ledge after brief delay
+  if (player.ledgeTimer > 10) {
+    if (input.jump) {
+      player.state = 'jump';
+      player.stateFrame = 0;
+      player.onGround = false;
+      player.vy = CHARACTERS[player.char].jumpVInitial || PHYSICS.jumpVInitial;
+      player.ledgeTimer = 0;
+    } else if (input.up) {
+      // Ledge getup
+      player.y += 10;
+      player.x += player.facing * 5;
+      player.state = 'idle';
+      player.onGround = true;
+      player.invulnerable = 15;
+      player.ledgeTimer = 0;
+    } else if (input.attack) {
+      // Ledge attack
+      player.y += 10;
+      player.x += player.facing * 5;
+      startAttack(player, 'ftilt');
+      player.invulnerable = 15;
+      player.ledgeTimer = 0;
+    }
+  }
+}
+
+function updateDead(player) {
+  // Respawn after death pause
+}
+
+function updateRespawn(player) {
+  player.invulnerable = 120;
+  player.stateFrame++;
+  if (player.stateFrame > 60) {
+    player.state = 'idle';
+    player.stateFrame = 0;
+  }
+}
+
+// ── Attack Helpers ───────────────────────────────────────────
+function startAttack(player, moveName) {
+  const char = CHARACTERS[player.char];
+  let move = char.moves[moveName];
+  if (!move) return;
+  // Jab combo
+  if (moveName === 'jab1' && player.jabCombo === 0) {
+    player.jabCombo = 1;
+  } else if (moveName === 'jab1' && player.jabCombo === 1) {
+    move = char.moves['jab2'];
+    player.jabCombo = 0;
+  }
+  player.currentMove = move;
+  player.currentMove.name = moveName;
+  player.attackFrame = 0;
+  player.hasHit = false;
+  player.state = 'attack';
+  player.stateFrame = 0;
+  if (player.onGround) {
+    player.vx *= 0.3;
+  }
+}
+
+function startGrab(player) {
+  const char = CHARACTERS[player.char];
+  const move = char.moves['grab'];
+  if (!move) return;
+  player.currentMove = { ...move, name: 'grab' };
+  player.attackFrame = 0;
+  player.hasHit = false;
+  player.state = 'grabbing';
+  player.grabState = 'startup';
+  player.grabHoldTimer = 0;
+  player.grabMashCount = 0;
+  player.vx *= 0.15;
+}
+
+const GRAB_MAX_HOLD = 180;    // 3 seconds at 60fps — auto-throw if no input
+const GRAB_MASH_PER_FRAME = 1; // mash rate: 1 per directional input change
+const GRAB_MASH_THRESHOLD = 20; // mashes needed to escape (scales with %)
+
+function updateGrabbing(player, input, opponent) {
+  const char = CHARACTERS[player.char];
+  const stick = input.stick;
+  player.stateFrame++;
+
+  if (player.grabState === 'startup') {
+    player.attackFrame++;
+    const move = player.currentMove;
+    if (player.attackFrame >= move.startup && player.attackFrame < move.startup + move.active) {
+      // Grab hitbox active — check for grab
+      if (!player.hasHit && opponent.state !== 'dead' && opponent.state !== 'respawn') {
+        const grabBox = worldHitbox(player, move.hitbox);
+        const defBox = hurtbox(opponent);
+        if (opponent.invulnerable <= 0 && rectsOverlap(grabBox.x, grabBox.y, grabBox.w, grabBox.h, defBox.x, defBox.y, defBox.w, defBox.h)) {
+          // GRABBED!
+          player.hasHit = true;
+          player.grabState = 'holding';
+          player.grabHoldTimer = 0;
+          opponent.state = 'grabbed';
+          opponent.grabbedBy = player;
+          opponent.grabTimer = GRAB_MASH_THRESHOLD + Math.floor(opponent.damage * 0.3);
+          opponent.grabMashCount = 0;
+          opponent.vx = 0;
+          opponent.vy = 0;
+          // Position opponent next to grabber
+          opponent.x = player.x + (player.facing > 0 ? 18 : -18);
+          opponent.y = player.y;
+        }
+      }
+    }
+    if (player.attackFrame >= move.startup + move.active) {
+      // Grab whiffed — enter endlag
+      player.grabState = 'endlag';
+    }
+  } else if (player.grabState === 'holding') {
+    player.grabHoldTimer++;
+    // Position held opponent
+    if (opponent.grabbedBy === player) {
+      opponent.x = player.x + (player.facing > 0 ? 18 : -18);
+      opponent.y = player.y;
+    }
+    // Pummel (attack button, debounce)
+    if (input.attack && player.grabHoldTimer % 12 === 0 && player.grabHoldTimer > 0) {
+      const pummel = char.moves['pummel'];
+      if (pummel && opponent.grabbedBy === player) {
+        opponent.damage += pummel.hitbox.damage;
+        player.flashTimer = 4;
+      }
+    }
+    // Throw selection — directional input + attack/smash
+    let throwDir = null;
+    if (input.attack || input.smash) {
+      if (stick.y > 0.5) throwDir = 'uthrow';
+      else if (stick.y < -0.5) throwDir = 'dthrow';
+      else if ((stick.x > 0.5 && player.facing > 0) || (stick.x < -0.5 && player.facing < 0)) throwDir = 'fthrow';
+      else if ((stick.x < -0.5 && player.facing > 0) || (stick.x > 0.5 && player.facing < 0)) throwDir = 'bthrow';
+      else throwDir = 'fthrow'; // default: fthrow
+    }
+    if (throwDir) {
+      const throwMove = char.moves[throwDir];
+      if (throwMove && opponent.grabbedBy === player) {
+        // Apply throw knockback
+        applyKnockback(opponent, throwMove.hitbox, player);
+        opponent.grabbedBy = null;
+        opponent.grabTimer = 0;
+        opponent.grabMashCount = 0;
+        opponent.state = 'hitstun';
+        // Grabber enters throw endlag
+        player.currentMove = { ...throwMove, name: throwDir };
+        player.grabState = 'endlag';
+        player.attackFrame = 0;
+      }
+    }
+    // Auto-throw after max hold
+    if (player.grabHoldTimer >= GRAB_MAX_HOLD) {
+      const throwMove = char.moves['fthrow'];
+      if (throwMove && opponent.grabbedBy === player) {
+        applyKnockback(opponent, throwMove.hitbox, player);
+        opponent.grabbedBy = null;
+        opponent.grabTimer = 0;
+        opponent.state = 'hitstun';
+        player.currentMove = { ...throwMove, name: 'fthrow' };
+        player.grabState = 'endlag';
+        player.attackFrame = 0;
+      }
+    }
+  } else if (player.grabState === 'endlag') {
+    player.attackFrame++;
+    const move = player.currentMove;
+    const totalEndlag = move ? (move.totalFrames - move.startup - move.active) : 20;
+    if (player.attackFrame >= totalEndlag) {
+      player.state = 'idle';
+      player.currentMove = null;
+      player.grabState = null;
+      player.attackFrame = 0;
+    }
+  }
+}
+
+function updateGrabbed(player, input) {
+  // Mash out: any directional change or button press counts
+  const prevMash = player.grabMashCount;
+  if (input.attack || input.special || input.jump) {
+    player.grabMashCount += GRAB_MASH_PER_FRAME;
+  }
+  // Count stick changes as mash
+  const stick = input.stick;
+  if (Math.abs(stick.x) > 0.5 || Math.abs(stick.y) > 0.5) {
+    player.grabMashCount += GRAB_MASH_PER_FRAME;
+  }
+  // Check mash-out
+  if (player.grabMashCount >= player.grabTimer) {
+    // Escape!
+    player.state = 'idle';
+    player.grabbedBy = null;
+    player.grabTimer = 0;
+    player.grabMashCount = 0;
+    player.vx = (player.facing || 1) * 2; // small pushback
+    player.invulnerable = 10;
+  }
+}
+
+function checkHit(attacker, defender, move) {
+  if (!move.hitbox) return;
+  const atkBox = worldHitbox(attacker, move.hitbox);
+  const defBox = hurtbox(defender);
+  if (rectsOverlap(atkBox.x, atkBox.y, atkBox.w, atkBox.h,
+                   defBox.x, defBox.y, defBox.w, defBox.h)) {
+    if (defender.invulnerable > 0) return;
+    if (defender.state === 'dead' || defender.state === 'respawn') return;
+    // Shield check
+    if (defender.shielding && defender.onGround) {
+      // Shield stun
+      defender.shieldStun = Math.floor(move.hitbox.damage * 0.5) + 2;
+      defender.shieldHP -= move.hitbox.damage * 0.7;
+      if (defender.shieldHP <= 0) {
+        // Shield break!
+        defender.state = 'hitstun';
+        defender.stateFrame = 60;
+        defender.shielding = false;
+        defender.shieldHP = 60;
+      }
+      attacker.hitlag = PHYSICS.hitlagBase;
+      defender.hitlag = PHYSICS.hitlagBase;
+      attacker.hasHit = true;
+      return;
+    }
+    // Tipper/sweetspot check — Marth tipper, Falcon knee, etc.
+    let hitboxCopy = move.hitbox;
+    if (move.hitbox.sweetspotMult && move.hitbox.sweetspotStart) {
+      // Check if hit at max range (sweetspot zone)
+      const atkCenterX = atkBox.x + atkBox.w / 2;
+      const defCenterX = defBox.x + defBox.w / 2;
+      const dist = Math.abs(atkCenterX - defCenterX);
+      const maxRange = atkBox.w / 2;
+      if (dist > maxRange * move.hitbox.sweetspotStart) {
+        // Sweetspot — boost damage and knockback
+        hitboxCopy = { ...move.hitbox,
+          damage: move.hitbox.damage * move.hitbox.sweetspotMult,
+          baseKB: move.hitbox.baseKB * move.hitbox.sweetspotMult,
+          kbScale: move.hitbox.kbScale * move.hitbox.sweetspotMult
+        };
+      }
+    }
+    applyKnockback(defender, hitboxCopy, attacker);
+  }
+}
+
+// ── Projectiles & Reflectors ─────────────────────────────────
+function spawnProjectile(owner, move) {
+  const char = CHARACTERS[owner.char];
+  const spec = move.projectile;
+  projectiles.push({
+    x: owner.x + owner.facing * (char.width / 2 + 3),
+    y: owner.y - char.height * 0.55,
+    vx: owner.facing * spec.speed,
+    vy: spec.vy || 0,
+    owner,
+    hitbox: { ...move.hitbox },
+    life: spec.life,
+    color: spec.color,
+    reflected: false,
+    reflectCooldown: 0,
+  });
+}
+
+function projectileBox(projectile) {
+  return {
+    x: projectile.x - projectile.hitbox.w / 2,
+    y: projectile.y - projectile.hitbox.h / 2,
+    w: projectile.hitbox.w,
+    h: projectile.hitbox.h,
+  };
+}
+
+function isReflecting(player) {
+  const move = player.currentMove;
+  return player.state === 'attack' && move && move.special === 'downB' &&
+    player.attackFrame >= move.startup &&
+    player.attackFrame < move.startup + move.active;
+}
+
+function reflectorBox(player) {
+  const move = player.currentMove;
+  return worldHitbox(player, move.hitbox);
+}
+
+function updateProjectiles() {
+  const survivors = [];
+  for (const projectile of projectiles) {
+    projectile.x += projectile.vx;
+    projectile.y += projectile.vy;
+    projectile.life--;
+    if (projectile.reflectCooldown > 0) projectile.reflectCooldown--;
+
+    const box = projectileBox(projectile);
+    let consumed = false;
+    for (const player of players) {
+      if (player === projectile.owner || player.state === 'dead' || player.state === 'respawn') continue;
+      // A live reflector replaces its owner's hurtbox interaction for this projectile.
+      if (isReflecting(player)) continue;
+
+      const target = hurtbox(player);
+      if (!rectsOverlap(box.x, box.y, box.w, box.h,
+                        target.x, target.y, target.w, target.h)) continue;
+      if (player.invulnerable > 0) { consumed = true; break; }
+      if (player.shielding && player.onGround) {
+        player.shieldStun = Math.floor(projectile.hitbox.damage * 0.5) + 2;
+        player.shieldHP -= projectile.hitbox.damage * 0.7;
+        if (player.shieldHP <= 0) {
+          player.state = 'hitstun';
+          player.stateFrame = 60;
+          player.shielding = false;
+          player.shieldHP = 60;
+        }
+        player.hitlag = PHYSICS.hitlagBase;
+        projectile.owner.hitlag = PHYSICS.hitlagBase;
+      } else {
+        applyKnockback(player, projectile.hitbox, projectile.owner);
+      }
+      consumed = true;
+      projectile.life = 0;
+      break;
+    }
+
+    if (!consumed && projectile.reflectCooldown === 0) {
+      for (const reflector of players) {
+        if (reflector === projectile.owner || !isReflecting(reflector)) continue;
+        const reflectBox = reflectorBox(reflector);
+        if (!rectsOverlap(box.x, box.y, box.w, box.h,
+                          reflectBox.x, reflectBox.y, reflectBox.w, reflectBox.h)) continue;
+        projectile.owner = reflector;
+        projectile.vx = -projectile.vx * 1.2;
+        projectile.vy = -projectile.vy;
+        projectile.hitbox.damage *= 1.5;
+        projectile.hitbox.baseKB *= 1.2;
+        projectile.reflected = true;
+        projectile.reflectCooldown = 4;
+        projectile.x += Math.sign(projectile.vx) * (box.w + 2);
+        reflector.flashTimer = 4;
+        consumed = true;
+        break;
+      }
+    }
+
+    if (consumed && projectile.life > 0) survivors.push(projectile);
+    else if (!consumed && projectile.life > 0 &&
+             projectile.x > currentStage.blastLeft && projectile.x < currentStage.blastRight &&
+             projectile.y > currentStage.blastBottom && projectile.y < currentStage.blastTop + 30) {
+      survivors.push(projectile);
+    }
+  }
+  projectiles = survivors;
+}
+
+// ── Death & Respawn ──────────────────────────────────────────
+function killPlayer(player) {
+  player.stocks--;
+  player.damage = 0;
+  player.vx = 0;
+  player.vy = 0;
+  player.trailPositions = [];
+  player.staleQueue = [];
+  player.shieldHP = 60;
+  player.currentMove = null;
+  player.jabCombo = 0;
+  if (player.stocks <= 0) {
+    player.state = 'dead';
+    gameState = 'gameover';
+  } else {
+    player.state = 'respawn';
+    player.stateFrame = 0;
+    player.x = 0;
+    player.y = 120;
+    player.invulnerable = 120;
+  }
+}
+
+function resetGame() {
+  // Support character selections from CSS (decomp: mnSlChar_8025A410)
+  const p1Char = resetGame.players ? resetGame.players[0] : 'fox';
+  const p2Char = resetGame.players ? resetGame.players[1] : 'falco';
+  players = [
+    createPlayer(p1Char, -30, true),
+    createPlayer(p2Char, 30, false),
+  ];
+  projectiles = [];
+  gameState = 'playing';
+  frameCount = 0;
+}
+
+// ── Rendering ────────────────────────────────────────────────
+function gameToScreen(x, y) {
+  return {
+    sx: W / 2 + (x - CAMERA.x) * CAMERA.scale,
+    sy: H / 2 - (y - CAMERA.y) * CAMERA.scale,
+  };
+}
+
+function drawStage() {
+  // Background gradient from current stage theme
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  const bg = currentStage.bgGradient || [{stop:0,color:'#0d1117'},{stop:0.5,color:'#161b22'},{stop:1,color:'#0a0e14'}];
+  for (const s of bg) grad.addColorStop(s.stop, s.color);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  // Platforms with stage-specific colors
+  const platColor = currentStage.platformColor || '#3a3a5e';
+  const edgeColor = currentStage.platformEdge || '#6a6a9e';
+  for (const plat of getPlatforms()) {
+    const tl = gameToScreen(plat.x, plat.y);
+    const w = plat.w * CAMERA.scale;
+    const h = plat.h * CAMERA.scale;
+    // Platform surface
+    ctx.fillStyle = platColor;
+    ctx.fillRect(tl.sx, tl.sy, w, h + 2);
+    // Platform edge highlights
+    ctx.strokeStyle = edgeColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(tl.sx, tl.sy);
+    ctx.lineTo(tl.sx + w, tl.sy);
+    ctx.stroke();
+  }
+  // Stage name indicator (top left)
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(currentStage.name, 10, 20);
+  // Blast zone indicators (subtle)
+  ctx.strokeStyle = 'rgba(255, 50, 50, 0.08)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8, 8]);
+  const tl = gameToScreen(currentStage.blastLeft, currentStage.blastTop);
+  const br = gameToScreen(currentStage.blastRight, currentStage.blastBottom);
+  ctx.strokeRect(tl.sx, tl.sy, br.sx - tl.sx, br.sy - tl.sy);
+  ctx.setLineDash([]);
+}
+
+function drawPlayer(player) {
+  const char = CHARACTERS[player.char];
+  const pos = gameToScreen(player.x, player.y);
+  const s = CAMERA.scale;
+  const w = char.width * s;
+  const h = char.height * s;
+  // Invulnerability flash
+  if (player.invulnerable > 0 && Math.floor(player.invulnerable / 3) % 2 === 0) {
+    ctx.globalAlpha = 0.3;
+  }
+  // Hit flash
+  if (player.flashTimer > 0) {
+    ctx.globalAlpha = 0.6;
+  }
+  // Trail
+  if (player.trailPositions.length > 1) {
+    ctx.strokeStyle = char.color;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.15;
+    ctx.beginPath();
+    const first = gameToScreen(player.trailPositions[0].x, player.trailPositions[0].y);
+    ctx.moveTo(first.sx, first.sy);
+    for (let i = 1; i < player.trailPositions.length; i++) {
+      const p = gameToScreen(player.trailPositions[i].x, player.trailPositions[i].y);
+      ctx.lineTo(p.sx, p.sy);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  // Body
+  const bodyX = pos.sx - w / 2;
+  const bodyY = pos.sy - h;
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(pos.sx, pos.sy + 2, w * 0.6, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Character body (stylized rectangle)
+  const crouchOffset = player.state === 'crouch' ? h * 0.2 : 0;
+  const bodyH = h - crouchOffset;
+  const bodyYAdj = bodyY + crouchOffset;
+  // Body gradient
+  const bodyGrad = ctx.createLinearGradient(bodyX, bodyYAdj, bodyX, bodyYAdj + bodyH);
+  bodyGrad.addColorStop(0, char.color);
+  bodyGrad.addColorStop(1, darkenColor(char.color, 0.4));
+  ctx.fillStyle = bodyGrad;
+  roundRect(ctx, bodyX, bodyYAdj, w, bodyH, 3);
+  ctx.fill();
+  // Eye / face indicator
+  const eyeX = pos.sx + player.facing * w * 0.15;
+  const eyeY = bodyYAdj + bodyH * 0.25;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(eyeX, eyeY, 2.5 * s / 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(eyeX + player.facing * 1, eyeY, 1.5 * s / 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Shield
+  if (player.shielding) {
+    const shieldRadius = char.width * 1.2 * s;
+    ctx.strokeStyle = 'rgba(100, 200, 255, 0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(pos.sx, pos.sy - h * 0.4, shieldRadius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(100, 200, 255, 0.1)';
+    ctx.fill();
+  }
+  // Hitstun indicator
+  if (player.state === 'hitstun') {
+    ctx.strokeStyle = 'rgba(255, 255, 0, 0.6)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      const angle = (frameCount * 0.3 + i * 2.094);
+      const r = w * 0.8;
+      const sx = pos.sx + Math.cos(angle) * r;
+      const sy = pos.sy - h * 0.5 + Math.sin(angle) * r;
+      ctx.beginPath();
+      ctx.moveTo(sx - 3, sy - 3);
+      ctx.lineTo(sx + 3, sy + 3);
+      ctx.moveTo(sx + 3, sy - 3);
+      ctx.lineTo(sx - 3, sy + 3);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+  // Hitbox visualization
+  if (showHitboxes) {
+    // Hurtbox
+    ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+    ctx.lineWidth = 1;
+    const hb = hurtbox(player);
+    const htl = gameToScreen(hb.x, hb.y + hb.h);
+    ctx.strokeRect(htl.sx, htl.sy, hb.w * s, hb.h * s);
+    // Attack hitbox
+    if (player.currentMove && player.currentMove.hitbox && !player.currentMove.projectile) {
+      const move = player.currentMove;
+      if (player.attackFrame >= move.startup && player.attackFrame < move.startup + move.active) {
+        const atkBox = worldHitbox(player, move.hitbox);
+        const atl = gameToScreen(atkBox.x, atkBox.y + atkBox.h);
+        // Cyan for grab hitboxes, yellow for throws, red for normal attacks
+        const isGrab = move.special === 'grab';
+        const isThrow = move.special === 'throw';
+        ctx.strokeStyle = isGrab ? 'rgba(0, 255, 255, 0.7)' : isThrow ? 'rgba(255, 255, 0, 0.7)' : 'rgba(255, 0, 0, 0.7)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(atl.sx, atl.sy, atkBox.w * s, atkBox.h * s);
+        ctx.fillStyle = isGrab ? 'rgba(0, 255, 255, 0.15)' : isThrow ? 'rgba(255, 255, 0, 0.15)' : 'rgba(255, 0, 0, 0.15)';
+        ctx.fillRect(atl.sx, atl.sy, atkBox.w * s, atkBox.h * s);
+      }
+    }
+  }
+  // Grabbed state indicator (victim shows grab rings)
+  if (player.state === 'grabbed') {
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)';
+    ctx.lineWidth = 2;
+    const ringR = w * 0.7;
+    for (let i = 0; i < 3; i++) {
+      const angle = (frameCount * 0.2 + i * 2.094);
+      const rx = pos.sx + Math.cos(angle) * ringR;
+      const ry = pos.sy - h * 0.5 + Math.sin(angle) * ringR * 0.4;
+      ctx.beginPath();
+      ctx.arc(rx, ry, 3, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  // Damage number above player
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(Math.floor(player.damage) + '%', pos.sx, bodyYAdj - 6);
+}
+
+function drawProjectiles() {
+  for (const projectile of projectiles) {
+    const pos = gameToScreen(projectile.x, projectile.y);
+    const radius = Math.max(2, projectile.hitbox.h * CAMERA.scale * 0.5);
+    ctx.save();
+    ctx.shadowColor = projectile.color;
+    ctx.shadowBlur = projectile.reflected ? 14 : 8;
+    ctx.fillStyle = projectile.reflected ? '#fff' : projectile.color;
+    ctx.beginPath();
+    ctx.arc(pos.sx, pos.sy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    if (showHitboxes) {
+      const box = projectileBox(projectile);
+      const tl = gameToScreen(box.x, box.y + box.h);
+      ctx.strokeStyle = 'rgba(255, 180, 0, 0.9)';
+      ctx.strokeRect(tl.sx, tl.sy, box.w * CAMERA.scale, box.h * CAMERA.scale);
+    }
+  }
+}
+
+function drawHUD() {
+  // Melee-style canvas HUD — decomp: pl_HUD.c
+  const p1 = players[0], p2 = players[1];
+  const p1Char = CHARACTERS[p1.char], p2Char = CHARACTERS[p2.char];
+
+  // ── P1 HUD (bottom-left) ──
+  // Background plate
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(10, H - 70, 180, 60);
+  ctx.strokeStyle = '#4a9eff'; ctx.lineWidth = 2;
+  ctx.strokeRect(10, H - 70, 180, 60);
+
+  // Character name
+  ctx.fillStyle = '#4a9eff'; ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.fillText(p1Char ? p1Char.name : 'P1', 20, H - 52);
+
+  // Damage percent — big bold number
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 36px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(Math.floor(p1.damage) + '%', 20, H - 18);
+
+  // Stock icons — colored squares
+  for (let i = 0; i < p1.stocks; i++) {
+    ctx.fillStyle = p1Char ? p1Char.color : '#4a9eff';
+    ctx.fillRect(150 + i * 14, H - 35, 10, 10);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
+    ctx.strokeRect(150 + i * 14, H - 35, 10, 10);
+  }
+
+  // ── P2 HUD (bottom-right) ──
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(W - 190, H - 70, 180, 60);
+  ctx.strokeStyle = '#ff4a4a'; ctx.lineWidth = 2;
+  ctx.strokeRect(W - 190, H - 70, 180, 60);
+
+  // Character name
+  ctx.fillStyle = '#ff4a4a'; ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'right'; ctx.fillText(p2Char ? p2Char.name : 'P2', W - 20, H - 52);
+
+  // Damage percent
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 36px "Courier New", monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(Math.floor(p2.damage) + '%', W - 20, H - 18);
+
+  // Stock icons
+  for (let i = 0; i < p2.stocks; i++) {
+    ctx.fillStyle = p2Char ? p2Char.color : '#ff4a4a';
+    ctx.fillRect(W - 190 + 10 + i * 14, H - 35, 10, 10);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
+    ctx.strokeRect(W - 190 + 10 + i * 14, H - 35, 10, 10);
+  }
+}
+
+function drawDebug() {
+  if (!showDebug) return;
+  const p1 = players[0];
+  const p2 = players[1];
+  const lines = [
+    `Frame: ${frameCount} | State: ${p1.state} vs ${p2.state}`,
+    `P1: (${p1.x.toFixed(1)}, ${p1.y.toFixed(1)}) vx=${p1.vx.toFixed(2)} vy=${p1.vy.toFixed(2)} ground=${p1.onGround} jumps=${p1.jumpsRemaining}`,
+    `P2: (${p2.x.toFixed(1)}, ${p2.y.toFixed(1)}) vx=${p2.vx.toFixed(2)} vy=${p2.vy.toFixed(2)} ground=${p2.onGround} jumps=${p2.jumpsRemaining}`,
+    `Stale P1: ${p1.staleQueue.length}/10 | P2: ${p2.staleQueue.length}/10`,
+    `[H] Hitboxes ${showHitboxes ? 'ON' : 'OFF'}  [P] Pause  [R] Reset`,
+  ];
+  const el = document.getElementById('debugOverlay');
+  el.innerHTML = lines.join('<br>');
+}
+
+// ── Utility ──────────────────────────────────────────────────
+function darkenColor(hex, amount) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgb(${Math.floor(r * (1 - amount))},${Math.floor(g * (1 - amount))},${Math.floor(b * (1 - amount))})`;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ── Game Over Screen ─────────────────────────────────────────
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 36px sans-serif';
+  ctx.textAlign = 'center';
+  const winner = players[0].stocks > 0 ? CHARACTERS[players[0].char].name : CHARACTERS[players[1].char].name;
+  ctx.fillText(`${winner} Wins!`, W / 2, H / 2 - 20);
+  ctx.font = '18px sans-serif';
+  ctx.fillStyle = '#888';
+  ctx.fillText('[R] Rematch  |  [T] Stage Select  |  [ESC] Character Select', W / 2, H / 2 + 20);
+}
+
+// ── Stage Select Screen (decomp: mnStageSel) ────────────────
+let sssCursor1 = 0;  // P1 stage index
+let sssCursor2 = 0;  // P2 stage index
+let sssConfirmed = { 1: false, 2: false };
+let sssReadyToStart = false;
+
+function enterStageSelect() {
+  gameState = 'stageSelect';
+  sssCursor1 = 0; sssCursor2 = 0;
+  sssConfirmed = { 1: false, 2: false };
+  sssReadyToStart = false;
+}
+
+function updateStageSelect() {
+  const p1 = getInput(KEY_MAP_P1);
+  const p2 = getInput(KEY_MAP_P2);
+  const count = STAGE_KEYS.length;
+  // P1 navigate
+  if (!sssConfirmed[1]) {
+    if (p1.left)   { sssCursor1 = (sssCursor1 - 1 + count) % count; }
+    if (p1.right)  { sssCursor1 = (sssCursor1 + 1) % count; }
+    if (p1.up)     { sssCursor1 = (sssCursor1 - 3 + count) % count; }
+    if (p1.down)   { sssCursor1 = (sssCursor1 + 3) % count; }
+    if (p1.confirm) { sssConfirmed[1] = true; }
+  } else {
+    if (p1.cancel) { sssConfirmed[1] = false; }
+  }
+  // P2 navigate
+  if (!sssConfirmed[2]) {
+    if (p2.left)   { sssCursor2 = (sssCursor2 - 1 + count) % count; }
+    if (p2.right)  { sssCursor2 = (sssCursor2 + 1) % count; }
+    if (p2.up)     { sssCursor2 = (sssCursor2 - 3 + count) % count; }
+    if (p2.down)   { sssCursor2 = (sssCursor2 + 3) % count; }
+    if (p2.confirm) { sssConfirmed[2] = true; }
+  } else {
+    if (p2.cancel) { sssConfirmed[2] = false; }
+  }
+  // START shortcut
+  if (keys['Enter'] && (selectedP1 || selectedP2)) {
+    if (!sssConfirmed[1]) sssConfirmed[1] = true;
+    if (!sssConfirmed[2]) sssConfirmed[2] = true;
+  }
+  // Both confirmed → start game
+  if (sssConfirmed[1] && sssConfirmed[2]) {
+    // Use P1's selection as the stage
+    currentStageKey = STAGE_KEYS[sssCursor1];
+    currentStage = STAGES[currentStageKey];
+    startGameFromCSS();
+  }
+  // R goes back to character select
+  if (keys['KeyR']) {
+    gameState = 'select';
+    cssConfirmed = { 1: false, 2: false }; cssReadyToStart = false;
+  }
+}
+
+function drawStageSelect() {
+  // Background — same dark blue as CSS
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#0a1628'); bgGrad.addColorStop(0.4, '#0a1420'); bgGrad.addColorStop(1, '#0a0a14');
+  ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
+
+  // Title
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 24px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.fillText('STAGE SELECT', W / 2, 35);
+
+  // 2×3 grid of stage thumbnails
+  const cols = 3, rows = 2;
+  const thumbW = 160, thumbH = 100, gap = 16;
+  const gridW = cols * thumbW + (cols - 1) * gap;
+  const gridH = rows * thumbH + (rows - 1) * gap;
+  const startX = (W - gridW) / 2;
+  const startY = 60;
+
+  for (let i = 0; i < STAGE_KEYS.length; i++) {
+    const col = i % cols, row = Math.floor(i / cols);
+    const x = startX + col * (thumbW + gap);
+    const y = startY + row * (thumbH + gap);
+    const stage = STAGES[STAGE_KEYS[i]];
+
+    // Highlight if cursor is here
+    const isP1 = sssCursor1 === i;
+    const isP2 = sssCursor2 === i;
+    const isBoth = isP1 && isP2;
+
+    // Card background
+    ctx.fillStyle = (isP1 || isP2) ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)';
+    ctx.fillRect(x, y, thumbW, thumbH);
+
+    // Border
+    if (isBoth) {
+      ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 3;
+    } else if (isP1) {
+      ctx.strokeStyle = sssConfirmed[1] ? '#4a9eff' : 'rgba(74,158,255,0.6)';
+      ctx.lineWidth = sssConfirmed[1] ? 3 : 2;
+    } else if (isP2) {
+      ctx.strokeStyle = sssConfirmed[2] ? '#ff4a4a' : 'rgba(255,74,74,0.6)';
+      ctx.lineWidth = sssConfirmed[2] ? 3 : 2;
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1;
+    }
+    ctx.strokeRect(x, y, thumbW, thumbH);
+
+    // Platform silhouette preview
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x + 2, y + 2, thumbW - 4, thumbH - 4); ctx.clip();
+    const cx = x + thumbW / 2, cy = y + thumbH - 25;
+    const scale = 0.55;
+    // Main platform
+    ctx.fillStyle = stage.platformColor || '#4a4a6e';
+    const mw = stage.main.w * scale, mh = Math.max(stage.main.h * scale, 3);
+    ctx.fillRect(cx - mw / 2, cy, mw, mh);
+    // Side platforms
+    if (stage.platL) {
+      const pl = stage.platL;
+      ctx.fillRect(cx - mw / 2 + (pl.x - stage.main.x) * scale, cy - pl.y * scale * 0.5, pl.w * scale, Math.max(pl.h * scale, 2));
+    }
+    if (stage.platR) {
+      const pr = stage.platR;
+      ctx.fillRect(cx - mw / 2 + (pr.x - stage.main.x) * scale, cy - pr.y * scale * 0.5, pr.w * scale, Math.max(pr.h * scale, 2));
+    }
+    ctx.restore();
+
+    // Stage name
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.fillText(stage.name, x + thumbW / 2, y + thumbH - 6);
+
+    // P1/P2 cursor labels
+    if (isP1) {
+      ctx.fillStyle = '#4a9eff'; ctx.font = 'bold 10px sans-serif';
+      ctx.fillText('P1', x + 14, y + 14);
+    }
+    if (isP2) {
+      ctx.fillStyle = '#ff4a4a'; ctx.font = 'bold 10px sans-serif';
+      ctx.fillText('P2', x + thumbW - 14, y + 14);
+    }
+  }
+
+  // Selected characters info (top)
+  ctx.fillStyle = '#667'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(getCharName(selectedP1) + ' vs ' + getCharName(selectedP2), W / 2, H - 28);
+
+  // Controls hint
+  ctx.fillStyle = '#3a4a5a'; ctx.font = '10px sans-serif';
+  ctx.fillText('P1: WASD + J/K     P2: Arrows + Numpad1/2     (R = back, Enter = confirm)', W / 2, H - 12);
+}
+
+// ── Main Loop ────────────────────────────────────────────────
+function gameLoop() {
+  if (gameState === 'select') {
+    updateMeleeCSS();
+    drawMeleeCSS();
+    cssFrameCount++;
+    requestAnimationFrame(gameLoop);
+    return;
+  }
+  if (gameState === 'stageSelect') {
+    updateStageSelect();
+    drawStageSelect();
+    requestAnimationFrame(gameLoop);
+    return;
+  }
+  if (gameState === 'playing') {
+    const p1Input = getInput(KEY_MAP_P1);
+    const p2Input = getInput(KEY_MAP_P2);
+    updatePlayer(players[0], p1Input, players[1]);
+    updatePlayer(players[1], p2Input, players[0]);
+    updateProjectiles();
+    // Auto-ledge grab
+    for (const p of players) {
+      if (p.state === 'fall' || p.state === 'hitstun') {
+        // Check ledge proximity
+        if (p.y < 10 && p.y > -20) {
+          if (p.x < currentStage.main.x + 5 && p.x > currentStage.main.x - 15) {
+            // Left ledge
+            p.state = 'ledge';
+            p.ledgeTimer = 0;
+            p.vx = 0;
+            p.vy = 0;
+            p.facing = 1;
+            p.x = currentStage.ledgeL.x;
+            p.y = currentStage.ledgeL.y;
+          } else if (p.x > currentStage.main.x + currentStage.main.w - 5 && p.x < currentStage.main.x + currentStage.main.w + 15) {
+            // Right ledge
+            p.state = 'ledge';
+            p.ledgeTimer = 0;
+            p.vx = 0;
+            p.vy = 0;
+            p.facing = -1;
+            p.x = currentStage.ledgeR.x;
+            p.y = currentStage.ledgeR.y;
+          }
+        }
+      }
+    }
+    frameCount++;
+  }
+  // Render
+  drawStage();
+  drawProjectiles();
+  for (const p of players) drawPlayer(p);
+  drawHUD();
+  drawDebug();
+  if (gameState === 'gameover') drawGameOver();
+  requestAnimationFrame(gameLoop);
+}
+
+// ── Start ────────────────────────────────────────────────────
+resetGame();
+gameLoop();
+</script>
+</body>
+</html>
